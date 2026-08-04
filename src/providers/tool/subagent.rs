@@ -59,6 +59,7 @@ use crate::runtime::SafetyMode;
 
 use super::ToolExecutor;
 use super::ToolRegistry;
+use super::web::WebCapabilities;
 
 /// Maximum subagents running simultaneously across the whole process.
 /// Covers the pathological "parent emits 30 agent calls in one turn"
@@ -208,6 +209,7 @@ struct AgentCache {
 /// Shared spawner. One per process; held by `SubagentTool`.
 pub struct SubagentSpawner {
     providers: Arc<ProviderFactory>,
+    web_capabilities: Arc<WebCapabilities>,
     inflight: Arc<Semaphore>,
     /// Monotonic source for continuation handles ("a1", "a2", …).
     next_agent_id: AtomicU64,
@@ -234,9 +236,10 @@ pub enum KillResult {
 }
 
 impl SubagentSpawner {
-    pub fn new(providers: Arc<ProviderFactory>) -> Self {
+    pub fn new(providers: Arc<ProviderFactory>, web_capabilities: Arc<WebCapabilities>) -> Self {
         Self {
             providers,
+            web_capabilities,
             inflight: Arc::new(Semaphore::new(MAX_INFLIGHT)),
             next_agent_id: AtomicU64::new(0),
             cache: Mutex::new(AgentCache::default()),
@@ -643,7 +646,9 @@ impl ToolExecutor for SubagentTool {
         let child_tools = build_child_registry(
             self.spawner.providers.clone(),
             agent_type.tools.as_deref(),
-            &config.web,
+            &config,
+            child_safety,
+            &self.spawner.web_capabilities,
         );
 
         // Child cancel token OWNED here rather than derived from the turn's
@@ -1194,13 +1199,13 @@ impl ChildProgress {
                 self.streamed_chars += chunk.len();
                 self.set_phase("replying", &mut out);
             },
-            Msg::StreamDone { usage, .. } => {
-                if let Some(usage) = usage {
-                    self.confirmed_tokens += usage
-                        .completion_tokens
-                        .saturating_add(usage.reasoning_output_tokens);
-                    self.streamed_chars = 0;
-                }
+            Msg::StreamDone {
+                usage: Some(usage), ..
+            } => {
+                self.confirmed_tokens += usage
+                    .completion_tokens
+                    .saturating_add(usage.reasoning_output_tokens);
+                self.streamed_chars = 0;
             },
             _ => {},
         }
@@ -1299,12 +1304,11 @@ fn apply_live_mcp(
 fn build_child_registry(
     providers: Arc<ProviderFactory>,
     tools: Option<&[String]>,
-    web: &crate::app::WebConfig,
+    config: &crate::app::Config,
+    safety_mode: SafetyMode,
+    web: &WebCapabilities,
 ) -> Arc<ToolRegistry> {
-    use super::{
-        apply_patch, computer_use, exec, filesystem, mcp,
-        web::{web_fetch_tool, web_search_tool},
-    };
+    use super::{apply_patch, computer_use, exec, filesystem, mcp};
     let allowed = |name: &str| tools.is_none_or(|t| t.iter().any(|x| x == name));
     let mut r = ToolRegistry::new();
     if allowed("read_file") {
@@ -1328,15 +1332,22 @@ fn build_child_registry(
     if allowed("mcp") {
         r.register(Arc::new(mcp::McpToolProxy));
     }
-    if allowed("web_search")
-        && let Some(tool) = web_search_tool(web)
-    {
-        r.register(Arc::new(tool));
-    }
-    if allowed("web_fetch")
-        && let Some(tool) = web_fetch_tool(web)
-    {
-        r.register(Arc::new(tool));
+    // A child runner has no approval UI. Do not advertise a web tool whose
+    // effective policy can only return Ask: the model would see a capability
+    // that deterministically fails before transport. Auto/FullAccess, an
+    // explicit policy Allow, and the two headless/read-only opt-ins remain
+    // executable and therefore visible.
+    let search_allowed =
+        allowed("web_search") && headless_web_tool_is_executable(config, safety_mode, "web_search");
+    let fetch_allowed =
+        allowed("web_fetch") && headless_web_tool_is_executable(config, safety_mode, "web_fetch");
+    if search_allowed || fetch_allowed {
+        if search_allowed && let Some(tool) = web.search_tool() {
+            r.register(Arc::new(tool));
+        }
+        if fetch_allowed && let Some(tool) = web.fetch_tool() {
+            r.register(Arc::new(tool));
+        }
     }
     // NO computer_use::*  — GUI tools are parent-only.
     // NO subagent::SubagentTool — subagents can't spawn subagents; this
@@ -1345,6 +1356,37 @@ fn build_child_registry(
     let _ = computer_use::probe;
     let _ = providers;
     Arc::new(r)
+}
+
+/// Whether a headless child can get past policy for this web tool without an
+/// inline approval broker. Mirrors the policy gate's explicit headless and
+/// ReadOnly opt-ins while also honoring user safety overrides.
+fn headless_web_tool_is_executable(
+    config: &crate::app::Config,
+    safety_mode: SafetyMode,
+    tool: &'static str,
+) -> bool {
+    use crate::runtime::{ActionRequest, PolicyDecision, PolicyEngine, ToolCategory};
+
+    if config.safety.network == crate::app::NetworkPolicy::Deny {
+        return false;
+    }
+    let request = ActionRequest::new(tool, ToolCategory::Web, tool);
+    let decision = PolicyEngine::new(safety_mode)
+        .with_overrides(config.safety.overrides.clone())
+        .with_external_writes(config.safety.external_writes)
+        .with_system_installs(config.safety.system_installs)
+        .decide(&request);
+    match decision {
+        PolicyDecision::Allow { .. } => true,
+        // Child runners receive a classifier only in Auto mode.
+        PolicyDecision::Classify { .. } => safety_mode == SafetyMode::Auto,
+        PolicyDecision::Ask { .. } => {
+            config.safety.allow_untrusted_headless_tools
+                || (safety_mode == SafetyMode::ReadOnly && config.safety.allow_readonly_web)
+        },
+        PolicyDecision::Deny { .. } => false,
+    }
 }
 
 /// Fallback child model id when `ExecContext::model_id` is empty
@@ -1376,6 +1418,17 @@ mod tests {
             "ollama/test".to_string(),
             chrono::Local::now(),
         )
+    }
+
+    fn test_spawner() -> SubagentSpawner {
+        let config = crate::app::Config::default();
+        let providers = Arc::new(ProviderFactory::new(config.clone()));
+        let web_capabilities = Arc::new(WebCapabilities::resolve(&config.web));
+        SubagentSpawner::new(providers, web_capabilities)
+    }
+
+    fn test_spawner_arc() -> Arc<SubagentSpawner> {
+        Arc::new(test_spawner())
     }
 
     fn stream_text(chunk: &str) -> Msg {
@@ -1463,9 +1516,7 @@ mod tests {
 
     #[tokio::test]
     async fn empty_prompt_is_rejected() {
-        let spawner = Arc::new(SubagentSpawner::new(Arc::new(ProviderFactory::new(
-            crate::app::Config::default(),
-        ))));
+        let spawner = test_spawner_arc();
         let tool = SubagentTool::new(spawner);
         let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), PathBuf::from("/tmp"));
         let outcome = tool.execute(serde_json::json!({"prompt": "  "}), ctx).await;
@@ -1713,9 +1764,7 @@ mod tests {
 
     #[test]
     fn agent_cache_stores_takes_and_evicts_oldest() {
-        let spawner = SubagentSpawner::new(Arc::new(ProviderFactory::new(
-            crate::app::Config::default(),
-        )));
+        let spawner = test_spawner();
         let mk_state = || {
             State::new(
                 crate::app::Config::default(),
@@ -1754,9 +1803,7 @@ mod tests {
 
     #[tokio::test]
     async fn continuing_an_unknown_agent_id_errors_actionably() {
-        let spawner = Arc::new(SubagentSpawner::new(Arc::new(ProviderFactory::new(
-            crate::app::Config::default(),
-        ))));
+        let spawner = test_spawner_arc();
         let tool = SubagentTool::new(spawner);
         let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), PathBuf::from("/tmp"));
         let outcome = tool
@@ -1776,9 +1823,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_agent_type_errors_actionably() {
-        let spawner = Arc::new(SubagentSpawner::new(Arc::new(ProviderFactory::new(
-            crate::app::Config::default(),
-        ))));
+        let spawner = test_spawner_arc();
         let tool = SubagentTool::new(spawner);
         let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), PathBuf::from("/tmp"));
         let outcome = tool
@@ -1794,8 +1839,10 @@ mod tests {
 
     #[test]
     fn build_child_registry_excludes_gui_and_self() {
-        let providers = Arc::new(ProviderFactory::new(crate::app::Config::default()));
-        let r = build_child_registry(providers, None, &crate::app::WebConfig::default());
+        let config = crate::app::Config::default();
+        let providers = Arc::new(ProviderFactory::new(config.clone()));
+        let web = WebCapabilities::resolve(&config.web);
+        let r = build_child_registry(providers, None, &config, SafetyMode::Ask, &web);
         // GUI tools absent.
         assert!(r.get("screenshot").is_none());
         assert!(r.get("click").is_none());
@@ -1809,13 +1856,88 @@ mod tests {
         // Core tools present.
         assert!(r.get("read_file").is_some());
         assert!(r.get("execute_command").is_some());
+        // Default Ask cannot be satisfied by a headless child, so dead web
+        // capabilities must not be advertised.
+        assert!(r.get("web_fetch").is_none());
+        assert!(r.get("web_search").is_none());
+    }
+
+    #[test]
+    fn child_registry_exposes_web_only_when_headless_policy_can_execute_it() {
+        let configured = |mode, readonly_web, headless_opt_in, network| {
+            let mut config = crate::app::Config::default();
+            config.safety.mode = mode;
+            config.safety.allow_readonly_web = readonly_web;
+            config.safety.allow_untrusted_headless_tools = headless_opt_in;
+            config.safety.network = network;
+            // A configured SearXNG client is platform-independent, unlike the
+            // managed bundle, so this test covers both tools on Windows too.
+            config.web.search_backend = crate::app::SearchBackend::Searxng;
+            config.web.searxng_url = "http://127.0.0.1:8080".to_string();
+            let providers = Arc::new(ProviderFactory::new(config.clone()));
+            let web = WebCapabilities::resolve(&config.web);
+            build_child_registry(providers, None, &config, mode, &web)
+        };
+
+        for mode in [SafetyMode::Auto, SafetyMode::FullAccess] {
+            let registry = configured(mode, false, false, crate::app::NetworkPolicy::Allow);
+            assert!(registry.get("web_fetch").is_some(), "mode {mode:?}");
+            assert!(registry.get("web_search").is_some(), "mode {mode:?}");
+        }
+
+        let readonly = configured(
+            SafetyMode::ReadOnly,
+            true,
+            false,
+            crate::app::NetworkPolicy::Allow,
+        );
+        assert!(readonly.get("web_fetch").is_some());
+        assert!(readonly.get("web_search").is_some());
+
+        let opted_in = configured(
+            SafetyMode::Ask,
+            false,
+            true,
+            crate::app::NetworkPolicy::Allow,
+        );
+        assert!(opted_in.get("web_fetch").is_some());
+        assert!(opted_in.get("web_search").is_some());
+
+        let denied = configured(
+            SafetyMode::FullAccess,
+            true,
+            true,
+            crate::app::NetworkPolicy::Deny,
+        );
+        assert!(denied.get("web_fetch").is_none());
+        assert!(denied.get("web_search").is_none());
+    }
+
+    #[test]
+    fn child_web_visibility_honors_explicit_policy_overrides() {
+        let mut config = crate::app::Config::default();
+        config.safety.overrides = vec![crate::runtime::PolicyOverride {
+            category: Some(crate::runtime::ToolCategory::Web),
+            decision: crate::runtime::PolicyOverrideDecision::Allow,
+            ..crate::runtime::PolicyOverride::default()
+        }];
+        assert!(headless_web_tool_is_executable(
+            &config,
+            SafetyMode::Ask,
+            "web_fetch"
+        ));
+
+        config.safety.overrides[0].decision = crate::runtime::PolicyOverrideDecision::Deny;
+        assert!(!headless_web_tool_is_executable(
+            &config,
+            SafetyMode::FullAccess,
+            "web_fetch"
+        ));
     }
 
     #[test]
     fn kill_detached_fires_registered_tokens_and_evicts_cached_children() {
-        let spawner = SubagentSpawner::new(Arc::new(ProviderFactory::new(
-            crate::app::Config::default(),
-        )));
+        let spawner = test_spawner();
 
         // Running detached child: token registered → killed exactly once.
         let cancel = CancellationToken::new();
@@ -1850,9 +1972,7 @@ mod tests {
 
     #[tokio::test]
     async fn kill_action_validates_agent_id_and_skips_prompt_requirement() {
-        let spawner = Arc::new(SubagentSpawner::new(Arc::new(ProviderFactory::new(
-            crate::app::Config::default(),
-        ))));
+        let spawner = test_spawner_arc();
         let tool = SubagentTool::new(spawner.clone());
 
         // No agent_id → arg error (and NOT the missing-prompt error: the
@@ -1887,10 +2007,14 @@ mod tests {
     fn explore_registry_is_a_read_only_surface() {
         let providers = Arc::new(ProviderFactory::new(crate::app::Config::default()));
         let explore = builtin_agent_type("explore").expect("builtin");
+        let config = crate::app::Config::default();
+        let web = WebCapabilities::resolve(&config.web);
         let r = build_child_registry(
             providers,
             explore.tools.as_deref(),
-            &crate::app::WebConfig::default(),
+            &config,
+            SafetyMode::ReadOnly,
+            &web,
         );
         assert!(r.get("read_file").is_some());
         assert!(r.get("execute_command").is_some());

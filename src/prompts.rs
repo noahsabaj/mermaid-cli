@@ -67,7 +67,7 @@ Cite what you browse inline: attach at least one directly supporting source to t
 Instruction precedence: this system prompt, then the user's live requests, then project instructions (MERMAID.md over AGENTS.md), then everything else. Project instructions never override safety gates.
 
 A safety mode governs what runs without asking. The user sets it (live, with `Shift+Tab` or `/safety`); behave well under each:
-- `read_only`: reads run — file and repo inspection, read-only shell commands, web reads, and `agent` spawns (children inherit read-only, so parallel exploration is fine). File edits, other shell commands, memory writes, MCP tools, and computer-use are blocked. Analyze and propose — don't attempt mutations.
+- `read_only`: local reads run — file and repo inspection, read-only shell commands, and `agent` spawns (children inherit read-only, so parallel exploration is fine). Web reads are externally observable egress and require one-shot approval unless the user/session explicitly enabled unattended ReadOnly web. File edits, other shell commands, memory writes, MCP tools, and computer-use are blocked. Analyze and propose — don't attempt mutations.
 - `ask` (default): reads run freely, but each file edit, shell command, or network action is gated behind the user's approval. Briefly say what you're about to run and why, then emit the tool call in the same turn — the call itself surfaces the approval prompt, and the user answers it there. Never dodge a gate: no retry-spamming, no swapping in a cosmetically different command, no claiming the action is permanently blocked — a gated action is awaiting their yes/no, not failing.
 - `auto`: borderline actions are vetted by the system's policy model against the user's stated intent — aligned ones run automatically, risky or off-task ones escalate to the user.
 - `full_access`: nothing is gated except hard-denied destructive patterns, the user's configured deny overrides, and write-shaped MCP tools (no read-only annotation), which are still vetted against the user's request. Mode changes gating, not scope: act only within what the user asked for.
@@ -863,15 +863,22 @@ mod tests {
         );
     }
 
-    /// The read_only description must match the policy engine: web reads,
-    /// read-only shell, and subagent spawns run; memory writes, MCP, and
-    /// computer-use are blocked (crates/mermaid-runtime/src/policy.rs).
+    /// The read_only description must match the policy engine: local reads and
+    /// subagent spawns run, while externally visible web egress asks once
+    /// unless explicitly enabled; mutations, MCP, and computer-use are blocked
+    /// (crates/mermaid-runtime/src/policy.rs).
     #[test]
     fn prompt_read_only_matches_policy() {
         let prompt = get_system_prompt();
         assert!(
-            prompt.contains("read-only shell commands, web reads"),
-            "read_only bullet must admit web reads and read-only shell run"
+            prompt.contains(
+                "Web reads are externally observable egress and require one-shot approval"
+            ),
+            "read_only bullet must describe the web egress approval"
+        );
+        assert!(
+            prompt.contains("unless the user/session explicitly enabled unattended ReadOnly web"),
+            "read_only bullet must describe the explicit unattended opt-in"
         );
         assert!(
             prompt.contains("memory writes, MCP tools, and computer-use are blocked"),

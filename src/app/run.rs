@@ -114,6 +114,11 @@ pub async fn run_interactive_with(
         crate::providers::TuiMode::Interactive,
         providers.clone(),
     );
+    if let Some(capabilities) = tools.web_capabilities() {
+        state.ui.pending_msgs.push_back(Msg::TransientStatus {
+            text: web_capabilities_notice(&config, capabilities),
+        });
+    }
     let (runner, mut msg_rx) = EffectRunner::pair_from(cwd.clone(), providers, tools);
     // Interactive TUI: enable inline approval prompts so `ask` mode (and Auto
     // escalations) pause and prompt instead of erroring out, and inline
@@ -432,6 +437,49 @@ fn bootstrap_cmds(config: &Config, session_id: &str) -> Vec<Cmd> {
     cmds
 }
 
+/// One startup-visible summary built from the exact capability resolution used
+/// by the registry and subagents. This makes backend/trust routing explicit in
+/// the TUI without re-reading credentials or probing platform viability.
+fn web_capabilities_notice(
+    config: &Config,
+    capabilities: &crate::providers::tool::web::WebCapabilities,
+) -> String {
+    if config.safety.network == crate::app::NetworkPolicy::Deny {
+        return format!(
+            "Web egress disabled by safety.network = \"deny\" (selected fetch backend: {}; selected search backend: {}).",
+            capabilities.fetch.backend, capabilities.search.backend
+        );
+    }
+
+    let render = |name: &str, status: &crate::providers::tool::web::WebCapabilityStatus| {
+        let availability = if status.available {
+            "available".to_string()
+        } else {
+            let reason = status
+                .reason
+                .as_deref()
+                .map(crate::utils::redact_secrets)
+                .unwrap_or_else(|| "backend initialization failed".to_string());
+            let reason = reason.split_whitespace().collect::<Vec<_>>().join(" ");
+            let reason = crate::utils::truncate_middle_bytes(&reason, 240)
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            format!("unavailable: {reason}")
+        };
+        format!(
+            "{name}: {} ({availability}; {})",
+            status.backend, status.trust_destination
+        )
+    };
+
+    format!(
+        "Web capabilities - {}; {}.",
+        render("fetch", &capabilities.fetch),
+        render("search", &capabilities.search)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -470,5 +518,30 @@ mod tests {
         );
         let cmds = bootstrap_cmds(&cfg, "sess-1");
         assert!(cmds.iter().any(|c| matches!(c, Cmd::InitMcpServers(_))));
+    }
+
+    #[test]
+    fn web_capability_notice_discloses_shared_backend_and_trust_routing() {
+        let config = Config::default();
+        let capabilities = crate::providers::tool::web::WebCapabilities::resolve(&config.web);
+        let notice = web_capabilities_notice(&config, &capabilities);
+        assert!(notice.contains("fetch: native"), "{notice}");
+        assert!(notice.contains("direct from this machine"), "{notice}");
+        assert!(notice.contains("search: managed_searxng"), "{notice}");
+        assert!(notice.contains("local managed process"), "{notice}");
+    }
+
+    #[test]
+    fn web_capability_notice_honors_global_network_denial() {
+        let mut config = Config::default();
+        config.safety.network = crate::app::NetworkPolicy::Deny;
+        let capabilities = crate::providers::tool::web::WebCapabilities::resolve(&config.web);
+        let notice = web_capabilities_notice(&config, &capabilities);
+        assert!(notice.contains("Web egress disabled"), "{notice}");
+        assert!(notice.contains("fetch backend: native"), "{notice}");
+        assert!(
+            notice.contains("search backend: managed_searxng"),
+            "{notice}"
+        );
     }
 }

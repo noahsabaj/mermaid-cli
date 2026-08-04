@@ -76,6 +76,11 @@ pub trait ToolExecutor: Send + Sync {
 /// Built once at startup; read-only after that.
 pub struct ToolRegistry {
     entries: HashMap<&'static str, Arc<dyn ToolExecutor>>,
+    /// Startup-resolved web routing/viability shared by the parent registry,
+    /// its provider-facing definitions, UI diagnostics, and every child
+    /// registry. Keeping the backend clients here prevents credentials or
+    /// environment changes from silently re-resolving a different route.
+    web_capabilities: Option<Arc<web::WebCapabilities>>,
     /// Direct handle to the subagent spawner (also reachable through the
     /// `agent` tool entry, but `dyn ToolExecutor` can't be downcast). The
     /// effect layer uses it to service `Cmd::KillBackgroundAgent`. `None`
@@ -87,8 +92,13 @@ impl ToolRegistry {
     pub fn new() -> Self {
         Self {
             entries: HashMap::new(),
+            web_capabilities: None,
             subagent_spawner: None,
         }
+    }
+
+    pub fn web_capabilities(&self) -> Option<&web::WebCapabilities> {
+        self.web_capabilities.as_deref()
     }
 
     pub fn subagent_spawner(&self) -> Option<&Arc<subagent::SubagentSpawner>> {
@@ -190,11 +200,8 @@ impl ToolRegistry {
     /// Config-aware factory. Always registers filesystem + exec +
     /// the MCP proxy + the subagent tool. Conditionally registers:
     ///
-    ///   - `web_fetch` and `web_search` per `config.web`. `web_fetch`
-    ///     defaults to the native backend (always registered, no key);
-    ///     `web_search` defaults to Ollama Cloud (registered iff
-    ///     `OLLAMA_API_KEY` resolves) or SearXNG (always). See
-    ///     `web::web_fetch_tool` / `web::web_search_tool`.
+    ///   - Viable `web_fetch` and `web_search` capabilities resolved once by
+    ///     `web::WebCapabilities`. Global network denial omits both.
     ///   - The computer-use tools the detected backend can drive (see
     ///     `register_computer_use_tools`) iff `mode == Interactive` AND
     ///     `computer_use::probe()` returns a usable backend.
@@ -211,6 +218,7 @@ impl ToolRegistry {
         providers: Arc<crate::providers::ProviderFactory>,
     ) -> Arc<Self> {
         let mut r = Self::new();
+        let web_capabilities = Arc::new(web::WebCapabilities::resolve(&config.web));
         r.register(Arc::new(filesystem::ReadFileTool));
         r.register(Arc::new(filesystem::WriteFileTool));
         r.register(Arc::new(apply_patch::ApplyPatchTool));
@@ -226,11 +234,16 @@ impl ToolRegistry {
         r.register(Arc::new(tasks::TaskListTool));
         r.register(Arc::new(mcp::McpToolProxy));
 
-        if let Some(tool) = web::web_fetch_tool(&config.web) {
-            r.register(Arc::new(tool));
-        }
-        if let Some(tool) = web::web_search_tool(&config.web) {
-            r.register(Arc::new(tool));
+        // `safety.network = "deny"` is a global egress kill-switch, not only
+        // a shell sandbox flag. Omit web capabilities entirely so adapters and
+        // subagents cannot advertise or execute them.
+        if config.safety.network == crate::app::NetworkPolicy::Allow {
+            if let Some(tool) = web_capabilities.fetch_tool() {
+                r.register(Arc::new(tool));
+            }
+            if let Some(tool) = web_capabilities.search_tool() {
+                r.register(Arc::new(tool));
+            }
         }
 
         // Computer-use tools only register when (a) the process runs
@@ -248,9 +261,13 @@ impl ToolRegistry {
         // `SubagentSpawner`; the tool itself is harmless when nobody
         // calls it. Headless runs do register the agent — a CI prompt
         // may still delegate to subagents for batched work.
-        let spawner = Arc::new(subagent::SubagentSpawner::new(providers));
+        let spawner = Arc::new(subagent::SubagentSpawner::new(
+            providers,
+            Arc::clone(&web_capabilities),
+        ));
         r.register(Arc::new(subagent::SubagentTool::new(spawner.clone())));
         r.subagent_spawner = Some(spawner);
+        r.web_capabilities = Some(web_capabilities);
 
         Arc::new(r)
     }
@@ -369,7 +386,7 @@ mod tests {
     fn build_registers_zero_config_web_tools_without_key() {
         // Both web tools register with no OLLAMA_API_KEY: web_fetch is native,
         // and web_search defaults to `auto`, which falls back to a managed local
-        // SearXNG (the container starts lazily at call time, not here).
+        // SearXNG (the process starts lazily at call time, not here).
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prior = std::env::var("OLLAMA_API_KEY").ok();
         unsafe {
@@ -382,12 +399,18 @@ mod tests {
             r.get("web_fetch").is_some(),
             "native web_fetch registers without a key"
         );
-        assert!(
+        assert_eq!(
             r.get("web_search").is_some(),
-            "auto web_search (managed SearXNG) registers without a key"
+            crate::searxng::managed_backend_viability().is_ok(),
+            "auto web_search registers only when managed SearXNG is viable"
         );
         assert!(r.get("read_file").is_some());
         assert!(r.get("execute_command").is_some());
+        let web = r
+            .web_capabilities()
+            .expect("config-aware registries retain the resolved web status");
+        assert_eq!(web.fetch.backend, "native");
+        assert_eq!(web.search.backend, "managed_searxng");
         unsafe {
             if let Some(v) = prior {
                 std::env::set_var("OLLAMA_API_KEY", v);
@@ -397,13 +420,15 @@ mod tests {
 
     #[test]
     fn build_registers_ollama_web_search_with_key() {
-        // With a key, the default Ollama search backend registers too.
+        // Cloud routing is explicit: a key plus an explicit Ollama backend
+        // registers search without changing the native fetch default.
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prior = std::env::var("OLLAMA_API_KEY").ok();
         unsafe {
             std::env::set_var("OLLAMA_API_KEY", "test-key-build");
         }
-        let cfg = crate::app::Config::default();
+        let mut cfg = crate::app::Config::default();
+        cfg.web.search_backend = crate::app::SearchBackend::Ollama;
         let providers = Arc::new(crate::providers::ProviderFactory::new(cfg.clone()));
         let r = ToolRegistry::build(&cfg, TuiMode::Interactive, providers);
         assert!(r.get("web_search").is_some(), "web_search registered");
@@ -411,6 +436,28 @@ mod tests {
         unsafe {
             match prior {
                 Some(v) => std::env::set_var("OLLAMA_API_KEY", v),
+                None => std::env::remove_var("OLLAMA_API_KEY"),
+            }
+        }
+    }
+
+    #[test]
+    fn auto_search_never_selects_cloud_just_because_a_key_exists() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prior = std::env::var("OLLAMA_API_KEY").ok();
+        unsafe {
+            std::env::set_var("OLLAMA_API_KEY", "test-key-must-not-route");
+        }
+        let cfg = crate::app::Config::default();
+        let capabilities = web::WebCapabilities::resolve(&cfg.web);
+        assert_eq!(capabilities.search.backend, "managed_searxng");
+        assert_eq!(
+            capabilities.search.available,
+            crate::searxng::managed_backend_viability().is_ok()
+        );
+        unsafe {
+            match prior {
+                Some(value) => std::env::set_var("OLLAMA_API_KEY", value),
                 None => std::env::remove_var("OLLAMA_API_KEY"),
             }
         }
@@ -442,5 +489,17 @@ mod tests {
                 std::env::set_var("OLLAMA_API_KEY", v);
             }
         }
+    }
+
+    #[test]
+    fn network_deny_omits_all_web_capabilities() {
+        let mut cfg = crate::app::Config::default();
+        cfg.safety.network = crate::app::NetworkPolicy::Deny;
+        cfg.web.search_backend = crate::app::SearchBackend::Searxng;
+        let providers = Arc::new(crate::providers::ProviderFactory::new(cfg.clone()));
+        let registry = ToolRegistry::build(&cfg, TuiMode::Headless, providers);
+        assert!(registry.get("web_fetch").is_none());
+        assert!(registry.get("web_search").is_none());
+        assert!(registry.get("read_file").is_some());
     }
 }

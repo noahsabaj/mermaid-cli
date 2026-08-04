@@ -48,6 +48,35 @@ pub fn truncate_middle(content: &str, max_chars: usize) -> String {
     )
 }
 
+/// Truncate to an exact UTF-8 byte budget while preserving both ends.
+///
+/// This differs from [`truncate_middle`], whose budget is measured in Unicode
+/// scalar values. Protocol envelopes and tool-result limits are byte budgets,
+/// so multi-byte text must be cut on a character boundary without exceeding
+/// `max_bytes` after the marker is included.
+pub fn truncate_middle_bytes(content: &str, max_bytes: usize) -> String {
+    if content.len() <= max_bytes {
+        return content.to_string();
+    }
+
+    const MARKER: &str = "\n...[content truncated]...\n";
+    if max_bytes <= MARKER.len() {
+        let end = content.floor_char_boundary(max_bytes);
+        return content[..end].to_string();
+    }
+
+    let keep = max_bytes - MARKER.len();
+    let head_budget = keep / 2;
+    let tail_budget = keep - head_budget;
+    let head_end = content.floor_char_boundary(head_budget);
+    let mut tail_start = content.len().saturating_sub(tail_budget);
+    while tail_start < content.len() && !content.is_char_boundary(tail_start) {
+        tail_start += 1;
+    }
+
+    format!("{}{MARKER}{}", &content[..head_end], &content[tail_start..])
+}
+
 /// Truncate web content using the default limit, keeping head and tail.
 pub fn truncate_web_content(content: &str) -> String {
     truncate_middle(content, WEB_CONTENT_MAX_CHARS)
@@ -209,5 +238,17 @@ mod tests {
             "must mark elision: {truncated}"
         );
         assert!(truncated.chars().count() < long.chars().count());
+    }
+
+    #[test]
+    fn truncate_middle_bytes_never_exceeds_utf8_budget() {
+        for unit in ["a", "é", "界"] {
+            let input = unit.repeat(40_000);
+            for budget in [0, 1, 8, 29, 30_000] {
+                let output = truncate_middle_bytes(&input, budget);
+                assert!(output.len() <= budget, "{} > {budget}", output.len());
+                assert!(std::str::from_utf8(output.as_bytes()).is_ok());
+            }
+        }
     }
 }

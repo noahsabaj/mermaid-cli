@@ -136,6 +136,29 @@ jobs:
       - name: Self-test (deterministic, model-free)
         run: cargo run --bin mermaid -- self-test --format json
 
+  # The managed-search test downloads the pinned bundle, starts the real
+  # Granian/SearXNG process, performs a JSON search, and verifies shutdown. Run
+  # it on every supported managed-search OS; the normal Windows matrix covers
+  # the actionable unsupported-backend path.
+  managed-search-integration:
+    name: Managed SearXNG (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: managed-searxng-${{ matrix.os }}
+      - name: Managed SearXNG end-to-end (ignored)
+        run: cargo test --lib searxng::tests::managed_searxng_end_to_end -- --ignored --exact
+
   # OS-sandbox enforcement on the non-Linux platforms with a real backend
   # (the Linux `integration` job above already runs these tests). macOS-only
   # for now; the Windows AppContainer port adds windows-latest. The

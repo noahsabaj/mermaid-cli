@@ -101,12 +101,12 @@ pub const PROVIDER_PROBE_TTL_DAYS: i64 = 30;
 /// Maximum characters to keep when truncating fetched web content
 pub const WEB_CONTENT_MAX_CHARS: usize = 5_000;
 
-/// Aggregate cap on the formatted output of `execute_web_searches`.
+/// Byte-exact aggregate cap on the complete formatted output of `web_search`.
 /// Per-result content is already truncated to `WEB_CONTENT_MAX_CHARS`, so
 /// at the default 5 results this caps the total at ~25 KB plus headers and
 /// the sources block. The aggregate cap protects against many-results-of-
 /// medium-size cases where individual truncation alone isn't enough.
-pub const WEB_SEARCH_AGGREGATE_MAX_CHARS: usize = 30_000;
+pub const WEB_SEARCH_AGGREGATE_MAX_BYTES: usize = 30_000;
 
 /// Maximum characters allowed in the streaming response buffer.
 /// Prevents unbounded memory growth from runaway model responses.
@@ -167,6 +167,16 @@ pub const MAX_BATCH_TOOL_ITEMS: usize = 32;
 /// stops a compromised or misconfigured endpoint from returning a multi-GB
 /// body that `Response::json` would buffer unbounded.
 pub const MAX_WEB_BODY_BYTES: usize = 16 * 1024 * 1024;
+/// Aggregate decoded web bytes accepted across all calls in one model turn.
+pub const MAX_WEB_TURN_BYTES: usize = 64 * 1024 * 1024;
+/// Maximum web response downloads in flight process-wide across all backends.
+pub const MAX_WEB_DOWNLOAD_CONCURRENCY: usize = 8;
+/// Maximum web response downloads in flight for one transport origin.
+pub const MAX_WEB_PER_ORIGIN_CONCURRENCY: usize = 2;
+/// Maximum CPU-heavy extraction/snapshot jobs in flight process-wide.
+pub const MAX_WEB_EXTRACTION_CONCURRENCY: usize = 2;
+/// Maximum concurrent queries inside one batched web_search call.
+pub const MAX_WEB_SEARCH_CONCURRENCY: usize = 4;
 
 // UI Cache
 /// Maximum entries in the markdown parse cache before eviction

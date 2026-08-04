@@ -793,6 +793,7 @@ impl EffectRunner {
                 let scope = self.scope_mut(turn);
                 let token = scope.token();
                 let background = scope.background_token();
+                let web_bytes = scope.web_bytes();
                 scope.spawn(async move {
                     use futures::FutureExt;
                     let fallback_tx = tx.clone();
@@ -805,6 +806,7 @@ impl EffectRunner {
                         source,
                         token,
                         background,
+                        web_bytes,
                         config,
                         model_id,
                         task_id,
@@ -1669,7 +1671,7 @@ impl EffectRunner {
                 if let Some(mgr) = crate::mcp::manager_ref::get() {
                     mgr.shutdown().await;
                 }
-                // Tear down the auto-managed SearXNG container (zero-config
+                // Tear down the auto-managed SearXNG process (zero-config
                 // web_search). Same ownership rule as MCP: only the top-level
                 // runner reaps process-global services. No-op if none started.
                 crate::searxng::shutdown().await;
@@ -2872,6 +2874,7 @@ async fn dispatch_execute_tool(
     source: crate::models::tool_call::ToolCall,
     token: tokio_util::sync::CancellationToken,
     background: tokio_util::sync::CancellationToken,
+    web_bytes: Arc<std::sync::atomic::AtomicUsize>,
     config: Arc<crate::app::Config>,
     model_id: String,
     task_id: Option<String>,
@@ -3004,6 +3007,7 @@ async fn dispatch_execute_tool(
         Some(tasks.clone()),
     );
     ctx.background = background;
+    ctx.web_bytes = web_bytes;
     ctx.plan_file = plan_file;
     ctx.plan_permissions = plan_permissions;
     ctx.context_percent = context_percent;
@@ -3107,7 +3111,7 @@ async fn start_runtime_tool_run(
     // (unlike `finish`, which is fire-and-forget) (#39).
     let task_id = task_id.map(str::to_string);
     let tool_name = tool_name.to_string();
-    let args_json = serde_json::to_string(args).ok();
+    let args_json = redacted_json_string(args);
     tokio::task::spawn_blocking(move || {
         crate::runtime::RuntimeStore::open_default()
             .and_then(|store| {
@@ -3134,7 +3138,7 @@ fn finish_runtime_tool_run(tool_run_id: Option<&str>, outcome: &crate::domain::T
     };
     let tool_run_id = tool_run_id.to_string();
     let status = tool_status_label(outcome.status).to_string();
-    let output_json = serde_json::to_string(&serde_json::json!({
+    let output_json = redacted_json_string(&serde_json::json!({
         "status": tool_status_label(outcome.status),
         "summary": &outcome.summary,
         "model_content": &outcome.model_content,
@@ -3142,8 +3146,7 @@ fn finish_runtime_tool_run(tool_run_id: Option<&str>, outcome: &crate::domain::T
         "metadata": &outcome.metadata,
         "artifacts": &outcome.artifacts,
         "duration_secs": outcome.duration_secs,
-    }))
-    .ok();
+    }));
     // Fire-and-forget telemetry write on the blocking pool — don't stall the
     // tool-finish path waiting on rusqlite (#39).
     tokio::task::spawn_blocking(move || {
@@ -3153,6 +3156,16 @@ fn finish_runtime_tool_run(tool_run_id: Option<&str>, outcome: &crate::domain::T
                 .finish(&tool_run_id, &status, output_json.as_deref());
         }
     });
+}
+
+/// Serialize a durable runtime payload only after applying the same mandatory
+/// credential redaction used by recordings and conversation archives. Keep
+/// executable values unmodified in memory; this helper is exclusively for
+/// persistence sinks.
+fn redacted_json_string(value: &serde_json::Value) -> Option<String> {
+    let mut redacted = value.clone();
+    crate::utils::redact_json(&mut redacted);
+    serde_json::to_string(&redacted).ok()
 }
 
 fn tool_status_label(status: crate::domain::ToolStatus) -> &'static str {
@@ -3484,6 +3497,41 @@ mod tests {
         );
         let kept = filter_suppressed(tools, &[]);
         assert_eq!(kept.len(), 3, "empty suppression list is a no-op");
+    }
+
+    #[test]
+    fn runtime_tool_payloads_are_redacted_before_serialization() {
+        let payload = serde_json::json!({
+            "url": "https://user:hunter2@example.test/page?X-Amz-Signature=opaque-signature#private",
+            "authorization": "opaque-secret-value",
+            "model_content": "Fetched page says OPENAI_API_KEY=sk-abcdefghijklmnop1234 and Authorization: Bearer abcdef123456ghijkl",
+        });
+        let serialized = redacted_json_string(&payload).expect("serialize redacted payload");
+        assert!(
+            !serialized.contains("hunter2"),
+            "URL password leaked: {serialized}"
+        );
+        assert!(
+            !serialized.contains("opaque-signature"),
+            "signed URL leaked: {serialized}"
+        );
+        assert!(
+            !serialized.contains("private"),
+            "URL fragment leaked: {serialized}"
+        );
+        assert!(
+            !serialized.contains("opaque-secret-value"),
+            "credential-named field leaked: {serialized}"
+        );
+        assert!(
+            !serialized.contains("abcdef123456ghijkl"),
+            "bearer token leaked: {serialized}"
+        );
+        assert!(
+            !serialized.contains("sk-abcdefghijklmnop1234"),
+            "secret-shaped fetched content leaked: {serialized}"
+        );
+        assert!(serialized.contains("[REDACTED]"));
     }
 
     #[test]

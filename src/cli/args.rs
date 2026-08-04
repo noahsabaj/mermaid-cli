@@ -84,9 +84,9 @@ pub struct Cli {
     #[arg(short = 'c', long = "config", value_name = "KEY=VALUE", global = true)]
     pub config_overrides: Vec<String>,
 
-    /// Deny network access for model-run shell commands this session. On Linux a
-    /// seccomp kill-switch blocks internet sockets (`AF_INET`/`AF_INET6`); a
-    /// no-op on other platforms. Equivalent to `-c safety.network=deny`.
+    /// Deny web-tool egress on every platform and network access for model-run
+    /// shell commands where an OS sandbox is available. Equivalent to
+    /// `-c safety.network=deny`.
     #[arg(long, global = true)]
     pub no_network: bool,
 

@@ -158,7 +158,7 @@ mermaid --resume <id> run "and now the tests"   # Continue a saved session headl
                                                 #   ndjson session_started/result, json result,
                                                 #   or the `session:` line on stderr)
 mermaid --continue run "keep going"             # Resume this directory's most recent session
-mermaid --no-network run "audit the code"       # Deny network to shell commands (Linux/macOS)
+mermaid --no-network run "audit the code"       # Deny web tools everywhere; shell network on Linux/macOS
 mermaid --sandbox run "refactor this"           # Also confine writes to the project (Linux/macOS)
 mermaid add <name>                              # Add an MCP server (e.g., context7, git)
 mermaid remove <name>                           # Remove a configured MCP server
@@ -253,8 +253,8 @@ The model uses these autonomously via native tool calling:
 | `create_directory` | Create directories |
 | `execute_command` | Run shell commands; background mode registers PID/log/URL metadata for GUI apps and dev servers |
 | `memory` | Manage durable cross-session memory (remember / update / forget facts; project, shared, or global scope) |
-| `web_search` | Search the web (zero-config: managed local SearXNG, or Ollama Cloud) |
-| `web_fetch` | Fetch a URL as markdown (native in-process by default, no key); optional `pattern` finds case-insensitive substring matches with surrounding context instead of returning the whole page |
+| `web_search` | Search the web (managed local SearXNG by default; explicit Ollama Cloud or self-hosted SearXNG available) |
+| `web_fetch` | Fetch a public URL into a bounded session snapshot (native in-process by default, no key); inspect it with Unicode-caseless `pattern` matching or stable `start_line`/`line_count` continuation without refetching |
 | `agent` | Spawn autonomous sub-agent for parallel tasks |
 | `screenshot` | Capture the screen (fullscreen, focused window, monitor, region, or window by title) |
 | `list_windows` | List visible window titles (X11-only discovery for window-mode screenshots) |
@@ -264,13 +264,13 @@ The model uses these autonomously via native tool calling:
 | `scroll` | Scroll up or down |
 | `mouse_move` | Move mouse cursor without clicking |
 
-MCP servers contribute additional tools under the `mcp__<server>__<tool>` prefix when configured. Names and schemas are sanitized to provider-safe form at startup (charset `[A-Za-z0-9_-]`, 64-char cap, `$ref` inlining and other schema normalization); `enabled_tools`/`disabled_tools` filters keep matching the RAW tool names the server itself advertises. `web_fetch` (native) and `web_search` (see [Web tool backends](#web-tool-backends)) are both registered by default with no configuration. Computer-use tools are advertised only in interactive TUI sessions when a usable GUI backend is detected.
+MCP servers contribute additional tools under the `mcp__<server>__<tool>` prefix when configured. Names and schemas are sanitized to provider-safe form at startup (charset `[A-Za-z0-9_-]`, 64-char cap, `$ref` inlining and other schema normalization); `enabled_tools`/`disabled_tools` filters keep matching the RAW tool names the server itself advertises. `web_fetch` is registered natively with no key. `web_search` is registered when the selected backend is viable; the managed default is omitted with an actionable diagnostic on unsupported platforms. Computer-use tools are advertised only in interactive TUI sessions when a usable GUI backend is detected.
 
 By default MCP tools are **deferred**: instead of advertising every server's tools on every request, the model gets one `tool_search` tool that searches deferred tool names/descriptions and promotes matches to direct advertisement for the rest of the session — deferred schemas don't count against `/context` until promoted. Servers start concurrently at launch, each bounded by a 60-second timeout, and report ready/errored individually. Opt out globally with `mcp_defer_tools = false` at the top level of config, or per server with `defer = false` on its `[mcp_servers.<name>]` entry.
 
 ### Web tool backends
 
-The web tools work out of the box with no configuration, and are backend-pluggable under `[web]`:
+Web routing is user-controlled under `[web]` in the user config or a session `-c` override. Project config cannot select a backend or destination:
 
 ```toml
 [web]
@@ -279,16 +279,18 @@ search_backend = "auto"     # "auto" (default) | "ollama" | "searxng"
 searxng_url = "http://localhost:8080"
 ```
 
-- **`web_fetch` defaults to `native`**: it fetches the URL directly from your machine and converts the HTML to markdown — no API key, no third party. Set `fetch_backend = "ollama"` to route through Ollama Cloud's server-side fetch instead (handles JS-heavy pages and bot-walls better; needs `OLLAMA_API_KEY`).
-- **`web_search` defaults to `auto`**, which just works with zero setup: if `OLLAMA_API_KEY` is set it uses Ollama Cloud; otherwise mermaid **downloads and runs a self-contained local [SearXNG](https://github.com/searxng/searxng) bundle** on your first search and tears it down when it exits — no Docker, no Podman, nothing to install. The bundle (a portable Python plus the [Granian](https://github.com/emmett-framework/granian) server and SearXNG) is fetched once from [mermaid-searxng](https://github.com/noahsabaj/mermaid-searxng), sha256-verified, and cached under your data dir; after that startup is a couple of seconds. Force a backend with `search_backend = "ollama"` (Ollama Cloud) or `"searxng"` (your own instance at `searxng_url`, which must have `json` in its `search.formats`).
+- **`web_fetch` defaults to `native`**: it fetches directly from your machine without ambient proxy variables, rejects URL userinfo and non-global destinations at every redirect, refuses HTTPS downgrade redirects, decodes supported text charsets, and routes extraction by MIME. HTML/XHTML uses readability; Markdown and plain text are preserved; JSON and XML are rendered as data. Set `fetch_backend = "ollama"` to explicitly route through Ollama Cloud's server-side fetch instead (useful for JS-heavy pages and bot walls; needs `OLLAMA_API_KEY`). Ollama's API does not disclose its target redirect chain or final URL, so Mermaid labels final provenance as unknown and treats target-hop enforcement as provider-managed rather than fabricating a final URL.
+- **`web_search` defaults to sovereign `auto`**: Mermaid downloads and runs a self-contained local [SearXNG](https://github.com/searxng/searxng) bundle on the first search on supported Linux/macOS targets, then health-checks and reuses it. Merely setting `OLLAMA_API_KEY` never changes the route. Select `search_backend = "ollama"` explicitly for Ollama Cloud, or `"searxng"` for your own instance at `searxng_url` (including on Windows; the instance must have `json` in `search.formats`). Windows managed search remains unavailable because no supported bundle exists.
+- Native fetches retain requested/final URL, status, MIME, charset, backend, extraction mode, source/extracted sizes, and truncation provenance; cloud fetches retain the requested URL and explicitly mark final provenance unavailable. The complete model-visible result is capped at 30 KB. Decoded chunks are charged at the transport boundary against a 64 MiB per-turn budget, with 16 MiB per response, eight downloads globally, two per origin, two blocking extractors, and four concurrent search queries. Batch search preserves input order and reports per-query partial failures structurally. Snapshots are session/task scoped and the process-wide cache is capped at four entries and 32 MiB.
 
 ## OS Sandbox
 
 Model-run shell commands can be confined by the operating system, independently of the
 approval policy. Two dimensions, each with its own flag (or config key):
 
-- `--no-network` (`safety.network = "deny"`): commands cannot reach the network. Local
-  `AF_UNIX` sockets stay open so D-Bus/nscd-style IPC keeps working.
+- `--no-network` (`safety.network = "deny"`): omits and blocks all web tools on every
+  platform. On Linux and macOS it also prevents model-run commands from reaching the
+  network; local `AF_UNIX` sockets stay open so D-Bus/nscd-style IPC keeps working.
 - `--confine-fs` (`safety.filesystem = "project"`): write-class filesystem access is allowed
   only beneath the project root, the working directory, the system temp directory, and (on
   unix) `/dev`. Reads and execution stay unrestricted.
@@ -296,7 +298,7 @@ approval policy. Two dimensions, each with its own flag (or config key):
 
 Enforcement is per-platform, behind one facade:
 
-| Platform | Network deny | Write confinement | Denial signature |
+| Platform | Shell network deny | Write confinement | Denial signature |
 | --- | --- | --- | --- |
 | Linux | seccomp-BPF kill-switch: creating an `AF_INET`/`AF_INET6` socket dies with `SIGSYS` | Landlock (kernel 5.13+; best-effort no-op with a warning on older kernels) | network: precise (`SIGSYS`); filesystem: hedged permission-error text |
 | macOS | Seatbelt (`sandbox-exec`) allow-default profile with `(deny network*)`, sparing `AF_UNIX` | Seatbelt `deny file-write*` outside the allowed roots, matched on both the literal and canonicalized path (so `TMPDIR` firmlinks work) | both hedged: `EPERM` "Operation not permitted", no signal |
@@ -440,15 +442,15 @@ keys in the file survive, and defaults are never frozen in.
 ### Project config
 
 A repo can commit shared defaults in `.mermaid/config.toml` — model choice, profiles,
-per-model reasoning, web/UX knobs. Loading needs no trust ceremony because safety is
+per-model reasoning, and UX knobs. Loading needs no trust ceremony because safety is
 structural:
 
 - Only these top-level sections are honored: `default_model`, `model_aliases`,
-  `reasoning_per_model`, `ollama`, `ollama_num_ctx_per_model`, `web`, `compaction`,
-  `computer_use`, `memory`, `non_interactive`, and a `safety` subset. Anything else —
-  `mcp_servers` (spawns commands), `providers` (redirects traffic/credentials), `agents`,
-  `daemon` — is ignored with a warning, as are `web.searxng_url` and `ollama.host`/`port`
-  (traffic-redirect vectors) inside otherwise-allowed tables.
+  `reasoning_per_model`, `ollama`, `ollama_num_ctx_per_model`, `compaction`,
+  `computer_use`, `memory`, `non_interactive`, `ui`, and a `safety` subset. Anything else —
+  including `web` (selects egress routing), `mcp_servers` (spawns commands), `providers`
+  (redirects traffic/credentials), `agents`, and `daemon` — is ignored with a warning.
+  `ollama.host`/`port` are also denied inside the otherwise-allowed `ollama` table.
 - `safety.mode`, `safety.network`, and `safety.filesystem` are clamped tighten-only against
   your user config: a project can turn the sandbox on or drop to `read_only`, but can never
   loosen what you configured. Session flags (you, at the keyboard) still override everything.
@@ -491,13 +493,16 @@ auto_start = true
 # against your stated intent — aligned actions run automatically, risky ones
 # escalate to an approval prompt. "full_access" auto-runs everything local;
 # write-shaped MCP tools (no read-only annotation) are still vetted against
-# your intent per `external_writes` below. "read_only" blocks all mutations
-# but keeps reads flowing — including web_search / web_fetch, which are reads
-# of the public web (the SSRF guard on internal hosts applies in every mode).
+# your intent per `external_writes` below. "read_only" blocks mutations and
+# requires one-shot approval for each web request because URLs and queries are
+# externally observable. Set allow_readonly_web = true only when unattended
+# web egress in read_only sessions is intentional; project config cannot set it.
 # Change it live with Shift+Tab or `/safety <mode>` (session-scoped; this
 # value is the persistent default each session starts from).
 mode = "ask"
 checkpoint_on_mutation = true
+# network = "allow"       # "deny" is a global shell + web egress kill-switch
+# allow_readonly_web = false
 # Enforcement floor for write-shaped MCP tools (send / deploy / delete-remote
 # — anything without a server-advertised readOnlyHint): safety mode alone
 # never authorizes an external side effect. "allow" restores unconditional
@@ -664,7 +669,7 @@ API keys resolve in strict precedence order: **environment variables always win*
 
 When a cloud provider call fails, the error shown in the TUI ends with a `(request-id: ..., cf-ray: ...)` line when the provider's response carried those headers — quote it when reporting the failure to the provider (or in a Mermaid issue), it lets them find the exact request.
 
-Ollama Cloud models authenticate via `OLLAMA_API_KEY`. The web tools don't require it: `web_fetch` is native, and `web_search` defaults to `auto` — Ollama Cloud when the key is set, otherwise a mermaid-managed local SearXNG (see [Web tool backends](#web-tool-backends)). Use `mermaid cloud-setup` from your shell to set the key for cloud models; `/cloud-setup` in the TUI points back to that shell command.
+Ollama Cloud models authenticate via `OLLAMA_API_KEY`. Native `web_fetch` and managed/self-hosted SearXNG do not require it. Cloud web routing is never inferred from the key: set `fetch_backend = "ollama"` or `search_backend = "ollama"` explicitly (see [Web tool backends](#web-tool-backends)). Use `mermaid cloud-setup` from your shell to set the key for cloud models; `/cloud-setup` in the TUI points back to that shell command.
 
 ## Development
 

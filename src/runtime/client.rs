@@ -1165,38 +1165,12 @@ impl RuntimeService {
             });
         }
         if let Some(profile) = crate::models::lookup_provider(&snapshot.provider) {
-            for (key, value) in [
-                (
-                    "max_output_tokens_param",
-                    format!("{:?}", profile.max_tokens_param),
-                ),
-                (
-                    "parallel_tool_calls",
-                    (!profile
-                        .disable_parallel_tool_calls_for
-                        .iter()
-                        .any(|disabled| *disabled == snapshot.model))
-                    .to_string(),
-                ),
-                (
-                    "reasoning_parameter_shape",
-                    format!("{:?}", profile.reasoning_strategy),
-                ),
-                (
-                    "streaming_usage_available",
-                    "provider_dependent".to_string(),
-                ),
-                ("token_usage_field_shape", "openai_compatible".to_string()),
-            ] {
-                let _ = self.store.provider_probes().upsert(NewProviderProbe {
-                    provider: snapshot.provider.clone(),
-                    model_id: snapshot.model.clone(),
-                    capability_key: key.to_string(),
-                    capability_value: value,
-                    confidence: "static".to_string(),
-                    error: None,
-                });
-            }
+            record_static_provider_probes(
+                &self.store,
+                profile,
+                &snapshot.provider,
+                &snapshot.model,
+            );
         }
         json!({
             "id": model,
@@ -1261,6 +1235,46 @@ pub fn runtime_hygiene_reason() -> &'static str {
     "runtime hygiene: test/dev artifact"
 }
 
+/// Record the statically-known capability probes a provider profile implies.
+/// Both `mermaid providers probe` and the runtime client's model view persist
+/// this same table, so it lives here once — adding a capability in one place
+/// can no longer silently miss the other.
+pub fn record_static_provider_probes(
+    store: &RuntimeStore,
+    profile: &crate::models::ProviderProfile,
+    provider: &str,
+    model_id: &str,
+) {
+    for (key, value) in [
+        (
+            "max_output_tokens_param",
+            format!("{:?}", profile.max_tokens_param),
+        ),
+        (
+            "parallel_tool_calls",
+            (!profile.disable_parallel_tool_calls_for.contains(&model_id)).to_string(),
+        ),
+        (
+            "reasoning_parameter_shape",
+            format!("{:?}", profile.reasoning_strategy),
+        ),
+        (
+            "streaming_usage_available",
+            "provider_dependent".to_string(),
+        ),
+        ("token_usage_field_shape", "openai_compatible".to_string()),
+    ] {
+        let _ = store.provider_probes().upsert(NewProviderProbe {
+            provider: provider.to_string(),
+            model_id: model_id.to_string(),
+            capability_key: key.to_string(),
+            capability_value: value,
+            confidence: "static".to_string(),
+            error: None,
+        });
+    }
+}
+
 pub fn parse_optional_json(raw: Option<&str>) -> Value {
     raw.and_then(|value| serde_json::from_str(value).ok())
         .unwrap_or(Value::Null)
@@ -1278,10 +1292,8 @@ pub fn affected_paths_from_json(pending_action: &Value, changed_files: &Value) -
 
 fn collect_path_like_strings(value: &Value, paths: &mut Vec<String>) {
     match value {
-        Value::String(value) => {
-            if looks_path_like(value) {
-                paths.push(value.clone());
-            }
+        Value::String(value) if looks_path_like(value) => {
+            paths.push(value.clone());
         },
         Value::Array(items) => {
             for item in items {

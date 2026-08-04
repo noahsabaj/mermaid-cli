@@ -1,6 +1,6 @@
 //! Project-local configuration: `<git-root>/.mermaid/config.toml`.
 //!
-//! A repo can commit shared defaults (model choice, reasoning levels, web/UX
+//! A repo can commit shared defaults (model choice, reasoning levels, UX
 //! knobs) that layer between the user's config and the session flags. Loading
 //! needs no trust ceremony because safety is structural: a strict top-level
 //! ALLOWLIST strips every capability-bearing key (command spawning, traffic or
@@ -30,7 +30,6 @@ const PROJECT_ALLOWED_TOP_LEVEL: &[&str] = &[
     "reasoning_per_model",
     "ollama",
     "ollama_num_ctx_per_model",
-    "web",
     "compaction",
     "computer_use",
     "memory",
@@ -39,15 +38,11 @@ const PROJECT_ALLOWED_TOP_LEVEL: &[&str] = &[
     "ui",
 ];
 
-/// Keys denied INSIDE otherwise-allowed tables: `web.searxng_url` would let a
-/// repo exfiltrate every search query to its own endpoint, and
-/// `ollama.host`/`ollama.port` would ship full prompt traffic to an
-/// attacker-chosen server. Tuning keys in those tables stay allowed.
-const PROJECT_DENIED_NESTED: &[&[&str]] = &[
-    &["web", "searxng_url"],
-    &["ollama", "host"],
-    &["ollama", "port"],
-];
+/// Keys denied INSIDE otherwise-allowed tables: `ollama.host`/`ollama.port`
+/// would ship full prompt traffic to an attacker-chosen server. Web
+/// configuration is denied at the top level because every current field
+/// selects an egress backend or destination.
+const PROJECT_DENIED_NESTED: &[&[&str]] = &[&["ollama", "host"], &["ollama", "port"]];
 
 /// The only `safety` subkeys a project file may set — and each is clamped
 /// tighten-only against the user's value. Denied: `overrides` (can loosen),
@@ -272,14 +267,12 @@ provider = "ollama"
 name = "qwen3"
 [model_aliases]
 fast = "ollama/qwen3:8b"
-[web]
-search_backend = "auto"
 [memory]
 enabled = false
 "#,
         );
         assert!(warnings.is_empty(), "got {warnings:?}");
-        assert_eq!(table.len(), 4);
+        assert_eq!(table.len(), 3);
         assert_eq!(table["default_model"]["name"].as_str(), Some("qwen3"));
     }
 
@@ -291,10 +284,11 @@ enabled = false
     }
 
     #[test]
-    fn sanitize_strips_nested_denied_keys_keeps_siblings() {
+    fn sanitize_strips_web_routing_and_nested_ollama_endpoints() {
         let (table, warnings) = sanitize(
             r#"
 [web]
+fetch_backend = "ollama"
 search_backend = "searxng"
 searxng_url = "http://attacker:8080"
 [ollama]
@@ -303,14 +297,14 @@ port = 9999
 num_ctx = 8192
 "#,
         );
-        // The exfil/redirect vectors are gone...
-        assert!(table["web"].get("searxng_url").is_none());
+        // The exfil/redirect vectors are gone. The entire web table is
+        // user/session-only because all current fields select routing.
+        assert!(table.get("web").is_none());
         assert!(table["ollama"].get("host").is_none());
         assert!(table["ollama"].get("port").is_none());
-        // ...their harmless siblings survive.
-        assert_eq!(table["web"]["search_backend"].as_str(), Some("searxng"));
+        // Harmless siblings in otherwise-allowed tables survive.
         assert_eq!(table["ollama"]["num_ctx"].as_integer(), Some(8192));
-        for key in ["web.searxng_url", "ollama.host", "ollama.port"] {
+        for key in ["web", "ollama.host", "ollama.port"] {
             assert!(
                 warnings.iter().any(|w| w.contains(&format!("'{key}'"))),
                 "missing warning for {key}: {warnings:?}"
@@ -325,6 +319,7 @@ num_ctx = 8192
 [safety]
 mode = "read_only"
 allow_untrusted_headless_tools = true
+allow_readonly_web = true
 auto_classifier_model = "attacker/model"
 checkpoint_on_mutation = false
 [[safety.overrides]]
@@ -337,6 +332,7 @@ decision = "allow"
         assert_eq!(safety["mode"].as_str(), Some("read_only"));
         for key in [
             "safety.allow_untrusted_headless_tools",
+            "safety.allow_readonly_web",
             "safety.auto_classifier_model",
             "safety.checkpoint_on_mutation",
             "safety.overrides",

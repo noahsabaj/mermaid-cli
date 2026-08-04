@@ -81,6 +81,9 @@ pub enum RunEvent {
         /// when `None`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         plan: Option<PlanApproved>,
+        /// Structured, secret-safe web transport details for web tools.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        web: Option<Box<WebEventDetails>>,
     },
     /// A gated tool is waiting for approval. Headless runs surface this so a
     /// supervising process can decide.
@@ -160,6 +163,61 @@ pub struct PlanApproved {
     pub fork: bool,
 }
 
+/// Stable, bounded web facts exposed to NDJSON consumers. Query text and page
+/// content deliberately stay out of this surface; URLs are sanitized before
+/// entering `ToolMetadata`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WebEventDetails {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub backend: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub charset: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extraction: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_byte_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_byte_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rendered_byte_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pattern: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_lines: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub match_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub succeeded_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_count: Option<usize>,
+    #[serde(default)]
+    pub failed_count: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failures: Vec<super::WebSearchFailure>,
+    #[serde(default)]
+    pub partial: bool,
+    #[serde(default)]
+    pub truncated: bool,
+}
+
 impl RunEvent {
     /// Project a lifecycle [`Msg`] into a public `RunEvent`, or `None` for the
     /// many messages that have no place in the SDK stream.
@@ -202,6 +260,7 @@ impl RunEvent {
                     }),
                     _ => None,
                 },
+                web: web_event_details(&outcome.metadata.detail).map(Box::new),
             },
             Msg::ApprovalRequested {
                 call_id,
@@ -301,6 +360,94 @@ fn tool_name(detail: &ToolMetadata) -> String {
     }
 }
 
+fn web_event_details(detail: &ToolMetadata) -> Option<WebEventDetails> {
+    match detail {
+        ToolMetadata::WebSearch {
+            queries,
+            requested_count,
+            result_count,
+            backend,
+            succeeded_queries,
+            failed_queries,
+            partial,
+            truncated,
+            failures,
+            ..
+        } => Some(WebEventDetails {
+            backend: backend.clone(),
+            requested_url: None,
+            final_url: None,
+            status: None,
+            error_kind: None,
+            media_type: None,
+            charset: None,
+            extraction: None,
+            snapshot_id: None,
+            source_byte_count: None,
+            output_byte_count: None,
+            rendered_byte_count: None,
+            line_count: None,
+            pattern: None,
+            context_lines: None,
+            match_count: None,
+            query_count: Some(queries.len()),
+            succeeded_count: Some(*succeeded_queries),
+            requested_count: Some(*requested_count),
+            result_count: Some(*result_count),
+            failed_count: *failed_queries,
+            failures: failures.clone(),
+            partial: *partial,
+            truncated: *truncated,
+        }),
+        ToolMetadata::WebFetch {
+            url,
+            final_url,
+            status,
+            error_kind,
+            media_type,
+            charset,
+            backend,
+            extraction,
+            snapshot_id,
+            source_byte_count,
+            output_byte_count,
+            byte_count,
+            line_count,
+            pattern,
+            context_lines,
+            match_count,
+            truncated,
+            ..
+        } => Some(WebEventDetails {
+            backend: backend.clone(),
+            requested_url: Some(url.clone()),
+            final_url: final_url.clone(),
+            status: *status,
+            error_kind: error_kind.clone(),
+            media_type: media_type.clone(),
+            charset: charset.clone(),
+            extraction: (!extraction.is_empty()).then(|| extraction.clone()),
+            snapshot_id: snapshot_id.clone(),
+            source_byte_count: Some(*source_byte_count),
+            output_byte_count: Some(*output_byte_count),
+            rendered_byte_count: Some(*byte_count),
+            line_count: Some(*line_count),
+            pattern: pattern.as_deref().map(crate::utils::redact_secrets),
+            context_lines: *context_lines,
+            match_count: *match_count,
+            query_count: None,
+            succeeded_count: None,
+            requested_count: None,
+            result_count: None,
+            failed_count: 0,
+            failures: Vec::new(),
+            partial: false,
+            truncated: *truncated,
+        }),
+        _ => None,
+    }
+}
+
 /// Stable string form of a tool status.
 fn status_str(status: ToolStatus) -> &'static str {
     match status {
@@ -355,6 +502,7 @@ mod tests {
                 summary: "command completed".to_string(),
                 error: None,
                 plan: None,
+                web: None,
             },
             RunEvent::ApprovalRequired {
                 call_id: "tool#4".to_string(),
@@ -576,8 +724,150 @@ mod tests {
                 summary: "command completed".to_string(),
                 error: None,
                 plan: None,
+                web: None,
             })
         );
+    }
+
+    #[test]
+    fn web_fetch_event_exposes_bounded_structured_provenance() {
+        let outcome = ToolOutcome::success("page", "fetched", 0.1).with_metadata(ToolRunMetadata {
+            detail: ToolMetadata::WebFetch {
+                url: "https://example.test/start".to_string(),
+                final_url: Some("https://example.test/final".to_string()),
+                status: Some(200),
+                error_kind: None,
+                media_type: Some("text/html".to_string()),
+                charset: Some("utf-8".to_string()),
+                backend: "native".to_string(),
+                extraction: "readability".to_string(),
+                title: Some("Example".to_string()),
+                line_count: 3,
+                byte_count: 100,
+                source_byte_count: 400,
+                output_byte_count: 240,
+                truncated: true,
+                pattern: Some("needle".to_string()),
+                context_lines: Some(2),
+                match_count: Some(3),
+                snapshot_id: Some("web-1".to_string()),
+            },
+            ..ToolRunMetadata::default()
+        });
+        let event = RunEvent::from_msg(&Msg::ToolFinished {
+            turn: TurnId(1),
+            call_id: ToolCallId(9),
+            outcome,
+        })
+        .expect("mapped");
+        let RunEvent::ToolFinished {
+            name,
+            web: Some(web),
+            ..
+        } = event
+        else {
+            panic!("expected structured web event");
+        };
+        assert_eq!(name, "web_fetch");
+        assert_eq!(web.backend, "native");
+        assert_eq!(web.status, Some(200));
+        assert!(web.error_kind.is_none());
+        assert_eq!(web.final_url.as_deref(), Some("https://example.test/final"));
+        assert_eq!(web.source_byte_count, Some(400));
+        assert_eq!(web.output_byte_count, Some(240));
+        assert_eq!(web.rendered_byte_count, Some(100));
+        assert_eq!(web.pattern.as_deref(), Some("needle"));
+        assert_eq!(web.match_count, Some(3));
+        assert!(web.truncated);
+    }
+
+    #[test]
+    fn web_fetch_error_event_keeps_typed_failure_context() {
+        let outcome =
+            ToolOutcome::error("backend unavailable", 0.1).with_metadata(ToolRunMetadata {
+                detail: ToolMetadata::WebFetch {
+                    url: "https://example.test/start".to_string(),
+                    final_url: None,
+                    status: Some(503),
+                    error_kind: Some("http_status".to_string()),
+                    media_type: None,
+                    charset: None,
+                    backend: "native".to_string(),
+                    extraction: String::new(),
+                    title: None,
+                    line_count: 0,
+                    byte_count: 0,
+                    source_byte_count: 0,
+                    output_byte_count: 0,
+                    truncated: false,
+                    pattern: None,
+                    context_lines: None,
+                    match_count: None,
+                    snapshot_id: None,
+                },
+                ..ToolRunMetadata::default()
+            });
+        let event = RunEvent::from_msg(&Msg::ToolFinished {
+            turn: TurnId(1),
+            call_id: ToolCallId(10),
+            outcome,
+        })
+        .expect("mapped");
+        let RunEvent::ToolFinished { web: Some(web), .. } = event else {
+            panic!("expected structured web event");
+        };
+        assert_eq!(web.status, Some(503));
+        assert_eq!(web.error_kind.as_deref(), Some("http_status"));
+        assert_eq!(web.backend, "native");
+        assert!(web.final_url.is_none());
+    }
+
+    #[test]
+    fn web_search_event_keeps_partial_failure_and_backend_context() {
+        let outcome = ToolOutcome::success("results", "3 results returned", 0.1).with_metadata(
+            ToolRunMetadata {
+                detail: ToolMetadata::WebSearch {
+                    queries: vec!["first".to_string(), "second".to_string()],
+                    requested_count: 10,
+                    result_count: 3,
+                    sources: vec!["https://example.test/result".to_string()],
+                    backend: "managed_searxng".to_string(),
+                    succeeded_queries: 1,
+                    failed_queries: 1,
+                    partial: true,
+                    truncated: true,
+                    failures: vec![crate::domain::WebSearchFailure {
+                        query_index: 1,
+                        error: "upstream timed out".to_string(),
+                    }],
+                },
+                ..ToolRunMetadata::default()
+            },
+        );
+        let event = RunEvent::from_msg(&Msg::ToolFinished {
+            turn: TurnId(1),
+            call_id: ToolCallId(11),
+            outcome,
+        })
+        .expect("mapped");
+        let RunEvent::ToolFinished {
+            name,
+            web: Some(web),
+            ..
+        } = event
+        else {
+            panic!("expected structured web event");
+        };
+        assert_eq!(name, "web_search");
+        assert_eq!(web.backend, "managed_searxng");
+        assert_eq!(web.query_count, Some(2));
+        assert_eq!(web.succeeded_count, Some(1));
+        assert_eq!(web.failed_count, 1);
+        assert_eq!(web.result_count, Some(3));
+        assert!(web.partial);
+        assert!(web.truncated);
+        assert_eq!(web.failures.len(), 1);
+        assert_eq!(web.failures[0].query_index, 1);
     }
 
     #[test]
@@ -616,6 +906,7 @@ mod tests {
             summary: "read".to_string(),
             error: None,
             plan: None,
+            web: None,
         })
         .unwrap();
         assert!(!json.contains("\"plan\""));

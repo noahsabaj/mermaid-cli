@@ -160,10 +160,13 @@ impl ApprovalBroker {
 
 /// External tools whose risk depends on live runtime context (which window has
 /// focus, what page is loaded, which untrusted server answers), not just their
-/// arguments. A blanket "don't ask again" for these is unsafe — "always type
-/// anything" / "always run any MCP tool" — so they're non-allowlistable: an
-/// empty key, which the gate and modal treat as "no approve-always" (#6, #31).
+/// arguments. A blanket "don't ask again" for these is unsafe — it would mean
+/// "always send any URL/query", "always type anything", or "always run any MCP
+/// tool" — so they are non-allowlistable: an empty key, which the gate and
+/// modal treat as "no approve-always" (#6, #31).
 const NON_ALLOWLISTABLE_TOOLS: &[&str] = &[
+    "web_fetch",
+    "web_search",
     "type_text",
     "press_key",
     "click",
@@ -242,6 +245,8 @@ mod tests {
         // #6/#31: a blanket "approve always" for these is unsafe (their risk is
         // context-dependent), so the key is empty ⇒ non-allowlistable.
         for tool in [
+            "web_fetch",
+            "web_search",
             "type_text",
             "press_key",
             "click",

@@ -684,23 +684,10 @@ impl AnthropicAdapter {
             body["temperature"] = json!(temp);
         }
 
-        // Tools come from `config.tools` (OpenAI-compat shape,
-        // populated by the provider wrapper). Translate to Anthropic
-        // `type: "custom"` entries; drop web tools when no cloud key
-        // is available.
-        let no_cloud_key = crate::ollama::get_cloud_api_key().is_none();
-        let filtered: Vec<&Value> = config
-            .tools
-            .iter()
-            .filter(|t| {
-                let name = t
-                    .pointer("/function/name")
-                    .and_then(|n| n.as_str())
-                    .unwrap_or("");
-                !(no_cloud_key && (name == "web_search" || name == "web_fetch"))
-            })
-            .collect();
-        let mut anthropic_tools = to_anthropic_tools(&filtered);
+        // Tool registration is the single capability boundary. Translate every
+        // registered tool; native fetch and SearXNG do not need an Ollama key.
+        let registered: Vec<&Value> = config.tools.iter().collect();
+        let mut anthropic_tools = to_anthropic_tools(&registered);
         if !anthropic_tools.is_empty() {
             // Mark the LAST tool with `cache_control: ephemeral` (Step
             // 5b). Anthropic caches everything BEFORE the marker too, so
@@ -1377,11 +1364,8 @@ enum ContentBlockOut {
         signature: Option<String>,
     },
     ToolUse {
-        #[allow(dead_code)]
         id: String,
-        #[allow(dead_code)]
         name: String,
-        #[allow(dead_code)]
         input: Value,
     },
     /// Catch-all for content types we don't model (server-tool results,
@@ -2464,6 +2448,36 @@ mod tests {
             assert!(tool.get("name").is_some());
             assert!(tool.get("input_schema").is_some());
         }
+    }
+
+    #[test]
+    fn build_request_body_preserves_registry_selected_web_tools() {
+        let adapter = test_adapter();
+        let config = ModelConfig {
+            tools: ["web_fetch", "web_search"]
+                .into_iter()
+                .map(|name| {
+                    serde_json::json!({
+                        "type": "function",
+                        "function": {
+                            "name": name,
+                            "description": "registered web tool",
+                            "parameters": {"type": "object"}
+                        }
+                    })
+                })
+                .collect(),
+            ..Default::default()
+        };
+
+        let body = adapter.build_request_body(&[ChatMessage::user("hi")], &config);
+        let names: Vec<&str> = body["tools"]
+            .as_array()
+            .expect("tools array")
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+            .collect();
+        assert_eq!(names, ["web_fetch", "web_search"]);
     }
 
     /// Step 5b: only the LAST tool gets `cache_control: ephemeral`.

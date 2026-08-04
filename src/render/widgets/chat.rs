@@ -143,11 +143,6 @@ impl ChatState {
         self.scroll_offset = 0;
     }
 
-    /// Check if user is manually scrolling (not following bottom)
-    pub fn is_manually_scrolling(&self) -> bool {
-        self.is_user_scrolling
-    }
-
     /// Find an image click target at the given screen coordinates.
     /// Returns Some((message_index, image_index)) if an image indicator was clicked.
     pub fn find_image_at_screen_pos(&self, screen_row: u16) -> Option<&ImageClickTarget> {
@@ -198,11 +193,6 @@ impl ChatState {
         {
             self.selection = Some((anchor, cursor));
         }
-    }
-
-    /// Drop any active selection (and its highlight).
-    pub fn clear_selection(&mut self) {
-        self.selection = None;
     }
 
     /// Extract the currently-selected text from the last rendered frame, or

@@ -20,6 +20,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -32,6 +33,49 @@ use crate::runtime::SafetyMode;
 use super::approval::ApprovalBroker;
 use super::auto_classifier::AutoClassifier;
 use super::questions::QuestionBroker;
+
+/// Shared, byte-exact budget for decoded HTTP response data in one turn.
+/// Clones point at the same atomic counter, so parallel tool calls and batched
+/// queries cannot each claim the full allowance independently.
+#[derive(Clone, Debug)]
+pub struct WebByteBudget {
+    used: Arc<AtomicUsize>,
+}
+
+impl WebByteBudget {
+    pub(crate) fn shared(used: Arc<AtomicUsize>) -> Self {
+        Self { used }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn isolated() -> Self {
+        Self::shared(Arc::new(AtomicUsize::new(0)))
+    }
+
+    /// Charge decoded bytes without allowing the shared total to cross the
+    /// fixed per-turn limit. An overflowing charge atomically saturates the
+    /// counter so every later response observes an exhausted budget before it
+    /// polls another body.
+    pub fn charge(&self, bytes: usize) -> Result<usize, usize> {
+        let limit = crate::constants::MAX_WEB_TURN_BYTES;
+        let prior = self
+            .used
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                Some(used.saturating_add(bytes).min(limit))
+            })
+            .expect("web byte budget update always supplies a value");
+        let next = prior.saturating_add(bytes);
+        if prior >= limit || next > limit {
+            Err(limit)
+        } else {
+            Ok(next)
+        }
+    }
+
+    pub fn remaining(&self) -> usize {
+        crate::constants::MAX_WEB_TURN_BYTES.saturating_sub(self.used.load(Ordering::Acquire))
+    }
+}
 
 /// What a `ModelProvider::chat()` receives.
 #[derive(Debug)]
@@ -159,6 +203,10 @@ pub struct ExecContext {
     /// subagent runners each own one; `None` only in bare test contexts,
     /// where the tools degrade to a graceful no-op.
     pub tasks: Option<crate::providers::tasks::TaskBroker>,
+    /// Decoded web bytes accepted by every sibling tool call in this turn.
+    /// The effect runner replaces the constructor default with the owning
+    /// `TurnScope` counter so parallel calls share one aggregate budget.
+    pub web_bytes: Arc<AtomicUsize>,
 }
 
 impl std::fmt::Debug for ExecContext {
@@ -240,7 +288,20 @@ impl ExecContext {
             approval,
             questions,
             tasks,
+            web_bytes: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    /// Charge decoded web bytes to this turn without ever crossing the fixed
+    /// aggregate limit. Returns the new total on success.
+    pub fn charge_web_bytes(&self, bytes: usize) -> Result<usize, usize> {
+        self.web_budget().charge(bytes)
+    }
+
+    /// A cloneable handle for transport code to charge each decoded chunk at
+    /// the point it is accepted, including failed responses and retries.
+    pub fn web_budget(&self) -> WebByteBudget {
+        WebByteBudget::shared(self.web_bytes.clone())
     }
 
     /// Checkpoint provenance for this call — every checkpoint-creating tool
@@ -340,7 +401,9 @@ pub fn test_exec_context(
 }
 
 /// [`test_exec_context`] with an explicit `Config` (e.g. `exec.pty = false`
-/// to pin the pipe spawn path).
+/// to pin the pipe spawn path, or a `safety.mode` other than `FullAccess`).
+/// The context's safety mode follows `config.safety.mode`, so gate tests can
+/// pick a mode without hand-rolling `ExecContext::new`.
 pub fn test_exec_context_with_config(
     turn: TurnId,
     call_id: ToolCallId,
@@ -349,6 +412,7 @@ pub fn test_exec_context_with_config(
 ) -> (ExecContext, mpsc::Receiver<ProgressEvent>) {
     let token = CancellationToken::new();
     let (tx, rx) = mpsc::channel(64);
+    let safety_mode = config.safety.mode;
     let config = Arc::new(config);
     (
         ExecContext::new(
@@ -362,7 +426,7 @@ pub fn test_exec_context_with_config(
             None,
             None,
             None,
-            crate::runtime::SafetyMode::FullAccess,
+            safety_mode,
             None,
             None,
             None,
@@ -371,11 +435,6 @@ pub fn test_exec_context_with_config(
         ),
         rx,
     )
-}
-
-/// Convenience: build a Send+Sync sharable sink for tests.
-pub fn arc_sink(tx: mpsc::Sender<StreamEvent>) -> Arc<mpsc::Sender<StreamEvent>> {
-    Arc::new(tx)
 }
 
 #[cfg(test)]
@@ -413,5 +472,32 @@ mod tests {
             ProgressEvent::Status(s) => assert_eq!(s, "halfway"),
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn web_budget_is_atomic_and_never_crosses_the_turn_limit() {
+        let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(2), PathBuf::from("/tmp"));
+        assert_eq!(ctx.charge_web_bytes(1024), Ok(1024));
+        let remaining = crate::constants::MAX_WEB_TURN_BYTES - 1024;
+        assert_eq!(
+            ctx.charge_web_bytes(remaining),
+            Ok(crate::constants::MAX_WEB_TURN_BYTES)
+        );
+        assert_eq!(
+            ctx.charge_web_bytes(1),
+            Err(crate::constants::MAX_WEB_TURN_BYTES)
+        );
+    }
+
+    #[test]
+    fn web_budget_overflow_saturates_and_stays_exhausted() {
+        let budget = WebByteBudget::isolated();
+        let limit = crate::constants::MAX_WEB_TURN_BYTES;
+        assert_eq!(budget.charge(limit - 1), Ok(limit - 1));
+        assert_eq!(budget.charge(2), Err(limit));
+        assert_eq!(budget.remaining(), 0);
+        assert_eq!(budget.charge(0), Err(limit));
+        assert_eq!(budget.charge(usize::MAX), Err(limit));
+        assert_eq!(budget.remaining(), 0);
     }
 }

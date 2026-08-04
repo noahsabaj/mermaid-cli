@@ -14,6 +14,7 @@ pub mod hardening;
 mod pathguard;
 pub mod plugin;
 pub mod policy;
+pub mod redact;
 pub mod sandbox;
 pub mod storage;
 
@@ -40,7 +41,7 @@ pub use checkpoint::{
 pub use daemon::{
     DEFAULT_PAIRING_TTL_DAYS, clamp_pairing_ttl_days, daemon_socket_path, generate_pairing_token,
     hash_pairing_token, pairing_expiry_from_now, request_daemon_json, request_daemon_text,
-    snapshot_field_from_daemon, subscribe_daemon_lines,
+    subscribe_daemon_lines,
 };
 pub use pathguard::{
     OpenIntent, create_dir_all_beneath, open_beneath, remove_file_beneath, write_atomic_beneath,
@@ -55,6 +56,7 @@ pub use policy::{
     PolicyOverrideDecision, READ_ONLY_DENIAL_MARKER, RiskClass, SafetyMode, ToolCategory,
     is_destructive_command, is_plan_file_only_write, is_plan_file_path, is_plan_safe_build_command,
 };
+pub use redact::{redact_json, redact_json_text, redact_secrets, sanitize_url_for_display};
 pub use sandbox::{
     Enforcement, SandboxPolicy, enforce, fs_confinement_available, network_killswitch_available,
 };

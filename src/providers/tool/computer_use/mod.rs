@@ -31,7 +31,6 @@ pub mod screenshot;
 pub mod scroll;
 pub mod type_text;
 
-use std::path::Path;
 use std::process::Command;
 
 use serde_json::Value;
@@ -169,15 +168,6 @@ fn xdpyinfo_alive() -> bool {
                 .unwrap_or(false)
         },
     }
-}
-
-/// Utility: strip to filename-safe path for temp files.
-#[allow(dead_code)]
-pub(crate) fn path_stem(p: &Path) -> String {
-    p.file_stem()
-        .and_then(|s| s.to_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| "unknown".to_string())
 }
 
 pub(super) fn computer_use_success(

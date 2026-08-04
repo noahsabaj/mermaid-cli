@@ -5,16 +5,11 @@
 //! shape). The adapter handles all of that; this wrapper just
 //! forwards.
 
-use std::sync::Arc;
-
 use async_trait::async_trait;
 
 use crate::domain::ChatRequest;
 use crate::models::adapters::gemini::GeminiAdapter;
-use crate::models::{
-    Model, ModelConfig, ModelError, ReasoningChunk, Result, StreamCallback,
-    StreamEvent as ModelStreamEvent,
-};
+use crate::models::{Model, ModelConfig, ModelError, Result};
 
 use super::super::capabilities::Capabilities;
 use super::super::ctx::{FinalResponse, StreamContext, StreamEvent};
@@ -63,7 +58,7 @@ impl ModelProvider for GeminiProvider {
     async fn chat(&self, request: ChatRequest, ctx: StreamContext) -> Result<FinalResponse> {
         let config = build_model_config(&request);
         let (relay_tx, relay_handle) = super::stream_bridge::ordered_relay(ctx.sink.clone());
-        let callback = forward_callback(relay_tx.clone());
+        let callback = super::stream_bridge::forward_callback(relay_tx.clone());
         let chat_fut = self
             .adapter
             .chat(&request.messages, &config, Some(callback));
@@ -108,31 +103,6 @@ fn build_model_config(request: &ChatRequest) -> ModelConfig {
         output_schema: request.output_schema.clone(),
         ..Default::default()
     }
-}
-
-fn forward_callback(sink: tokio::sync::mpsc::UnboundedSender<StreamEvent>) -> StreamCallback {
-    Arc::new(move |event: ModelStreamEvent| {
-        let mapped = match event {
-            ModelStreamEvent::Text(s) => StreamEvent::Text(s),
-            ModelStreamEvent::Reasoning(chunk) => StreamEvent::Reasoning(ReasoningChunk {
-                text: chunk.text,
-                signature: chunk.signature,
-            }),
-            ModelStreamEvent::ToolCall(tc) => StreamEvent::ToolCall(tc),
-            ModelStreamEvent::Status(s) => StreamEvent::Status(s),
-            // No adapter emits `Done` through this callback — the wrapper
-            // sends the authoritative terminal `Done` built from the
-            // returned `ModelResponse` (F3). Map defensively without
-            // inventing usage (the old placeholder misfiled everything
-            // as completion tokens).
-            ModelStreamEvent::Done { .. } => StreamEvent::Done {
-                usage: None,
-                provider_continuation: None,
-                stop_reason: None,
-            },
-        };
-        let _ = sink.send(mapped);
-    })
 }
 
 #[cfg(test)]
