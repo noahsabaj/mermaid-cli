@@ -23,6 +23,20 @@ use super::web_client::{
     SearxngClient, ValidatedWebUrl, WebFetchError, WebFetchResult, format_results,
 };
 
+/// Where a backend's traffic terminates. `trust_destination` says this in
+/// prose for humans; this says it in a form callers can branch on, so
+/// disclosure decisions never depend on matching English strings that a later
+/// wording change would silently break.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Egress {
+    /// Terminates on this machine: direct sockets, or a local child process.
+    OnMachine,
+    /// Reaches a third party, or a host that cannot be proven to be loopback.
+    /// Configured-endpoint backends land here even when the operator points
+    /// them at localhost — over-disclosing is the safe direction to err.
+    OffMachine,
+}
+
 /// User-visible availability for one web capability. This contains no
 /// credentials and is safe for doctor/UI diagnostics.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,6 +44,7 @@ pub struct WebCapabilityStatus {
     pub available: bool,
     pub backend: &'static str,
     pub trust_destination: &'static str,
+    pub egress: Egress,
     pub reason: Option<String>,
 }
 
@@ -54,11 +69,16 @@ impl WebCapabilities {
         let (fetch, fetch_backend): (_, Option<Arc<dyn FetchProvider>>) = match web.fetch_backend {
             FetchBackend::Native => match NativeFetchClient::new() {
                 Ok(client) => (
-                    available("native", "direct from this machine"),
+                    available("native", "direct from this machine", Egress::OnMachine),
                     Some(Arc::new(client)),
                 ),
                 Err(error) => (
-                    unavailable("native", "direct from this machine", error.to_string()),
+                    unavailable(
+                        "native",
+                        "direct from this machine",
+                        Egress::OnMachine,
+                        error.to_string(),
+                    ),
                     None,
                 ),
             },
@@ -78,11 +98,20 @@ impl WebCapabilities {
                 // users opt into Ollama Cloud with `search_backend = "ollama"`.
                 SearchBackend::Auto => match crate::searxng::managed_backend_viability() {
                     Ok(_) => (
-                        available("managed_searxng", "local managed process"),
+                        available(
+                            "managed_searxng",
+                            "local managed process",
+                            Egress::OnMachine,
+                        ),
                         Some(Arc::new(ManagedSearxngBackend)),
                     ),
                     Err(reason) => (
-                        unavailable("managed_searxng", "local managed process", reason),
+                        unavailable(
+                            "managed_searxng",
+                            "local managed process",
+                            Egress::OnMachine,
+                            reason,
+                        ),
                         None,
                     ),
                 },
@@ -90,13 +119,20 @@ impl WebCapabilities {
                     let (status, client) = ollama_cloud_backend(ollama_key, "Ollama Cloud");
                     (status, client.map(|c| c as Arc<dyn SearchProvider>))
                 },
+                // A configured endpoint may well be loopback, but proving that
+                // means parsing an operator-supplied URL. Disclose instead.
                 SearchBackend::Searxng => match SearxngClient::new(web.searxng_url.clone()) {
                     Ok(client) => (
-                        available("searxng", "configured SearXNG instance"),
+                        available("searxng", "configured SearXNG instance", Egress::OffMachine),
                         Some(Arc::new(client)),
                     ),
                     Err(error) => (
-                        unavailable("searxng", "configured SearXNG instance", error.to_string()),
+                        unavailable(
+                            "searxng",
+                            "configured SearXNG instance",
+                            Egress::OffMachine,
+                            error.to_string(),
+                        ),
                         None,
                     ),
                 },
@@ -107,6 +143,19 @@ impl WebCapabilities {
             search,
             fetch_backend,
             search_backend,
+        }
+    }
+
+    /// Assemble a capability set from statuses alone, with no backends behind
+    /// them. Lets disclosure tests assert formatting for viability combinations
+    /// the test host cannot actually produce (e.g. a missing SearXNG bundle).
+    #[cfg(test)]
+    pub fn from_statuses_for_test(fetch: WebCapabilityStatus, search: WebCapabilityStatus) -> Self {
+        Self {
+            fetch,
+            search,
+            fetch_backend: None,
+            search_backend: None,
         }
     }
 
@@ -134,11 +183,16 @@ fn ollama_cloud_backend(
     match key {
         Some(key) => match OllamaWebClient::new(key) {
             Ok(client) => (
-                available("ollama_cloud", trust_destination),
+                available("ollama_cloud", trust_destination, Egress::OffMachine),
                 Some(Arc::new(client)),
             ),
             Err(error) => (
-                unavailable("ollama_cloud", "Ollama Cloud", error.to_string()),
+                unavailable(
+                    "ollama_cloud",
+                    "Ollama Cloud",
+                    Egress::OffMachine,
+                    error.to_string(),
+                ),
                 None,
             ),
         },
@@ -146,6 +200,7 @@ fn ollama_cloud_backend(
             unavailable(
                 "ollama_cloud",
                 "Ollama Cloud",
+                Egress::OffMachine,
                 "OLLAMA_API_KEY is not configured",
             ),
             None,
@@ -153,11 +208,16 @@ fn ollama_cloud_backend(
     }
 }
 
-fn available(backend: &'static str, trust_destination: &'static str) -> WebCapabilityStatus {
+fn available(
+    backend: &'static str,
+    trust_destination: &'static str,
+    egress: Egress,
+) -> WebCapabilityStatus {
     WebCapabilityStatus {
         available: true,
         backend,
         trust_destination,
+        egress,
         reason: None,
     }
 }
@@ -165,12 +225,14 @@ fn available(backend: &'static str, trust_destination: &'static str) -> WebCapab
 fn unavailable(
     backend: &'static str,
     trust_destination: &'static str,
+    egress: Egress,
     reason: impl Into<String>,
 ) -> WebCapabilityStatus {
     WebCapabilityStatus {
         available: false,
         backend,
         trust_destination,
+        egress,
         reason: Some(reason.into()),
     }
 }
