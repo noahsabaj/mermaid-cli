@@ -114,10 +114,13 @@ pub async fn run_interactive_with(
         crate::providers::TuiMode::Interactive,
         providers.clone(),
     );
-    if let Some(capabilities) = tools.web_capabilities() {
-        state.ui.pending_msgs.push_back(Msg::TransientStatus {
-            text: web_capabilities_notice(&config, capabilities),
-        });
+    if let Some(capabilities) = tools.web_capabilities()
+        && let Some(text) = web_capabilities_notice(&config, capabilities)
+    {
+        state
+            .ui
+            .pending_msgs
+            .push_back(Msg::TransientStatus { text });
     }
     let (runner, mut msg_rx) = EffectRunner::pair_from(cwd.clone(), providers, tools);
     // Interactive TUI: enable inline approval prompts so `ask` mode (and Auto
@@ -440,44 +443,81 @@ fn bootstrap_cmds(config: &Config, session_id: &str) -> Vec<Cmd> {
 /// One startup-visible summary built from the exact capability resolution used
 /// by the registry and subagents. This makes backend/trust routing explicit in
 /// the TUI without re-reading credentials or probing platform viability.
+///
+/// Returns `None` only for the boring case — every capability resolved AND
+/// every one of them terminates on this machine — so a healthy sovereign
+/// startup stays quiet. Silence therefore means "working and local"; anything
+/// else speaks. Availability alone is deliberately NOT the gate: a working
+/// cloud backend is exactly what a user needs told, so gating on viability
+/// would mute the disclosure precisely when traffic is leaving the machine.
 fn web_capabilities_notice(
     config: &Config,
     capabilities: &crate::providers::tool::web::WebCapabilities,
-) -> String {
+) -> Option<String> {
+    use crate::providers::tool::web::Egress;
+
     if config.safety.network == crate::app::NetworkPolicy::Deny {
-        return format!(
+        return Some(format!(
             "Web egress disabled by safety.network = \"deny\" (selected fetch backend: {}; selected search backend: {}).",
             capabilities.fetch.backend, capabilities.search.backend
-        );
+        ));
     }
 
-    let render = |name: &str, status: &crate::providers::tool::web::WebCapabilityStatus| {
-        let availability = if status.available {
-            "available".to_string()
+    let all = [
+        ("fetch", &capabilities.fetch),
+        ("search", &capabilities.search),
+    ];
+    let degraded = all
+        .into_iter()
+        .filter(|(_, status)| !status.available)
+        .collect::<Vec<_>>();
+    let leaves_machine = all
+        .iter()
+        .any(|(_, status)| status.egress == Egress::OffMachine);
+    if degraded.is_empty() && !leaves_machine {
+        return None;
+    }
+
+    // Headline stays one line per capability: backend + availability, and the
+    // trust destination ONLY where it means something. An unavailable backend
+    // routes nowhere, so naming its destination there is noise that also
+    // strands the remediation text mid-sentence.
+    let headline = |name: &str, status: &crate::providers::tool::web::WebCapabilityStatus| {
+        if status.available {
+            format!(
+                "{name}: {} (available; {})",
+                status.backend, status.trust_destination
+            )
         } else {
-            let reason = status
-                .reason
-                .as_deref()
-                .map(crate::utils::redact_secrets)
-                .unwrap_or_else(|| "backend initialization failed".to_string());
-            let reason = reason.split_whitespace().collect::<Vec<_>>().join(" ");
-            let reason = crate::utils::truncate_middle_bytes(&reason, 240)
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ");
-            format!("unavailable: {reason}")
-        };
-        format!(
-            "{name}: {} ({availability}; {})",
-            status.backend, status.trust_destination
-        )
+            format!("{name}: {} (unavailable)", status.backend)
+        }
     };
 
-    format!(
+    // Remediation prose is a paragraph, not a parenthetical — give each
+    // degraded capability its own line below the headline. The marker is a
+    // `-` bullet, not leading whitespace: the transcript renderer re-wraps
+    // system notices word by word (`wrap_text_with_indent`), so an indent is
+    // dropped and the detail lines would be indistinguishable from the
+    // wrapped headline. A glyph is a word, so it survives.
+    let mut notice = format!(
         "Web capabilities - {}; {}.",
-        render("fetch", &capabilities.fetch),
-        render("search", &capabilities.search)
-    )
+        headline("fetch", &capabilities.fetch),
+        headline("search", &capabilities.search)
+    );
+    for (name, status) in degraded {
+        let reason = status
+            .reason
+            .as_deref()
+            .map(crate::utils::redact_secrets)
+            .unwrap_or_else(|| "backend initialization failed".to_string());
+        let reason = reason.split_whitespace().collect::<Vec<_>>().join(" ");
+        let reason = crate::utils::truncate_middle_bytes(&reason, 240)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        notice.push_str(&format!("\n- {name}: {reason}"));
+    }
+    Some(notice)
 }
 
 #[cfg(test)]
@@ -520,23 +560,190 @@ mod tests {
         assert!(cmds.iter().any(|c| matches!(c, Cmd::InitMcpServers(_))));
     }
 
+    /// Statuses are built by hand rather than via `WebCapabilities::resolve`
+    /// so the notice's formatting is asserted independently of whichever
+    /// backends happen to be viable on the test host.
+    fn capabilities(
+        fetch: crate::providers::tool::web::WebCapabilityStatus,
+        search: crate::providers::tool::web::WebCapabilityStatus,
+    ) -> crate::providers::tool::web::WebCapabilities {
+        crate::providers::tool::web::WebCapabilities::from_statuses_for_test(fetch, search)
+    }
+
+    fn available(
+        backend: &'static str,
+        trust_destination: &'static str,
+        egress: crate::providers::tool::web::Egress,
+    ) -> crate::providers::tool::web::WebCapabilityStatus {
+        crate::providers::tool::web::WebCapabilityStatus {
+            available: true,
+            backend,
+            trust_destination,
+            egress,
+            reason: None,
+        }
+    }
+
+    fn unavailable(
+        backend: &'static str,
+        trust_destination: &'static str,
+        egress: crate::providers::tool::web::Egress,
+        reason: &str,
+    ) -> crate::providers::tool::web::WebCapabilityStatus {
+        crate::providers::tool::web::WebCapabilityStatus {
+            available: false,
+            backend,
+            trust_destination,
+            egress,
+            reason: Some(reason.to_string()),
+        }
+    }
+
+    /// The two sovereign defaults, spelled once: fetch straight off this
+    /// machine, search via the locally managed SearXNG process.
+    fn local_fetch() -> crate::providers::tool::web::WebCapabilityStatus {
+        available(
+            "native",
+            "direct from this machine",
+            crate::providers::tool::web::Egress::OnMachine,
+        )
+    }
+
+    fn local_search() -> crate::providers::tool::web::WebCapabilityStatus {
+        available(
+            "managed_searxng",
+            "local managed process",
+            crate::providers::tool::web::Egress::OnMachine,
+        )
+    }
+
+    #[test]
+    fn web_capability_notice_stays_silent_when_everything_resolved_and_local() {
+        let config = Config::default();
+        let capabilities = capabilities(local_fetch(), local_search());
+        assert_eq!(web_capabilities_notice(&config, &capabilities), None);
+    }
+
+    /// The regression this gate exists to prevent: a WORKING cloud backend is
+    /// the case a sovereignty-focused tool most needs to disclose, so
+    /// viability alone must never buy silence.
+    #[test]
+    fn web_capability_notice_discloses_working_cloud_egress() {
+        let config = Config::default();
+        let capabilities = capabilities(
+            local_fetch(),
+            available(
+                "ollama_cloud",
+                "Ollama Cloud",
+                crate::providers::tool::web::Egress::OffMachine,
+            ),
+        );
+        let notice =
+            web_capabilities_notice(&config, &capabilities).expect("cloud egress must disclose");
+        assert!(
+            notice.contains("search: ollama_cloud (available; Ollama Cloud)"),
+            "{notice}"
+        );
+        // Nothing is broken, so nothing earns a remediation line.
+        assert!(!notice.contains('\n'), "{notice}");
+    }
+
+    /// An operator-supplied SearXNG URL cannot be proven to be loopback, so it
+    /// discloses like any other off-machine destination.
+    #[test]
+    fn web_capability_notice_discloses_configured_searxng_endpoint() {
+        let config = Config::default();
+        let capabilities = capabilities(
+            local_fetch(),
+            available(
+                "searxng",
+                "configured SearXNG instance",
+                crate::providers::tool::web::Egress::OffMachine,
+            ),
+        );
+        let notice =
+            web_capabilities_notice(&config, &capabilities).expect("configured endpoint discloses");
+        assert!(notice.contains("configured SearXNG instance"), "{notice}");
+    }
+
+    #[test]
+    fn web_capability_notice_gives_every_degraded_capability_its_own_line() {
+        let config = Config::default();
+        let capabilities = capabilities(
+            unavailable(
+                "native",
+                "direct from this machine",
+                crate::providers::tool::web::Egress::OnMachine,
+                "TLS backend failed to initialize",
+            ),
+            unavailable(
+                "managed_searxng",
+                "local managed process",
+                crate::providers::tool::web::Egress::OnMachine,
+                "no sovereign SearXNG bundle is available for this platform",
+            ),
+        );
+        let notice = web_capabilities_notice(&config, &capabilities).expect("both degraded");
+        let lines = notice.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 3, "{notice}");
+        assert!(lines[1].starts_with("- fetch: TLS backend"), "{notice}");
+        assert!(lines[2].starts_with("- search: no sovereign"), "{notice}");
+    }
+
     #[test]
     fn web_capability_notice_discloses_shared_backend_and_trust_routing() {
         let config = Config::default();
-        let capabilities = crate::providers::tool::web::WebCapabilities::resolve(&config.web);
-        let notice = web_capabilities_notice(&config, &capabilities);
-        assert!(notice.contains("fetch: native"), "{notice}");
+        let capabilities = capabilities(
+            local_fetch(),
+            unavailable(
+                "managed_searxng",
+                "local managed process",
+                crate::providers::tool::web::Egress::OnMachine,
+                "no sovereign SearXNG bundle is available for this platform",
+            ),
+        );
+        let notice = web_capabilities_notice(&config, &capabilities).expect("degraded search");
+        // The healthy capability still discloses where its traffic goes.
+        assert!(notice.contains("fetch: native (available"), "{notice}");
         assert!(notice.contains("direct from this machine"), "{notice}");
-        assert!(notice.contains("search: managed_searxng"), "{notice}");
-        assert!(notice.contains("local managed process"), "{notice}");
+        assert!(
+            notice.contains("search: managed_searxng (unavailable)"),
+            "{notice}"
+        );
+    }
+
+    #[test]
+    fn web_capability_notice_moves_remediation_off_the_headline() {
+        let config = Config::default();
+        let capabilities = capabilities(
+            local_fetch(),
+            unavailable(
+                "managed_searxng",
+                "local managed process",
+                crate::providers::tool::web::Egress::OnMachine,
+                "no sovereign SearXNG bundle is available for this platform (windows/x86_64).\n  Configure `[web] search_backend = \"ollama\"`.",
+            ),
+        );
+        let notice = web_capabilities_notice(&config, &capabilities).expect("degraded search");
+        let (headline, detail) = notice.split_once('\n').expect("detail line");
+        // The unavailable backend routes nowhere, so its trust destination is
+        // not named — and the paragraph never lands mid-parenthetical.
+        assert!(!headline.contains("local managed process"), "{headline}");
+        assert!(!headline.contains("SearXNG bundle"), "{headline}");
+        assert_eq!(
+            detail,
+            "- search: no sovereign SearXNG bundle is available for this platform (windows/x86_64). Configure `[web] search_backend = \"ollama\"`."
+        );
     }
 
     #[test]
     fn web_capability_notice_honors_global_network_denial() {
         let mut config = Config::default();
         config.safety.network = crate::app::NetworkPolicy::Deny;
-        let capabilities = crate::providers::tool::web::WebCapabilities::resolve(&config.web);
-        let notice = web_capabilities_notice(&config, &capabilities);
+        // Denial reports regardless of viability or locality — both backends
+        // resolve here, and both stay on this machine.
+        let capabilities = capabilities(local_fetch(), local_search());
+        let notice = web_capabilities_notice(&config, &capabilities).expect("denial always shows");
         assert!(notice.contains("Web egress disabled"), "{notice}");
         assert!(notice.contains("fetch backend: native"), "{notice}");
         assert!(

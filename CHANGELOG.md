@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.1] - 2026-08-05
+
+### Changed
+
+- **A healthy, local web setup now starts quiet.** The startup web-capability
+  line printed on every run, so the one case worth reading — traffic leaving
+  the machine — looked exactly like the many that did not. The notice now
+  resolves to nothing when every capability initialized AND every one of them
+  terminates on this machine, so silence means "working and local". A working
+  cloud backend still announces itself: viability must never buy silence for
+  off-machine egress, which is the disclosure a sovereignty-focused tool most
+  owes its user. Backends carry an `Egress` discriminant (`OnMachine` /
+  `OffMachine`) rather than having the disclosure branch on prose, so
+  rewording a trust destination can no longer mute it by accident. Anything
+  that cannot be proven local discloses — an operator-configured SearXNG URL
+  counts as off-machine even when it points at loopback. Remediation text for
+  a failed backend moves off the headline onto its own `-` bullet, which the
+  transcript renderer keeps intact (a leading indent does not survive its
+  word-by-word re-wrap).
+
 ## [0.19.0] - 2026-08-04
 
 ### Changed
@@ -2762,7 +2782,8 @@ MERMAID.md project instructions, MCP spec bump, and a security update.
 - rustfmt and clippy configuration
 - Docker compose setup for LiteLLM proxy
 
-[Unreleased]: https://github.com/noahsabaj/mermaid-cli/compare/v0.19.0...HEAD
+[Unreleased]: https://github.com/noahsabaj/mermaid-cli/compare/v0.19.1...HEAD
+[0.19.1]: https://github.com/noahsabaj/mermaid-cli/compare/v0.19.0...v0.19.1
 [0.19.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.16.0...v0.17.0
