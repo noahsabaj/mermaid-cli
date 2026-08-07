@@ -95,11 +95,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   directory is a likelier cause than a missing git and the old message
   guessed wrong.
 
-- **A subagent's parallel tool calls are executed, not just counted.** The
-  agent-loop suite checks a turn's calls reach the reducer against an empty
-  registry; a child now runs three real `write_file` calls from one turn and
-  is shown to receive all three results before its next turn. Losing one
-  would hang the child until its timeout.
+- **A stub provider for tests** (`tests/harness/stub_model.rs`) and
+  `ProviderFactory::with_seeded_providers`, the seam it plugs into. A
+  `ScriptedModel` replays a queue of turns — tool calls, then a final message
+  — so a test drives the real reducer, effect runner, tool registry, safety
+  gate, and subagent spawner without a network. Nothing in production
+  dispatch knows it exists; the stub lives in `tests/` and is injected, so no
+  model id can reach it. Running off the end of a script panics rather than
+  returning empty, because that means the loop took a path the test did not
+  describe.
+
+  `tests/subagent_worktree_scripted.rs` uses it for the cases a live model
+  will not produce on demand: two children editing the same line so exactly
+  one conflicts, four disjoint children merging concurrently, what the child
+  was actually told about being isolated, and the empty-merge case that
+  caught the leak above. Offline, no key, on every `cargo nextest run`.
+
+- **Deterministic coverage for the Auto-mode safety classifier**
+  (`tests/auto_classifier_stubbed.rs`). In `auto` mode an LLM decides whether
+  a borderline action runs without asking, which makes
+  `ModelAutoClassifier::vet` a security boundary — and its tests covered only
+  the pure helpers (`parse_verdict`, `looks_like_injection`), never the path
+  from request to verdict. The two properties a live model cannot demonstrate
+  on demand are now pinned: it **fails closed** (a provider error, a stall
+  plus cancellation, or an unparseable reply escalates rather than allows),
+  and it **does not leak** (the stub records what the process actually sent,
+  so a secret in the vetted action is asserted absent from the wire rather
+  than assumed redacted). Both were checked by mutation — making the error
+  arm return `allow`, and stripping the redaction calls, each fails exactly
+  one test.
+
+- **Deterministic coverage for compaction's failure modes**
+  (`tests/compaction_stubbed.rs`). Compaction is the one operation that
+  deliberately destroys conversation state, and it is a *two-call* operation
+  — draft, then review — so nothing could reach its failure paths before
+  without a live model failing on cue. Now pinned: a failed draft call
+  reports an error and touches nothing; a failed or malformed **review** call
+  still lands the valid draft rather than costing the user their context over
+  a second call that was only ever a quality improvement, and records the
+  reason in `review_error`; a draft and review that are both structurally
+  invalid fail rather than replacing real history with prose; and "nothing to
+  compact" stays an `Info` note that spends no model call, so compaction
+  errors remain worth reading. Mutation-checked: making a review failure sink
+  the whole compaction fails exactly one test.
 
 - **Deterministic coverage for memory consolidation**
   (`tests/memory_consolidation_stubbed.rs`). `/memory consolidate` hands the
@@ -132,49 +170,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   backgrounding a child releases the turn at once while its report still
   arrives out of band.
 
-- **Deterministic coverage for compaction's failure modes**
-  (`tests/compaction_stubbed.rs`). Compaction is the one operation that
-  deliberately destroys conversation state, and it is a *two-call* operation
-  — draft, then review — so nothing could reach its failure paths before
-  without a live model failing on cue. Now pinned: a failed draft call
-  reports an error and touches nothing; a failed or malformed **review** call
-  still lands the valid draft rather than costing the user their context over
-  a second call that was only ever a quality improvement, and records the
-  reason in `review_error`; a draft and review that are both structurally
-  invalid fail rather than replacing real history with prose; and "nothing to
-  compact" stays an `Info` note that spends no model call, so compaction
-  errors remain worth reading. Mutation-checked: making a review failure sink
-  the whole compaction fails exactly one test.
-
-- **Deterministic coverage for the Auto-mode safety classifier**
-  (`tests/auto_classifier_stubbed.rs`). In `auto` mode an LLM decides whether
-  a borderline action runs without asking, which makes
-  `ModelAutoClassifier::vet` a security boundary — and its tests covered only
-  the pure helpers (`parse_verdict`, `looks_like_injection`), never the path
-  from request to verdict. The two properties a live model cannot demonstrate
-  on demand are now pinned: it **fails closed** (a provider error, a stall
-  plus cancellation, or an unparseable reply escalates rather than allows),
-  and it **does not leak** (the stub records what the process actually sent,
-  so a secret in the vetted action is asserted absent from the wire rather
-  than assumed redacted). Both were checked by mutation — making the error
-  arm return `allow`, and stripping the redaction calls, each fails exactly
-  one test.
-
-- **A stub provider for tests** (`tests/harness/stub_model.rs`) and
-  `ProviderFactory::with_seeded_providers`, the seam it plugs into. A
-  `ScriptedModel` replays a queue of turns — tool calls, then a final message
-  — so a test drives the real reducer, effect runner, tool registry, safety
-  gate, and subagent spawner without a network. Nothing in production
-  dispatch knows it exists; the stub lives in `tests/` and is injected, so no
-  model id can reach it. Running off the end of a script panics rather than
-  returning empty, because that means the loop took a path the test did not
-  describe.
-
-  `tests/subagent_worktree_scripted.rs` uses it for the cases a live model
-  will not produce on demand: two children editing the same line so exactly
-  one conflicts, four disjoint children merging concurrently, what the child
-  was actually told about being isolated, and the empty-merge case that
-  caught the leak above. Offline, no key, on every `cargo nextest run`.
+- **A subagent's parallel tool calls are executed, not just counted.** The
+  agent-loop suite checks a turn's calls reach the reducer against an empty
+  registry; a child now runs three real `write_file` calls from one turn and
+  is shown to receive all three results before its next turn. Losing one
+  would hang the child until its timeout.
 
 - **A live end-to-end suite for isolation** (`tests/subagent_worktree.rs`,
   `#[ignore]`d, in the integration CI job). The unit tests cover the
