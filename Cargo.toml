@@ -98,7 +98,7 @@ htmd = "0.5.4"
 # only, no I/O, so the domain purity guard stays satisfied).
 ignore = "0.4"
 nucleo-matcher = "0.3"
-jsonschema = "0.47.0"
+jsonschema = "0.49.3"
 # POSIX-shell tokenization for the exec tool's scratch-containment prover
 # (`command_provably_in_scratch`): the command must be split exactly as
 # `sh -c` would. Same crate + version mermaid-runtime already uses.
