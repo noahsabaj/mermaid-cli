@@ -177,13 +177,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   would hang the child until its timeout.
 
 - **A live end-to-end suite for isolation** (`tests/subagent_worktree.rs`,
-  `#[ignore]`d, in the integration CI job). The unit tests cover the
-  mechanics with the drive stubbed or failed on purpose; only a real child
-  shows that a model handed an isolated workspace actually writes into the
-  checkout and that its work then lands. Three tests: a single child's edit
-  landing, a shared child still writing straight through, and three children
-  fanning out concurrently without collision. Runs on
-  `meta/muse-spark-1.2-contributor` and skips cleanly without `MODEL_API_KEY`.
+  `#[ignore]`d, **run by hand**). The unit tests cover the mechanics with the
+  drive stubbed or failed on purpose; only a real child shows that a model
+  handed an isolated workspace actually writes into the checkout and that its
+  work then lands — that is what caught the agent-id collision below. Three
+  tests: a single child's edit landing, a shared child still writing straight
+  through, and three children fanning out concurrently without collision.
+  Runs on `meta/muse-spark-1.2-contributor`.
+
+  Deliberately **not** wired into CI. Each case is a paid API call on every
+  push, and without a repository secret every case skips while printing
+  `ok. 3 passed` in 0.00s — coverage-shaped noise for real money. The default
+  suite already compiles the file on all three platforms, so a refactor that
+  breaks these still fails CI; only the live execution is manual.
 
 ### Changed
 

@@ -195,19 +195,6 @@ jobs:
         run: cargo test --test sandbox_network -- --ignored
       - name: Sandbox filesystem confinement (ignored, Linux)
         run: cargo test --test sandbox_fs -- --ignored
-      # Drives real subagents against a live model, so it needs a key. The
-      # test skips itself when `MODEL_API_KEY` is empty — which is what a fork
-      # PR sees, since it cannot read secrets, and what every run sees until
-      # the repository secret exists. Skipping prints `ok. 3 passed` in 0.00s,
-      # which reads exactly like coverage, so say so out loud instead.
-      - name: Subagent worktree isolation (ignored, live model)
-        run: |
-          if [ -z "${MODEL_API_KEY}" ]; then
-            echo "::warning title=Live subagent tests did not run::MODEL_API_KEY is unset, so every case in tests/subagent_worktree.rs skipped. Add the repository secret to actually exercise them."
-          fi
-          cargo test --test subagent_worktree -- --ignored --test-threads=1
-        env:
-          MODEL_API_KEY: ${{ secrets.MODEL_API_KEY }}
       - name: Self-test (deterministic, model-free)
         run: cargo run --bin mermaid -- self-test --format json
 

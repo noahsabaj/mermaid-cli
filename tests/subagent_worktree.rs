@@ -7,14 +7,20 @@
 //! worktree root everywhere a child tool resolves a path — and that its work
 //! then lands in the project.
 //!
-//! `#[ignore]`d so it runs in the dedicated integration CI job rather than
-//! the default suite: it costs a real API call and needs a network.
+//! **Run this by hand, not in CI.** Each case costs a real API call, and CI
+//! runs on every push:
 //!
-//! Requires `MODEL_API_KEY`. Skips cleanly without one so a contributor
-//! running `cargo test -- --ignored` locally does not see a spurious failure
-//! — but note that a skipped run still reports `ok. 3 passed` in 0.00s, which
-//! reads exactly like coverage. The CI step raises a warning annotation when
-//! the key is absent so a skipped run cannot be mistaken for a passing one.
+//! ```text
+//! MODEL_API_KEY=... cargo test --test subagent_worktree -- --ignored --test-threads=1
+//! ```
+//!
+//! `#[ignore]`d so the default suite skips it. The default suite still
+//! *compiles* it, so a refactor that breaks these cannot rot unnoticed —
+//! which is the only thing a CI step for them would have added, since no key
+//! means every case skips while printing `ok. 3 passed` in 0.00s.
+//!
+//! Skips cleanly without `MODEL_API_KEY` so `cargo test -- --ignored` locally
+//! does not fail spuriously.
 
 use std::path::{Path, PathBuf};
 
