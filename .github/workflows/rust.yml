@@ -177,6 +177,49 @@ jobs:
   # for now; the Windows AppContainer port adds windows-latest. The
   # `#[ignore]`d tests include the Seatbelt profile-compile canary, so an SBPL
   # grammar change in a new macOS release fails this job loudly.
+  # Real macOS verification of the clipboard FILE-REFERENCE paste path.
+  #
+  # This path (Finder 'Copy' on an image file, rather than copying the image
+  # itself) was written against documented `public.file-url` behavior and could
+  # not be exercised by its author, who has no Mac. The Linux equivalents are
+  # verified by hand; a CI runner is the only Apple hardware this project has,
+  # so the check lives here rather than in a paragraph nobody re-reads.
+  clipboard-macos:
+    name: Clipboard file-reference paste (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: clipboard-macos
+      - name: Arm the clipboard with a file reference, then probe it
+        run: |
+          set -uo pipefail
+          DIR="$RUNNER_TEMP/mermaid-fileref"
+          mkdir -p "$DIR"
+          # A space in the name so the URI carries a percent-escape.
+          echo 'not-a-real-png-but-the-extension-is-what-matters' > "$DIR/My Shot.png"
+          # Exactly what Finder's Copy puts on the pasteboard: a file URL.
+          if ! osascript -e "set the clipboard to POSIX file \"$DIR/My Shot.png\""; then
+            echo "::notice::this runner cannot drive the pasteboard; skipping"
+            exit 0
+          fi
+          INFO=$(osascript -e 'clipboard info' || true)
+          echo "clipboard info: $INFO"
+          case "$INFO" in
+            *furl*) ;;
+            *)
+              echo "::notice::pasteboard did not take a file reference; skipping"
+              exit 0
+              ;;
+          esac
+          # Only now is the assertion meaningful: the pasteboard really holds a
+          # file reference, so a failure here is mermaid's probe, not the runner.
+          cargo test --lib manual_file_reference_paste -- --ignored --nocapture
+
   sandbox-integration:
     name: OS Sandbox
     runs-on: ${{ matrix.os }}

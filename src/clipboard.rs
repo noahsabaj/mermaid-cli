@@ -708,6 +708,53 @@ mod tests {
         assert_eq!(has_image(), probe_image_source() != ImageSource::None);
     }
 
+    /// Manual QA for the FILE-REFERENCE paste path on macOS and Linux.
+    ///
+    /// This one exists because the rest of that path could not be verified on
+    /// the machine that wrote it. The URI parsing is unit-tested above and the
+    /// Windows `CF_HDROP` branch was checked against a real Explorer copy; what
+    /// is unproven is the platform plumbing in between — whether
+    /// `osascript -e 'clipboard info'` really reports `furl` for a Finder copy,
+    /// and whether a file manager's `text/uri-list` reaches
+    /// `wl-paste`/`xclip` in the shape [`probe_image_source`] expects.
+    ///
+    /// Rather than leave that as a paragraph in a changelog, this makes it one
+    /// command. **Copy an image file in Finder / Nautilus / Dolphin first**,
+    /// then:
+    ///
+    /// `cargo test manual_file_reference_paste -- --ignored --nocapture`
+    ///
+    /// A pass means `has_image()` is true and the bytes come back with the
+    /// file's own format. A failure prints what the probe actually saw, which
+    /// is the diagnostic needed to fix it.
+    #[test]
+    #[ignore = "copy an image FILE in your file manager first, then run this"]
+    fn manual_file_reference_paste() {
+        let Some(backend) = detect_backend() else {
+            eprintln!("no clipboard backend detected; nothing to exercise");
+            return;
+        };
+        eprintln!("backend: {backend:?}");
+        match probe_image_source() {
+            ImageSource::File(path) => {
+                eprintln!("resolved file reference: {}", path.display());
+                let (bytes, format) = read_image_file(&path).expect("read the referenced file");
+                eprintln!("read {} bytes as {format}", bytes.len());
+                assert!(!bytes.is_empty());
+                assert!(has_image(), "has_image must agree with the probe");
+            },
+            ImageSource::Inline => panic!(
+                "the clipboard holds inline image data, not a file reference — \
+                 copy an image FILE in your file manager (not the image itself) \
+                 and re-run"
+            ),
+            ImageSource::None => panic!(
+                "no image source detected. If you did copy an image file, THIS is \
+                 the bug: the platform probe did not recognize the file reference."
+            ),
+        }
+    }
+
     /// Manual QA for a real display server (CI has none): round-trips a
     /// string through the system clipboard, then restores the previous text
     /// contents. Run with:
