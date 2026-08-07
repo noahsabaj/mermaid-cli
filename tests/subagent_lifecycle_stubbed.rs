@@ -101,6 +101,82 @@ async fn an_explore_child_is_advertised_only_read_only_tools() {
 }
 
 #[tokio::test]
+async fn a_child_emitting_several_tool_calls_runs_them_all_and_sees_every_result() {
+    // `TurnState::ExecutingTools` parallelizes a turn's tool calls, and the
+    // reducer gates the follow-up model call on every outcome landing. Losing
+    // one would hang the child until its timeout; feeding back the wrong
+    // count would have it reason from a partial picture. The agent-loop suite
+    // checks the calls reach the reducer against an empty registry; this runs
+    // them for real.
+    let dir = std::env::temp_dir().join(format!("mermaid_multitool_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let model = ScriptedModel::new([
+        Turn::tools([
+            (
+                "write_file".to_string(),
+                serde_json::json!({"path": "a.txt", "content": "alpha\n"}),
+            ),
+            (
+                "write_file".to_string(),
+                serde_json::json!({"path": "b.txt", "content": "beta\n"}),
+            ),
+            (
+                "write_file".to_string(),
+                serde_json::json!({"path": "c.txt", "content": "gamma\n"}),
+            ),
+        ]),
+        Turn::say("Wrote all three."),
+    ]);
+    let tool = SubagentTool::new(spawner(vec![model.clone()]));
+    let (ctx, _rx) = test_exec_context_with_config(TurnId(1), ToolCallId(1), dir.clone(), config());
+
+    let outcome = tool
+        .execute(
+            serde_json::json!({
+                "prompt": "write the three files",
+                "model": format!("{STUB}-0"),
+            }),
+            ctx,
+        )
+        .await;
+    assert_eq!(
+        outcome.status,
+        ToolStatus::Success,
+        "{}",
+        outcome.model_content
+    );
+
+    for (name, want) in [
+        ("a.txt", "alpha\n"),
+        ("b.txt", "beta\n"),
+        ("c.txt", "gamma\n"),
+    ] {
+        let got = std::fs::read_to_string(dir.join(name))
+            .unwrap_or_else(|e| panic!("{name} was not written: {e}"))
+            .replace("\r\n", "\n");
+        assert_eq!(got, want, "{name}");
+    }
+
+    // The second call must carry all three results, or the child reasoned
+    // about work it could not see the outcome of.
+    let requests = model.requests();
+    assert_eq!(requests.len(), 2, "one turn of tools, then the report");
+    let results = requests[1]
+        .messages
+        .iter()
+        .filter(|m| m.role == mermaid_cli::models::MessageRole::Tool)
+        .count();
+    assert_eq!(
+        results, 3,
+        "every tool result must feed back before the next turn"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
 async fn a_continuation_reuses_the_context_the_child_already_built() {
     // The whole point of `agent_id`: the follow-up must not re-explore. If
     // the second drive started from an empty history it would still answer,

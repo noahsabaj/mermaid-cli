@@ -418,6 +418,95 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_checkout_that_vanished_is_reported_not_read_as_empty() {
+        let Some((project, cx)) = project("vanished") else {
+            return;
+        };
+        let ws = Workspace::create(Isolation::Worktree, project.clone(), "a1")
+            .await
+            .unwrap();
+        std::fs::write(ws.root().join("app.rs"), "fn main() { work(); }\n").unwrap();
+
+        // Something took the checkout out from under us mid-flight. The
+        // dangerous reading is "changed no files", which would tell the
+        // parent its child did nothing rather than that its work was lost.
+        std::fs::remove_dir_all(ws.root()).unwrap();
+
+        let (ws, report) = ws.merge(&cx).await;
+        assert!(report.needs_attention, "{report:?}");
+        assert!(
+            report.note.contains("reading back its changes failed"),
+            "{}",
+            report.note
+        );
+        assert!(
+            !report.note.contains("changed no files"),
+            "a lost checkout must not read as an empty one: {}",
+            report.note
+        );
+        assert_eq!(
+            read(&project.join("app.rs")),
+            "fn main() {}\n",
+            "the project must be untouched"
+        );
+        ws.discard().await;
+    }
+
+    /// Unix-only: forcing a checkpoint failure needs an unreadable file, and
+    /// file modes are the one lever Windows does not give us. The repo
+    /// already scopes its mode-dependent tests this way.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_merge_that_cannot_be_checkpointed_applies_nothing() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let Some((project, _)) = project("nocheckpoint") else {
+            return;
+        };
+        // Checkpointing on, unlike the other tests here: this is about what
+        // happens when that snapshot cannot be taken.
+        let mut config = crate::app::Config::default();
+        config.safety.checkpoint_on_mutation = true;
+        let (ctx, _rx) = crate::providers::ctx::test_exec_context_with_config(
+            TurnId(9),
+            ToolCallId(9),
+            project.clone(),
+            config,
+        );
+        let cx = MergeContext::from_exec(&ctx);
+
+        let ws = Workspace::create(Isolation::Worktree, project.clone(), "a1")
+            .await
+            .unwrap();
+        std::fs::write(ws.root().join("app.rs"), "fn main() { work(); }\n").unwrap();
+        // The project-side file the checkpoint must snapshot before the merge
+        // overwrites it. Unreadable, so the snapshot fails.
+        let target = project.join("app.rs");
+        let original = std::fs::metadata(&target).unwrap().permissions();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let (ws, report) = ws.merge(&cx).await;
+
+        std::fs::set_permissions(&target, original).unwrap();
+        assert!(report.needs_attention, "{report:?}");
+        assert!(
+            report
+                .note
+                .contains("checkpointing the project before merging failed"),
+            "{}",
+            report.note
+        );
+        // The invariant: merging without a restore point would leave the
+        // change unrecoverable, so nothing is applied.
+        assert_eq!(
+            read(&target),
+            "fn main() {}\n",
+            "a merge with no restore point behind it must not land"
+        );
+        ws.discard().await;
+    }
+
+    #[tokio::test]
     async fn discarding_an_isolated_workspace_removes_its_checkout() {
         let Some((project, _cx)) = project("discard") else {
             return;
