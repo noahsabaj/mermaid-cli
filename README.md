@@ -687,8 +687,7 @@ Ollama Cloud models authenticate via `OLLAMA_API_KEY`. Native `web_fetch` and ma
 ## Development
 
 Contributor guardrails live in [`AGENTS.md`](AGENTS.md) (MVU purity, the no-emoji
-rule, no back-compat shims). The one-command pre-PR gate — exactly what CI runs —
-is:
+rule, no back-compat shims). The one-command pre-PR gate is:
 
 ```
 just check    # cargo fmt --check + clippy -D warnings + cargo nextest run
@@ -703,16 +702,31 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo nextest run --workspace   # or: cargo test --workspace
 ```
 
+**On Windows that gate is not equivalent to CI.** The render snapshot suite is
+`#[cfg(all(test, unix))]`, so roughly 400 tests — every pinned frame among them
+— are skipped without saying so. A green run on Windows can still fail CI on a
+snapshot mismatch. Nothing local reports the gap; if you develop on Windows,
+expect CI to be the first place a visual regression shows up.
+
 CI additionally runs two dependency-free source guards (`.github/scripts/`): no
 emoji/pictographs in source, and `src/domain` stays a pure MVU core (no I/O, no
 wall clock).
 
-The TUI has a snapshot suite (`src/render/snapshots.rs`, unix-only) that pins
-full rendered frames for curated scenes at 80x24 and 120x40. It runs as part of
-the normal test suite; a mismatch panics with a diff and writes a gitignored
-`.snap.new` sibling. Review and accept deliberate visual changes with
-`just snapshots` (`cargo insta review`) and commit the updated `.snap` files in
-the same PR as the style change.
+The TUI has a snapshot suite (`src/render/snapshots.rs`) that pins full rendered
+frames for curated scenes at 80x24 and 120x40. It runs as part of the normal
+test suite **on unix only** (see above); a mismatch panics with a diff and
+writes a gitignored `.snap.new` sibling. The test job publishes those as a
+`pending-snapshots-*` artifact on failure, so the rendered frame is reviewable
+from a Windows box that cannot produce it locally. Review and accept deliberate
+visual changes with `just snapshots` (`cargo insta review`) and commit the
+updated `.snap` files in the same PR as the style change.
+
+Terminal behavior that a `Line`/`Span` assertion cannot see — a shredded
+background, a glyph past a border, a stale status band — is covered separately
+by `tests/pty_frame.rs`, which drives the real binary on a pty and compares
+whole terminal grids against `tests/snapshots/*.txt`. Those DO run on every
+platform. Regenerate with `UPDATE_SNAPSHOTS=1 cargo test --test pty_frame` and
+read the diff before accepting it.
 
 ## License
 
