@@ -1,10 +1,10 @@
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::git::git;
 use crate::pathguard::{contain_within, contain_within_canonical};
 use crate::{NewApproval, NewCheckpoint, RuntimeStore, data_dir};
 
@@ -462,14 +462,8 @@ fn snapshot_shadow_git(
     let worktree = repo_root.join("worktree");
     std::fs::create_dir_all(&worktree)?;
     if !worktree.join(".git").exists() {
-        run_git(&worktree, ["init"])?;
+        git(&worktree).arg("init").run()?;
     }
-
-    run_git(&worktree, ["config", "user.name", "Mermaid Checkpoints"])?;
-    run_git(
-        &worktree,
-        ["config", "user.email", "mermaid-checkpoints@localhost"],
-    )?;
 
     for file in files {
         // `file.path` is the project-root-relative display path for in-tree
@@ -510,70 +504,28 @@ fn snapshot_shadow_git(
         }
     }
 
-    run_git(&worktree, ["add", "-A"])?;
-    let status = Command::new("git")
-        .args(HOOKS_OFF)
-        .arg("diff")
-        .arg("--cached")
-        .arg("--quiet")
-        .current_dir(&worktree)
-        .status()?;
-    if !status.success() {
-        run_git_with_env(
-            &worktree,
-            ["commit", "-m", &format!("checkpoint {checkpoint_id}")],
-        )?;
+    git(&worktree).args(["add", "-A"]).run()?;
+    // Nothing staged means nothing changed since the last checkpoint; an
+    // empty commit would just grow the shadow history.
+    if !git(&worktree)
+        .args(["diff", "--cached", "--quiet"])
+        .success()?
+    {
+        git(&worktree)
+            .args(["commit", "-m", &format!("checkpoint {checkpoint_id}")])
+            .run()?;
     }
-    let commit =
-        git_output(&worktree, ["rev-parse", "HEAD"]).unwrap_or_else(|_| "uncommitted".to_string());
+    let commit = git(&worktree)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .unwrap_or_else(|_| "uncommitted".to_string());
     Ok(ShadowGitSnapshot {
         repo: worktree.display().to_string(),
         commit,
     })
 }
 
-/// Disable repo-provided git hooks on every shadow-git invocation. The shadow
-/// worktree lives under the data dir, but the project's own hooks (and a
-/// tampered shadow repo) must never run as a side effect of taking a
-/// checkpoint. A nonexistent hooks dir ⇒ git runs no hooks (works on Windows
-/// Git too). Mirrors the `core.hooksPath=/dev/null` hardening in `plugin.rs`.
-const HOOKS_OFF: [&str; 2] = ["-c", "core.hooksPath=/dev/null"];
-
-fn run_git<const N: usize>(cwd: &Path, args: [&str; N]) -> Result<()> {
-    run_git_with_env(cwd, args)
-}
-
-fn run_git_with_env<const N: usize>(cwd: &Path, args: [&str; N]) -> Result<()> {
-    let status = Command::new("git")
-        .args(HOOKS_OFF)
-        .args(args)
-        .current_dir(cwd)
-        .env("GIT_AUTHOR_NAME", "Mermaid Checkpoints")
-        .env("GIT_AUTHOR_EMAIL", "mermaid-checkpoints@localhost")
-        .env("GIT_COMMITTER_NAME", "Mermaid Checkpoints")
-        .env("GIT_COMMITTER_EMAIL", "mermaid-checkpoints@localhost")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()?;
-    anyhow::ensure!(
-        status.success(),
-        "shadow git command failed in {}",
-        cwd.display()
-    );
-    Ok(())
-}
-
-fn git_output<const N: usize>(cwd: &Path, args: [&str; N]) -> Result<String> {
-    let output = Command::new("git")
-        .args(HOOKS_OFF)
-        .args(args)
-        .current_dir(cwd)
-        .output()?;
-    anyhow::ensure!(output.status.success(), "shadow git command failed");
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-fn project_hash(path: &Path) -> String {
+pub(crate) fn project_hash(path: &Path) -> String {
     let mut hasher = Sha256::new();
     hasher.update(path.display().to_string().as_bytes());
     crate::hex_lower(&hasher.finalize())

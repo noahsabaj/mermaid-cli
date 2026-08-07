@@ -546,36 +546,23 @@ fn resolve_plugin_source(path: &Path) -> Result<PathBuf> {
         .join("plugins")
         .join("sources")
         .join(crate::hex_lower(&Sha256::digest(git_source.as_bytes())));
-    // Harden git: no credential prompts, no repo-provided hooks, no external
-    // transports (`ext::` RCE), so materializing the source can't itself run
-    // attacker code.
-    const HARDENING: [&str; 4] = [
-        "-c",
-        "core.hooksPath=/dev/null",
-        "-c",
-        "protocol.ext.allow=never",
-    ];
+    // `crate::git` is what keeps materializing the source from running
+    // attacker code: no repo-provided hooks, no `ext::` transports, no
+    // credential prompt to hang a background install on.
     if dest.exists() {
-        let _ = Command::new("git")
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .args(HARDENING)
-            .arg("-C")
-            .arg(&dest)
-            .args(["pull", "--ff-only"])
-            .status();
+        // A refresh that fails leaves the already-cloned source in place,
+        // which is still installable — don't fail the install over it.
+        let _ = crate::git::git(&dest).args(["pull", "--ff-only"]).run();
     } else {
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let status = Command::new("git")
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .args(HARDENING)
+        crate::git::GitCommand::new()
             .args(["clone", "--depth", "1"])
             .arg(&git_source)
             .arg(&dest)
-            .status()
+            .run()
             .with_context(|| format!("failed to clone plugin source {}", git_source))?;
-        anyhow::ensure!(status.success(), "git clone failed for {}", git_source);
     }
     Ok(dest)
 }

@@ -31,6 +31,7 @@ pub mod subagent;
 pub mod tasks;
 pub mod web;
 pub mod web_client;
+pub mod workspace;
 
 use async_trait::async_trait;
 use std::collections::HashMap;

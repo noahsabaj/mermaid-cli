@@ -326,6 +326,14 @@ fn startup_recovery() {
     {
         tracing::info!(removed, "gc removed old checkpoint directories");
     }
+    // Subagent worktrees are removed when their child is evicted, but a
+    // crash between creating one and cleaning it up strands the checkout —
+    // and agent ids are per-session, so nothing reclaims it by name.
+    if let Ok(removed) = mermaid_cli::runtime::gc_orphaned_worktrees(daemon.retention_days)
+        && removed > 0
+    {
+        tracing::info!(removed, "gc removed orphaned subagent worktrees");
+    }
     if let Ok(removed) = sweep_stale_bg_logs(daemon.retention_days)
         && removed > 0
     {

@@ -135,6 +135,33 @@ impl ProviderFactory {
         }
     }
 
+    /// A factory with providers already resolved for the given model ids.
+    ///
+    /// `resolve` hands these back instead of building anything, so a caller
+    /// can substitute a provider it constructed itself. This is how tests
+    /// drive the real agent loop — reducer, effect runner, tool registry,
+    /// subagents — against a scripted model instead of a network: the seam
+    /// is the provider, so everything below it is the production path.
+    ///
+    /// Seeding is additive. A model id that was not seeded still builds
+    /// normally, which lets a test stub one model and leave the rest alone.
+    pub fn with_seeded_providers(
+        config: Config,
+        seeds: impl IntoIterator<Item = (String, Arc<dyn ModelProvider>)>,
+    ) -> Self {
+        let cache = seeds
+            .into_iter()
+            .map(|(model_id, provider)| {
+                let cell = tokio::sync::OnceCell::new_with(Some(provider));
+                (normalize_cache_key(&model_id), Arc::new(cell))
+            })
+            .collect();
+        Self {
+            config: Arc::new(config),
+            cache: Mutex::new(cache),
+        }
+    }
+
     pub fn config(&self) -> &Config {
         &self.config
     }

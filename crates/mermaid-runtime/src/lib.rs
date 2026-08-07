@@ -10,6 +10,7 @@ pub mod approval;
 pub mod atomic;
 pub mod checkpoint;
 pub mod daemon;
+pub mod git;
 pub mod hardening;
 mod pathguard;
 pub mod plugin;
@@ -17,6 +18,7 @@ pub mod policy;
 pub mod redact;
 pub mod sandbox;
 pub mod storage;
+pub mod worktree;
 
 /// Lowercase hex encoding of a byte slice. Shared by the SHA-256 hashing sites
 /// (pairing-token hash, project hashes, plugin-source hash) that each used to
@@ -43,6 +45,7 @@ pub use daemon::{
     hash_pairing_token, pairing_expiry_from_now, request_daemon_json, request_daemon_text,
     subscribe_daemon_lines,
 };
+pub use git::{GitCommand, is_work_tree};
 pub use pathguard::{
     OpenIntent, create_dir_all_beneath, open_beneath, remove_file_beneath, write_atomic_beneath,
 };
@@ -72,6 +75,7 @@ pub use storage::{
     RuntimeStore, SessionRecord, SessionsRepo, TaskPriority, TaskRecord, TaskStatus,
     TaskTimelineEvent, TasksRepo, ToolRunRecord, ToolRunsRepo, data_dir,
 };
+pub use worktree::{AgentWorktree, MergeOutcome, gc_orphaned_worktrees};
 // Unix-only: backs the `#[cfg(unix)]` daemon singleton via `flock`.
 #[cfg(unix)]
 pub use storage::try_exclusive_lock;

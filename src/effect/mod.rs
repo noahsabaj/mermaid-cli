@@ -1268,7 +1268,16 @@ impl EffectRunner {
                 if let Some(spawner) = spawner {
                     match agent_id {
                         Some(id) => {
-                            spawner.kill_detached(&id);
+                            // Killing a finished child hands back the
+                            // workspace it was holding for a continuation
+                            // that can no longer happen. Discarding it needs
+                            // to be async, so it rides a task.
+                            if let crate::providers::tool::subagent::KillResult::Evicted(
+                                workspace,
+                            ) = spawner.kill_detached(&id)
+                            {
+                                tokio::spawn(workspace.discard());
+                            }
                         },
                         None => {
                             spawner.kill_all_detached();

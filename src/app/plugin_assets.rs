@@ -470,6 +470,7 @@ mod tests {
                 safety: Some("read_only".to_string()),
                 preamble: None,
                 model: None,
+                isolation: None,
             },
         );
         let warnings = apply(&mut config, &assets);

@@ -8,6 +8,7 @@ An open-source AI coding assistant with computer use for the terminal. Multi-pro
 - **Native Tool Calling** — read, write, edit, delete, create directories, execute commands, search the web, spawn subagents, and call configured MCP tools
 - **Computer Use** — screenshot, click, type, press keys, scroll, move the mouse, and list windows on supported interactive GUI backends
 - **Subagents** — spawn parallel autonomous agents for independent tasks; built-in `general` and read-only `explore` types (plus user-defined ones), per-call model override, and continuation handles to follow up with a child that kept its context
+- **Worktree Isolation** — give a writing subagent its own git checkout with `isolation = "worktree"` (per type) or the `isolation` tool arg (per call). The checkout is seeded with your current uncommitted state, so the child sees your work in progress; your working copy is never touched while it runs. On success its changes are checkpointed and applied to the project as one patch, serialized against other children — so two agents editing the same lines produce a reported conflict with a saved patch instead of a silently interleaved tree. Fan out several writing children at once without collisions
 - **Agent Loop** — model calls tools autonomously, sees results, and continues until done
 - **Image Paste** — Ctrl+V to attach images for vision models (X11/Wayland/macOS/Windows). All three clipboard shapes work on every backend: a raster copy (screenshot tools, "Copy image"), an encoded blob with no raster form (GIMP, Figma — `PNG` with no `CF_BITMAP`), and a file reference from a file manager's Copy (Explorer / Finder / Nautilus). File-reference pastes accept png/jpeg/gif/webp/bmp/tiff up to 32 MB
 - **Reasoning Levels** — seven tiers (`none`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max`); cycle with Alt+T or set via `/reasoning`; persisted per-model
@@ -585,6 +586,7 @@ timeout_secs = 1200
 # safety = "read_only"    # ceiling — the child never runs looser than this
 # preamble = "You are a scout: find and report, fast."
 # model = "ollama/qwen3:8b"   # default model for this type; per-call `model` wins
+# isolation = "worktree"  # private git checkout; per-call `isolation` wins
 
 # Per-model reasoning preferences (remembered across sessions)
 [reasoning_per_model]
