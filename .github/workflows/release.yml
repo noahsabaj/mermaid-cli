@@ -24,16 +24,39 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Compare tag to Cargo.toml version
+      # Every workspace crate is checked, not just the root, and so is every
+      # intra-workspace dependency's `version =`. A bump now has to move six
+      # strings across three manifests; checking only the root would pass a
+      # release whose `mermaid-model` was left a version behind, and the failure
+      # would land at `cargo publish` — after the GitHub release and every
+      # binary artifact had already shipped.
+      - name: Compare tag to every workspace version
         run: |
           set -euo pipefail
           TAG="${{ github.event.inputs.version || github.ref_name }}"
-          CARGO_VERSION=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/^version = "(.*)"/\1/')
-          echo "release tag: $TAG / Cargo.toml: v$CARGO_VERSION"
-          if [ "$TAG" != "v$CARGO_VERSION" ]; then
-            echo "::error::Release tag $TAG does not match Cargo.toml version v$CARGO_VERSION"
-            exit 1
-          fi
+          WANT="${TAG#v}"
+          fail=0
+          for manifest in Cargo.toml crates/*/Cargo.toml; do
+            # `[package] version` — the first `^version = ` in the file.
+            got=$(grep -m1 '^version = ' "$manifest" | sed -E 's/^version = "(.*)"/\1/')
+            echo "$manifest: package v$got"
+            if [ "$got" != "$WANT" ]; then
+              echo "::error file=$manifest::package version v$got does not match release tag $TAG"
+              fail=1
+            fi
+            # Intra-workspace deps carry a `version =` that cargo publishes
+            # against; a stale one resolves to the previous release on crates.io.
+            while read -r line; do
+              dep=${line%% =*}
+              got=$(sed -E 's/.*version = "([^"]*)".*/\1/' <<<"$line")
+              echo "$manifest: dep $dep v$got"
+              if [ "$got" != "$WANT" ]; then
+                echo "::error file=$manifest::dependency $dep pinned to v$got, expected $WANT"
+                fail=1
+              fi
+            done < <(grep -E '^mermaid-[a-z]+ = \{.*version = "' "$manifest" || true)
+          done
+          exit $fail
 
   # Create release and build binaries
   release:
