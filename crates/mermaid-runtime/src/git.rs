@@ -50,6 +50,10 @@ pub struct GitCommand {
     cmd: Command,
     /// Echoed into error messages — `Command` won't give the args back.
     display: Vec<String>,
+    /// Likewise. A spawn failure is most often a missing working directory
+    /// rather than a missing git, and naming the directory is the difference
+    /// between a legible error and a wrong guess.
+    cwd: Option<std::path::PathBuf>,
     stdin: Option<Vec<u8>>,
 }
 
@@ -67,6 +71,7 @@ impl GitCommand {
         Self {
             cmd,
             display: Vec::new(),
+            cwd: None,
             stdin: None,
         }
     }
@@ -74,6 +79,7 @@ impl GitCommand {
     /// Run in `dir`.
     pub fn cwd(mut self, dir: &Path) -> Self {
         self.cmd.current_dir(dir);
+        self.cwd = Some(dir.to_path_buf());
         self
     }
 
@@ -151,10 +157,15 @@ impl GitCommand {
             Stdio::null()
         });
         let display = self.display.join(" ");
-        let mut child = self
-            .cmd
-            .spawn()
-            .with_context(|| format!("failed to run git {display} (is git installed?)"))?;
+        let where_ = match &self.cwd {
+            Some(dir) => format!(" in {}", dir.display()),
+            None => String::new(),
+        };
+        let mut child = self.cmd.spawn().with_context(|| {
+            format!(
+                "failed to run git {display}{where_} (missing directory, or git not installed?)"
+            )
+        })?;
         if let Some(data) = self.stdin.take() {
             let mut pipe = child
                 .stdin

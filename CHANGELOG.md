@@ -82,6 +82,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the scripted suite below, on the one test that asserted a child which wrote
   nothing changes nothing.
 
+- **The merge's own failure paths are forced, not just reasoned about.** Two
+  branches in `Workspace::merge` existed for cases nothing exercised. A
+  checkout that vanishes mid-flight now reports that reading its changes
+  failed rather than the far more dangerous "changed no files", which would
+  tell the parent its child did nothing rather than that the work was lost.
+  And a merge whose pre-apply checkpoint cannot be written applies nothing —
+  merging with no restore point behind it would leave the change
+  unrecoverable. The checkpoint case needs an unreadable file to force, so it
+  is `#[cfg(unix)]`, matching how the repo already scopes mode-dependent
+  tests. `git` spawn failures now name the working directory, since a missing
+  directory is a likelier cause than a missing git and the old message
+  guessed wrong.
+
+- **A subagent's parallel tool calls are executed, not just counted.** The
+  agent-loop suite checks a turn's calls reach the reducer against an empty
+  registry; a child now runs three real `write_file` calls from one turn and
+  is shown to receive all three results before its next turn. Losing one
+  would hang the child until its timeout.
+
 - **Deterministic coverage for memory consolidation**
   (`tests/memory_consolidation_stubbed.rs`). `/memory consolidate` hands the
   model the whole corpus and acts on a JSON prune list by **deleting files**;
