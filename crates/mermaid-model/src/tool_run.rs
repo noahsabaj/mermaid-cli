@@ -4,7 +4,7 @@
 //! the provider-facing text that goes back to the model, while this module
 //! holds the metadata the UI and future commands consume without scraping it.
 //!
-//! They live in `mermaid-core` rather than in `domain` because `ChatMessage`
+//! They live in `mermaid-model` rather than in `domain` because `ChatMessage`
 //! embeds them (through `ActionDisplay`), and a wire type reaching up into the
 //! MVU layer for its own field types was the last cycle standing between the
 //! model layer and its own crate.

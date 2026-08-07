@@ -279,10 +279,12 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
-          # Publish the workspace library first, then the binary crate that
-          # depends on it. Recent cargo waits for the dependency to appear on
-          # the index before publishing the dependent crate.
+          # Publish in dependency order: `mermaid-model` depends on
+          # `mermaid-runtime`, and `mermaid-cli` depends on both. Recent cargo
+          # waits for each dependency to appear on the index before publishing
+          # the crate that needs it.
           cargo publish -p mermaid-runtime
+          cargo publish -p mermaid-model
           cargo publish -p mermaid-cli
 
   # Bump the Homebrew tap + Scoop bucket to the new release. This is a no-op

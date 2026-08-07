@@ -4,7 +4,7 @@
 //! paints one per tool call attached to an assistant message. Pure
 //! data; no runtime, no I/O.
 //!
-//! Lives in `mermaid-core` because `models::ChatMessage` embeds a
+//! Lives in `mermaid-model` because `models::ChatMessage` embeds a
 //! `Vec<ActionDisplay>`; the wire type owning display data is a wart, but it is
 //! serialized into every saved conversation, so the type moves down rather than
 //! the field going away.

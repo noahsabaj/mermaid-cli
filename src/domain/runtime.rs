@@ -118,9 +118,9 @@ pub fn infer_static_context_window_for_model_id(model_id: &str) -> Option<usize>
     infer_static_context_window(model)
 }
 
-/// Tool-run value types moved to `mermaid_core::tool_run` — re-exported here so
+/// Tool-run value types moved to `mermaid_model::tool_run` — re-exported here so
 /// `domain::ToolRunMetadata` and its siblings keep resolving unchanged.
-pub use mermaid_core::tool_run::{
+pub use mermaid_model::tool_run::{
     ManagedProcess, ManagedProcessStatus, OllamaContextInfo, OllamaPlacement, ToolArtifact,
     ToolMetadata, ToolRunMetadata, ToolStatus, WebSearchFailure,
 };

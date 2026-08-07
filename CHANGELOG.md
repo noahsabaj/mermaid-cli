@@ -257,7 +257,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--test <name>` selectors. Dependencies were confirmed fully cached — only
   `mermaid-cli` and `mermaid-runtime` compile on a CI leg.
 
-- **`mermaid-core`: the model layer is now a crate, and the compiler enforces
+- **`mermaid-model`: the model layer is now a crate, and the compiler enforces
   it.** Five dependency edges pointed the wrong way — the wire adapters reached
   up into the application. `models` read `app::Config`, borrowed `prompts`'
   system prompt, borrowed `domain::ActionDisplay`, called the retry middleware

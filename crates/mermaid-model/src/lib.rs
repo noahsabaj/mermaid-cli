@@ -1,6 +1,6 @@
 //! The model layer and the things it needs, and nothing above it.
 //!
-//! `mermaid-core` is the dependency-closed bottom of the tree: provider
+//! `mermaid-model` is the dependency-closed bottom of the tree: provider
 //! adapters and their wire types, the capability catalog, the shared retry
 //! policy, the tool-run and action value types those wire types embed, plus
 //! `constants` and `utils`. Nothing here may reach up into `app`, `domain`,

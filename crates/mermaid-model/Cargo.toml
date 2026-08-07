@@ -1,13 +1,17 @@
 [package]
-name = "mermaid-core"
+name = "mermaid-model"
 version = "0.20.0"
 edition = "2024"
 rust-version = "1.91"
 authors = ["Noah Sabaj <noahsabaj@gmail.com>"]
 description = "Model-layer core for Mermaid: provider adapters, wire types, capability catalog, and the shared utilities they need."
 repository = "https://github.com/noahsabaj/mermaid-cli"
+homepage = "https://github.com/noahsabaj/mermaid-cli"
 license = "MIT OR Apache-2.0"
-publish = false
+# Publishable, and it has to be: `mermaid-cli` is published to crates.io and now
+# depends on this crate, and a published crate cannot depend on an unpublished
+# path dependency. `release.yml` publishes runtime -> core -> cli, in dependency
+# order.
 
 [dependencies]
 anyhow = "1.0"
@@ -18,12 +22,12 @@ clap = { version = "4.6", features = ["derive", "env"] }
 futures = "0.3"
 getrandom = "0.4"
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
-mermaid-runtime = { path = "../mermaid-runtime" }
+mermaid-runtime = { path = "../mermaid-runtime", version = "0.20.0" }
 regex = "1.12"
-sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls", "gzip", "brotli"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
 tokio = { version = "1.44", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

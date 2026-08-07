@@ -2357,7 +2357,7 @@ dependencies = [
  "insta",
  "jsonschema",
  "keyring",
- "mermaid-core",
+ "mermaid-model",
  "mermaid-runtime",
  "mime",
  "nucleo-matcher",
@@ -2393,7 +2393,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mermaid-core"
+name = "mermaid-model"
 version = "0.20.0"
 dependencies = [
  "anyhow",
