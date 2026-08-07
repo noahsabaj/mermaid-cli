@@ -475,7 +475,18 @@ fn compare_snapshot(name: &str, actual: &str) {
         return;
     }
 
-    let Ok(expected) = std::fs::read_to_string(&path) else {
+    // Normalize CRLF: the checkout's line endings are a property of the
+    // developer's git config, not of what the terminal drew. Without this the
+    // suite passes on the machine that generated the files and fails on a
+    // Windows CI runner with `autocrlf=true`, where every expected row carries
+    // a trailing `` the frame never had.
+    let Ok(expected) = std::fs::read_to_string(&path).map(|text| {
+        text.replace(
+            "
+", "
+",
+        )
+    }) else {
         panic!(
             "missing snapshot {}\n\nRe-run with UPDATE_SNAPSHOTS=1 to create it, then review \
              the file before committing.\n\n--- actual ---\n{actual}",
