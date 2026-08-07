@@ -11,7 +11,10 @@
 //! the default suite: it costs a real API call and needs a network.
 //!
 //! Requires `MODEL_API_KEY`. Skips cleanly without one so a contributor
-//! running `cargo test -- --ignored` locally does not see a spurious failure.
+//! running `cargo test -- --ignored` locally does not see a spurious failure
+//! — but note that a skipped run still reports `ok. 3 passed` in 0.00s, which
+//! reads exactly like coverage. The CI step raises a warning annotation when
+//! the key is absent so a skipped run cannot be mistaken for a passing one.
 
 use std::path::{Path, PathBuf};
 
