@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-08-07
+
 ### Changed
 
 - **Plan mode is a safety mode, not a badge on top of one.** It now sits in the

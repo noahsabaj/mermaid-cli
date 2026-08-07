@@ -381,7 +381,7 @@ fn collapse_blank_runs(lines: &[String]) -> Vec<String> {
     out
 }
 
-/// `mermaid v0.19.1` → `mermaid v<VERSION>`; the footer prints it every frame.
+/// `mermaid v<semver>` → `mermaid v<VERSION>`; the footer prints it every frame.
 fn redact_version(line: &str) -> String {
     let Some(start) = line.find("mermaid v") else {
         return line.to_string();
