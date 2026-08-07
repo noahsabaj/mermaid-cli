@@ -19,7 +19,12 @@ pub mod markdown;
 pub mod theme;
 pub mod widgets;
 
-use ratatui::{Frame, layout::Margin};
+use ratatui::{
+    Frame,
+    layout::{Margin, Rect},
+    style::Style,
+    text::{Line, Span},
+};
 use rustc_hash::FxHashMap;
 use unicode_width::UnicodeWidthChar;
 
@@ -334,6 +339,10 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         && question_item.is_none()
         && !confirm_open
         && matches!(state.ui.mode, crate::domain::UiMode::PlanConfig { .. });
+    let model_picker_open = approval_item.is_none()
+        && question_item.is_none()
+        && !confirm_open
+        && matches!(state.ui.mode, crate::domain::UiMode::ModelPicker { .. });
     let file_picker_open = approval_item.is_none()
         && question_item.is_none()
         && !confirm_open
@@ -352,13 +361,17 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         let body_lines = item.prompt.lines().count().clamp(1, 6) as u16;
         2 + body_lines + 1 + 3
     } else if let Some(qset) = question_item {
-        widgets::question_modal_height(qset, &rstate.theme)
+        // The modal spans the full frame width; wrapping must be measured at
+        // the same width it is drawn at or the reserved zone clips it.
+        widgets::question_modal_height(qset, &rstate.theme, frame.area().width)
     } else if confirm_open {
         6
     } else if conv_list_open || rewind_open {
         12
     } else if plan_config_open {
         widgets::PLAN_CONFIG_HEIGHT
+    } else if model_picker_open {
+        widgets::MODEL_PICKER_HEIGHT
     } else if file_picker_open {
         let rows = state.ui.file_picker_matches.len().clamp(1, 8);
         (rows as u16) + 2
@@ -399,6 +412,25 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         horizontal: 1,
         vertical: 0,
     });
+    // A live toast borrows the chat area's LAST row rather than claiming its
+    // own layout slot: the zone above the input already stacks three
+    // conditional bands, and a fourth that appears for two seconds would shove
+    // the whole transcript. Borrowing a row keeps the input box still.
+    let toast = active_toast(state);
+    let (chat_area, toast_area) = match toast {
+        Some(_) if chat_area.height > 1 => (
+            Rect {
+                height: chat_area.height - 1,
+                ..chat_area
+            },
+            Some(Rect {
+                y: chat_area.y + chat_area.height - 1,
+                height: 1,
+                ..chat_area
+            }),
+        ),
+        _ => (chat_area, None),
+    };
     // Stitch pre-pass: fold auto-continued replies into one bubble and hide
     // spent recovery nudges. Sessions without either kind skip this entirely
     // (borrowed slice, no fingerprint); with them, the memo makes idle frames
@@ -433,6 +465,19 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         blink_on,
     };
     frame.render_stateful_widget(chat_widget, chat_area, &mut rstate.chat);
+
+    // Toast: right-aligned and dim on the row it borrowed, so it reads as
+    // feedback beside the input rather than as a transcript entry.
+    if let (Some(text), Some(area)) = (toast, toast_area) {
+        frame.render_widget(
+            ratatui::widgets::Paragraph::new(Line::from(Span::styled(
+                text,
+                Style::new().fg(rstate.theme.colors.info.to_color()),
+            )))
+            .alignment(ratatui::layout::Alignment::Right),
+            area,
+        );
+    }
 
     // Status line for every active turn (built above, already fit to width).
     // Indented 1 cell to align with the chat column's 1-cell pad.
@@ -534,6 +579,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         let widget = QuestionModalWidget {
             theme: &rstate.theme,
             set: qset,
+            width: chunks[4].width,
         };
         frame.render_widget(widget, chunks[4]);
     } else if let Some(confirm) = &state.confirm {
@@ -545,6 +591,24 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             options: vec!["y. Yes".to_string(), "n. No  (Esc)".to_string()],
             selected_index: None,
             accent: rstate.theme.colors.warning.to_color(),
+        };
+        frame.render_widget(widget, chunks[4]);
+    } else if let crate::domain::UiMode::ModelPicker {
+        candidates,
+        query,
+        cursor,
+        loading,
+    } = &state.ui.mode
+    {
+        use widgets::ModelPickerWidget;
+        let matches = crate::domain::reducer::filter_model_choices(candidates, query);
+        let widget = ModelPickerWidget {
+            theme: &rstate.theme,
+            matches: &matches,
+            query,
+            cursor: *cursor,
+            loading: *loading,
+            current: &state.session.model_id,
         };
         frame.render_widget(widget, chunks[4]);
     } else if let crate::domain::UiMode::ConversationList { candidates, cursor } = &state.ui.mode {
@@ -608,14 +672,9 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             model_name: &state.session.model_id,
             reasoning_level: effective,
             requested_level,
+            // Planning IS the mode — `plan` renders through the same
+            // `safety: <mode>` segment as every other level.
             safety_mode: state.session.safety_mode,
-            // Planning is the MODE; the plan data carries where to go back to.
-            plan_resume: state
-                .session
-                .plan
-                .as_ref()
-                .filter(|_| state.session.safety_mode.is_planning())
-                .map(|plan| plan.resume_safety_mode),
         };
         frame.render_widget(status_widget, chunks[4]);
     }
@@ -950,6 +1009,18 @@ fn exit_armed(state: &State) -> bool {
         .ui
         .exit_armed_until
         .is_some_and(|deadline| state.now <= deadline)
+}
+
+/// The toast to draw, or `None` once it has expired. Same lazy-expiry pattern
+/// as `exit_armed`: nothing clears `ui.toast`, the 60 Hz tick just stops
+/// drawing it once `state.now` passes the deadline.
+fn active_toast(state: &State) -> Option<String> {
+    state
+        .ui
+        .toast
+        .as_ref()
+        .filter(|(_, until)| state.now <= *until)
+        .map(|(text, _)| text.clone())
 }
 
 /// True while a first idle Esc's rewind window is open (same lazy-expiry

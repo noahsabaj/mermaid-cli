@@ -221,6 +221,15 @@ pub enum Cmd {
     /// saved session (newest first). The reducer transitions to
     /// `UiMode::ConversationList` and the render shows the picker.
     ListConversations,
+    /// Discover every model the user could switch to, for the `/model` picker.
+    /// Emits `Msg::AvailableModelsListed`.
+    ///
+    /// Best-effort and strictly read-only: a dead Ollama is NOT started (a
+    /// cloud-only user who stopped it to free VRAM must not have it
+    /// resurrected by opening a list) and an unreachable provider is skipped
+    /// rather than failing the whole listing. Provider keys are resolved
+    /// inside the handler, never carried on this Cmd.
+    ListAvailableModels,
     /// Walk the project for the @-mention file picker (gitignore-aware,
     /// capped, sorted). Emits `Msg::ProjectFilesListed` with relative paths
     /// (directories carry a trailing `/`).
@@ -464,6 +473,7 @@ impl Cmd {
             Cmd::ConsolidateMemory { .. } => "consolidate_memory",
             Cmd::LoadConversation(_) => "load_conversation",
             Cmd::ListConversations => "list_conversations",
+            Cmd::ListAvailableModels => "list_available_models",
             Cmd::ListProjectFiles => "list_project_files",
             Cmd::ListRuntimeTasks { .. } => "list_runtime_tasks",
             Cmd::LoadRuntimeTask { .. } => "load_runtime_task",
@@ -618,6 +628,7 @@ impl Cmd {
             Cmd::ConsolidateMemory { .. } => "consolidate_memory".to_string(),
             Cmd::LoadConversation(id) => format!("load_conversation({})", id),
             Cmd::ListConversations => "list_conversations".to_string(),
+            Cmd::ListAvailableModels => "list_available_models".to_string(),
             Cmd::ListProjectFiles => "list_project_files".to_string(),
             Cmd::ListRuntimeTasks { limit } => format!("list_runtime_tasks(limit={})", limit),
             Cmd::LoadRuntimeTask { id } => format!("load_runtime_task({})", id),

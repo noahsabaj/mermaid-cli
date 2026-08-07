@@ -8,14 +8,17 @@ pub enum SafetyMode {
     /// carve-outs the policy gate layers on (the plan file is writable,
     /// `[plan]` permissions may re-open memory/builds/web).
     ///
-    /// Plan is a MODE, not a flag alongside one. It used to be a separate
+    /// Plan is a MODE, not a flag alongside one, and it is a full position in
+    /// the Shift+Tab cycle — the strictest one. It used to be a separate
     /// `Session.plan: Option<_>` orthogonal to `safety_mode`, which meant the
     /// two could disagree: Shift+Tab while planning set `full_access` and the
     /// harness then told the model "safety mode changed to full_access" while
     /// the plan read-only floor was still in force — a contradiction the model
     /// resolved by attempting mutations and collecting denials. With one mode
     /// value that state is unrepresentable. `Session.plan` still carries the
-    /// plan DATA (path, saved overrides), never the fact of being in plan mode.
+    /// plan DATA (path, saved overrides), never the fact of being in plan mode,
+    /// and it never carries a mode to "restore": leaving plan means picking
+    /// another mode, like leaving any other.
     Plan,
     ReadOnly,
     #[default]
@@ -418,11 +421,20 @@ impl PolicyEngine {
                         checkpoint: false,
                     }
                 } else {
+                    // Name the risk class that actually tripped. The old blanket
+                    // "mutations and control actions" told a `curl` it had
+                    // mutated something, so the model retried variations of a
+                    // read instead of understanding that egress is the gate.
+                    let what = match risk {
+                        RiskClass::Network => "network access",
+                        RiskClass::Process => "running programs",
+                        RiskClass::ExternalAccess => "external side effects",
+                        RiskClass::SystemMutation => "machine-scoped changes",
+                        _ => "mutations and control actions",
+                    };
                     PolicyDecision::Deny {
                         risk,
-                        reason: format!(
-                            "{READ_ONLY_DENIAL_MARKER} blocks mutations and control actions"
-                        ),
+                        reason: format!("{READ_ONLY_DENIAL_MARKER} blocks {what}"),
                     }
                 }
             },

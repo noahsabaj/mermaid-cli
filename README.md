@@ -9,10 +9,10 @@ An open-source AI coding assistant with computer use for the terminal. Multi-pro
 - **Computer Use** — screenshot, click, type, press keys, scroll, move the mouse, and list windows on supported interactive GUI backends
 - **Subagents** — spawn parallel autonomous agents for independent tasks; built-in `general` and read-only `explore` types (plus user-defined ones), per-call model override, and continuation handles to follow up with a child that kept its context
 - **Agent Loop** — model calls tools autonomously, sees results, and continues until done
-- **Image Paste** — Ctrl+V to attach images for vision models (X11/Wayland/macOS/Windows)
+- **Image Paste** — Ctrl+V to attach images for vision models (X11/Wayland/macOS/Windows). All three clipboard shapes work on every backend: a raster copy (screenshot tools, "Copy image"), an encoded blob with no raster form (GIMP, Figma — `PNG` with no `CF_BITMAP`), and a file reference from a file manager's Copy (Explorer / Finder / Nautilus). File-reference pastes accept png/jpeg/gif/webp/bmp/tiff up to 32 MB
 - **Reasoning Levels** — seven tiers (`none`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max`); cycle with Alt+T or set via `/reasoning`; persisted per-model
-- **Safety Modes** — `read_only`/`ask`/`auto`/`full_access`; `auto` is classifier-backed (an LLM vets each borderline action against your intent, auto-running aligned ones and escalating risky ones); cycle live with Shift+Tab or `/safety`
-- **Plan Mode** — Alt+P or `/plan`: a hard read-only collaboration state where the agent explores, asks structured questions, and authors a plan file you approve before anything changes. Approval seeds the live task checklist from the plan's Tasks section and can start implementation in place, in a cleared context, or hand off to a fork/fresh session on a different model (plan on a frontier model, execute locally). Per-category permissions (builds, web, memory, task tools), plan-phase model/reasoning overrides, and approval behavior live in `/plan config`; `mermaid run --plan` does it headless
+- **Safety Modes** — `plan`/`read_only`/`ask`/`auto`/`full_access`; `auto` is classifier-backed (an LLM vets each borderline action against your intent, auto-running aligned ones and escalating risky ones); cycle live with Shift+Tab or `/safety`
+- **Plan Mode** — the strictest safety mode (Shift+Tab, `/plan`, or `/safety plan`): a hard read-only collaboration state where the agent explores, asks structured questions, and authors a plan file you approve before anything changes. Approval seeds the live task checklist from the plan's Tasks section and can start implementation in place, in a cleared context, or hand off to a fork/fresh session on a different model (plan on a frontier model, execute locally). Per-category permissions (builds, web, memory, task tools), plan-phase model/reasoning overrides, and approval behavior live in `/plan config`; `mermaid run --plan` does it headless
 - **Inline approvals** — in `ask` mode (and `auto` escalations) a gated action pauses and prompts inline (`1` Yes · `2` Yes, don't ask again · `3`/Esc No); the agent waits for your answer instead of erroring out
 - **Checkpoints** — shadow-git snapshots before mutations (`checkpoint_on_mutation`, on by default); inspect with `/checkpoints`, roll back with `/restore <id>`
 - **Project Instructions** — auto-loads `AGENTS.md` and `MERMAID.md` (MERMAID.md wins on conflict); edits take effect on the next turn
@@ -179,9 +179,8 @@ mermaid pr create                               # Open a PR/MR from the current 
 | Ctrl+D | Quit when the input box is empty (auto-saves the session) |
 | Ctrl+B | While tools are running, send the foreground command to the background (it keeps running as a `/processes` entry) |
 | Alt+T | Cycle reasoning level: `None → Minimal → Low → Medium → High → XHigh → Max → None` |
-| Alt+P | Toggle plan mode (read-only exploration + an approvable plan file) |
-| Shift+Tab | Cycle safety mode: `read_only → ask → auto → full_access → read_only` (session-scoped) |
-| Ctrl+V | Paste image or text from clipboard |
+| Shift+Tab | Cycle safety mode: `plan → read_only → ask → auto → full_access → plan` (session-scoped). `plan` is read-only exploration plus an approvable plan file |
+| Ctrl+V | Paste image or text from clipboard (a copied image *file* pastes as the image) |
 | Ctrl+O | Compose the prompt in `$VISUAL`/`$EDITOR` (TUI suspends, resumes on save-quit) |
 | Ctrl+Click | Open image from chat history |
 | Drag | Select chat text (highlights; does not copy) |
@@ -209,7 +208,7 @@ Everyday:
 
 Model and context:
 
-- `/model <name>` — switch model; auto-pulls Ollama models if needed
+- `/model` — open the model picker: every model this machine can reach, local Ollama models grouped first, the active one marked, type to filter (↑↓ navigate · Enter switch · Esc cancel). `/model <name>` switches directly; either way an Ollama model auto-pulls if needed
 - `/reasoning <level>` — set reasoning: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`
 - `/visible-reasoning [on|off|toggle]` — show or hide reasoning blocks in the transcript
 - `/usage`, `/context`, `/compact [instructions]`
@@ -224,8 +223,8 @@ Durable memory:
 
 Safety and recovery:
 
-- `/safety [read_only|ask|auto|full_access]` (alias `/permission`) — show or set the session safety mode; Shift+Tab cycles it
-- `/plan [off|show|config]` — enter/leave plan mode (Alt+P toggles), show the plan file, or open the plan settings picker (`/config` opens the same picker)
+- `/safety [plan|read_only|ask|auto|full_access]` (alias `/permission`) — show or set the session safety mode; Shift+Tab cycles it
+- `/plan [off|show|config]` — enter/leave plan mode (Shift+Tab cycles into it too; `off` returns to the configured `[safety] mode`), show the plan file, or open the plan settings picker (`/config` opens the same picker)
 - `/approvals`, `/approve <id>`, `/deny <id>`
 - `/checkpoint <path...>`, `/checkpoints`, `/restore <id>`
 
@@ -554,6 +553,20 @@ enabled = true
 # context-window truncation, before the run stops and shows the manual
 # levers (`/context max`, `/context offload on`). 0 = uncapped.
 max_truncation_recoveries = 3
+# Compact automatically when the window crosses the threshold. false leaves
+# compaction entirely to `/compact`.
+# auto_enabled = true
+# auto_threshold_percent = 85        # clamped to 1..=100
+# tail_turns = 2                     # user turns kept verbatim (min 1)
+# tail_token_budget = 8000           # token ceiling on that tail
+# tool_output_max_chars = 2000       # per-message cap in the summarizer excerpt
+# summary_max_tokens = 8000          # ceiling on the checkpoint produced
+# summarizer_input_token_budget = 64000
+# min_response_reserve_tokens = 4000 # window held back for the reply
+# max_response_reserve_tokens = 20000
+# Both token budgets scale DOWN automatically on a small context window, so
+# these are caps rather than demands. Nonsense values are clamped, not
+# rejected: 0 falls back to the default and swapped reserve bounds are ordered.
 
 # Subagents (the `agent` tool). Built-in types: `general` (full tool access
 # at your safety mode) and `explore` (read-only reconnaissance). Define more

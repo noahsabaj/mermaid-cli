@@ -4,7 +4,7 @@
 //! (allocate the plan path, flip `session.plan`), so `handle_tool_finished`
 //! performs it when it sees this tool succeed. Entering is deliberately
 //! confirmation-free — the read-only floor makes it safe, and the user can
-//! Alt+P straight back out.
+//! Shift+Tab straight back out.
 //!
 //! Registered `is_internal`: `build_chat_request` advertises the definition
 //! only while NOT planning (and never to subagents).

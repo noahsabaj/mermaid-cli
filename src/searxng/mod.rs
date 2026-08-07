@@ -431,7 +431,9 @@ fn spawn_granian(
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        cmd.creation_flags(crate::utils::DETACHED_PROCESS | crate::utils::CREATE_NEW_PROCESS_GROUP);
+        // CREATE_NO_WINDOW, never DETACHED_PROCESS: the latter leaves a
+        // visible console window on Windows 11 (see utils::proc).
+        cmd.creation_flags(crate::utils::CREATE_NO_WINDOW | crate::utils::CREATE_NEW_PROCESS_GROUP);
     }
     // Granian has no stable inherited-listener interface in the pinned bundle.
     // Release as late as possible; `wait_ready` additionally requires a live
@@ -744,8 +746,11 @@ mod tests {
         use std::os::windows::process::CommandExt;
         let mut command = std::process::Command::new("cmd");
         command.args(["/C", "ping -n 31 127.0.0.1 >NUL"]);
+        // CREATE_NO_WINDOW: under DETACHED_PROCESS this helper opened a real
+        // console window on every test run, and killing the child orphaned it
+        // on the developer's desktop.
         command.creation_flags(
-            crate::utils::DETACHED_PROCESS | crate::utils::CREATE_NEW_PROCESS_GROUP,
+            crate::utils::CREATE_NO_WINDOW | crate::utils::CREATE_NEW_PROCESS_GROUP,
         );
         command
             .stdin(Stdio::null())

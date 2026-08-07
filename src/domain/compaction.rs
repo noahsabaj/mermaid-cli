@@ -82,7 +82,55 @@ impl Default for CompactionPolicy {
     }
 }
 
+/// Share of a known context window the summarizer may spend on its own
+/// output. The rest is the input budget (scaffold + history excerpt).
+///
+/// A fixed output cap does not survive small windows: at a 4k window the flat
+/// 8k cap asked for twice the entire window, so compaction could never fit and
+/// every attempt failed. Scaling keeps the same behavior on large windows —
+/// `summary_max_tokens` is still the ceiling — while making small ones work.
+const SUMMARY_OUTPUT_WINDOW_SHARE: usize = 4;
+
+/// Floor for the scaled output cap. Below this a checkpoint cannot carry the
+/// ten required sections, so the window is genuinely too small to compact and
+/// [`prepare_compaction`] skips instead of emitting a request that must fail.
+const SUMMARY_OUTPUT_FLOOR_TOKENS: usize = 512;
+
 impl CompactionPolicy {
+    /// The summarizer's output cap for a model whose window is `window`.
+    ///
+    /// Unknown window keeps the flat `summary_max_tokens` (the remote-provider
+    /// case — nothing better to go on). A known window caps the summary at
+    /// `1/SUMMARY_OUTPUT_WINDOW_SHARE` of it, so the input budget always has
+    /// room left; large windows are unaffected because `summary_max_tokens`
+    /// stays the ceiling.
+    pub fn summary_output_tokens(self, window: Option<usize>) -> usize {
+        match window {
+            None => self.summary_max_tokens,
+            Some(window) => self
+                .summary_max_tokens
+                .min(window / SUMMARY_OUTPUT_WINDOW_SHARE),
+        }
+    }
+
+    /// Total input budget (fixed scaffold + history excerpt) for the
+    /// summarizer, given the model's window.
+    ///
+    /// Monotonic in the window, which the previous computation was NOT: it
+    /// subtracted a flat output cap and then treated a non-positive result as
+    /// "window unknown", falling back to the *most permissive* budget. An 8k
+    /// model therefore got a 64k input budget while a 9k model got 1k —
+    /// shrinking the window made the request bigger, and 8k-and-below could
+    /// never compact.
+    pub fn summary_input_budget(self, window: Option<usize>) -> usize {
+        match window {
+            None => self.summarizer_input_token_budget,
+            Some(size) => size
+                .saturating_sub(self.summary_output_tokens(window))
+                .min(self.summarizer_input_token_budget),
+        }
+    }
+
     /// Window room to hold back for the model's response when sizing
     /// compaction. Decoupled from the on-wire output cap: an explicit user cap
     /// is the best reserve estimate, but AUTO (`max_tokens == 0`) reserves the
@@ -151,21 +199,29 @@ pub struct CompactionRequest {
 }
 
 impl CompactionRequest {
-    pub fn manual(chat: ChatRequest, instructions: Option<String>) -> Self {
+    // Both constructors take the policy explicitly rather than defaulting it.
+    // `[compaction]` config exists precisely so these knobs can differ from the
+    // constants, and a constructor that quietly substituted defaults would make
+    // whether the user's settings applied depend on which call site ran.
+    pub fn manual(
+        chat: ChatRequest,
+        instructions: Option<String>,
+        policy: CompactionPolicy,
+    ) -> Self {
         Self {
             chat,
             trigger: CompactionTrigger::Manual,
             instructions,
-            policy: CompactionPolicy::default(),
+            policy,
         }
     }
 
-    pub fn auto(chat: ChatRequest, trigger: CompactionTrigger) -> Self {
+    pub fn auto(chat: ChatRequest, trigger: CompactionTrigger, policy: CompactionPolicy) -> Self {
         Self {
             chat,
             trigger,
             instructions: None,
-            policy: CompactionPolicy::default(),
+            policy,
         }
     }
 }
@@ -290,6 +346,12 @@ pub enum CompactionSkip {
     Suppressed,
     BelowThreshold,
     NothingToCompact,
+    /// The window cannot hold a checkpoint at all: even an empty history
+    /// excerpt leaves no room for the fixed prompt scaffold plus a usable
+    /// summary. Skipping here turns what used to be a guaranteed
+    /// "request exceeds the model context window" failure into a plain,
+    /// honest note.
+    WindowTooSmall,
 }
 
 impl std::fmt::Display for CompactionSkip {
@@ -303,6 +365,10 @@ impl std::fmt::Display for CompactionSkip {
             ),
             Self::BelowThreshold => write!(f, "context is below compaction threshold"),
             Self::NothingToCompact => write!(f, "not enough conversation history to summarize"),
+            Self::WindowTooSmall => write!(
+                f,
+                "the model's context window is too small to hold a checkpoint"
+            ),
         }
     }
 }
@@ -397,11 +463,18 @@ pub fn prepare_compaction(
     // interrupted turn's response reserve. Account for the fixed prompt,
     // previous checkpoint, focus, and attached image payloads before assigning
     // the remainder to history.
-    let max_input_tokens = max_context_tokens
-        .map(|max| max.saturating_sub(request.policy.summary_max_tokens))
-        .filter(|max| *max > 0)
-        .unwrap_or(request.policy.summarizer_input_token_budget)
-        .min(request.policy.summarizer_input_token_budget);
+    //
+    // Both halves scale with the window (see `summary_output_tokens` /
+    // `summary_input_budget`) so the budget is monotonic: a smaller window can
+    // only ever produce a smaller request.
+    if request
+        .policy
+        .summary_output_tokens(max_context_tokens)
+        .lt(&SUMMARY_OUTPUT_FLOOR_TOKENS)
+    {
+        return Err(CompactionSkip::WindowTooSmall);
+    }
+    let max_input_tokens = request.policy.summary_input_budget(max_context_tokens);
     let sizing_prepared = PreparedCompaction {
         archived_messages: Vec::new(),
         preserved_messages: Vec::new(),
@@ -420,6 +493,7 @@ pub fn prepare_compaction(
         &sizing_prepared,
         request.instructions.as_deref(),
         request.policy,
+        max_context_tokens,
     );
     let fixed_tokens = super::state::estimate_context_usage_for_request(&probe, None).used_tokens;
     let mut remaining_tokens = max_input_tokens.saturating_sub(fixed_tokens);
@@ -466,6 +540,9 @@ pub fn build_summary_request(
     prepared: &PreparedCompaction,
     focus: Option<&str>,
     policy: CompactionPolicy,
+    // The model's context window, so the summary's own output cap scales with
+    // it. A flat cap asked a 4k model for 8k of output.
+    window: Option<usize>,
 ) -> ChatRequest {
     let mut message = ChatMessage::user(summary_prompt(prepared, focus));
     if !prepared.summary_images.is_empty() {
@@ -478,7 +555,7 @@ pub fn build_summary_request(
         instructions: None,
         reasoning: compaction_reasoning(base.reasoning),
         temperature: 0.0,
-        max_tokens: policy.summary_max_tokens,
+        max_tokens: policy.summary_output_tokens(window),
         tools: Vec::new(),
         ollama_num_ctx: base.ollama_num_ctx,
         ollama_allow_ram_offload: base.ollama_allow_ram_offload,
@@ -496,6 +573,7 @@ pub fn build_verification_request(
     draft_summary: &str,
     focus: Option<&str>,
     policy: CompactionPolicy,
+    window: Option<usize>,
 ) -> ChatRequest {
     let prompt = format!(
         "{}\n\n# Draft Summary\n{}\n\n# Verification Task\nCritically check the draft against the conversation excerpt. If it omitted specific file paths, commands, test results, tool results, user constraints, current state, or next steps, return an improved complete checkpoint. Otherwise return the draft unchanged. Return only the final checkpoint markdown.",
@@ -513,7 +591,7 @@ pub fn build_verification_request(
         instructions: None,
         reasoning: compaction_reasoning(base.reasoning),
         temperature: 0.0,
-        max_tokens: policy.summary_max_tokens,
+        max_tokens: policy.summary_output_tokens(window),
         tools: Vec::new(),
         ollama_num_ctx: base.ollama_num_ctx,
         ollama_allow_ram_offload: base.ollama_allow_ram_offload,
@@ -1060,10 +1138,10 @@ mod tests {
             summary_images: Vec::new(),
         };
         let policy = CompactionPolicy::default();
-        let summary = build_summary_request(&base, &prepared, None, policy);
+        let summary = build_summary_request(&base, &prepared, None, policy, None);
         assert_eq!(summary.resolved_context_window, Some(1_000_000));
         assert_eq!(summary.resolved_max_output, Some(128_000));
-        let verify = build_verification_request(&base, &prepared, "draft", None, policy);
+        let verify = build_verification_request(&base, &prepared, "draft", None, policy, None);
         assert_eq!(verify.resolved_context_window, Some(1_000_000));
         assert_eq!(verify.resolved_max_output, Some(128_000));
     }
@@ -1162,7 +1240,8 @@ mod tests {
             ChatMessage::assistant("two answer"),
             ChatMessage::user("three"),
         ];
-        let request = CompactionRequest::manual(request_with(messages), None);
+        let request =
+            CompactionRequest::manual(request_with(messages), None, CompactionPolicy::default());
         let prepared = prepare_compaction(&request, Some(100_000)).expect("prepared");
         assert_eq!(prepared.archived_messages.len(), 2);
         assert_eq!(prepared.preserved_messages.len(), 3);
@@ -1192,17 +1271,152 @@ mod tests {
             ChatMessage::assistant("second answer"),
             ChatMessage::user("third"),
         ];
-        let request = CompactionRequest::manual(request_with(messages), None);
+        let request =
+            CompactionRequest::manual(request_with(messages), None, CompactionPolicy::default());
         let prepared = prepare_compaction(&request, Some(100_000)).expect("prepared");
         assert!(prepared.history_excerpt.contains("cargo test --workspace"));
         assert!(prepared.history_excerpt.contains("[REDACTED]"));
         assert!(!prepared.history_excerpt.contains("opaque-secret-value"));
         assert_eq!(prepared.summary_images, vec!["aGVsbG8=".to_string()]);
-        let summary =
-            build_summary_request(&request.chat, &prepared, None, CompactionPolicy::default());
+        let summary = build_summary_request(
+            &request.chat,
+            &prepared,
+            None,
+            CompactionPolicy::default(),
+            Some(100_000),
+        );
         assert_eq!(
             summary.messages[0].images.as_deref(),
             Some(prepared.summary_images.as_slice())
+        );
+    }
+
+    /// Build a conversation with far more history than any budget will hold,
+    /// so the sizing math — not the content — decides the request size.
+    fn oversized_conversation() -> Vec<ChatMessage> {
+        vec![
+            ChatMessage::user("old ".repeat(40_000)),
+            ChatMessage::assistant("old answer ".repeat(20_000)),
+            ChatMessage::user("second".to_string()),
+            ChatMessage::assistant("second answer".to_string()),
+            ChatMessage::user("third".to_string()),
+        ]
+    }
+
+    /// The summarizer's request must never grow as the window shrinks.
+    ///
+    /// It used to: `max_input_tokens` subtracted a flat 8k output cap and then
+    /// treated a non-positive result as "window unknown", falling back to the
+    /// *most permissive* 64k budget. Measured, an 8k model got a 16,059-char
+    /// excerpt while a 9k model got 2,688 — so 9k compacted and 8k could not.
+    #[test]
+    fn summary_request_shrinks_monotonically_with_the_window() {
+        let mut previous: Option<(usize, usize)> = None;
+        for window in [128_000usize, 32_000, 16_000, 9_000, 8_000, 4_000] {
+            let request = CompactionRequest::manual(
+                request_with(oversized_conversation()),
+                None,
+                CompactionPolicy::default(),
+            );
+            let prepared =
+                prepare_compaction(&request, Some(window)).expect("window is large enough");
+            let summary = build_summary_request(
+                &request.chat,
+                &prepared,
+                request.instructions.as_deref(),
+                request.policy,
+                Some(window),
+            );
+            let used = crate::domain::estimate_context_usage_for_request(&summary, Some(window))
+                .used_tokens;
+            if let Some((prev_window, prev_used)) = previous {
+                assert!(
+                    used <= prev_used,
+                    "shrinking the window {prev_window} -> {window} grew the request \
+                     {prev_used} -> {used} tokens",
+                );
+            }
+            previous = Some((window, used));
+        }
+    }
+
+    /// The fit invariant, checked on BOTH sides of the old cliff. The existing
+    /// coverage only ever used a 32k window — comfortably above the flat 8k
+    /// output cap — which is exactly why the break went unnoticed.
+    #[test]
+    fn complete_summary_request_fits_every_supported_window() {
+        for window in [128_000usize, 32_000, 16_000, 9_000, 8_000, 4_000, 2_048] {
+            let request = CompactionRequest::manual(
+                request_with(oversized_conversation()),
+                None,
+                CompactionPolicy::default(),
+            );
+            let prepared =
+                prepare_compaction(&request, Some(window)).expect("window is large enough");
+            let summary = build_summary_request(
+                &request.chat,
+                &prepared,
+                request.instructions.as_deref(),
+                request.policy,
+                Some(window),
+            );
+            let used = crate::domain::estimate_context_usage_for_request(&summary, Some(window))
+                .used_tokens;
+            assert!(
+                used.saturating_add(summary.max_tokens) <= window,
+                "window {window}: input {used} + output {} exceeds it",
+                summary.max_tokens,
+            );
+            assert!(
+                summary.max_tokens > 0,
+                "window {window}: the summary must be allowed to produce output",
+            );
+        }
+    }
+
+    /// A window too small to hold a checkpoint skips with a plain reason
+    /// instead of building a request that is guaranteed to be rejected.
+    #[test]
+    fn a_window_too_small_to_compact_skips_instead_of_failing() {
+        let request = CompactionRequest::manual(
+            request_with(oversized_conversation()),
+            None,
+            CompactionPolicy::default(),
+        );
+        assert_eq!(
+            prepare_compaction(&request, Some(1_000)).err(),
+            Some(CompactionSkip::WindowTooSmall)
+        );
+        // The message is user-facing (`Nothing to compact — …`), so it must read
+        // as an explanation rather than an error code.
+        assert_eq!(
+            CompactionSkip::WindowTooSmall.to_string(),
+            "the model's context window is too small to hold a checkpoint"
+        );
+    }
+
+    /// An unknown window (the normal remote-provider case) keeps the flat
+    /// budget it always had — the scaling only ever applies to a known window.
+    #[test]
+    fn unknown_window_keeps_the_flat_budget() {
+        let policy = CompactionPolicy::default();
+        assert_eq!(
+            policy.summary_output_tokens(None),
+            policy.summary_max_tokens
+        );
+        assert_eq!(
+            policy.summary_input_budget(None),
+            policy.summarizer_input_token_budget
+        );
+        // A large known window is likewise unchanged: the flat cap is the
+        // ceiling, and the input budget is still the summarizer's own cap.
+        assert_eq!(
+            policy.summary_output_tokens(Some(1_000_000)),
+            policy.summary_max_tokens
+        );
+        assert_eq!(
+            policy.summary_input_budget(Some(1_000_000)),
+            policy.summarizer_input_token_budget
         );
     }
 
@@ -1215,7 +1429,11 @@ mod tests {
             ChatMessage::assistant("second answer"),
             ChatMessage::user("third"),
         ];
-        let request = CompactionRequest::manual(request_with(messages), Some("focus".repeat(500)));
+        let request = CompactionRequest::manual(
+            request_with(messages),
+            Some("focus".repeat(500)),
+            CompactionPolicy::default(),
+        );
         let window = 32_000;
         let prepared = prepare_compaction(&request, Some(window)).expect("prepared");
         let summary = build_summary_request(
@@ -1223,6 +1441,7 @@ mod tests {
             &prepared,
             request.instructions.as_deref(),
             request.policy,
+            Some(window),
         );
         let usage = crate::domain::estimate_context_usage_for_request(&summary, Some(window));
         assert!(usage.used_tokens.saturating_add(summary.max_tokens) <= window);
@@ -1239,7 +1458,11 @@ mod tests {
             ChatMessage::assistant("second answer"),
             ChatMessage::user("third"),
         ];
-        let request = CompactionRequest::manual(request_with(messages), Some("focus".repeat(500)));
+        let request = CompactionRequest::manual(
+            request_with(messages),
+            Some("focus".repeat(500)),
+            CompactionPolicy::default(),
+        );
         let window = 32_000;
         let prepared = prepare_compaction(&request, Some(window)).expect("prepared");
         let summary = build_summary_request(
@@ -1247,6 +1470,7 @@ mod tests {
             &prepared,
             request.instructions.as_deref(),
             request.policy,
+            Some(window),
         );
         assert!(
             !prepared.summary_images.is_empty(),
@@ -1277,7 +1501,8 @@ mod tests {
             ChatMessage::assistant("second answer"),
             ChatMessage::user("third"),
         ];
-        let request = CompactionRequest::manual(request_with(messages), None);
+        let request =
+            CompactionRequest::manual(request_with(messages), None, CompactionPolicy::default());
         let prepared = prepare_compaction(&request, None).expect("prepared");
         assert_eq!(prepared.summary_images, vec!["a".repeat(400)]);
         assert!(
@@ -1326,7 +1551,8 @@ mod tests {
             orphan,
             ChatMessage::user("three"),
         ];
-        let request = CompactionRequest::manual(request_with(messages), None);
+        let request =
+            CompactionRequest::manual(request_with(messages), None, CompactionPolicy::default());
         let prepared = prepare_compaction(&request, Some(100_000)).expect("prepared");
         let has_orphan = prepared
             .preserved_messages
@@ -1358,7 +1584,8 @@ mod tests {
             ChatMessage::tool("call_1", "do_thing", "ok"),
             ChatMessage::user("three"),
         ];
-        let request = CompactionRequest::manual(request_with(messages), None);
+        let request =
+            CompactionRequest::manual(request_with(messages), None, CompactionPolicy::default());
         let prepared = prepare_compaction(&request, Some(100_000)).expect("prepared");
         let kept = prepared
             .preserved_messages
@@ -1484,7 +1711,8 @@ mod tests {
         ];
         // Tail keeps the last two user turns ("two".., "three"), so the assistant
         // tool_use is archived but the tool_result survives into the tail.
-        let request = CompactionRequest::manual(request_with(messages), None);
+        let request =
+            CompactionRequest::manual(request_with(messages), None, CompactionPolicy::default());
         let prepared = prepare_compaction(&request, Some(100_000)).expect("prepared");
         assert!(
             prepared
@@ -1510,8 +1738,11 @@ mod tests {
             ChatMessage::user("three"),
             pending,
         ];
-        let request =
-            CompactionRequest::auto(request_with(messages), CompactionTrigger::ContextLimitRetry);
+        let request = CompactionRequest::auto(
+            request_with(messages),
+            CompactionTrigger::ContextLimitRetry,
+            CompactionPolicy::default(),
+        );
         let prepared = prepare_compaction(&request, Some(100_000)).expect("prepared");
         let last = prepared
             .preserved_messages
@@ -1540,7 +1771,8 @@ mod tests {
             ChatMessage::user("three"),
             pending,
         ];
-        let request = CompactionRequest::manual(request_with(messages), None);
+        let request =
+            CompactionRequest::manual(request_with(messages), None, CompactionPolicy::default());
         let prepared = prepare_compaction(&request, Some(100_000)).expect("prepared");
         assert!(
             !prepared

@@ -45,9 +45,7 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 
 use crate::app::{Config, MemoryConfig};
-use crate::domain::{
-    Cmd, CompactionPolicy, CompactionRequest, CompactionResult, CompactionTrigger, Msg, TurnId,
-};
+use crate::domain::{Cmd, CompactionRequest, CompactionResult, CompactionTrigger, Msg, TurnId};
 use crate::models::{ModelError, TokenUsage};
 use crate::providers::ctx::{ExecContext, StreamContext};
 use crate::providers::model::ModelProvider;
@@ -1189,6 +1187,14 @@ impl EffectRunner {
                     let _ = tx.send(Msg::ConversationsListed(summaries)).await;
                 });
             },
+            Cmd::ListAvailableModels => {
+                let tx = self.msg_tx.clone();
+                let providers = self.providers.clone();
+                self.detached.spawn(async move {
+                    let choices = discover_available_models(providers).await;
+                    let _ = tx.send(Msg::AvailableModelsListed(choices)).await;
+                });
+            },
             Cmd::ListProjectFiles => {
                 let tx = self.msg_tx.clone();
                 let workdir = self.workdir.clone();
@@ -1856,10 +1862,14 @@ async fn dispatch_call_model(
         })
         .await;
 
-    let policy = CompactionPolicy::default();
+    // The live `[compaction]` policy, not the constants: auto-compaction is the
+    // one path the user never invokes by hand, so it is the one that most needs
+    // to honor their settings.
+    let policy = factory.config().compaction.policy();
     let mut compacted_before_stream = false;
     if crate::domain::should_auto_compact(&context_snapshot, &request, policy).is_ok() {
-        let compaction = CompactionRequest::auto(request.clone(), CompactionTrigger::AutoThreshold);
+        let compaction =
+            CompactionRequest::auto(request.clone(), CompactionTrigger::AutoThreshold, policy);
         // Best-effort preflight: if there's nothing to compact, proceed
         // un-compacted (the provider's own context limit is the real gate).
         if let Ok(prepared) = crate::domain::prepare_compaction(&compaction, max_context_tokens) {
@@ -2007,8 +2017,11 @@ async fn dispatch_call_model(
             if retry_context_limit {
                 let latest_snapshot =
                     crate::domain::estimate_context_usage_for_request(&request, max_context_tokens);
-                let compaction =
-                    CompactionRequest::auto(request.clone(), CompactionTrigger::ContextLimitRetry);
+                let compaction = CompactionRequest::auto(
+                    request.clone(),
+                    CompactionTrigger::ContextLimitRetry,
+                    policy,
+                );
                 // Only retry if there's something to compact; otherwise fall
                 // through to surface the original context-limit error.
                 if let Ok(prepared) =
@@ -2578,6 +2591,7 @@ async fn run_compaction(
         &prepared,
         request.instructions.as_deref(),
         request.policy,
+        max_context_tokens,
     );
     ensure_compaction_request_fits(&summary_request, max_context_tokens)?;
     let (draft, draft_usage) =
@@ -2592,6 +2606,7 @@ async fn run_compaction(
         &draft_summary,
         request.instructions.as_deref(),
         request.policy,
+        max_context_tokens,
     );
     let review_fits = compaction_request_fits(&verify_request, max_context_tokens);
     let (final_summary, verify_usage, review_status, review_error) = if review_fits {
@@ -2679,19 +2694,38 @@ async fn run_compaction(
         archive_path: None,
     };
 
+    record.duration_secs = started.elapsed().as_secs_f64();
+    // `after_tokens` is self-referential: it counts a replacement whose receipt
+    // text prints `after_tokens`. Iterate to a fixpoint, and keep the
+    // replacement built FROM the record being reported — the previous code ran
+    // exactly two passes and kept the pair from different iterations, so the
+    // receipt in the transcript and the number in `/context` disagreed.
+    //
+    // Convergence is fast because the receipt renders the count abbreviated
+    // (`43.8k`), so its length only moves when the abbreviation does. The cap
+    // is a guard against a pathological oscillation, not an expected path.
+    const AFTER_TOKENS_PASSES: usize = 4;
+    let mut compacted_request = request.chat.clone();
     let mut replacement =
         crate::domain::build_replacement_messages(&final_summary, &prepared, &record);
-    let mut compacted_request = request.chat.clone();
+    for _ in 0..AFTER_TOKENS_PASSES {
+        compacted_request.messages = replacement.clone();
+        let measured = crate::domain::estimate_context_usage_for_request(
+            &compacted_request,
+            max_context_tokens,
+        );
+        if measured.used_tokens == record.after_tokens {
+            break;
+        }
+        record.after_tokens = measured.used_tokens;
+        replacement = crate::domain::build_replacement_messages(&final_summary, &prepared, &record);
+    }
+    // Whatever happened above, `replacement` was built from `record` — so the
+    // snapshot is measured on the messages actually kept, and the receipt text
+    // quotes the same `after_tokens` the record carries.
     compacted_request.messages = replacement.clone();
-    let mut after_snapshot =
+    let after_snapshot =
         crate::domain::estimate_context_usage_for_request(&compacted_request, max_context_tokens);
-    record.after_tokens = after_snapshot.used_tokens;
-    record.duration_secs = started.elapsed().as_secs_f64();
-    replacement = crate::domain::build_replacement_messages(&final_summary, &prepared, &record);
-    compacted_request.messages = replacement.clone();
-    after_snapshot =
-        crate::domain::estimate_context_usage_for_request(&compacted_request, max_context_tokens);
-    record.after_tokens = after_snapshot.used_tokens;
 
     if after_snapshot.used_tokens >= before_snapshot.used_tokens {
         return Err(ModelError::InvalidRequest(format!(
@@ -3400,6 +3434,130 @@ async fn dispatch_probe_vision(
         .await;
 }
 
+/// How long the `/model` picker waits on one provider's catalog. The picker
+/// opens immediately and fills in, so a slow provider costs a late row, not a
+/// stalled UI — but it must not hang the discovery task forever either.
+const MODEL_DISCOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(6);
+
+/// Everything the user could switch to, for the `/model` picker.
+///
+/// Two sources, both best-effort — a failure anywhere yields fewer rows, never
+/// an error: the local Ollama daemon (queried WITHOUT autostart, so opening a
+/// list can't resurrect a server the user deliberately stopped) and the
+/// `/models` endpoint of every remote provider that has a resolvable key.
+async fn discover_available_models(
+    providers: Option<Arc<ProviderFactory>>,
+) -> Vec<crate::domain::state::ModelChoice> {
+    use crate::domain::state::ModelChoice;
+    let Some(factory) = providers else {
+        return Vec::new();
+    };
+    let config = factory.config();
+    let mut out: Vec<ModelChoice> = Vec::new();
+
+    // ── Local models ────────────────────────────────────────────────
+    if let Some(names) = list_ollama_models_readonly(config).await {
+        for name in names {
+            out.push(ModelChoice {
+                id: format!("ollama/{name}"),
+                group: "Local (Ollama)".to_string(),
+                detail: "runs on this machine".to_string(),
+                ready: true,
+            });
+        }
+    }
+
+    // ── Remote catalogs ─────────────────────────────────────────────
+    let client = match reqwest::Client::builder()
+        .timeout(MODEL_DISCOVERY_TIMEOUT)
+        .build()
+    {
+        Ok(client) => client,
+        Err(_) => return out,
+    };
+    for profile in crate::models::PROVIDER_REGISTRY {
+        let user_cfg = config.providers.get(profile.name);
+        let Some(api_key) = crate::utils::resolve_provider_key(
+            profile.name,
+            profile.api_key_env,
+            user_cfg.and_then(|c| c.api_key_env.as_deref()),
+        ) else {
+            continue;
+        };
+        let Some(base_url) = crate::providers::factory::discovery_base_url(
+            profile,
+            user_cfg.and_then(|c| c.base_url.clone()),
+        ) else {
+            continue;
+        };
+        let url = format!("{}/models", base_url.trim_end_matches('/'));
+        let mut request = client.get(&url).bearer_auth(api_key);
+        for (name, value) in profile.extra_headers {
+            request = request.header(*name, *value);
+        }
+        let Ok(response) = request.send().await else {
+            continue;
+        };
+        if !response.status().is_success() {
+            continue;
+        }
+        let Ok(body) = response.json::<serde_json::Value>().await else {
+            continue;
+        };
+        // Every provider here is OpenAI-compatible: `{ "data": [{ "id": … }] }`.
+        let ids = body
+            .get("data")
+            .and_then(|d| d.as_array())
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|r| r.get("id").and_then(|i| i.as_str()).map(str::to_string))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for id in ids {
+            out.push(ModelChoice {
+                id: format!("{}/{}", profile.name, id),
+                group: profile.name.to_string(),
+                detail: String::new(),
+                ready: true,
+            });
+        }
+    }
+
+    // Stable order: local first (it is the sovereign default), then providers
+    // alphabetically, then model id. The picker's filter does the rest.
+    out.sort_by(|a, b| {
+        let local = |c: &ModelChoice| u8::from(c.group != "Local (Ollama)");
+        local(a)
+            .cmp(&local(b))
+            .then_with(|| a.group.cmp(&b.group))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    out.dedup_by(|a, b| a.id == b.id);
+    out
+}
+
+/// Ask the local Ollama daemon for its models. `None` when it could not be
+/// reached, distinct from `Some(vec![])` (running with nothing pulled).
+///
+/// Autostart is hard-off: enumerating must never mutate. Same contract as the
+/// CLI's `list_ollama_models`.
+async fn list_ollama_models_readonly(config: &crate::app::Config) -> Option<Vec<String>> {
+    use crate::models::adapters::ollama::OllamaAdapter;
+    use crate::models::{BackendConfig, Model};
+    let backend = BackendConfig {
+        ollama_url: format!("{}:{}", config.ollama.host, config.ollama.port),
+        timeout_secs: 5,
+        max_idle_per_host: 2,
+        // Enumerating must never mutate — see the doc comment.
+        ollama_autostart: false,
+    };
+    match OllamaAdapter::new("__list__", Arc::new(backend)).await {
+        Ok(adapter) => adapter.list_models().await.ok(),
+        Err(_) => None,
+    }
+}
+
 /// Write text to the system clipboard on a blocking thread (the platform
 /// tools shell out and block), then report the result via a transient status.
 async fn dispatch_copy_to_clipboard(text: String, tx: MsgSender) {
@@ -3409,8 +3567,11 @@ async fn dispatch_copy_to_clipboard(text: String, tx: MsgSender) {
         .unwrap_or_else(|e| Err(anyhow::anyhow!("clipboard spawn_blocking: {e}")));
 
     let msg = match result {
-        Ok(()) => Msg::TransientStatus {
-            text: format!("Copied {char_count} chars to clipboard"),
+        // A successful copy is feedback on a keystroke, not conversation: it
+        // toasts above the input and expires. Failures still land in the
+        // transcript, where they can be read after the fact.
+        Ok(()) => Msg::Toast {
+            text: format!("copied {char_count} chars to clipboard"),
         },
         Err(e) => Msg::TransientStatus {
             text: format!("Copy failed: {e}"),

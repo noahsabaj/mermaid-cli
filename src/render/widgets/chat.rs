@@ -1894,10 +1894,15 @@ fn hard_break_styled_word(
 /// styled fragments, and a word boundary exists only where the source text has
 /// whitespace. A span ending mid-word glues onto the next span's text, so
 /// `**bold**suffix` stays one token and a `.` right after a link's dimmed URL
-/// stays attached (no phantom space at a style boundary). Separator spaces
-/// between words are re-emitted UNSTYLED so a link's underline or inline
-/// code's background never paints the gap before it.
-fn wrap_styled_line(
+/// stays attached (no phantom space at a style boundary).
+///
+/// A separator space is re-emitted with the style of the span the whitespace
+/// CAME FROM, so a gap *inside* a styled run keeps that run's paint while a gap
+/// *between* runs stays plain. This is what keeps multi-word inline code
+/// (`` `No image data found` ``) one continuous block instead of a row of
+/// disconnected per-word boxes, and still leaves the space in front of a link
+/// un-underlined (that space belongs to the preceding prose span).
+pub(crate) fn wrap_styled_line(
     line: Line<'static>,
     width: usize,
     continuation_indent: usize,
@@ -1938,12 +1943,23 @@ fn wrap_styled_line(
         n
     };
 
-    // Flatten the spans into words: each word is a run of styled fragments.
+    // Flatten the spans into words: each word is a run of styled fragments plus
+    // the style of the whitespace that separated it from the previous word.
     // Whitespace anywhere closes the current word (runs collapse to a single
     // boundary); a span ending mid-word leaves the word open so the next
     // span's text glues on — a style change is NOT a word boundary.
-    let mut words: Vec<Vec<(String, Style)>> = Vec::new();
+    struct Word {
+        fragments: Vec<(String, Style)>,
+        /// Style of the whitespace run that preceded this word, taken from the
+        /// span that whitespace lived in. Interior gaps of a styled run keep
+        /// the run's style; gaps between runs carry the plain prose style.
+        separator: Style,
+    }
+    let mut words: Vec<Word> = Vec::new();
     let mut current_word: Vec<(String, Style)> = Vec::new();
+    // Separator in front of the word currently being built. The first word has
+    // no preceding gap, so its value is never emitted.
+    let mut separator = Style::default();
     for span in &line.spans {
         let mut frag = String::new();
         for ch in span.content.chars() {
@@ -1952,8 +1968,15 @@ fn wrap_styled_line(
                     current_word.push((std::mem::take(&mut frag), span.style));
                 }
                 if !current_word.is_empty() {
-                    words.push(std::mem::take(&mut current_word));
+                    words.push(Word {
+                        fragments: std::mem::take(&mut current_word),
+                        separator,
+                    });
                 }
+                // This gap belongs to the span it was written in, and becomes
+                // the separator in front of the NEXT word — that is what keeps
+                // a multi-word code span's background continuous.
+                separator = span.style;
             } else {
                 frag.push(ch);
             }
@@ -1963,7 +1986,10 @@ fn wrap_styled_line(
         }
     }
     if !current_word.is_empty() {
-        words.push(current_word);
+        words.push(Word {
+            fragments: current_word,
+            separator,
+        });
     }
 
     fn emit_word(spans: &mut Vec<Span<'static>>, word: Vec<(String, Style)>) {
@@ -1972,7 +1998,11 @@ fn wrap_styled_line(
         }
     }
 
-    for word in words {
+    for Word {
+        fragments: word,
+        separator,
+    } in words
+    {
         let word_width: usize = word.iter().map(|(text, _)| text.width()).sum();
 
         if current_line_width == 0 && result_lines.is_empty() {
@@ -2006,14 +2036,15 @@ fn wrap_styled_line(
         }
 
         // Separator space before this word — only when the row already holds
-        // content, and always UNSTYLED: the space between words belongs to
-        // neither word's style (an underlined link must not underline the gap
-        // in front of it).
+        // content, and painted with the style of the span the gap came from
+        // (see the flattening pass): interior gaps of a code span keep its
+        // background, gaps between runs stay plain. A gap that lands on a wrap
+        // point is dropped entirely, so no row ends in a highlighted space.
         let sep = usize::from(current_line_width > 0);
         if current_line_width + sep + word_width <= available_width {
             // Word fits on current line
             if sep == 1 {
-                current_line_spans.push(Span::raw(" "));
+                current_line_spans.push(Span::styled(" ", separator));
             }
             current_line_width += sep + word_width;
             emit_word(&mut current_line_spans, word);
@@ -2777,6 +2808,50 @@ mod tests {
         assert!(
             first.starts_with("  ") && first.trim_start().starts_with("No source"),
             "first wrapped segment must keep the 2-space gutter; got {first:?}"
+        );
+    }
+
+    /// Regression: a multi-word inline code span used to render as one box per
+    /// word. The wrapper re-emitted every separator space unstyled, punching
+    /// plain gaps through the code background — every wrapped answer containing
+    /// `` `a phrase like this` `` came out visually shredded. Gaps *inside* a
+    /// styled run now keep that run's style; the gap *before* it stays plain.
+    #[test]
+    fn wrap_styled_line_keeps_inline_code_background_across_its_spaces() {
+        let code = Style::default().bg(ratatui::style::Color::Rgb(40, 40, 40));
+        let line = Line::from(vec![
+            Span::raw("read_image_bytes bails with ".to_string()),
+            Span::styled("No image data found in clipboard".to_string(), code),
+            Span::raw(" and the effect routes it onward".to_string()),
+        ]);
+        let wrapped = wrap_styled_line(line, 40, 2);
+        assert!(wrapped.len() >= 2, "should wrap");
+
+        // Walk the produced spans in order: every space BETWEEN two code-styled
+        // spans must itself be code-styled; the space before the run must not.
+        let spans: Vec<_> = wrapped.iter().flat_map(|l| l.spans.iter()).collect();
+        let interior_gaps = spans
+            .windows(3)
+            .filter(|w| {
+                w[1].content.as_ref() == " " && w[0].style.bg.is_some() && w[2].style.bg.is_some()
+            })
+            .count();
+        assert!(
+            interior_gaps >= 3,
+            "the 5-word code span should keep its background on interior gaps; got \
+             {interior_gaps} in {:?}",
+            spans
+                .iter()
+                .map(|s| (s.content.as_ref(), s.style.bg))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            spans.windows(2).all(|w| {
+                !(w[0].content.as_ref() == " "
+                    && w[0].style.bg.is_some()
+                    && w[1].style.bg.is_none())
+            }),
+            "no highlighted space may leak onto the plain prose that follows"
         );
     }
 

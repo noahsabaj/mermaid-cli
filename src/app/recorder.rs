@@ -679,7 +679,9 @@ mod tests {
                 | MsgKind::MouseScroll
                 | MsgKind::FocusChanged
                 | MsgKind::OpenImageAt
+                | MsgKind::AvailableModelsListed
                 | MsgKind::TransientStatus
+                | MsgKind::Toast
                 | MsgKind::EditorReturned
                 | MsgKind::BackgroundAgent
                 | MsgKind::CopySelection => true,

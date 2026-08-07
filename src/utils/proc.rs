@@ -48,23 +48,35 @@ pub enum Grace {
 #[cfg(not(target_os = "windows"))]
 const GRACE_PERIOD: Duration = Duration::from_millis(400);
 
-/// Windows creation-flag pair for every "outlives mermaid" spawn (the exec
-/// tool's background launcher, ollama autostart). `DETACHED_PROCESS`: no
-/// inherited console (and therefore no console window). This flag pair means
-/// the child is exempt from the parent console's Ctrl+C fan-out and keeps
-/// running after mermaid exits.
-#[cfg(target_os = "windows")]
-pub const DETACHED_PROCESS: u32 = 0x0000_0008;
 /// `CREATE_NEW_PROCESS_GROUP`: the child gets its own process group, so
 /// console control events aimed at mermaid's group never reach it.
 #[cfg(target_os = "windows")]
 pub const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-/// `CREATE_NO_WINDOW`: the child gets its OWN console with no window —
-/// same isolation from mermaid's console as `DETACHED_PROCESS` (exempt from
-/// Ctrl+C fan-out, survives mermaid exiting) but console APIs still work.
-/// PowerShell dies at startup under `DETACHED_PROCESS` (no console at all),
-/// so the exec tool's background launcher uses this instead. Mutually
-/// exclusive with `DETACHED_PROCESS`.
+
+/// `CREATE_NO_WINDOW`: the child gets its OWN console with **no window**.
+/// Paired with [`CREATE_NEW_PROCESS_GROUP`], this is the flag set for every
+/// "outlives mermaid" spawn (the exec tool's background launcher, ollama
+/// autostart, the managed-search server): the child is exempt from the parent
+/// console's Ctrl+C fan-out, survives mermaid exiting, and console APIs still
+/// work inside it.
+///
+/// **Not `DETACHED_PROCESS` (0x8).** That flag is the intuitive choice and it
+/// is wrong here. It gives the child *no console at all*, so the moment a
+/// console-subsystem child touches console I/O Windows allocates one for it —
+/// and on Windows 11, where Windows Terminal is the default console host, that
+/// allocation opens a **visible window**. Measured directly: spawning
+/// `cmd /C ping … >NUL` with `DETACHED_PROCESS` adds one visible top-level
+/// window; the same spawn with `CREATE_NO_WINDOW` adds none. Redirecting stdio
+/// to null does not prevent it — the window comes from console allocation, not
+/// from output. A killed child then leaves the orphaned window on the user's
+/// desktop showing a launch error.
+///
+/// It is also less compatible: PowerShell dies at startup under
+/// `DETACHED_PROCESS` because it requires a console.
+///
+/// The two flags are mutually exclusive, and there is no case in this codebase
+/// that wants `DETACHED_PROCESS`, so the constant is deliberately gone rather
+/// than left available to reach for.
 #[cfg(target_os = "windows")]
 pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
@@ -445,6 +457,61 @@ mod tests {
         .expect_err("a child that never reads must time out");
         assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
         assert!(start.elapsed() < Duration::from_secs(10));
+    }
+
+    /// Every long-lived Windows spawn must use `CREATE_NO_WINDOW`, never
+    /// `DETACHED_PROCESS`.
+    ///
+    /// This is a source check rather than a behavioral one because the symptom
+    /// is a *desktop* artifact, not a process property: `DETACHED_PROCESS`
+    /// leaves the child with no console, Windows allocates one on first console
+    /// I/O, and on Windows 11 that opens a real Terminal window. A killed child
+    /// then orphans it. The test suite itself did this on every run — the bug
+    /// was found by noticing a stack of dead `ping -n 31 127.0.0.1` windows on
+    /// a developer's desktop, which no assertion in this suite could have seen.
+    #[cfg(windows)]
+    #[test]
+    fn no_spawn_site_uses_detached_process() {
+        // Split so this scanner's own source never contains the whole token —
+        // otherwise the guard reports itself.
+        let needle = concat!("DETACHED", "_PROCESS");
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut offenders = Vec::new();
+        let mut stack = vec![root];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().is_none_or(|ext| ext != "rs") {
+                    continue;
+                }
+                let Ok(text) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                for (number, line) in text.lines().enumerate() {
+                    // Prose (this doc comment, the constant's docs) explains why
+                    // the flag is banned; only real code counts.
+                    let code = line.trim_start();
+                    if code.starts_with("//") || code.starts_with("///") {
+                        continue;
+                    }
+                    if line.contains(needle) {
+                        offenders.push(format!("{}:{}", path.display(), number + 1));
+                    }
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "{needle} opens a visible console window on Windows 11 — use \
+             CREATE_NO_WINDOW instead. Offending lines: {offenders:?}",
+        );
     }
 
     #[cfg(windows)]

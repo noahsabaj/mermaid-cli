@@ -250,7 +250,9 @@ fn spawn_serve(binary: &std::path::Path, authority: &str) -> std::io::Result<std
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        cmd.creation_flags(crate::utils::DETACHED_PROCESS | crate::utils::CREATE_NEW_PROCESS_GROUP);
+        // CREATE_NO_WINDOW, never DETACHED_PROCESS: the latter leaves a
+        // visible console window on Windows 11 (see utils::proc).
+        cmd.creation_flags(crate::utils::CREATE_NO_WINDOW | crate::utils::CREATE_NEW_PROCESS_GROUP);
     }
     cmd.spawn()
 }
