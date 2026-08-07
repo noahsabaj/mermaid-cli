@@ -11,3 +11,11 @@ install.ps1 text eol=crlf
 # `render_unit`) — force LF so a Windows checkout doesn't embed CRLF (which is
 # wrong on Linux and would fail the packaged-unit drift-guard test).
 *.service text eol=lf
+
+# Golden terminal frames are compared cell-exact against what a pty emitted,
+# which never contains CR. A CRLF checkout would append one to every expected
+# row and fail the suite on a Windows runner. (The harness also normalizes on
+# read, so this is belt-and-braces — but the files should be canonical LF.)
+tests/snapshots/*.txt text eol=lf
+# insta snapshots, for the same reason.
+*.snap text eol=lf

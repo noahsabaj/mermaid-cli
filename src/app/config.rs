@@ -131,7 +131,7 @@ pub struct Config {
     #[serde(default)]
     pub exec: ExecConfig,
 
-    /// Plan-mode behavior (`/plan`, Alt+P).
+    /// Plan-mode behavior (`/plan`, `/safety plan`, Shift+Tab).
     #[serde(default)]
     pub plan: PlanConfig,
 
@@ -548,6 +548,11 @@ impl Default for MemoryConfig {
 }
 
 /// Context-compaction settings.
+///
+/// Every field maps onto a [`crate::domain::CompactionPolicy`] knob that was
+/// previously a hard-coded constant. Values are sanitized on the way out (see
+/// [`CompactionConfig::policy`]) rather than validated on the way in: a bad
+/// number should degrade to the nearest sane one, not refuse to start the app.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CompactionConfig {
@@ -563,14 +568,107 @@ pub struct CompactionConfig {
     /// max_truncation_recoveries = 0  # never give up on its own
     /// ```
     pub max_truncation_recoveries: u8,
+
+    /// Compact automatically when the context crosses the threshold below.
+    /// `false` leaves compaction entirely to `/compact` — the provider's own
+    /// context limit then becomes the only backstop.
+    pub auto_enabled: bool,
+
+    /// Window fill (percent) at which auto-compaction triggers. Clamped to
+    /// `1..=100`; a value of 100 effectively means "only when the response
+    /// reserve no longer fits".
+    pub auto_threshold_percent: u8,
+
+    /// How many trailing user turns survive compaction verbatim. Clamped to at
+    /// least 1 — a compaction that preserved no turn would hand the model a
+    /// summary with no live thread to continue.
+    pub tail_turns: usize,
+
+    /// Token ceiling on that preserved tail. When the last `tail_turns` exceed
+    /// it, older turns are dropped from the tail until it fits.
+    pub tail_token_budget: usize,
+
+    /// Per-message character cap applied to tool output inside the summarizer's
+    /// history excerpt (prose gets 4x this). Keeps one enormous tool result
+    /// from crowding out the rest of the conversation.
+    pub tool_output_max_chars: usize,
+
+    /// Ceiling on the checkpoint the summarizer may produce. Scaled DOWN
+    /// automatically for small context windows (see
+    /// `CompactionPolicy::summary_output_tokens`), so this is a cap and not a
+    /// demand.
+    pub summary_max_tokens: usize,
+
+    /// Ceiling on the summarizer's input (prompt scaffold plus history
+    /// excerpt). Also scaled down to fit a small window.
+    pub summarizer_input_token_budget: usize,
+
+    /// Floor and ceiling on the window room held back for the model's reply
+    /// when deciding whether the context counts as "full". Swapped values are
+    /// corrected rather than rejected.
+    pub min_response_reserve_tokens: usize,
+    pub max_response_reserve_tokens: usize,
 }
 
 impl Default for CompactionConfig {
     fn default() -> Self {
+        let policy = crate::domain::CompactionPolicy::default();
         Self {
             max_truncation_recoveries: crate::constants::COMPACTION_MAX_TRUNCATION_RECOVERIES,
+            auto_enabled: policy.auto_enabled,
+            auto_threshold_percent: policy.auto_threshold_percent,
+            tail_turns: policy.tail_turns,
+            tail_token_budget: policy.tail_token_budget,
+            tool_output_max_chars: policy.tool_output_max_chars,
+            summary_max_tokens: policy.summary_max_tokens,
+            summarizer_input_token_budget: policy.summarizer_input_token_budget,
+            min_response_reserve_tokens: policy.min_response_reserve_tokens,
+            max_response_reserve_tokens: policy.max_response_reserve_tokens,
         }
     }
+}
+
+impl CompactionConfig {
+    /// The live policy, with every value clamped into a range compaction can
+    /// actually operate in.
+    ///
+    /// Sanitizing here rather than at load time means a hand-edited config can
+    /// never put the app in a state where compaction silently cannot run — the
+    /// failure mode that motivated it is a `min_response_reserve` above
+    /// `max_response_reserve`, which would make `response_reserve` return the
+    /// smaller *maximum* and quietly under-reserve on every turn.
+    pub fn policy(&self) -> crate::domain::CompactionPolicy {
+        let defaults = crate::domain::CompactionPolicy::default();
+        let min_reserve = self.min_response_reserve_tokens;
+        let max_reserve = self.max_response_reserve_tokens;
+        crate::domain::CompactionPolicy {
+            auto_enabled: self.auto_enabled,
+            auto_threshold_percent: self.auto_threshold_percent.clamp(1, 100),
+            tail_turns: self.tail_turns.max(1),
+            // A zero budget would drop the whole tail; fall back to the default
+            // rather than produce a checkpoint with nothing after it.
+            tail_token_budget: nonzero_or(self.tail_token_budget, defaults.tail_token_budget),
+            tool_output_max_chars: nonzero_or(
+                self.tool_output_max_chars,
+                defaults.tool_output_max_chars,
+            ),
+            summary_max_tokens: nonzero_or(self.summary_max_tokens, defaults.summary_max_tokens),
+            summarizer_input_token_budget: nonzero_or(
+                self.summarizer_input_token_budget,
+                defaults.summarizer_input_token_budget,
+            ),
+            // Order the pair rather than trusting it: swapped bounds are the
+            // easy hand-edit mistake, and silently inverting the reserve is
+            // worse than ignoring the user's intent about which is which.
+            min_response_reserve_tokens: min_reserve.min(max_reserve),
+            max_response_reserve_tokens: min_reserve.max(max_reserve),
+        }
+    }
+}
+
+/// `value` unless it is zero, in which case `fallback`.
+fn nonzero_or(value: usize, fallback: usize) -> usize {
+    if value == 0 { fallback } else { value }
 }
 
 /// Computer-use (desktop control) preferences.
@@ -1405,14 +1503,17 @@ fn finalize_config(table: toml::Table) -> Result<(Config, Vec<String>)> {
         ignored.push(path.to_string());
     })
     .context("Failed to interpret configuration. Run 'mermaid init' to regenerate.")?;
-    // `plan` is a session STATE, not a persistent permission level: entering it
-    // allocates a plan file and stages a mode to return to, neither of which a
-    // config default can express. `safety.mode = "plan"` would otherwise start
-    // a session that reports "planning" with no plan to write. Fall back to the
-    // default and let `/plan` do the real thing.
+    // `plan` is a live session mode, not a persistent default: entering it
+    // allocates a plan file, which config loading has no session to do it for.
+    // `safety.mode = "plan"` would otherwise start a session that reports
+    // "planning" with no plan to write. Fall back to the default and let
+    // `/plan`, `/safety plan`, or Shift+Tab do the real thing. It is also what
+    // `mode_after_plan` reads, so this must never be `plan` itself.
     if config.safety.mode.is_planning() {
         config.safety.mode = SafetyConfig::default().mode;
-        ignored.push("safety.mode (plan is entered with /plan, not configured)".to_string());
+        ignored.push(
+            "safety.mode (plan is entered with /plan or Shift+Tab, not configured)".to_string(),
+        );
     }
     Ok((config, ignored))
 }
@@ -2653,6 +2754,89 @@ port = 11434
         assert!(!blob.contains("extra instructions"));
         let loaded: Config = toml::from_str(&blob).expect("deserialize");
         assert!(!loaded.prompt.is_customized());
+    }
+
+    /// An absent `[compaction]` section must reproduce the constants exactly —
+    /// making the policy configurable must not change anyone's behavior.
+    #[test]
+    fn absent_compaction_section_matches_the_built_in_policy() {
+        let c: Config = toml::from_str("").expect("empty config parses");
+        assert_eq!(
+            c.compaction.policy(),
+            crate::domain::CompactionPolicy::default(),
+        );
+    }
+
+    #[test]
+    fn compaction_settings_reach_the_policy() {
+        let c: Config = toml::from_str(
+            "[compaction]\n\
+             auto_enabled = false\n\
+             auto_threshold_percent = 60\n\
+             tail_turns = 5\n\
+             tail_token_budget = 12000\n\
+             summary_max_tokens = 3000\n",
+        )
+        .expect("compaction section parses");
+        let policy = c.compaction.policy();
+        assert!(!policy.auto_enabled);
+        assert_eq!(policy.auto_threshold_percent, 60);
+        assert_eq!(policy.tail_turns, 5);
+        assert_eq!(policy.tail_token_budget, 12_000);
+        assert_eq!(policy.summary_max_tokens, 3_000);
+        // Unset keys keep their defaults rather than zeroing out.
+        let defaults = crate::domain::CompactionPolicy::default();
+        assert_eq!(policy.tool_output_max_chars, defaults.tool_output_max_chars);
+    }
+
+    /// A hand-edited config degrades to the nearest workable value rather than
+    /// putting compaction in a state where it silently cannot run.
+    #[test]
+    fn nonsense_compaction_settings_are_clamped() {
+        let c: Config = toml::from_str(
+            "[compaction]\n\
+             auto_threshold_percent = 250\n\
+             tail_turns = 0\n\
+             tail_token_budget = 0\n\
+             summary_max_tokens = 0\n\
+             summarizer_input_token_budget = 0\n\
+             tool_output_max_chars = 0\n\
+             min_response_reserve_tokens = 50000\n\
+             max_response_reserve_tokens = 1000\n",
+        )
+        .expect("config parses");
+        let policy = c.compaction.policy();
+        let defaults = crate::domain::CompactionPolicy::default();
+
+        assert_eq!(policy.auto_threshold_percent, 100, "percent clamps to 100");
+        assert_eq!(
+            policy.tail_turns, 1,
+            "a checkpoint needs a live turn after it"
+        );
+        // Zero would mean "no budget at all"; fall back rather than disable.
+        assert_eq!(policy.tail_token_budget, defaults.tail_token_budget);
+        assert_eq!(policy.summary_max_tokens, defaults.summary_max_tokens);
+        assert_eq!(
+            policy.summarizer_input_token_budget,
+            defaults.summarizer_input_token_budget
+        );
+        assert_eq!(policy.tool_output_max_chars, defaults.tool_output_max_chars);
+
+        // Swapped reserve bounds are ordered, not obeyed: `response_reserve`
+        // clamps with `.max(min).min(max)`, so an inverted pair would return
+        // the smaller value and under-reserve on every single turn.
+        assert_eq!(policy.min_response_reserve_tokens, 1_000);
+        assert_eq!(policy.max_response_reserve_tokens, 50_000);
+        assert!(policy.min_response_reserve_tokens <= policy.max_response_reserve_tokens);
+    }
+
+    /// `auto_threshold_percent = 0` would compact on every single turn, before
+    /// there is anything to compact.
+    #[test]
+    fn zero_compaction_threshold_clamps_up() {
+        let c: Config =
+            toml::from_str("[compaction]\nauto_threshold_percent = 0\n").expect("parses");
+        assert_eq!(c.compaction.policy().auto_threshold_percent, 1);
     }
 
     #[test]

@@ -445,9 +445,14 @@ fn render_table(
 
         if row_idx == 0 && table_header_len > 0 {
             let mut sep_spans = vec![Span::styled("|-", border_style)];
-            for &w in &col_widths {
+            for (col, &w) in col_widths.iter().enumerate() {
                 sep_spans.push(Span::styled("-".repeat(w), border_style));
-                sep_spans.push(Span::styled("-|-", border_style));
+                // A data row ends `" | "` — pipe then a SPACE, which is
+                // invisible. Ending the separator `"-|-"` put a dash where that
+                // space is, so every table hung one stray dash past its right
+                // edge. The last column closes on the pipe instead.
+                let closer = if col + 1 == num_cols { "-|" } else { "-|-" };
+                sep_spans.push(Span::styled(closer, border_style));
             }
             lines.push(Line::from(sep_spans));
         }

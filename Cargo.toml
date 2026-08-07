@@ -132,6 +132,7 @@ insta = "1"
 # though extraction is only shipped on Unix targets.
 ruzstd = "0.8.3"
 tar = "0.4.46"
+vt100 = "0.16.2"
 
 [profile.release]
 lto = true

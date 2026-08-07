@@ -34,20 +34,12 @@ pub struct StatusWidget<'a> {
     /// snap case). `Some(requested)` shows `reasoning: high (max
     /// requested)`; `None` shows just `reasoning: high`.
     pub requested_level: Option<ReasoningLevel>,
-    /// Live session safety mode. Rendered on line 2 left so the active
-    /// permission level is always visible (Shift+Tab / `/safety` change it).
+    /// Live session safety mode — including `plan`, which is a mode like any
+    /// other and renders as plain `safety: plan`. Rendered on line 2 left so
+    /// the active permission level is always visible (Shift+Tab / `/safety`
+    /// change it). Never the spinner/status widget (#245 invariant) — this is
+    /// the persistent mode line.
     pub safety_mode: SafetyMode,
-    /// `Some(mode)` while the session is drafting a plan, carrying the STAGED
-    /// mode plan exit will restore: the safety segment reads
-    /// `plan mode on (alt+p to toggle) - restores: <mode>` instead of
-    /// `safety: <mode>`. Never the spinner/status widget (#245 invariant) —
-    /// this is the persistent mode line.
-    ///
-    /// It has to be carried separately now that `safety_mode` is `Plan` while
-    /// planning; reading the restore target off `safety_mode` would render
-    /// "restores: plan". Shift+Tab while planning re-targets THIS value, which
-    /// is what makes staging a post-approval mode visible.
-    pub plan_resume: Option<SafetyMode>,
 }
 
 impl<'a> Widget for StatusWidget<'a> {
@@ -106,13 +98,7 @@ impl<'a> Widget for StatusWidget<'a> {
         // Prefix the app version (the one inoffensive, always-visible place we
         // surface it) and the live safety mode (Shift+Tab / `/safety` change it
         // live) ahead of the reasoning level.
-        let safety_segment = match self.plan_resume {
-            Some(resume) => format!(
-                "plan mode on (alt+p to toggle) - restores: {}",
-                resume.as_str()
-            ),
-            None => format!("safety: {}", self.safety_mode.as_str()),
-        };
+        let safety_segment = format!("safety: {}", self.safety_mode.as_str());
         let left_text = status_line2_left(self.version, &safety_segment, &reasoning_text);
         let model_display = self.model_name;
 
@@ -179,8 +165,8 @@ fn format_context_snapshot(snapshot: &ContextUsageSnapshot) -> String {
 
 /// Left segment of status line 2: the app version (threaded from
 /// `RenderCache`, which defaults it to the compile-time crate version), then
-/// the safety segment (`safety: <mode>` or the plan-mode badge) and reasoning
-/// level. This footer is the single place the version is surfaced in the TUI.
+/// the safety segment (`safety: <mode>`) and reasoning level. This footer is
+/// the single place the version is surfaced in the TUI.
 fn status_line2_left(version: &str, safety_segment: &str, reasoning_text: &str) -> String {
     format!("mermaid v{version} · {safety_segment} · {reasoning_text}")
 }
@@ -201,16 +187,14 @@ mod tests {
     }
 
     #[test]
-    fn status_line2_left_carries_plan_badge_segment() {
-        // The plan badge replaces the safety segment wholesale and always
-        // names the restore target, so the user sees both facts at once.
-        let s = status_line2_left(
-            "0.0.0",
-            "plan mode on (alt+p to toggle) - restores: auto",
-            "reasoning: high",
-        );
-        assert!(s.contains("plan mode on (alt+p to toggle) - restores: auto"));
-        assert!(!s.contains("safety:"));
+    fn status_line2_left_renders_plan_as_a_plain_safety_mode() {
+        // Plan is a safety mode like the others — no badge, no restore target.
+        // The old `plan mode on (alt+p to toggle) - restores: <mode>` band
+        // described a plan that layered ON TOP of a mode; that model is gone.
+        let s = status_line2_left("0.0.0", "safety: plan", "reasoning: high");
+        assert!(s.contains("safety: plan"));
+        assert!(!s.contains("restores"));
+        assert!(!s.contains("alt+p"));
     }
 
     #[test]

@@ -1,0 +1,2 @@
+<USER>@<HOST>:<CWD>   <CONTEXT GAUGE>
+mermaid v<VERSION> · safety: ask · reasoning: medium                          anthropic/pty-visual-test

@@ -12,14 +12,49 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Widget};
+use unicode_width::UnicodeWidthStr;
 
 use super::truncate_to_cells;
 use crate::domain::{OptionPreview, PendingQuestionSet, Question, QuestionSelection};
 use crate::render::theme::Theme;
+use crate::render::widgets::chat::wrap_styled_line;
 
 pub struct QuestionModalWidget<'a> {
     pub theme: &'a Theme,
     pub set: &'a PendingQuestionSet,
+    /// Total width of the modal INCLUDING its border, so the content wraps to
+    /// the same width the height estimator assumed.
+    pub width: u16,
+}
+
+/// Content width available to the question column, derived from the modal's
+/// total width. The estimator and the renderer must agree or the reserved
+/// bottom zone won't match what's drawn, so both go through here.
+///
+/// With a preview open the questions get the left 48% split; the estimator's
+/// integer share is never wider than the layout solver's column, so any drift
+/// makes the estimate wrap MORE and the modal a line too tall rather than a
+/// line too short (which would clip).
+fn question_column_width(set: &PendingQuestionSet, total_width: u16) -> usize {
+    let inner = total_width.saturating_sub(2) as usize;
+    if active_question_has_preview(set) {
+        inner * 48 / 100
+    } else {
+        inner
+    }
+    .max(8)
+}
+
+/// Push a line, wrapping it to `width` with `hang` cells of hanging indent so
+/// a long option description continues under its own text instead of running
+/// off the border. Everything the modal draws goes through this — a modal is
+/// a fixed box, so nothing may rely on the terminal to clip it.
+fn push_wrapped(lines: &mut Vec<Line<'static>>, line: Line<'static>, width: usize, hang: usize) {
+    lines.extend(wrap_styled_line(
+        line,
+        width,
+        hang.min(width.saturating_sub(1)),
+    ));
 }
 
 /// A header "chip": label on the brand accent, like Claude Code's blue tag.
@@ -58,6 +93,7 @@ fn push_choice_lines(
     q: &Question,
     sel: &QuestionSelection,
     theme: &Theme,
+    width: usize,
 ) {
     let brand = theme.colors.brand.to_color();
     let dim = theme.colors.text_disabled.to_color();
@@ -96,13 +132,20 @@ fn push_choice_lines(
         } else {
             Style::default().fg(white).add_modifier(Modifier::BOLD)
         };
+        // Everything before the label is gutter: "> " + "N. " (+ "[x] ").
+        let hang: usize = spans.iter().map(|s| s.content.width()).sum();
         spans.push(Span::styled(opt.label.clone(), label_style));
-        lines.push(Line::from(spans));
+        push_wrapped(lines, Line::from(spans), width, hang);
         if let Some(desc) = &opt.description {
-            lines.push(Line::from(Span::styled(
-                format!("     {}", desc),
-                Style::default().fg(dim),
-            )));
+            push_wrapped(
+                lines,
+                Line::from(Span::styled(
+                    format!("     {}", desc),
+                    Style::default().fg(dim),
+                )),
+                width,
+                5,
+            );
         }
     }
     if end < n {
@@ -128,6 +171,7 @@ fn push_choice_lines(
             Style::default().fg(if checked { brand } else { dim }),
         ));
     }
+    let hang: usize = spans.iter().map(|s| s.content.width()).sum();
     if sel.other_text.is_empty() {
         spans.push(Span::styled("Type something", Style::default().fg(dim)));
     } else {
@@ -136,7 +180,7 @@ fn push_choice_lines(
             Style::default().fg(white),
         ));
     }
-    lines.push(Line::from(spans));
+    push_wrapped(lines, Line::from(spans), width, hang);
 
     // Submit row (multi-select only).
     if multi {
@@ -163,6 +207,7 @@ fn push_input_lines(
     q: &Question,
     sel: &QuestionSelection,
     theme: &Theme,
+    max_width: usize,
 ) {
     let brand = theme.colors.brand.to_color();
     let dim = theme.colors.text_disabled.to_color();
@@ -178,7 +223,7 @@ fn push_input_lines(
         field.push(Span::styled(value.clone(), Style::default().fg(white)));
     }
     field.push(Span::styled("_", Style::default().fg(brand)));
-    lines.push(Line::from(field));
+    push_wrapped(lines, Line::from(field), max_width, 2);
 
     if let crate::domain::QuestionKind::Number {
         min: Some(lo),
@@ -200,10 +245,15 @@ fn push_input_lines(
     }
 
     match crate::domain::validate_input(&q.kind, value) {
-        Err(e) => lines.push(Line::from(Span::styled(
-            format!("  {e}"),
-            Style::default().fg(theme.colors.error.to_color()),
-        ))),
+        Err(e) => push_wrapped(
+            lines,
+            Line::from(Span::styled(
+                format!("  {e}"),
+                Style::default().fg(theme.colors.error.to_color()),
+            )),
+            max_width,
+            2,
+        ),
         Ok(()) => lines.push(Line::from(Span::styled(
             "  Enter to submit",
             Style::default().fg(dim),
@@ -217,6 +267,7 @@ fn push_rank_lines(
     q: &Question,
     sel: &QuestionSelection,
     theme: &Theme,
+    width: usize,
 ) {
     let brand = theme.colors.brand.to_color();
     let dim = theme.colors.text_disabled.to_color();
@@ -236,23 +287,34 @@ fn push_rank_lines(
         } else {
             Style::default().fg(white).add_modifier(Modifier::BOLD)
         };
-        lines.push(Line::from(vec![
-            Span::styled(prefix, Style::default().fg(brand)),
-            Span::styled(format!("{}. ", pos + 1), Style::default().fg(dim)),
-            Span::styled(
-                q.options
-                    .get(opt_idx)
-                    .map(|o| o.label.clone())
-                    .unwrap_or_default(),
-                label_style,
-            ),
-        ]));
+        let marker = format!("{}. ", pos + 1);
+        let hang = prefix.width() + marker.width();
+        push_wrapped(
+            lines,
+            Line::from(vec![
+                Span::styled(prefix, Style::default().fg(brand)),
+                Span::styled(marker, Style::default().fg(dim)),
+                Span::styled(
+                    q.options
+                        .get(opt_idx)
+                        .map(|o| o.label.clone())
+                        .unwrap_or_default(),
+                    label_style,
+                ),
+            ]),
+            width,
+            hang,
+        );
     }
 }
 
 /// Build the modal's content lines. Shared by the widget and the height
 /// estimator so the reserved bottom-zone height always matches what's drawn.
-pub fn build_question_lines(set: &PendingQuestionSet, theme: &Theme) -> Vec<Line<'static>> {
+pub fn build_question_lines(
+    set: &PendingQuestionSet,
+    theme: &Theme,
+    width: usize,
+) -> Vec<Line<'static>> {
     let brand = theme.colors.brand.to_color();
     let dim = theme.colors.text_disabled.to_color();
     let white = theme.colors.text_primary.to_color();
@@ -294,19 +356,29 @@ pub fn build_question_lines(set: &PendingQuestionSet, theme: &Theme) -> Vec<Line
         )));
         lines.push(Line::from(""));
         for (q, ans) in set.questions.iter().zip(set.build_answers()) {
-            lines.push(Line::from(Span::styled(
-                format!("- {}", q.question),
-                Style::default().fg(white),
-            )));
+            push_wrapped(
+                &mut lines,
+                Line::from(Span::styled(
+                    format!("- {}", q.question),
+                    Style::default().fg(white),
+                )),
+                width,
+                2,
+            );
             let value = if ans.selected.is_empty() {
                 "(no selection)".to_string()
             } else {
                 ans.selected.join(", ")
             };
-            lines.push(Line::from(Span::styled(
-                format!("   -> {}", value),
-                Style::default().fg(brand),
-            )));
+            push_wrapped(
+                &mut lines,
+                Line::from(Span::styled(
+                    format!("   -> {}", value),
+                    Style::default().fg(brand),
+                )),
+                width,
+                6,
+            );
         }
         if has_memory {
             let mark = if set.remember { "[x]" } else { "[ ]" };
@@ -341,7 +413,12 @@ pub fn build_question_lines(set: &PendingQuestionSet, theme: &Theme) -> Vec<Line
             foot.push_str(" | r: remember");
         }
         foot.push_str(" | Esc to cancel");
-        lines.push(Line::from(Span::styled(foot, Style::default().fg(dim))));
+        push_wrapped(
+            &mut lines,
+            Line::from(Span::styled(foot, Style::default().fg(dim))),
+            width,
+            0,
+        );
         return lines;
     }
 
@@ -359,34 +436,49 @@ pub fn build_question_lines(set: &PendingQuestionSet, theme: &Theme) -> Vec<Line
             brand,
         )));
     }
-    lines.push(Line::from(Span::styled(
-        q.question.clone(),
-        Style::default().fg(white).add_modifier(Modifier::BOLD),
-    )));
+    push_wrapped(
+        &mut lines,
+        Line::from(Span::styled(
+            q.question.clone(),
+            Style::default().fg(white).add_modifier(Modifier::BOLD),
+        )),
+        width,
+        0,
+    );
     lines.push(Line::from(""));
 
     if q.is_input() {
-        push_input_lines(&mut lines, q, sel, theme);
+        push_input_lines(&mut lines, q, sel, theme, width);
     } else if q.is_rank() {
-        push_rank_lines(&mut lines, q, sel, theme);
+        push_rank_lines(&mut lines, q, sel, theme, width);
     } else {
-        push_choice_lines(&mut lines, q, sel, theme);
+        push_choice_lines(&mut lines, q, sel, theme, width);
     }
 
     // Notes line (choice kinds only — input kinds capture every keystroke).
     if q.is_choice() {
         lines.push(Line::from(""));
         if set.editing_note {
-            lines.push(Line::from(vec![
-                Span::styled("Notes: ", Style::default().fg(brand)),
-                Span::styled(sel.note.clone(), Style::default().fg(white)),
-                Span::styled("_", Style::default().fg(brand)),
-            ]));
+            push_wrapped(
+                &mut lines,
+                Line::from(vec![
+                    Span::styled("Notes: ", Style::default().fg(brand)),
+                    Span::styled(sel.note.clone(), Style::default().fg(white)),
+                    Span::styled("_", Style::default().fg(brand)),
+                ]),
+                width,
+                7,
+            );
         } else if !sel.note.trim().is_empty() {
-            lines.push(Line::from(vec![
-                Span::styled("Notes: ", Style::default().fg(dim)),
-                Span::styled(sel.note.clone(), Style::default().fg(white)),
-            ]));
+            push_wrapped(
+                &mut lines,
+                Line::from(vec![
+                    Span::styled("Notes: ", Style::default().fg(dim)),
+                    Span::styled(sel.note.clone(), Style::default().fg(white)),
+                ]),
+                width,
+                7,
+            );
         } else {
             lines.push(Line::from(Span::styled(
                 "Notes: press n to add notes",
@@ -419,7 +511,12 @@ pub fn build_question_lines(set: &PendingQuestionSet, theme: &Theme) -> Vec<Line
         }
     }
     hint.push_str(" | Esc to cancel");
-    lines.push(Line::from(Span::styled(hint, Style::default().fg(dim))));
+    push_wrapped(
+        &mut lines,
+        Line::from(Span::styled(hint, Style::default().fg(dim))),
+        width,
+        0,
+    );
 
     lines
 }
@@ -488,8 +585,8 @@ fn build_preview_lines(preview: &OptionPreview, theme: &Theme) -> Vec<Line<'stat
 
 /// Total rendered height including the border, so `render::mod` can size the
 /// bottom zone to fit the modal — the taller of the option list and its preview.
-pub fn question_modal_height(set: &PendingQuestionSet, theme: &Theme) -> u16 {
-    let left = build_question_lines(set, theme).len();
+pub fn question_modal_height(set: &PendingQuestionSet, theme: &Theme, total_width: u16) -> u16 {
+    let left = build_question_lines(set, theme, question_column_width(set, total_width)).len();
     let content = if active_question_has_preview(set) {
         left.max(max_preview_lines(set))
     } else {
@@ -514,7 +611,12 @@ impl<'a> Widget for QuestionModalWidget<'a> {
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(48), Constraint::Percentage(52)])
                 .split(inner);
-            Paragraph::new(build_question_lines(self.set, self.theme)).render(cols[0], buf);
+            Paragraph::new(build_question_lines(
+                self.set,
+                self.theme,
+                question_column_width(self.set, self.width),
+            ))
+            .render(cols[0], buf);
             let preview_lines = focused_preview(self.set)
                 .map(|p| build_preview_lines(p, self.theme))
                 .unwrap_or_default();
@@ -526,7 +628,12 @@ impl<'a> Widget for QuestionModalWidget<'a> {
                 )
                 .render(cols[1], buf);
         } else {
-            Paragraph::new(build_question_lines(self.set, self.theme)).render(inner, buf);
+            Paragraph::new(build_question_lines(
+                self.set,
+                self.theme,
+                question_column_width(self.set, self.width),
+            ))
+            .render(inner, buf);
         }
     }
 }
@@ -595,7 +702,7 @@ mod tests {
         let theme = Theme::dark();
         // Modal grows to fit the 20-line preview (plus the 2-line border).
         assert!(
-            question_modal_height(&set, &theme) >= 22,
+            question_modal_height(&set, &theme, 120) >= 22,
             "expected height >= 22 to fit the preview"
         );
     }
@@ -626,7 +733,7 @@ mod tests {
         // No tab strip for a single question, so the header chip appears exactly
         // once (above the title) — otherwise the header would vanish entirely.
         let set = PendingQuestionSet::new(TurnId(1), ToolCallId(1), vec![q_with_header("HDR")]);
-        let lines = build_question_lines(&set, &Theme::dark());
+        let lines = build_question_lines(&set, &Theme::dark(), 120);
         assert_eq!(lone_chip_lines(&lines, "HDR"), 1);
     }
 
@@ -639,7 +746,61 @@ mod tests {
             ToolCallId(1),
             vec![q_with_header("HDR"), q_with_header("Other")],
         );
-        let lines = build_question_lines(&set, &Theme::dark());
+        let lines = build_question_lines(&set, &Theme::dark(), 120);
         assert_eq!(lone_chip_lines(&lines, "HDR"), 0);
+    }
+
+    /// Regression: the modal built its lines width-blind, so a long option
+    /// description ran under the right border and was clipped mid-word
+    /// ("…screenshots + file dro"). A modal is a fixed box — every line it
+    /// draws must fit, and the height estimator must count the wrapped lines.
+    #[test]
+    fn long_option_text_wraps_inside_the_modal_instead_of_being_clipped() {
+        let desc = "Press Shift+Tab or run /safety ask so I can run PowerShell diagnostics and \
+                    patch clipboard.rs to handle screenshots + file drops";
+        let q = Question {
+            header: "Safety".to_string(),
+            question: "I'm in read_only mode and can't run diagnostics or patch the clipboard \
+                       code. How should I proceed?"
+                .to_string(),
+            kind: crate::domain::QuestionKind::Select,
+            options: vec![QuestionOption {
+                label: "Switch to ask/full_access (Recommended)".to_string(),
+                description: Some(desc.to_string()),
+                preview: None,
+                recommended: true,
+            }],
+            memory_key: None,
+        };
+        let set = PendingQuestionSet::new(TurnId(1), ToolCallId(1), vec![q]);
+        let theme = Theme::dark();
+        let width = 60usize;
+        let lines = build_question_lines(&set, &theme, width);
+        for line in &lines {
+            let w: usize = line.spans.iter().map(|s| s.content.as_ref().width()).sum();
+            assert!(
+                w <= width,
+                "line overflows the modal ({w} > {width}): {:?}",
+                line.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            );
+        }
+        // Nothing is lost to the wrap: the description's tail still renders.
+        let all: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(
+            all.contains("file drops"),
+            "the clipped tail must survive wrapping: {all}"
+        );
+        // The reserved height counts the wrapped lines, not the unwrapped ones.
+        assert!(
+            question_modal_height(&set, &theme, (width + 2) as u16) as usize >= lines.len() + 2,
+            "the estimator must reserve room for every wrapped line"
+        );
     }
 }

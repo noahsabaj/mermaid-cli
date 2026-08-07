@@ -298,6 +298,9 @@ pub enum Msg {
     /// Response to `Cmd::ListConversations`. Populates the `/load`
     /// picker's candidate list.
     ConversationsListed(Vec<ConversationSummary>),
+    /// Discovery for the `/model` picker finished. Carries every model the
+    /// user can switch to, already grouped and sorted by the effect layer.
+    AvailableModelsListed(Vec<crate::domain::state::ModelChoice>),
     /// Response to `Cmd::ListProjectFiles`: relative project paths for the
     /// @-mention picker (gitignore-aware walk, capped, sorted; directories
     /// carry a trailing `/`).
@@ -355,6 +358,14 @@ pub enum Msg {
     /// the chat transcript. Lets effects surface a result (clipboard read,
     /// config saved, plugin install, …) without a bespoke Msg per effect.
     TransientStatus {
+        text: String,
+    },
+
+    /// Ephemeral confirmation of a manual action (clipboard copy), shown just
+    /// above the input for [`crate::domain::TOAST_TTL`] and then gone. The
+    /// sibling of `TransientStatus` for feedback that must NOT become a
+    /// permanent transcript row.
+    Toast {
         text: String,
     },
 
@@ -564,11 +575,13 @@ pub enum SlashCmd {
     Reasoning(Option<ReasoningLevel>),
     VisibleReasoning(Option<String>),
     /// No arg → show current safety mode; `Some` → switch it for this
-    /// session (`Shift+Tab` cycles the same field). Session-scoped.
+    /// session, `plan` included (`Shift+Tab` cycles the same field).
+    /// Session-scoped.
     Safety(Option<SafetyMode>),
     /// Plan mode: no arg / `on` → enter; `off` → leave; `show` → print the
-    /// plan-file path; `config` → open the settings picker. `Alt+P` toggles
-    /// the same state. Session-scoped.
+    /// plan-file path; `config` → open the settings picker. `plan` is a
+    /// `SafetyMode`, so `Shift+Tab` and `/safety plan` reach the same state.
+    /// Session-scoped.
     Plan(Option<String>),
     /// Open the settings picker (currently the plan-mode section; more
     /// sections join it as they exist).
@@ -700,6 +713,7 @@ impl Msg {
             Msg::SessionSaved => MsgKind::SessionSaved,
             Msg::ConversationLoaded(_) => MsgKind::ConversationLoaded,
             Msg::ConversationsListed(_) => MsgKind::ConversationsListed,
+            Msg::AvailableModelsListed(_) => MsgKind::AvailableModelsListed,
             Msg::ProjectFilesListed(_) => MsgKind::ProjectFilesListed,
             Msg::ScratchpadReady { .. } => MsgKind::ScratchpadReady,
             Msg::RuntimeTasksListed(_)
@@ -718,6 +732,7 @@ impl Msg {
             Msg::FocusChanged(_) => MsgKind::FocusChanged,
             Msg::OpenImageAt { .. } => MsgKind::OpenImageAt,
             Msg::TransientStatus { .. } => MsgKind::TransientStatus,
+            Msg::Toast { .. } => MsgKind::Toast,
             Msg::EditorReturned { .. } => MsgKind::EditorReturned,
             Msg::BackgroundAgentStarted { .. }
             | Msg::BackgroundAgentProgress { .. }
@@ -766,6 +781,7 @@ pub enum MsgKind {
     SessionSaved,
     ConversationLoaded,
     ConversationsListed,
+    AvailableModelsListed,
     ProjectFilesListed,
     ScratchpadReady,
     RuntimeStore,
@@ -778,6 +794,7 @@ pub enum MsgKind {
     BackgroundAgent,
     OpenImageAt,
     TransientStatus,
+    Toast,
     EditorReturned,
     CopySelection,
 }

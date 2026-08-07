@@ -545,17 +545,12 @@ pub fn estimate_tool_schema_tokens(tools: &[super::cmd::ToolDefinition]) -> usiz
         .unwrap_or(0)
 }
 
-/// Live plan-mode state: present iff the session is currently drafting a
-/// plan. Plan mode is deliberately NOT a fifth `SafetyMode` — it *remembers
-/// and restores* the mode the user was in, which a flat cycle can't express.
-/// While this is `Some`, tool dispatch floors the effective safety mode to
-/// `ReadOnly` and the policy gate applies the plan carve-outs (the plan file
-/// itself, memory writes, known-safe builds).
-///
-/// `Session.safety_mode` is left untouched while planning — it IS the restore
-/// target (the status bar shows it as "restores: <mode>", and Shift+Tab /
-/// `/safety` may retune it mid-plan); only the *effective* mode at tool
-/// dispatch changes.
+/// The plan's DATA while `Session.safety_mode == SafetyMode::Plan` — never the
+/// fact of being in plan mode, which the mode value alone decides. Plan IS a
+/// safety mode (the strictest position in the Shift+Tab cycle), so there is no
+/// second flag and no remembered restore target here; the policy gate applies
+/// the plan carve-outs (the plan file itself, memory writes, known-safe builds)
+/// off the mode.
 ///
 /// Serialized into `ConversationHistory` on every save (like `safety_mode`)
 /// so `--resume` restores planning-in-progress; sessions saved before this
@@ -573,16 +568,6 @@ pub struct PlanState {
     /// `[plan] reasoning` overrode it at entry.
     #[serde(default)]
     pub prev_reasoning: Option<crate::models::ReasoningLevel>,
-    /// The safety mode to return to when plan mode ends — captured at entry,
-    /// and re-targeted by Shift+Tab WHILE planning.
-    ///
-    /// `safety_mode` is `Plan` for the duration, so Shift+Tab has to act on
-    /// something else. Staging it here is what makes "pre-set full_access for
-    /// after approval" work without the live mode and the plan floor ever
-    /// disagreeing — the contradiction that used to produce a permanent
-    /// "safety mode changed to full_access" marker while the floor still held.
-    #[serde(default)]
-    pub resume_safety_mode: crate::runtime::SafetyMode,
 }
 
 /// The mode-defining facts the model was last told about, snapshotted at
@@ -1146,7 +1131,21 @@ pub struct UiState {
     /// one-line form (Ctrl+T toggles). Named for the non-default state so
     /// `derive(Default)` yields expanded, session-scoped, never persisted.
     pub tasks_collapsed: bool,
+    /// Ephemeral confirmation for an action the user just took by hand
+    /// ("copied 42 chars to clipboard"): the text and the instant it stops
+    /// being drawn. Expiry is lazy against `state.now` — the 60 Hz tick makes
+    /// it vanish on its own, exactly like `esc_armed_at`.
+    ///
+    /// Deliberately NOT the transcript. A copy confirmation is feedback on a
+    /// keystroke, not part of the conversation; parking it in the message log
+    /// left a permanent "Copied N chars to clipboard" row above the input for
+    /// the rest of the session. Anything worth KEEPING (an error, a config
+    /// change) still goes through `Msg::TransientStatus` to the transcript.
+    pub toast: Option<(String, DateTime<Local>)>,
 }
+
+/// How long a [`UiState::toast`] stays on screen.
+pub const TOAST_TTL: chrono::Duration = chrono::Duration::milliseconds(2000);
 
 impl UiState {
     /// The @-mention token under the cursor, when the picker may show:
@@ -1165,6 +1164,26 @@ impl UiState {
     }
 }
 
+/// One selectable row in the `/model` picker.
+///
+/// Deliberately flat data, not a provider handle: discovery runs in the effect
+/// layer and hands the reducer plain strings, so the picker renders (and
+/// `--replay` reproduces) without touching the network.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ModelChoice {
+    /// The full id `/model <id>` would take — `ollama/llama3.2`,
+    /// `anthropic/claude-opus-4-5`.
+    pub id: String,
+    /// Group heading this row sits under: `Local (Ollama)`, `anthropic`, …
+    pub group: String,
+    /// Dim right-hand column: what the row is good for, or why it can't run.
+    pub detail: String,
+    /// Ready to use right now. `false` for an Ollama model that is known but
+    /// not pulled — still selectable (selection triggers the pull), but marked
+    /// so the list never implies it will answer instantly.
+    pub ready: bool,
+}
+
 /// Top-level UI mode. Like `TurnState` this is a sum type instead of a
 /// zoo of independent bools. `EditingInput` is the default.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -1180,6 +1199,18 @@ pub enum UiMode {
     },
     /// `/model` — list of available models visible.
     ModelList,
+    /// `/model` with no argument: the interactive model picker. `candidates`
+    /// is everything discovery found (local Ollama models plus each keyed
+    /// remote provider's catalog); `query` narrows it as the user types, which
+    /// is what keeps a provider returning 200 ids usable.
+    ModelPicker {
+        candidates: Vec<ModelChoice>,
+        query: String,
+        cursor: usize,
+        /// Discovery is still in flight. Rendered as a "searching…" row rather
+        /// than an empty list, so a slow provider doesn't look like "no models".
+        loading: bool,
+    },
     /// Double-Esc rewind: pick an earlier user message to fork the session
     /// at. Candidates are user-role Normal messages, newest first. Selecting
     /// one forks into a NEW session (original preserved, lineage stamped)

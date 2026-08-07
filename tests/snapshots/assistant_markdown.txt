@@ -1,0 +1,17 @@
+ > read me the clipboard notes  <TIME>
+
+ ● Clipboard paste is wired for every backend, with prerequisites:
+     • Windows — Clipboard::ContainsImage() misses a PNG-only clipboard, so No image data
+       found in clipboard was the result of every screenshot paste.
+     • Linux — needs wl-clipboard on Wayland or xclip on X11, plus WAYLAND_DISPLAY/DISPLAY set.
+
+   | OS      | Backend    | Guard |
+   |---------|------------|-------|
+   | Windows | PowerShell | 10s   |
+   | macOS   | pngpaste   | 5s    |
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────────────────────────────────────────────────
+<USER>@<HOST>:<CWD>   <CONTEXT GAUGE>
+mermaid v<VERSION> · safety: ask · reasoning: medium                          anthropic/pty-visual-test

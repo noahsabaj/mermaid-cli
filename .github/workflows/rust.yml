@@ -86,6 +86,19 @@ jobs:
         # nextest skipping them loses nothing.
         run: cargo nextest run --workspace
 
+      # The insta snapshot suite is `#[cfg(all(test, unix))]`, so a Windows
+      # developer cannot run it and only learns of a mismatch from CI. insta
+      # writes the rendered frame to a `.snap.new` sibling on failure; publish
+      # those so the diff is reviewable (and appliable) without a unix box.
+      - name: Upload pending snapshots
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pending-snapshots-${{ matrix.os }}-${{ matrix.rust }}
+          path: '**/*.snap.new'
+          if-no-files-found: ignore
+          retention-days: 3
+
       # Only check documentation on stable Linux
       - name: Check documentation
         if: matrix.rust == 'stable' && matrix.os == 'ubuntu-latest'

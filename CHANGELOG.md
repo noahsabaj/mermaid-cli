@@ -7,6 +7,202 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Plan mode is a safety mode, not a badge on top of one.** It now sits in the
+  Shift+Tab cycle as its strictest position: `plan → read_only → ask → auto →
+  full_access → plan`. `Alt+P` is gone — one keystroke reaches every mode, and
+  `/safety plan` works like any other level. The footer reads plain
+  `safety: plan`; the old band, `plan mode on (alt+p to toggle) - restores:
+  <mode>`, described the retired model where planning layered over a remembered
+  mode. `PlanState.resume_safety_mode` is gone with it: a mode does not carry
+  the mode before it. Leaving plan by cycling lands on the next position;
+  leaving by `/plan off`, plan approval, or a handoff lands on the configured
+  `[safety] mode`. Every switch routes through one `apply_safety_mode`, which
+  owns the plan-file allocation on entry and the teardown on exit, so the mode
+  and the read-only floor cannot disagree.
+
+### Fixed
+
+- **Screenshot paste works on Windows, and image paste is at parity across
+  every backend.** A "copied image" is three different things depending on the
+  app that copied it, and mermaid only handled one of them per platform:
+  - *An encoded blob with no raster form* — GIMP, Figma, and some Electron apps
+    put `PNG` on the Windows clipboard with `CF_BITMAP` absent.
+    `Clipboard::ContainsImage()` answers False for exactly that payload, so
+    `has_image()` said no and Ctrl+V fell through to a text read. The Windows
+    read path now takes the raw `PNG` stream byte-for-byte when present (which
+    also preserves alpha) and only falls back to `GetImage()` re-encoding.
+  - *A file reference* — Explorer / Finder / a Linux file manager "Copy" puts
+    `CF_HDROP` / `public.file-url` / `text/uri-list` on the clipboard, which no
+    backend handled. All four now resolve the reference and attach the file
+    (png/jpeg/gif/webp/bmp/tiff, percent-escapes decoded, capped at 32 MB so a
+    stray Ctrl+C on a huge scan can't be slurped into the process).
+  - *A raster handle* — unchanged, still works.
+
+  `has_image` and `read_image_bytes` are now both defined in terms of one
+  `probe_image_source`, so they cannot disagree about whether a paste is
+  possible — the split that let Windows report an image it then failed to read.
+  Windows also stops hard-coding `powershell.exe`: the host is resolved once,
+  preferring Windows PowerShell (STA by default) and falling back to `pwsh
+  -STA`, since `System.Windows.Forms.Clipboard` throws in an MTA. `System.
+  Drawing` is loaded explicitly (PowerShell 7 does not auto-load it), the temp
+  path is single-quote-escaped, and `tool_exists` uses `where.exe` on Windows
+  rather than the POSIX-only `which`.
+- **Multi-word inline code no longer renders as a row of disconnected boxes.**
+  The transcript wrapper re-emitted every separator space unstyled, punching
+  plain gaps through the code background — so `` `No image data found` ``
+  arrived as five separate highlights, and any wrapped answer containing a code
+  phrase came out visually shredded. A gap now carries the style of the span it
+  came from: interior gaps of a styled run keep the run's paint, gaps between
+  runs stay plain (the space in front of a link is still not underlined).
+- **The question modal wraps instead of clipping.** It built its lines
+  width-blind, so a long option description ran under the right border and was
+  cut mid-word. Labels, descriptions, the question, notes, and footer hints now
+  wrap with a hanging indent, and the height estimator measures the wrapped
+  lines so the reserved zone matches what is drawn.
+- **Clipboard copies toast instead of accumulating.** "Copied N chars to
+  clipboard" went into the chat transcript and stayed there for the rest of the
+  session. A copy is feedback on a keystroke, not conversation: it now shows
+  right-aligned above the input for two seconds and expires on its own.
+  Failures still go to the transcript, where they can be read after the fact.
+- **Windows spawns no longer open stray console windows.** `DETACHED_PROCESS`
+  gives a child *no console at all*, so the moment a console-subsystem child
+  touches console I/O, Windows allocates one — and on Windows 11, where Windows
+  Terminal is the default console host, that allocation opens a **visible
+  window**. Redirecting stdio to null does not prevent it: the window comes from
+  the console allocation, not from output. Killing the child then orphans the
+  window on the desktop showing a launch error.
+
+  Three spawn sites used it, two of them in production: ollama autostart
+  (`ollama/server.rs`) and the managed-search server (`searxng/mod.rs`), plus a
+  test helper that leaked one window per test-suite run. All now use
+  `CREATE_NO_WINDOW`, which is what the exec tool's background launcher already
+  used — same isolation (own console, exempt from Ctrl+C fan-out, survives
+  mermaid exiting) with no window, and strictly more compatible, since
+  PowerShell dies at startup under `DETACHED_PROCESS`. The constant is removed
+  rather than left available to reach for, and `no_spawn_site_uses_detached_
+  process` fails the build if it comes back. Measured: `cmd /C ping … >NUL`
+  under `DETACHED_PROCESS` adds one visible top-level window, under
+  `CREATE_NO_WINDOW` adds none; two full test runs after the fix leave zero.
+- **Compaction works on small context windows.** Two sizing bugs made `/compact`
+  impossible below roughly a 10k window, and made it *worse* as the window got
+  smaller:
+  - `max_input_tokens` subtracted a flat 8k summary cap from the window and then
+    treated a non-positive result as "window unknown", falling back to the most
+    permissive 64k budget. Measured on identical history, a 9k model got a
+    2,688-char excerpt and compacted fine, while an 8k model got 16,059 chars
+    and failed — shrinking the window grew the request. `summary_input_budget`
+    replaces it and is monotonic in the window by construction.
+  - The summarizer's own output cap was a flat 8,000 tokens regardless of the
+    model. At a 4k window it asked for twice the entire window, so no budget
+    could have made it fit. `summary_output_tokens` scales it to a quarter of a
+    known window, with `summary_max_tokens` still the ceiling — so large and
+    unknown windows behave exactly as before.
+
+  A window genuinely too small to hold a checkpoint now skips with
+  `CompactionSkip::WindowTooSmall` ("the model's context window is too small to
+  hold a checkpoint") instead of building a request guaranteed to be rejected.
+  The fit invariant was already tested — but only at a 32k window, comfortably
+  above the cliff, which is why this went unnoticed; it is now checked at 128k,
+  32k, 16k, 9k, 8k, 4k, and 2k, alongside a monotonicity test.
+- **A compaction receipt and its record report the same number.** `after_tokens`
+  counts a replacement whose receipt text prints `after_tokens`, and the code
+  ran exactly two passes of that fixpoint, keeping the message from one
+  iteration and the record from the next. The transcript receipt and
+  `/context`'s "last compaction" line therefore disagreed. It now iterates to a
+  fixpoint and keeps the replacement built *from* the record it reports.
+- **`/clear` no longer blanks the context gauge either.** A cleared
+  conversation is not one of *unknown* size — the system prompt and every
+  advertised tool schema still ride the next request, routinely tens of
+  thousands of tokens before you type anything. `context: n/a` hid that floor
+  until the first reply came back; the gauge is now re-estimated the same way a
+  rewind does. Cumulative spend still resets: those tokens were really spent,
+  and that is a different number.
+- **A rewind no longer blanks the context gauge.** Double-Esc to an earlier
+  prompt reset `context_usage` to `None`, so a session sitting at 250k/1M
+  dropped to `context: n/a` — which reads as "the meter broke" rather than
+  "there is less context now", and stayed that way until the next model call.
+  The fork's context is in fact the most precisely known thing about it (the
+  prefix the user just picked), so it is re-estimated from the truncated
+  history instead of cleared, through the same computation `/context` uses. It
+  renders with the `~` estimate marker until a real call returns
+  provider-counted usage. Cumulative spend still resets — those tokens were
+  really spent, and that is a different number.
+- **A read-only denial names the risk that tripped it.** Every refusal said
+  "blocks mutations and control actions", so a `curl` was told it had mutated
+  something and the model retried variations of a read. Network, process,
+  external-access, and machine-scoped denials now say so.
+
+### Added
+
+- **`[compaction]` is now a real config section.** Nine knobs that were
+  hard-coded constants — `auto_enabled`, `auto_threshold_percent`, `tail_turns`,
+  `tail_token_budget`, `tool_output_max_chars`, `summary_max_tokens`,
+  `summarizer_input_token_budget`, and the response-reserve bounds — are
+  settable, alongside the existing `max_truncation_recoveries`. An absent
+  section reproduces the constants exactly, pinned by a test.
+
+  Values are sanitized on read rather than validated on load, so a hand-edited
+  config degrades to the nearest workable number instead of refusing to start:
+  the threshold clamps to `1..=100`, `tail_turns` to at least 1 (a checkpoint
+  needs a live turn after it), a `0` budget falls back to its default, and
+  **swapped reserve bounds are ordered rather than obeyed** — `response_reserve`
+  clamps with `.max(min).min(max)`, so an inverted pair would have silently
+  under-reserved on every turn.
+
+  `CompactionRequest::manual`/`auto` now take the policy explicitly instead of
+  defaulting it, so no call site can quietly ignore the user's settings — which
+  is how the auto-compaction path in the effect layer had been reaching for the
+  constants.
+- **`/model` opens a picker instead of printing the current model.** It used to
+  answer a question nobody had — the point of the command is to *change* the
+  model. The pane lists everything this machine can actually reach (local Ollama
+  models grouped first, then each remote provider whose key resolves), marks the
+  active model with a `✔`, and narrows as you type: ↑↓ navigate, Enter switches,
+  Esc cancels and leaves your draft untouched.
+
+  The filter is the part the fixed-length pickers this is modeled on don't need
+  and this one does: a provider's `/models` endpoint routinely returns 100+ ids,
+  so showing a fixed handful would misrepresent what's available and showing all
+  of them would be unusable. Matching is a case-insensitive subsequence over the
+  id, so `oplus` finds `anthropic/claude-opus-4-5`.
+
+  Discovery is best-effort and strictly read-only: the pane opens immediately
+  and fills in, a provider that fails or times out costs its rows rather than
+  the whole listing, and a stopped Ollama is **not** started — a cloud-only user
+  who stopped it to free VRAM must not have it resurrected by opening a list.
+  Selection routes through the same `switch_model` path as `/model <name>`, so a
+  picked model still gets the vision re-probe, the persistence write, and the
+  Ollama auto-pull.
+- **Golden-frame tests: the whole screen, compared cell by cell**
+  (`tests/pty_frame.rs`, `tests/harness/`). Three bugs shipped in one session —
+  inline code rendered as disconnected boxes, a modal clipped mid-word, a status
+  band advertising a removed keybinding — and every unit test passed through all
+  of them, because `Line`/`Span` assertions cannot see a shredded background or
+  a glyph past the border. A golden frame is the missing detector.
+
+  Two things make it work. **Cells, not bytes:** ratatui redraws only changed
+  cells and jumps the rest with cursor moves, so the byte stream is not the
+  screen (`[Image #1] ` arrives split as `[Image` … `#1]`); the stream is fed to
+  a real VT parser and the *grid* is captured. **Redaction, not avoidance:** a
+  frame legitimately holds a version, a sandbox path, a hostname and a clock,
+  each rewritten to a placeholder — including the whole cwd line, since its
+  padding encodes the path's *length*, and the message timestamp, which renders
+  in local time and would otherwise fail in every other timezone.
+
+  Chat rendering is snapshot-able because the transcript is seeded on disk and
+  loaded with `--resume` — no model call, fixed content. Four frames are pinned:
+  startup, assistant markdown (lists, inline code, a table), the `/model` picker,
+  and every safety-mode footer. `UPDATE_SNAPSHOTS=1` rewrites them; review the
+  diff like any other diff.
+- **`tests/pty_visual.rs` — the UI, tested through a real terminal.** Unit tests
+  assert on `Line`/`Span` values, which is exactly why a wrong mode band could
+  ship with every assertion passing. This spawns the actual binary on a pty
+  (openpty / ConPTY) and reads the glyphs that landed on screen: Shift+Tab walks
+  the whole safety cycle in the footer, and Ctrl+V against a PNG-only clipboard
+  splices an `[Image #1]` token into the input.
+
 ## [0.19.1] - 2026-08-05
 
 ### Changed

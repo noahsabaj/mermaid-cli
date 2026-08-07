@@ -33,7 +33,7 @@ use crate::runtime::TaskStatus;
 
 use super::cmd::{ChatRequest, Cmd};
 use super::compaction::{
-    CompactionArchive, CompactionPolicy, CompactionRequest, CompactionResult, CompactionTrigger,
+    CompactionArchive, CompactionRequest, CompactionResult, CompactionTrigger,
     context_exceeds_hard_limit, format_compact_count, should_auto_compact,
 };
 use super::ids::TurnId;
@@ -593,6 +593,22 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             refresh_scratchpad(&mut state, &mut cmds);
             emit_title_if_changed(&mut state, &mut cmds);
         },
+        Msg::AvailableModelsListed(candidates) => {
+            // Only fill a picker that is still open — Esc before discovery
+            // landed drops the event, exactly like `ConversationsListed`.
+            if let UiMode::ModelPicker { query, cursor, .. } = &state.ui.mode {
+                let (query, cursor) = (query.clone(), *cursor);
+                let matches = filter_model_choices(&candidates, &query).len();
+                state.ui.mode = UiMode::ModelPicker {
+                    candidates,
+                    query,
+                    // Keep the cursor if the user already moved it, but never
+                    // leave it past the end of the freshly-arrived list.
+                    cursor: cursor.min(matches.saturating_sub(1)),
+                    loading: false,
+                };
+            }
+        },
         Msg::ConversationsListed(candidates) => {
             if let UiMode::ConversationList { .. } = state.ui.mode {
                 state.ui.mode = UiMode::ConversationList {
@@ -704,9 +720,16 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
         },
         Msg::TransientStatus { text } => {
             // Generic async feedback from effect handlers ("clipboard is empty",
-            // "config saved", etc.). Routed into the chat transcript instead of
-            // the old transient banner above the input.
+            // "config saved", etc.). Routed into the chat transcript because it
+            // is worth reading after the fact.
             push_system(&mut state, &mut cmds, text);
+        },
+        Msg::Toast { text } => {
+            // Feedback on a keystroke the user just made. It expires on its own
+            // against `state.now`; the 60 Hz tick redraws it away. Never a
+            // transcript row — that is what left "Copied N chars to clipboard"
+            // parked above the input for the rest of the session.
+            state.ui.toast = Some((text, state.now + crate::domain::state::TOAST_TTL));
         },
         Msg::EditorReturned { text } => {
             // $EDITOR compose round-trip (Ctrl+O / /editor). `Some` replaces
@@ -1528,46 +1551,21 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
         return;
     }
 
-    // Alt+P toggles plan mode. A dedicated chord rather than a fifth
-    // Shift+Tab cycle entry: plan mode restores the safety mode the user was
-    // in, which a flat cycle can't express, and a cycle entry would put plan
-    // on the path to full_access.
-    if mods.alt && code == KeyCode::Char('p') {
-        if state.session.plan.is_some() {
-            exit_plan_mode(state, cmds);
-        } else {
-            enter_plan_mode(state, cmds);
-        }
+    // Shift+Tab cycles the safety mode (plan → read-only → ask → auto →
+    // full-access). Session-scoped: the `[safety]` config value stays the
+    // persistent default, so a session never silently inherits a more-permissive
+    // mode from a previous run. Mirrors the Alt+T reasoning cycle above.
+    if code == KeyCode::BackTab {
+        apply_safety_mode(state, cmds, cycle_safety(state.session.safety_mode));
+        // The bottom status bar already shows the new safety mode — no banner.
         return;
     }
 
-    // Shift+Tab cycles the safety mode (read-only → ask → auto → full-access).
-    // Session-scoped: the `[safety]` config value stays the persistent default,
-    // so a session never silently inherits a more-permissive mode from a
-    // previous run. Mirrors the Alt+T reasoning cycle above.
-    if code == KeyCode::BackTab {
-        // While planning, the live mode IS `Plan` and the plan read-only floor
-        // is in force, so Shift+Tab cannot mean "switch now" without lying.
-        // Re-target the mode plan exit will restore instead; the status band
-        // shows it as staged. This is why the two can no longer contradict.
-        if let Some(plan) = &mut state.session.plan
-            && state.session.safety_mode.is_planning()
-        {
-            plan.resume_safety_mode = cycle_safety(plan.resume_safety_mode);
-            cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
-            return;
-        }
-        let previous = state.session.safety_mode;
-        let next = cycle_safety(previous);
-        state.session.safety_mode = next;
-        // Leaving read_only past a stale denial nudges the model to re-attempt
-        // (hidden from the transcript); `build_chat_request` additionally
-        // rewrites the stale denials themselves.
-        note_safety_mode_change(state, cmds, previous, next);
-        // Persist now so `--resume`/`--continue` restore this mode even if the
-        // user changes it and quits without sending another message.
-        cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
-        // The bottom status bar already shows the new safety mode — no banner.
+    // Model picker (`/model`): ↑/↓ navigate, Enter switches, Esc dismisses,
+    // typing filters. Placed before the conversation picker for no reason
+    // other than declaration order — the modes are mutually exclusive.
+    if matches!(state.ui.mode, UiMode::ModelPicker { .. }) {
+        handle_model_picker_key(state, cmds, code);
         return;
     }
 
@@ -2113,13 +2111,21 @@ fn fork_conversation_at(state: &mut State, cmds: &mut Vec<Cmd>, message_index: u
     let selected = original.messages().get(message_index).cloned();
 
     // 3. Swap. Cumulative token meters continue (same spend, same session of
-    //    work); context/last-usage described the dropped suffix — reset.
+    //    work); last-usage described a model call on the dropped suffix, so it
+    //    has no successor here — reset.
     // The fork starts with an empty checklist (a rewound plan describes
     // dropped work); the broker must forget it too or the next task tool
     // call would republish the stale list.
     state.session.conversation = fork;
-    state.session.context_usage = None;
     state.session.last_token_usage = None;
+    // The context gauge is RE-ESTIMATED, not cleared. Dropping it to `None`
+    // rendered "context: n/a" — which reads as "unknown", when in fact the
+    // fork's context is the most precisely known thing about it: the prefix we
+    // just chose. The gauge going 250k → n/a after a rewind looked like the
+    // meter had broken; it should go 250k → whatever the prefix costs.
+    // Marked as an estimate (the `~` prefix) until the next real call returns
+    // provider-counted usage.
+    state.session.context_usage = Some(estimate_current_context(state));
     cmds.push(Cmd::SyncTaskStore(crate::domain::TaskStore::default()));
     // The fork minted a fresh conversation id, so it gets its own scratch
     // dir too — the original session's scratch contents describe work on
@@ -2193,6 +2199,99 @@ fn refresh_scratchpad(state: &mut State, cmds: &mut Vec<Cmd>) {
     cmds.push(Cmd::EnsureScratchpad {
         session_id: state.session.conversation.id.clone(),
     });
+}
+
+/// Switch the session model. The one path — `/model <id>` and the `/model`
+/// picker both land here, so a model chosen from the list gets the same
+/// vision re-probe, persistence, and Ollama pull as one typed by hand.
+fn switch_model(state: &mut State, cmds: &mut Vec<Cmd>, new_model: String) {
+    let pull_target = ollama_pull_target(&new_model);
+    state.session.model_id = new_model.clone();
+    state.runtime.set_model(&new_model);
+    // Refresh vision capability for the newly-selected model (set_model
+    // reset the snapshot to a static default). Nag only if an image is
+    // already staged — i.e. you switched TO a no-vision model with a
+    // pending paste; otherwise this just keeps `/doctor` honest.
+    cmds.push(Cmd::ProbeVision {
+        model_id: state.session.model_id.clone(),
+        warn: !state.ui.attachments.is_empty(),
+    });
+    // The bottom status bar shows the new model — no banner.
+    cmds.push(Cmd::PersistLastModel(new_model));
+    if let Some(model) = pull_target {
+        cmds.push(Cmd::PullOllamaModel { model });
+    }
+}
+
+/// Rows of the `/model` picker matching `query`, in list order.
+///
+/// Subsequence match over the model id, case-insensitive: typing `oplus` finds
+/// `anthropic/claude-opus-4-5`. A provider can return 200 ids, so filtering is
+/// what makes the list usable at all — the difference between this picker and
+/// the fixed four-row ones it is modeled on.
+pub(crate) fn filter_model_choices<'a>(
+    candidates: &'a [crate::domain::state::ModelChoice],
+    query: &str,
+) -> Vec<&'a crate::domain::state::ModelChoice> {
+    let needle = query.trim().to_lowercase();
+    candidates
+        .iter()
+        .filter(|c| needle.is_empty() || is_subsequence(&needle, &c.id.to_lowercase()))
+        .collect()
+}
+
+/// Are `needle`'s chars present in `haystack`, in order (not necessarily
+/// adjacent)? Both are expected lowercase.
+fn is_subsequence(needle: &str, haystack: &str) -> bool {
+    let mut chars = haystack.chars();
+    needle.chars().all(|n| chars.any(|h| h == n))
+}
+
+/// Handle keyboard input while the `/model` picker is open. ↑/↓ walk the
+/// filtered rows, Enter switches, Esc dismisses, and printable characters
+/// (plus Backspace) edit the filter — the input buffer is untouched, so
+/// dismissing restores whatever draft was there.
+fn handle_model_picker_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode) {
+    let UiMode::ModelPicker {
+        ref candidates,
+        ref mut query,
+        ref mut cursor,
+        ..
+    } = state.ui.mode
+    else {
+        return;
+    };
+    match code {
+        KeyCode::Up => *cursor = cursor.saturating_sub(1),
+        KeyCode::Down => {
+            let max = filter_model_choices(candidates, query)
+                .len()
+                .saturating_sub(1);
+            if *cursor < max {
+                *cursor += 1;
+            }
+        },
+        KeyCode::Enter => {
+            let chosen = filter_model_choices(candidates, query)
+                .get(*cursor)
+                .map(|c| c.id.clone());
+            state.ui.mode = UiMode::EditingInput;
+            if let Some(id) = chosen {
+                switch_model(state, cmds, id);
+            }
+        },
+        KeyCode::Escape => state.ui.mode = UiMode::EditingInput,
+        KeyCode::Backspace => {
+            query.pop();
+            *cursor = 0;
+        },
+        KeyCode::Char(c) => {
+            query.push(c);
+            // Narrowing invalidates the old row position; start from the top.
+            *cursor = 0;
+        },
+        _ => {},
+    }
 }
 
 /// Handle keyboard input while the conversation-list picker is open.
@@ -2370,22 +2469,20 @@ fn cycle_reasoning(current: crate::models::ReasoningLevel) -> crate::models::Rea
 }
 
 /// Cycle SafetyMode by increasing permissiveness, wrapping around. Used by
-/// Shift+Tab: ReadOnly → Ask → Auto → FullAccess → ReadOnly.
+/// Shift+Tab: Plan → ReadOnly → Ask → Auto → FullAccess → Plan.
+///
+/// Plan is a position in the cycle like any other mode — it is the strictest
+/// one (`permissiveness() == 0`), so the walk starts there. Entering it still
+/// allocates a plan path and may swap the model; that side of the transition
+/// lives in [`apply_safety_mode`], which every mode switch routes through.
 fn cycle_safety(current: crate::runtime::SafetyMode) -> crate::runtime::SafetyMode {
     use crate::runtime::SafetyMode as S;
     match current {
+        S::Plan => S::ReadOnly,
         S::ReadOnly => S::Ask,
         S::Ask => S::Auto,
         S::Auto => S::FullAccess,
-        S::FullAccess => S::ReadOnly,
-        // Plan is NOT a position in the cycle: entering it allocates a plan
-        // path and may swap the model, and leaving it runs the approval /
-        // restore path — neither belongs on a keystroke that just widens
-        // permissions. Alt+P and `/plan` enter it; `exit_plan_mode` and
-        // `/plan off` leave it. While planning, Shift+Tab cycles the STAGED
-        // resume mode instead (see the `BackTab` handler), so this arm is
-        // defensive only; return the strictest real mode.
-        S::Plan => S::ReadOnly,
+        S::FullAccess => S::Plan,
     }
 }
 
@@ -2464,6 +2561,18 @@ fn handle_paste(state: &mut State, paste: Paste) {
     // text; Ctrl+V clipboard reads — which can be images — arrive separately as
     // `Msg::ClipboardRead`.
     let Paste::Text(t) = paste;
+    // A picker that filters as you type owns the keyboard, so it must own the
+    // paste too. This went unnoticed because a paste normally arrives as one
+    // burst: it silently typed into the composer *behind* the open pane. The
+    // coalescer makes it reachable by ordinary typing — fast keystrokes get
+    // batched into a paste, so a filter typed at speed lands split between the
+    // pane and the hidden composer, character by character.
+    if let UiMode::ModelPicker { query, cursor, .. } = &mut state.ui.mode {
+        query.push_str(&t);
+        // Narrowing invalidates the old row position (same rule as a keystroke).
+        *cursor = 0;
+        return;
+    }
     insert_text_at_cursor(state, &t);
 }
 
@@ -2648,29 +2757,18 @@ fn handle_submit_prompt(
 fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
     match cmd {
         SlashCmd::Model(None) => {
-            push_system(
-                state,
-                cmds,
-                format!("Current model: {}", state.session.model_id),
-            );
+            // Open the picker immediately and fill it when discovery lands, so
+            // a slow provider costs a late row rather than a frozen keystroke.
+            state.ui.mode = UiMode::ModelPicker {
+                candidates: Vec::new(),
+                query: String::new(),
+                cursor: 0,
+                loading: true,
+            };
+            cmds.push(Cmd::ListAvailableModels);
         },
         SlashCmd::Model(Some(new_model)) => {
-            let pull_target = ollama_pull_target(&new_model);
-            state.session.model_id = new_model.clone();
-            state.runtime.set_model(&new_model);
-            // Refresh vision capability for the newly-selected model (set_model
-            // reset the snapshot to a static default). Nag only if an image is
-            // already staged — i.e. you switched TO a no-vision model with a
-            // pending paste; otherwise this just keeps `/doctor` honest.
-            cmds.push(Cmd::ProbeVision {
-                model_id: state.session.model_id.clone(),
-                warn: !state.ui.attachments.is_empty(),
-            });
-            // The bottom status bar shows the new model — no banner.
-            cmds.push(Cmd::PersistLastModel(new_model));
-            if let Some(model) = pull_target {
-                cmds.push(Cmd::PullOllamaModel { model });
-            }
+            switch_model(state, cmds, new_model);
         },
         SlashCmd::Reasoning(None) => {
             push_system(
@@ -2691,51 +2789,17 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
                 state,
                 cmds,
                 format!(
-                    "Safety: {} — options: read_only, ask, auto, full_access (Shift+Tab cycles)",
+                    "Safety: {} — options: plan, read_only, ask, auto, full_access (Shift+Tab \
+                     cycles)",
                     state.session.safety_mode.as_str()
                 ),
             );
         },
         SlashCmd::Safety(Some(mode)) => {
-            // `/safety plan` is not the way in: entering plan mode allocates a
-            // plan path and may swap the model, and leaving it runs the
-            // approval/restore path. Point the user at the real entry.
-            if mode.is_planning() {
-                push_system(
-                    state,
-                    cmds,
-                    "Use /plan (or Alt+P) to enter plan mode — /safety switches permission \
-                     levels only.",
-                );
-                return;
-            }
-            // While planning, `/safety <mode>` stages the post-plan mode rather
-            // than dropping the floor mid-draft (same contract as Shift+Tab).
-            if let Some(plan) = &mut state.session.plan
-                && state.session.safety_mode.is_planning()
-            {
-                plan.resume_safety_mode = mode;
-                push_system(
-                    state,
-                    cmds,
-                    format!(
-                        "Staged: leaving plan mode will restore {}. The plan read-only floor \
-                         stays in effect until then.",
-                        mode.as_str()
-                    ),
-                );
-                cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
-                return;
-            }
-            // Session-scoped (mirrors Shift+Tab) — not written to the config.
-            let previous = state.session.safety_mode;
-            state.session.safety_mode = mode;
-            // Leaving read_only past a stale denial nudges the model to
-            // re-attempt (hidden). See the Shift+Tab handler.
-            note_safety_mode_change(state, cmds, previous, mode);
-            // Persist so `--resume`/`--continue` restore this mode (see the
-            // Shift+Tab handler).
-            cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
+            // `plan` is a mode like any other here — `apply_safety_mode` runs
+            // the plan-file allocation / teardown that entering or leaving it
+            // needs. Session-scoped (mirrors Shift+Tab) — not written to config.
+            apply_safety_mode(state, cmds, mode);
             // The bottom status bar shows the new mode — no banner.
         },
         SlashCmd::Plan(arg) => match arg.as_deref().map(str::trim) {
@@ -2746,7 +2810,11 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
                     let path = plan_path_display(state, &plan.plan_path.clone());
                     push_system(state, cmds, format!("Plan file (drafting): {path}"));
                 },
-                None => push_system(state, cmds, "Not in plan mode (Alt+P or /plan enters it)"),
+                None => push_system(
+                    state,
+                    cmds,
+                    "Not in plan mode (/plan or Shift+Tab enters it)",
+                ),
             },
             Some("config") => {
                 state.ui.mode = UiMode::PlanConfig { cursor: 0 };
@@ -3398,7 +3466,11 @@ fn handle_manual_compact(state: &mut State, cmds: &mut Vec<Cmd>, instructions: O
     state.runtime.auto_compact_suppressed = false;
     cmds.push(Cmd::CompactConversation {
         turn,
-        request: CompactionRequest::manual(build_chat_request(state), instructions),
+        request: CompactionRequest::manual(
+            build_chat_request(state),
+            instructions,
+            state.settings.compaction.policy(),
+        ),
     });
 }
 
@@ -3594,6 +3666,29 @@ fn usage_text(state: &State) -> String {
     lines.join("\n")
 }
 
+/// Estimate the context the NEXT dispatch would carry, from the conversation
+/// as it stands. Same computation `/context` shows, so the footer gauge and
+/// `/context` never disagree.
+///
+/// Used wherever the transcript is rewritten out from under a
+/// provider-reported figure (a rewind fork): the old number described messages
+/// that no longer exist, but the new one is computable — so recompute it
+/// rather than blanking the gauge.
+fn estimate_current_context(state: &State) -> super::state::ContextUsageSnapshot {
+    let request = build_chat_request(state);
+    let max_context = state
+        .session
+        .context_usage
+        .as_ref()
+        .and_then(|snapshot| snapshot.max_tokens)
+        .or(state.runtime.provider_capabilities.max_context_tokens);
+    // The request carries MCP tools only; the effect runner appends the
+    // built-in schemas at dispatch. Fold them in so the gauge matches what the
+    // next call actually sends (the `/context` precedent).
+    super::state::estimate_context_usage_for_request(&request, max_context)
+        .with_additional_tokens(state.runtime.builtin_tool_schema_tokens)
+}
+
 fn context_text(state: &State) -> String {
     let mut lines = Vec::new();
     lines.push("Context".to_string());
@@ -3693,7 +3788,7 @@ fn context_text(state: &State) -> String {
         lines.push(String::new());
     }
 
-    let policy = CompactionPolicy::default();
+    let policy = state.settings.compaction.policy();
     let response_reserve = policy.response_reserve(&request);
     let usage_summary = match (next_snapshot.used_percent, next_snapshot.max_tokens) {
         (Some(percent), Some(_)) if percent >= policy.auto_threshold_percent => {
@@ -4161,7 +4256,16 @@ fn handle_confirm_accepted(state: &mut State, cmds: &mut Vec<Cmd>) {
             state.session.conversation.git_branch = git_branch;
             state.session.last_token_usage = None;
             state.session.cumulative_token_usage = TokenUsageTotals::default();
-            state.session.context_usage = None;
+            // A cleared conversation is not a conversation of unknown size — it
+            // is a KNOWN, non-zero one: the system prompt and every advertised
+            // tool schema still ride the next request, routinely tens of
+            // thousands of tokens before the user types anything. Blanking the
+            // gauge to `context: n/a` hid that floor until the first reply came
+            // back. Same treatment as a rewind (see `estimate_current_context`).
+            //
+            // Cumulative spend above stays reset: those tokens were really
+            // spent, and that is a different number.
+            state.session.context_usage = Some(estimate_current_context(state));
             state.runtime.auto_compact_suppressed = false;
             state.turn = TurnState::Idle;
             // The fresh conversation starts with an empty checklist; the
@@ -4718,8 +4822,11 @@ fn handle_stream_done(
                     .as_ref()
                     .and_then(|s| s.max_tokens)
                     .or(state.runtime.provider_capabilities.max_context_tokens);
-                let reserve =
-                    CompactionPolicy::default().response_reserve(&build_chat_request(state));
+                let reserve = state
+                    .settings
+                    .compaction
+                    .policy()
+                    .response_reserve(&build_chat_request(state));
                 match crate::domain::compaction::classify_length_stop(
                     usage.as_ref(),
                     window,
@@ -4929,6 +5036,7 @@ fn handle_stream_done(
             request: CompactionRequest::auto(
                 build_chat_request(state),
                 CompactionTrigger::TruncationRecovery,
+                state.settings.compaction.policy(),
             ),
         });
         return;
@@ -5508,7 +5616,7 @@ fn note_plan_tool_outcome(
 /// change, and re-stamp the snapshot. The single un-bypassable announcement
 /// path for plan entry/exit, safety flips, and model swaps — the transitions
 /// themselves stay message-log-free, and rapid flips between dispatches
-/// (Alt+P on, Alt+P off) collapse to no marker at all.
+/// (plan on, plan off) collapse to no marker at all.
 ///
 /// A `None` snapshot (fresh conversation, `/clear`, fresh handoff, or a save
 /// from before the field existed) establishes the baseline silently: the
@@ -5891,23 +5999,20 @@ fn system_prompt_for_state(state: &State) -> String {
     };
     // While a plan is being drafted the live-mode line would mislead ("attempt
     // gated actions") — the effective policy is the plan-mode read-only floor.
-    // The restore target is the STAGED resume mode, which Shift+Tab may have
-    // re-targeted since entry.
-    let safety_line = match &state.session.plan {
-        Some(plan) if planning => format!(
-            "Safety mode: plan (a plan is being drafted; the plan-mode read-only floor is in \
-             effect; leaving plan mode restores {}).",
-            plan.resume_safety_mode.as_str()
-        ),
-        // Not planning: the live mode is the whole story. (`Some(_)` with a
-        // non-plan mode is the brief window between plan-data teardown and
-        // mode restore; the live line is correct there too.)
-        _ => format!(
+    // There is no restore target to name: plan is one position in the same
+    // Shift+Tab cycle, and the user leaves it by picking another mode.
+    let safety_line = if planning {
+        "Safety mode: plan (the strictest mode: a plan is being drafted and the plan-mode \
+         read-only floor is in effect; the user leaves it with Shift+Tab or /safety like any \
+         other mode)."
+            .to_string()
+    } else {
+        format!(
             "Safety mode: {} (live — the user can switch it anytime with Shift+Tab or /safety; \
              trust this over any earlier tool error, and attempt gated actions rather than \
              assuming they will fail).",
             state.session.safety_mode.as_str()
-        ),
+        )
     };
     let mut prompt = format!(
         "{}\n\n## Current Session\nCurrent working directory: {}\n{}\nTreat this as the project root unless the user specifies a different path.",
@@ -6336,17 +6441,65 @@ fn cycle_plan_config_row(state: &mut State, row: usize, forward: bool) {
     }
 }
 
+/// Switch the session safety mode, running whatever the transition needs.
+///
+/// The ONE entry point for every interactive mode change (Shift+Tab,
+/// `/safety <mode>`), because `Plan` is a mode with side effects on both
+/// edges: entering allocates the plan file and applies the `[plan]`
+/// model/reasoning overrides, leaving tears them back down. Routing every
+/// switch through here is what lets plan sit in the flat Shift+Tab cycle
+/// without a separate "am I planning?" flag to contradict it.
+fn apply_safety_mode(state: &mut State, cmds: &mut Vec<Cmd>, next: crate::runtime::SafetyMode) {
+    let previous = state.session.safety_mode;
+    if previous == next {
+        return;
+    }
+    if next.is_planning() {
+        // Entry does the full flip (mode included) and persists.
+        enter_plan_mode_state(state, cmds);
+        return;
+    }
+    if let Some(plan) = state.session.plan.take() {
+        // Leaving plan for a real permission level: undo the `[plan]`
+        // overrides, drop the standing reminder, then land on the mode the
+        // user actually picked (NOT a remembered restore target — there
+        // isn't one any more).
+        restore_plan_overrides(state, &plan);
+        retract_plan_reminder(state);
+    }
+    state.session.safety_mode = next;
+    // Leaving read_only past a stale denial nudges the model to re-attempt
+    // (hidden from the transcript); `build_chat_request` additionally rewrites
+    // the stale denials themselves.
+    note_safety_mode_change(state, cmds, previous, next);
+    // Persist now so `--resume`/`--continue` restore this mode even if the user
+    // changes it and quits without sending another message.
+    cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
+}
+
+/// Where a session lands when it leaves plan mode without naming a
+/// destination — `/plan off`, plan approval, a handoff. The configured
+/// `[safety] mode` (the level this session would be in had it never planned),
+/// clamped away from `plan` itself so "leave" can never mean "stay".
+///
+/// There is deliberately no remembered per-session restore target: plan is a
+/// safety mode like the others, and a mode does not carry the mode before it.
+fn mode_after_plan(state: &State) -> crate::runtime::SafetyMode {
+    let configured = state.settings.safety.mode;
+    if configured.is_planning() {
+        crate::runtime::SafetyMode::Ask
+    } else {
+        configured
+    }
+}
+
 /// The pure state flip of entering plan mode: allocate the plan file path,
 /// set `session.plan`, retract stale nudges, persist. Shared by the
-/// interactive entry (Alt+P / `/plan`) and the `enter_plan_mode` tool — the
-/// tool path runs mid-batch, where appending a system message would
-/// interleave between an assistant `tool_use` and its tool results, so THIS
-/// helper never touches the message log. Returns the allocated path; `None`
-/// when already planning or a subagent.
-///
-/// `session.safety_mode` is deliberately untouched — it is the restore target
-/// (shown as "restores: <mode>"); tool dispatch floors the effective mode
-/// while `session.plan` is `Some`.
+/// interactive entry (Shift+Tab / `/plan` / `/safety plan`) and the
+/// `enter_plan_mode` tool — the tool path runs mid-batch, where appending a
+/// system message would interleave between an assistant `tool_use` and its
+/// tool results, so THIS helper never touches the message log. Returns the
+/// allocated path; `None` when already planning or a subagent.
 fn enter_plan_mode_state(state: &mut State, cmds: &mut Vec<Cmd>) -> Option<std::path::PathBuf> {
     // Children explore, they don't plan (and have no user to approve).
     if state.session.is_subagent || state.session.plan.is_some() {
@@ -6376,15 +6529,12 @@ fn enter_plan_mode_state(state: &mut State, cmds: &mut Vec<Cmd>) -> Option<std::
         ));
     }
     // The mode BECOMES plan. `session.plan` carries only the plan's data, so
-    // there is no second value that can disagree with the floor; the mode to
-    // come back to is staged here (Shift+Tab re-targets it while planning).
-    let resume_safety_mode = state.session.safety_mode;
+    // there is no second value that can disagree with the floor.
     state.session.safety_mode = crate::runtime::SafetyMode::Plan;
     state.session.plan = Some(super::state::PlanState {
         plan_path: plan_path.clone(),
         prev_model_id,
         prev_reasoning,
-        resume_safety_mode,
     });
     // Retract any pending safety-mode nudge: "re-attempt gated actions" would
     // steer the model wrong now that the read-only floor applies. (The old
@@ -6401,28 +6551,29 @@ fn enter_plan_mode_state(state: &mut State, cmds: &mut Vec<Cmd>) -> Option<std::
     Some(plan_path)
 }
 
-/// Interactive plan-mode entry (Alt+P / `/plan`): the state flip only — the
-/// status band announces the mode (it shows `plan mode on … restores: <mode>`
-/// while `session.plan` is set), so no transcript row is added HERE. The
-/// model learns the mode from the context-delta marker the injector appends
-/// at the next dispatch (`advertise_context_changes`), the per-dispatch tail
-/// reminder, and the system-prompt appendix.
+/// Interactive plan-mode entry (`/plan`, `/safety plan`, Shift+Tab): the state
+/// flip only — the status band announces the mode (`safety: plan`, like every
+/// other mode), so no transcript row is added HERE. The model learns the mode
+/// from the context-delta marker the injector appends at the next dispatch
+/// (`advertise_context_changes`), the per-dispatch tail reminder, and the
+/// system-prompt appendix.
 fn enter_plan_mode(state: &mut State, cmds: &mut Vec<Cmd>) {
     if let Some(plan) = &state.session.plan {
         let path = plan_path_display(state, &plan.plan_path.clone());
         push_system(
             state,
             cmds,
-            format!("Already in plan mode — plan file: {path} (Alt+P or /plan off leaves)"),
+            format!("Already in plan mode — plan file: {path} (Shift+Tab or /plan off leaves)"),
         );
         return;
     }
     enter_plan_mode_state(state, cmds);
 }
 
-/// Undo the `[plan]` model/reasoning overrides stashed at entry and leave the
-/// `Plan` mode for the staged resume mode (entry's mode, or whatever Shift+Tab
-/// re-targeted it to while planning).
+/// Undo the `[plan]` model/reasoning overrides stashed at entry, and leave the
+/// `Plan` mode for [`mode_after_plan`] if the caller has not already picked a
+/// destination. Callers that DO pick one (`apply_safety_mode`) overwrite
+/// `safety_mode` right after this returns.
 fn restore_plan_overrides(state: &mut State, plan: &super::state::PlanState) {
     if let Some(prev) = &plan.prev_model_id {
         state.session.model_id = prev.clone();
@@ -6432,16 +6583,21 @@ fn restore_plan_overrides(state: &mut State, plan: &super::state::PlanState) {
         state.session.reasoning = prev;
     }
     if state.session.safety_mode.is_planning() {
-        state.session.safety_mode = plan.resume_safety_mode;
+        state.session.safety_mode = mode_after_plan(state);
     }
 }
 
-/// Leave plan mode without an approval flow (Alt+P toggle / `/plan off`).
-/// The effective safety mode reverts to `session.safety_mode` simply because
-/// the floor stops applying.
+/// Leave plan mode without an approval flow (`/plan off`). Lands on
+/// [`mode_after_plan`] — the level the session would have been in had it never
+/// planned. Shift+Tab out of plan goes through [`apply_safety_mode`] instead,
+/// which lands on the next mode in the cycle.
 fn exit_plan_mode(state: &mut State, cmds: &mut Vec<Cmd>) {
     let Some(plan) = state.session.plan.take() else {
-        push_system(state, cmds, "Not in plan mode (Alt+P or /plan enters it)");
+        push_system(
+            state,
+            cmds,
+            "Not in plan mode (/plan or Shift+Tab enters it)",
+        );
         return;
     };
     restore_plan_overrides(state, &plan);
@@ -7624,6 +7780,40 @@ mod tests {
         assert!(
             cmds.iter().any(|c| matches!(c, Cmd::SaveConversation(_))),
             "the transcript message is persisted"
+        );
+    }
+
+    /// A copy confirmation is feedback on a keystroke, not conversation: it
+    /// toasts with a deadline and never touches the message log. Routing it
+    /// through `TransientStatus` left "Copied N chars to clipboard" parked
+    /// above the input for the rest of the session.
+    #[test]
+    fn toast_expires_and_never_enters_the_transcript() {
+        let state = fresh_state();
+        let now = state.now;
+        let (state, cmds) = update(
+            state,
+            Msg::Toast {
+                text: "copied 42 chars to clipboard".to_string(),
+            },
+        );
+        let (text, until) = state.ui.toast.clone().expect("toast is armed");
+        assert_eq!(text, "copied 42 chars to clipboard");
+        assert_eq!(until, now + crate::domain::state::TOAST_TTL);
+        assert!(
+            state.session.messages().is_empty(),
+            "a toast must not become a transcript row: {:?}",
+            state.session.messages()
+        );
+        assert!(
+            !cmds.iter().any(|c| matches!(c, Cmd::SaveConversation(_))),
+            "a toast is not worth persisting"
+        );
+        // Expiry is lazy against `state.now` — nothing has to clear it.
+        assert!(now <= until, "live immediately after the keystroke");
+        assert!(
+            now + crate::domain::state::TOAST_TTL + chrono::Duration::milliseconds(1) > until,
+            "gone once the TTL passes"
         );
     }
 
@@ -11428,10 +11618,22 @@ mod tests {
     #[test]
     fn cycle_safety_walks_by_permissiveness() {
         use crate::runtime::SafetyMode as S;
+        // Plan is the strictest position (permissiveness 0), so the walk
+        // starts there and wraps back to it — one flat cycle, no side door.
+        assert_eq!(cycle_safety(S::Plan), S::ReadOnly);
         assert_eq!(cycle_safety(S::ReadOnly), S::Ask);
         assert_eq!(cycle_safety(S::Ask), S::Auto);
         assert_eq!(cycle_safety(S::Auto), S::FullAccess);
-        assert_eq!(cycle_safety(S::FullAccess), S::ReadOnly);
+        assert_eq!(cycle_safety(S::FullAccess), S::Plan);
+        // Every mode is reachable from every other by cycling.
+        let mut seen = vec![S::Ask];
+        let mut cur = S::Ask;
+        for _ in 0..4 {
+            cur = cycle_safety(cur);
+            seen.push(cur);
+        }
+        assert_eq!(cycle_safety(cur), S::Ask, "the cycle closes in 5 steps");
+        assert_eq!(seen.len(), 5, "every mode appears exactly once");
     }
 
     #[test]
@@ -11446,6 +11648,199 @@ mod tests {
             }),
         );
         assert_eq!(state.session.safety_mode, cycle_safety(start));
+    }
+
+    // ── /model picker ────────────────────────────────────────────────
+
+    fn model_choice(id: &str, group: &str) -> crate::domain::state::ModelChoice {
+        crate::domain::state::ModelChoice {
+            id: id.to_string(),
+            group: group.to_string(),
+            detail: String::new(),
+            ready: true,
+        }
+    }
+
+    fn pick_key(code: KeyCode) -> Msg {
+        Msg::Key(Key {
+            code,
+            modifiers: KeyMods::default(),
+        })
+    }
+
+    /// `/model` with no argument opens the picker and asks for discovery. It
+    /// used to just print the current model, which answered a question nobody
+    /// had — the whole point of the command is to CHANGE the model.
+    #[test]
+    fn slash_model_opens_the_picker_and_requests_discovery() {
+        let (state, cmds) = update(fresh_state(), Msg::Slash(SlashCmd::Model(None)));
+        assert!(
+            matches!(state.ui.mode, UiMode::ModelPicker { loading: true, .. }),
+            "expected a loading picker, got {:?}",
+            state.ui.mode
+        );
+        assert!(
+            cmds.iter().any(|c| matches!(c, Cmd::ListAvailableModels)),
+            "the picker must ask for discovery"
+        );
+        assert!(
+            state.session.messages().is_empty(),
+            "opening a picker adds no transcript row"
+        );
+    }
+
+    /// Discovery lands, the user narrows, and Enter switches — the same path
+    /// `/model <id>` takes, so the vision re-probe and persistence still fire.
+    #[test]
+    fn model_picker_filters_then_switches_on_enter() {
+        let (state, _) = update(fresh_state(), Msg::Slash(SlashCmd::Model(None)));
+        let (state, _) = update(
+            state,
+            Msg::AvailableModelsListed(vec![
+                model_choice("ollama/llama3.2", "Local (Ollama)"),
+                model_choice("anthropic/claude-opus-4-5", "anthropic"),
+                model_choice("anthropic/claude-haiku-4-5", "anthropic"),
+            ]),
+        );
+        assert!(matches!(
+            state.ui.mode,
+            UiMode::ModelPicker { loading: false, .. }
+        ));
+
+        // Subsequence match: "ohaik" reaches anthropic/claude-haiku-4-5.
+        let mut state = state;
+        for c in "ohaik".chars() {
+            let (next, _) = update(state, pick_key(KeyCode::Char(c)));
+            state = next;
+        }
+        let UiMode::ModelPicker {
+            ref candidates,
+            ref query,
+            ..
+        } = state.ui.mode
+        else {
+            panic!("picker closed unexpectedly");
+        };
+        let matches = filter_model_choices(candidates, query);
+        assert_eq!(
+            matches.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            vec!["anthropic/claude-haiku-4-5"],
+        );
+
+        let (state, cmds) = update(state, pick_key(KeyCode::Enter));
+        assert_eq!(state.session.model_id, "anthropic/claude-haiku-4-5");
+        assert!(
+            matches!(state.ui.mode, UiMode::EditingInput),
+            "picker closes"
+        );
+        assert!(
+            cmds.iter().any(|c| matches!(c, Cmd::ProbeVision { .. })),
+            "switching re-probes vision"
+        );
+        assert!(
+            cmds.iter().any(|c| matches!(c, Cmd::PersistLastModel(_))),
+            "switching persists the choice"
+        );
+    }
+
+    /// Esc leaves the model untouched, and the draft in the composer survives
+    /// — the picker never wrote to the input buffer.
+    /// A paste while the picker is open must filter it, not type into the
+    /// composer hidden behind it.
+    ///
+    /// Found by a flaky golden-frame test: typing a filter quickly produced a
+    /// query and a composer draft with the characters *interleaved*
+    /// (`filter=zomch`, `composer=zzznat`). The event source coalesces rapid
+    /// keystrokes into `Msg::Paste`, which went straight to the input buffer —
+    /// so how much of a filter survived depended on typing speed. An actual
+    /// Ctrl+V paste always lost the whole thing.
+    #[test]
+    fn a_paste_filters_the_model_picker_rather_than_the_hidden_composer() {
+        let (state, _) = update(fresh_state(), Msg::Slash(SlashCmd::Model(None)));
+        let (state, _) = update(
+            state,
+            Msg::AvailableModelsListed(vec![
+                model_choice("ollama/llama3.2", "Local (Ollama)"),
+                model_choice("anthropic/claude-opus-4-5", "anthropic"),
+            ]),
+        );
+        // A burst (what the coalescer produces from fast typing).
+        let (state, _) = update(
+            state,
+            Msg::Paste(super::super::msg::Paste::Text("opus".to_string())),
+        );
+        let UiMode::ModelPicker {
+            ref candidates,
+            ref query,
+            ..
+        } = state.ui.mode
+        else {
+            panic!("the picker must stay open across a paste");
+        };
+        assert_eq!(query, "opus", "the paste filters the pane");
+        assert_eq!(
+            filter_model_choices(candidates, query)
+                .iter()
+                .map(|c| c.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["anthropic/claude-opus-4-5"],
+        );
+        assert!(
+            state.ui.input_buffer.is_empty(),
+            "nothing may leak into the composer behind the pane: {:?}",
+            state.ui.input_buffer
+        );
+    }
+
+    #[test]
+    fn model_picker_escape_keeps_the_model_and_the_draft() {
+        let (state, _) = type_text(fresh_state(), "half-written prompt");
+        let before = state.session.model_id.clone();
+        let (state, _) = update(state, Msg::Slash(SlashCmd::Model(None)));
+        let (state, cmds) = update(state, pick_key(KeyCode::Escape));
+        assert!(matches!(state.ui.mode, UiMode::EditingInput));
+        assert_eq!(state.session.model_id, before);
+        assert_eq!(state.ui.input_buffer, "half-written prompt");
+        assert!(
+            !cmds.iter().any(|c| matches!(c, Cmd::PersistLastModel(_))),
+            "cancelling must not persist anything"
+        );
+    }
+
+    /// A discovery result that lands after the user already dismissed the
+    /// picker is dropped, not resurrected into a reopened pane.
+    #[test]
+    fn late_discovery_after_escape_is_ignored() {
+        let (state, _) = update(fresh_state(), Msg::Slash(SlashCmd::Model(None)));
+        let (state, _) = update(state, pick_key(KeyCode::Escape));
+        let (state, _) = update(
+            state,
+            Msg::AvailableModelsListed(vec![model_choice("ollama/x", "Local (Ollama)")]),
+        );
+        assert!(matches!(state.ui.mode, UiMode::EditingInput));
+    }
+
+    #[test]
+    fn model_filter_is_a_case_insensitive_subsequence() {
+        let all = vec![
+            model_choice("ollama/llama3.2", "Local (Ollama)"),
+            model_choice("anthropic/claude-opus-4-5", "anthropic"),
+        ];
+        let ids = |q: &str| {
+            filter_model_choices(&all, q)
+                .iter()
+                .map(|c| c.id.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            ids(""),
+            vec!["ollama/llama3.2", "anthropic/claude-opus-4-5"]
+        );
+        assert_eq!(ids("OPUS"), vec!["anthropic/claude-opus-4-5"]);
+        assert_eq!(ids("llama"), vec!["ollama/llama3.2"]);
+        // Subsequence, not substring.
+        assert_eq!(ids("aoi"), vec!["anthropic/claude-opus-4-5"]);
+        assert!(ids("zzz").is_empty());
     }
 
     #[test]
@@ -12228,6 +12623,57 @@ mod tests {
         assert!(state.confirm.is_none());
     }
 
+    /// `/clear` used to blank the gauge to `context: n/a`, which reads as
+    /// "unknown". A cleared conversation is not unknown — the system prompt and
+    /// every advertised tool schema still ride the next request, so the floor is
+    /// known, non-zero, and worth seeing before you type. Same treatment as a
+    /// rewind; cumulative spend still resets, because that is a different number.
+    #[test]
+    fn clearing_re_estimates_the_context_gauge_instead_of_blanking_it() {
+        let mut state = fresh_state();
+        state.runtime.provider_capabilities.max_context_tokens = Some(200_000);
+        state.session.append(ChatMessage::user("one"), state.now);
+        state
+            .session
+            .append(ChatMessage::assistant("two"), state.now);
+        state.session.context_usage = Some(crate::domain::ContextUsageSnapshot::from_usage(
+            &crate::models::TokenUsage::provider(120_000, 900),
+            Some(200_000),
+        ));
+        state.session.cumulative_token_usage = TokenUsageTotals {
+            prompt_tokens: 120_000,
+            completion_tokens: 900,
+            ..Default::default()
+        };
+        state.confirm = Some(super::super::state::Confirmation {
+            prompt: "Clear conversation history?".to_string(),
+            accept_msg_token: super::super::state::ConfirmationTarget::ClearConversation,
+        });
+
+        let (state, _) = update(state, Msg::ConfirmAccepted);
+
+        assert!(state.session.messages().is_empty(), "history is wiped");
+        let gauge = state
+            .session
+            .context_usage
+            .as_ref()
+            .expect("the gauge survives a clear");
+        assert_eq!(gauge.max_tokens, Some(200_000), "the window carries over");
+        assert!(
+            gauge.used_tokens < 120_000,
+            "clearing must shrink the context: {}",
+            gauge.used_tokens
+        );
+        assert!(
+            gauge.is_estimate(),
+            "no provider has counted the fresh context yet"
+        );
+        // Cumulative spend is NOT context — those tokens were really spent, and
+        // `/clear` is a new session for accounting.
+        assert_eq!(state.session.cumulative_token_usage.prompt_tokens, 0);
+        assert!(state.session.last_token_usage.is_none());
+    }
+
     #[test]
     fn confirm_declined_clears_without_action() {
         let mut state = fresh_state();
@@ -12611,45 +13057,66 @@ mod tests {
         );
     }
 
+    /// Alt+P is gone: plan is a position in the Shift+Tab cycle, so the chord
+    /// that used to toggle it must not do anything special any more.
     #[test]
-    fn alt_p_toggles_plan_mode_and_allocates_a_plan_path() {
-        let key = || {
+    fn alt_p_no_longer_toggles_plan_mode() {
+        let (state, _) = update(
+            fresh_state(),
             Msg::Key(Key {
                 code: KeyCode::Char('p'),
                 modifiers: KeyMods {
                     alt: true,
                     ..Default::default()
                 },
+            }),
+        );
+        assert!(state.session.plan.is_none());
+        assert_eq!(state.session.safety_mode, Config::default().safety.mode);
+    }
+
+    /// Shift+Tab walks the whole cycle including plan, and entering plan that
+    /// way allocates the plan file exactly as `/plan` does.
+    #[test]
+    fn shift_tab_cycles_into_plan_mode_and_allocates_a_plan_path() {
+        use crate::runtime::SafetyMode as S;
+        let tab = || {
+            Msg::Key(Key {
+                code: KeyCode::BackTab,
+                modifiers: KeyMods::default(),
             })
         };
-        let (state, _) = update(fresh_state(), key());
-        let plan = state.session.plan.clone().expect("Alt+P enters plan mode");
+        // ask -> auto -> full_access -> plan
+        let (state, _) = update(fresh_state(), tab());
+        assert_eq!(state.session.safety_mode, S::Auto);
+        let (state, _) = update(state, tab());
+        assert_eq!(state.session.safety_mode, S::FullAccess);
+        let (state, _) = update(state, tab());
+        assert_eq!(state.session.safety_mode, S::Plan);
+
+        let plan = state
+            .session
+            .plan
+            .clone()
+            .expect("cycling into plan allocates the plan data");
         assert!(
             plan.plan_path.starts_with("/tmp/project/.mermaid/plans"),
             "plan file is project-local: {:?}",
             plan.plan_path
         );
         assert!(plan.plan_path.extension().is_some_and(|e| e == "md"));
-        // The status band announces the mode — toggling adds no transcript row.
+        // The status band announces the mode — cycling adds no transcript row.
         assert!(
             state.session.messages().is_empty(),
             "entry adds no transcript row (status band carries the mode): {:?}",
             state.session.messages()
         );
-        // Plan IS the safety mode now, and the mode it displaced is staged for
-        // restore — one value, so the two can never disagree.
-        assert_eq!(state.session.safety_mode, crate::runtime::SafetyMode::Plan);
-        assert_eq!(
-            state.session.plan.as_ref().unwrap().resume_safety_mode,
-            Config::default().safety.mode,
-        );
-        let (state, _) = update(state, key());
-        assert!(state.session.plan.is_none(), "Alt+P toggles back off");
-        assert_eq!(
-            state.session.safety_mode,
-            Config::default().safety.mode,
-            "exit restores the staged mode",
-        );
+
+        // One more Shift+Tab leaves plan for the next mode in the cycle — no
+        // remembered restore target, just the next position.
+        let (state, _) = update(state, tab());
+        assert_eq!(state.session.safety_mode, S::ReadOnly);
+        assert!(state.session.plan.is_none(), "plan data is torn down");
         assert!(
             state.session.messages().is_empty(),
             "exit adds no transcript row either: {:?}",
@@ -12704,14 +13171,12 @@ mod tests {
 
     use crate::models::ChatMessageKind;
 
-    fn alt_p() -> Msg {
-        Msg::Key(Key {
-            code: KeyCode::Char('p'),
-            modifiers: KeyMods {
-                alt: true,
-                ..Default::default()
-            },
-        })
+    /// Toggle plan mode the way a user does now that Alt+P is gone.
+    fn plan_on() -> Msg {
+        Msg::Slash(SlashCmd::Plan(None))
+    }
+    fn plan_off() -> Msg {
+        Msg::Slash(SlashCmd::Plan(Some("off".to_string())))
     }
 
     /// Dispatch once and return the request the model would see.
@@ -12743,14 +13208,8 @@ mod tests {
     /// data. Clearing only `session.plan` leaves `safety_mode == Plan`, which
     /// is the same half-state `enter_planning` guards against.
     fn exit_planning(state: &mut State) {
-        let resume = state
-            .session
-            .plan
-            .as_ref()
-            .map(|p| p.resume_safety_mode)
-            .unwrap_or_default();
         state.session.plan = None;
-        state.session.safety_mode = resume;
+        state.session.safety_mode = crate::runtime::SafetyMode::default();
     }
 
     fn markers(request: &ChatRequest) -> Vec<String> {
@@ -12770,36 +13229,18 @@ mod tests {
     /// salience work exists to prevent.
     ///
     /// With one mode value the contradiction is unrepresentable: Shift+Tab
-    /// re-targets the STAGED resume mode, the live mode stays `Plan`, and no
-    /// safety-delta marker can be emitted at all.
+    /// moves the LIVE mode, and the plan floor exists only while that mode is
+    /// `Plan`. So no marker can ever announce a mode the floor contradicts —
+    /// leaving plan and dropping the floor are the same event.
     #[test]
-    fn shift_tab_while_planning_stages_the_mode_and_emits_no_marker() {
+    fn shift_tab_out_of_plan_moves_the_live_mode_and_drops_the_floor_together() {
         use crate::runtime::SafetyMode;
         let mut state = fresh_state();
         dispatch(&mut state, 1);
-        let (mut state, _) = update(state, alt_p());
+        let (mut state, _) = update(state, Msg::Slash(SlashCmd::Plan(None)));
         assert_eq!(state.session.safety_mode, SafetyMode::Plan);
 
-        // Shift+Tab three times: ask -> auto -> full_access -> read_only.
-        for _ in 0..3 {
-            let (next, _) = update(
-                state,
-                Msg::Key(Key {
-                    code: KeyCode::BackTab,
-                    modifiers: KeyMods::default(),
-                }),
-            );
-            state = next;
-            assert_eq!(
-                state.session.safety_mode,
-                SafetyMode::Plan,
-                "the live mode never leaves Plan while a plan is being drafted",
-            );
-        }
-        let staged = state.session.plan.as_ref().unwrap().resume_safety_mode;
-        assert_eq!(staged, SafetyMode::ReadOnly, "the staged target cycled");
-
-        // No marker may claim the safety mode changed — the floor still holds.
+        // While the mode IS plan, no marker may claim otherwise.
         let request = dispatch(&mut state, 2);
         for marker in markers(&request) {
             assert!(
@@ -12808,10 +13249,20 @@ mod tests {
             );
         }
 
-        // Exit restores what Shift+Tab staged, not what entry captured.
-        let (state, _) = update(state, alt_p());
-        assert!(state.session.plan.is_none());
+        // Shift+Tab leaves plan for the next cycle position, and the plan data
+        // goes with it — the floor cannot outlive the mode.
+        let (state, _) = update(
+            state,
+            Msg::Key(Key {
+                code: KeyCode::BackTab,
+                modifiers: KeyMods::default(),
+            }),
+        );
         assert_eq!(state.session.safety_mode, SafetyMode::ReadOnly);
+        assert!(
+            state.session.plan.is_none(),
+            "plan data must not survive the mode that defines it",
+        );
     }
 
     /// The staleness nudge named `task_update` while plan mode withdrew it, so
@@ -12886,7 +13337,7 @@ mod tests {
         let req = dispatch(&mut state, 1);
         assert!(markers(&req).is_empty(), "baseline seed must be silent");
         // The keypress itself appends nothing (status band carries the mode).
-        let (mut state, _) = update(state, alt_p());
+        let (mut state, _) = update(state, plan_on());
         assert!(
             state
                 .session
@@ -12929,7 +13380,7 @@ mod tests {
         let mut state = fresh_state();
         state.settings.plan.model = Some("ollama/plan-brain".to_string());
         dispatch(&mut state, 1);
-        let (mut state, _) = update(state, alt_p());
+        let (mut state, _) = update(state, plan_on());
         let req = dispatch(&mut state, 2);
         let m = markers(&req);
         assert_eq!(m.len(), 1, "one coalesced marker, not two: {m:?}");
@@ -12942,10 +13393,10 @@ mod tests {
         // Without denials: the exit is announced, the re-attempt sentence not.
         let mut state = fresh_state();
         dispatch(&mut state, 1);
-        let (state, _) = update(state, alt_p());
+        let (state, _) = update(state, plan_on());
         let mut state = state;
         dispatch(&mut state, 2);
-        let (mut state, _) = update(state, alt_p());
+        let (mut state, _) = update(state, plan_off());
         let req = dispatch(&mut state, 3);
         let m = markers(&req);
         let exit = m.last().expect("exit marker");
@@ -12955,7 +13406,7 @@ mod tests {
         // With a standing plan denial: the steering sentence rides the marker.
         let mut state = fresh_state();
         dispatch(&mut state, 1);
-        let (mut state, _) = update(state, alt_p());
+        let (mut state, _) = update(state, plan_on());
         dispatch(&mut state, 2);
         state.session.append(
             ChatMessage::assistant("editing").with_tool_calls(vec![
@@ -12980,7 +13431,7 @@ mod tests {
             ),
             state.now,
         );
-        let (mut state, _) = update(state, alt_p());
+        let (mut state, _) = update(state, plan_off());
         let req = dispatch(&mut state, 3);
         let m = markers(&req);
         let exit = m.last().expect("exit marker");
@@ -12995,8 +13446,8 @@ mod tests {
     fn rapid_plan_toggle_between_dispatches_injects_nothing() {
         let mut state = fresh_state();
         dispatch(&mut state, 1);
-        let (state, _) = update(state, alt_p());
-        let (mut state, _) = update(state, alt_p());
+        let (state, _) = update(state, plan_on());
+        let (mut state, _) = update(state, plan_off());
         let req = dispatch(&mut state, 2);
         assert!(
             markers(&req).is_empty(),
@@ -13069,7 +13520,7 @@ mod tests {
     fn plan_reminder_rides_every_dispatch_and_never_duplicates() {
         let mut state = fresh_state();
         dispatch(&mut state, 1);
-        let (mut state, _) = update(state, alt_p());
+        let (mut state, _) = update(state, plan_on());
         for turn in 2..4 {
             let req = dispatch(&mut state, turn);
             let reminders: Vec<_> = req
@@ -13093,7 +13544,7 @@ mod tests {
     fn plan_reminder_is_retracted_when_plan_mode_exits() {
         let mut state = fresh_state();
         dispatch(&mut state, 1);
-        let (mut state, _) = update(state, alt_p());
+        let (mut state, _) = update(state, plan_on());
         dispatch(&mut state, 2);
         assert!(
             state
@@ -13102,14 +13553,14 @@ mod tests {
                 .iter()
                 .any(|m| m.content.starts_with(PLAN_REMINDER_PREFIX))
         );
-        let (mut state, _) = update(state, alt_p());
+        let (mut state, _) = update(state, plan_off());
         assert!(
             state
                 .session
                 .messages()
                 .iter()
                 .all(|m| !m.content.starts_with(PLAN_REMINDER_PREFIX)),
-            "Alt+P exit retracts the standing reminder"
+            "leaving plan mode retracts the standing reminder"
         );
         let req = dispatch(&mut state, 3);
         assert!(
@@ -13123,7 +13574,7 @@ mod tests {
     fn context_markers_survive_the_turn_end_sweep() {
         let mut state = fresh_state();
         dispatch(&mut state, 1);
-        let (mut state, _) = update(state, alt_p());
+        let (mut state, _) = update(state, plan_on());
         dispatch(&mut state, 2);
         assert!(
             state
@@ -13182,7 +13633,7 @@ mod tests {
     fn a_shell_redirect_plan_write_disarms_the_stall_breaker() {
         let mut state = fresh_state();
         dispatch(&mut state, 1);
-        let (mut state, _) = update(state, alt_p());
+        let (mut state, _) = update(state, plan_on());
         note_plan_tool_outcome(
             &mut state.runtime,
             true,
@@ -13214,7 +13665,7 @@ mod tests {
     fn non_mutating_plan_denials_do_not_arm_the_stall_breaker() {
         let mut state = fresh_state();
         dispatch(&mut state, 1);
-        let (mut state, _) = update(state, alt_p());
+        let (mut state, _) = update(state, plan_on());
         for tool in ["web_fetch", "web_search", "memory", "task_create"] {
             note_plan_tool_outcome(&mut state.runtime, true, tool, &plan_denial_outcome());
             assert!(
@@ -13236,7 +13687,7 @@ mod tests {
     fn plan_stall_escalates_the_reminder_after_repeated_denials() {
         let mut state = fresh_state();
         dispatch(&mut state, 1);
-        let (mut state, _) = update(state, alt_p());
+        let (mut state, _) = update(state, plan_on());
         // Pure exploration never escalates, however long it runs.
         for turn in 2..8 {
             let req = dispatch(&mut state, turn);
@@ -13282,7 +13733,7 @@ mod tests {
     fn plan_write_disarms_the_stall_breaker() {
         let mut state = fresh_state();
         dispatch(&mut state, 1);
-        let (mut state, _) = update(state, alt_p());
+        let (mut state, _) = update(state, plan_on());
         note_plan_tool_outcome(
             &mut state.runtime,
             true,
@@ -13322,7 +13773,7 @@ mod tests {
         // Exiting plan mode clears an armed breaker.
         state.runtime.plan_thrash_armed = true;
         state.runtime.plan_calls_since_denial = 1;
-        let (state, _) = update(state, alt_p());
+        let (state, _) = update(state, plan_off());
         assert!(!state.runtime.plan_thrash_armed, "exit clears the breaker");
         assert_eq!(state.runtime.plan_calls_since_denial, 0);
     }
@@ -13331,7 +13782,7 @@ mod tests {
     fn forked_handoff_announces_plan_end_in_the_new_conversation() {
         let mut state = fresh_state();
         dispatch(&mut state, 1);
-        let (mut state, _) = update(state, alt_p());
+        let (mut state, _) = update(state, plan_on());
         dispatch(&mut state, 2);
         let old_id = state.session.conversation.id.clone();
         let mut cmds = Vec::new();
@@ -13947,6 +14398,54 @@ mod tests {
             Some("Implement the plan.")
         );
         assert!(matches!(state.turn, TurnState::Generating { .. }));
+    }
+
+    /// A rewind used to blank the context gauge — 250k/1M became `context:
+    /// n/a`, which reads as "the meter broke" rather than "there is less
+    /// context now". The fork's context is the most precisely known thing
+    /// about it (the prefix the user just chose), so it is re-estimated.
+    #[test]
+    fn rewind_reestimates_the_context_gauge_instead_of_blanking_it() {
+        let mut state = state_with_two_exchanges();
+        state.runtime.provider_capabilities.max_context_tokens = Some(1_000_000);
+        // A provider-counted figure for the FULL transcript, as a live session
+        // would have after its last call.
+        state.session.context_usage = Some(crate::domain::ContextUsageSnapshot::from_usage(
+            &crate::models::TokenUsage::provider(250_000, 1_000),
+            Some(1_000_000),
+        ));
+        let before = state
+            .session
+            .context_usage
+            .as_ref()
+            .expect("seeded")
+            .used_tokens;
+
+        let mut cmds = Vec::new();
+        fork_conversation_at(&mut state, &mut cmds, 2);
+
+        let after = state
+            .session
+            .context_usage
+            .as_ref()
+            .expect("the gauge must survive a rewind");
+        assert!(
+            after.max_tokens == Some(1_000_000),
+            "the window carries over: {:?}",
+            after.max_tokens
+        );
+        assert!(
+            after.used_tokens < before,
+            "a rewind drops messages, so context must shrink: {} -> {}",
+            before,
+            after.used_tokens
+        );
+        assert!(
+            after.is_estimate(),
+            "no provider counted the fork yet — it must render with the ~ marker"
+        );
+        // Cumulative spend is NOT context: the tokens were really spent.
+        assert!(state.session.last_token_usage.is_none());
     }
 
     #[test]

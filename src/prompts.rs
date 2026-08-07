@@ -110,7 +110,7 @@ When asked to read, inspect, familiarize yourself with, or review a codebase:
 
 - Project instructions in AGENTS.md and MERMAID.md are auto-loaded from the nearest matching directory and reload on the next turn (MERMAID.md is read last, so it overrides AGENTS.md). When a durable project rule emerges in conversation, suggest capturing it in MERMAID.md so it survives the session.
 - Every file mutation automatically creates a restore checkpoint first; the user rolls back with `/checkpoints` and `/restore`.
-- User controls (the user runs these, not you; `/help` lists the rest): `/model`, `/reasoning`, `/visible-reasoning`, `/safety` (switch safety mode), `/plan` (Alt+P), `/doctor`, `/context`, and `/compact`; plus `/approvals` `/approve` `/deny` for pending approvals and `/save` `/load` `/clear` for conversation history. `/context` shows context budget, response reserve, and auto-compact status; `/compact [focus]` creates a context checkpoint and archive.
+- User controls (the user runs these, not you; `/help` lists the rest): `/model`, `/reasoning`, `/visible-reasoning`, `/safety` (switch safety mode, including `plan`), `/plan`, `/doctor`, `/context`, and `/compact`; plus `/approvals` `/approve` `/deny` for pending approvals and `/save` `/load` `/clear` for conversation history. `/context` shows context budget, response reserve, and auto-compact status; `/compact [focus]` creates a context checkpoint and archive.
 - Esc interrupts the current agent loop. Warn before long-running or risky work so the user knows they can interrupt.
 
 ## GUI And Computer Control
@@ -215,8 +215,8 @@ You are in plan mode: a read-only collaboration state for designing work \
 before doing it. The user reviews and approves the plan before anything is \
 implemented. Plan mode is not changed by user intent, tone, or imperative \
 language — treat a request to execute as a request to plan the execution. \
-Plan mode ends at plan approval (your exit_plan_mode call) or the user's \
-Alt+P / /plan off.
+Plan mode ends at plan approval (your exit_plan_mode call) or the user \
+switching to another safety mode (Shift+Tab / /safety / /plan off).
 
 What runs while planning: {plan_capabilities} The checklist writers \
 (task_create/task_update) are disabled until approval; task_list still \
@@ -1116,7 +1116,7 @@ mod tests {
     #[test]
     fn advertised_keybindings_exist() {
         let prompt = get_system_prompt();
-        for key in ["Shift+Tab", "Alt+P", "Esc"] {
+        for key in ["Shift+Tab", "Esc"] {
             assert!(prompt.contains(key), "prompt must mention the {key} key");
             assert!(
                 crate::domain::slash_commands::KEYBINDINGS
@@ -1187,7 +1187,7 @@ mod tests {
             "Ground-phase builds must be conditional on the live profile"
         );
         assert!(
-            PLAN_MODE_PROMPT.contains("Alt+P / /plan off"),
+            PLAN_MODE_PROMPT.contains("(Shift+Tab / /safety / /plan off)"),
             "plan prompt must name the user's exit controls"
         );
         assert!(
