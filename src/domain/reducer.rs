@@ -2561,6 +2561,18 @@ fn handle_paste(state: &mut State, paste: Paste) {
     // text; Ctrl+V clipboard reads — which can be images — arrive separately as
     // `Msg::ClipboardRead`.
     let Paste::Text(t) = paste;
+    // A picker that filters as you type owns the keyboard, so it must own the
+    // paste too. This went unnoticed because a paste normally arrives as one
+    // burst: it silently typed into the composer *behind* the open pane. The
+    // coalescer makes it reachable by ordinary typing — fast keystrokes get
+    // batched into a paste, so a filter typed at speed lands split between the
+    // pane and the hidden composer, character by character.
+    if let UiMode::ModelPicker { query, cursor, .. } = &mut state.ui.mode {
+        query.push_str(&t);
+        // Narrowing invalidates the old row position (same rule as a keystroke).
+        *cursor = 0;
+        return;
+    }
     insert_text_at_cursor(state, &t);
 }
 
@@ -11733,6 +11745,53 @@ mod tests {
 
     /// Esc leaves the model untouched, and the draft in the composer survives
     /// — the picker never wrote to the input buffer.
+    /// A paste while the picker is open must filter it, not type into the
+    /// composer hidden behind it.
+    ///
+    /// Found by a flaky golden-frame test: typing a filter quickly produced a
+    /// query and a composer draft with the characters *interleaved*
+    /// (`filter=zomch`, `composer=zzznat`). The event source coalesces rapid
+    /// keystrokes into `Msg::Paste`, which went straight to the input buffer —
+    /// so how much of a filter survived depended on typing speed. An actual
+    /// Ctrl+V paste always lost the whole thing.
+    #[test]
+    fn a_paste_filters_the_model_picker_rather_than_the_hidden_composer() {
+        let (state, _) = update(fresh_state(), Msg::Slash(SlashCmd::Model(None)));
+        let (state, _) = update(
+            state,
+            Msg::AvailableModelsListed(vec![
+                model_choice("ollama/llama3.2", "Local (Ollama)"),
+                model_choice("anthropic/claude-opus-4-5", "anthropic"),
+            ]),
+        );
+        // A burst (what the coalescer produces from fast typing).
+        let (state, _) = update(
+            state,
+            Msg::Paste(super::super::msg::Paste::Text("opus".to_string())),
+        );
+        let UiMode::ModelPicker {
+            ref candidates,
+            ref query,
+            ..
+        } = state.ui.mode
+        else {
+            panic!("the picker must stay open across a paste");
+        };
+        assert_eq!(query, "opus", "the paste filters the pane");
+        assert_eq!(
+            filter_model_choices(candidates, query)
+                .iter()
+                .map(|c| c.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["anthropic/claude-opus-4-5"],
+        );
+        assert!(
+            state.ui.input_buffer.is_empty(),
+            "nothing may leak into the composer behind the pane: {:?}",
+            state.ui.input_buffer
+        );
+    }
+
     #[test]
     fn model_picker_escape_keeps_the_model_and_the_draft() {
         let (state, _) = type_text(fresh_state(), "half-written prompt");

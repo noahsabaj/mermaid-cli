@@ -86,8 +86,14 @@ fn model_picker_frame() {
         "picker never opened:\n{}",
         term.frame_text()
     );
-    // Discovery must settle first, or the filter races the "searching…" state.
-    term.wait_for_text("filter:", Duration::from_secs(25));
+    // Discovery must FINISH before typing. Waiting on "filter:" was not enough:
+    // that row is present while loading too, so the filter keystrokes raced the
+    // arrival of the model list and only some of them landed in the pane.
+    assert!(
+        term.wait_for_gone("still searching", Duration::from_secs(30)),
+        "model discovery never settled:\n{}",
+        term.frame_text()
+    );
     term.type_text("zzzznomatch");
     assert!(
         term.wait_for_text("Nothing matches", Duration::from_secs(10)),

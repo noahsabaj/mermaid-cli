@@ -479,14 +479,10 @@ fn compare_snapshot(name: &str, actual: &str) {
     // developer's git config, not of what the terminal drew. Without this the
     // suite passes on the machine that generated the files and fails on a
     // Windows CI runner with `autocrlf=true`, where every expected row carries
-    // a trailing `` the frame never had.
-    let Ok(expected) = std::fs::read_to_string(&path).map(|text| {
-        text.replace(
-            "
-", "
-",
-        )
-    }) else {
+    // a trailing CR the frame never had. `.gitattributes` pins these files to
+    // LF too; this is the belt to that suspenders, since a stray checkout
+    // setting must not be able to turn every frame red.
+    let Ok(expected) = std::fs::read_to_string(&path).map(|text| text.replace("\r\n", "\n")) else {
         panic!(
             "missing snapshot {}\n\nRe-run with UPDATE_SNAPSHOTS=1 to create it, then review \
              the file before committing.\n\n--- actual ---\n{actual}",
