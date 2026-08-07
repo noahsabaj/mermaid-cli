@@ -702,24 +702,26 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo nextest run --workspace   # or: cargo test --workspace
 ```
 
-**On Windows that gate is not equivalent to CI.** The render snapshot suite is
-`#[cfg(all(test, unix))]`, so roughly 400 tests — every pinned frame among them
-— are skipped without saying so. A green run on Windows can still fail CI on a
-snapshot mismatch. Nothing local reports the gap; if you develop on Windows,
-expect CI to be the first place a visual regression shows up.
+That gate runs the same suites on every platform, including the render
+snapshots. What is still `#[cfg(unix)]` is per-test and covers what Windows does
+not have — file modes, signals, `sh`, seccomp, Landlock, Seatbelt — with
+`#[cfg(windows)]` tests covering the `cmd`, ConPTY and clipboard paths in their
+place.
 
 CI additionally runs two dependency-free source guards (`.github/scripts/`): no
 emoji/pictographs in source, and `src/domain` stays a pure MVU core (no I/O, no
 wall clock).
 
 The TUI has a snapshot suite (`src/render/snapshots.rs`) that pins full rendered
-frames for curated scenes at 80x24 and 120x40. It runs as part of the normal
-test suite **on unix only** (see above); a mismatch panics with a diff and
-writes a gitignored `.snap.new` sibling. The test job publishes those as a
-`pending-snapshots-*` artifact on failure, so the rendered frame is reviewable
-from a Windows box that cannot produce it locally. Review and accept deliberate
-visual changes with `just snapshots` (`cargo insta review`) and commit the
-updated `.snap` files in the same PR as the style change.
+frames for curated scenes at 80x24 and 120x40. One set of `.snap` files serves
+every platform: the suite pins the clock, host, user, version and cwd, and its
+fixture clock is a fixed *local wall clock* rather than a fixed instant, so the
+rendered timestamp reads the same in every timezone. A mismatch panics with a
+diff and writes a gitignored `.snap.new` sibling. The test job publishes those
+as a `pending-snapshots-*` artifact on failure, so a frame from a platform you
+don't have is still reviewable. Review and accept deliberate visual changes with
+`just snapshots` (`cargo insta review`) and commit the updated `.snap` files in
+the same PR as the style change.
 
 Terminal behavior that a `Line`/`Span` assertion cannot see — a shredded
 background, a glyph past a border, a stale status band — is covered separately
