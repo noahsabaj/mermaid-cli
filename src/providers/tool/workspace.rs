@@ -210,12 +210,15 @@ impl Workspace {
                 ),
                 needs_attention: false,
             },
+            // The patch path goes on its own line. Data dirs contain spaces
+            // on macOS (`Library/Application Support`), so a path inline in a
+            // sentence is ambiguous to read and unpasteable into a shell.
             Ok(MergeOutcome::Conflicted { patch, reason }) => WorkspaceReport {
                 note: format!(
                     "Ran in an isolated worktree, but its changes do NOT apply to the \
                      project as it now stands ({reason}) — most likely the same lines \
-                     changed underneath it. The project is untouched and the rejected \
-                     patch is saved at {}. Review it before redoing this work.",
+                     changed underneath it. The project is untouched. The rejected \
+                     patch is saved at:\n{}\nReview it before redoing this work.",
                     patch.display()
                 ),
                 needs_attention: true,

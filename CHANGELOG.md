@@ -53,6 +53,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   agent ids are per-session, so nothing reclaims one by name after a restart.
   The daemon runs it at startup alongside the checkpoint GC.
 
+  Paths the worktree hands out are anchored on a **canonicalized** project
+  root, not on git's `--show-toplevel` answer. Those paths are the merge's
+  write-lock keys, and the file tools lock on canonicalized paths — two
+  spellings of one file are two keys, so a merge and a concurrent
+  `write_file` would not have excluded each other at all. Windows CI found
+  it: `%TEMP%` hands out an 8.3 short name where git reports the long one.
+  A symlinked route to the same directory would have done the same on any
+  platform.
+
   Checkout directories carry a process id and a counter, not just the agent
   id. Agent ids restart at `a1` per spawner, so two Mermaid processes in one
   repo both wanted `.../a1`; git resolved that by inventing `a11` and `a12`,

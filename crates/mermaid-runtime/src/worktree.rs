@@ -137,6 +137,15 @@ impl AgentWorktree {
                 .output()
                 .context("could not locate the repository top level")?,
         );
+        // Canonicalize what git reported. Its answer is a real path but not
+        // necessarily *the* path: on Windows it resolves the long name where
+        // `%TEMP%` may hand out an 8.3 short one, and anywhere else it may
+        // differ from the caller's route through a symlink. Every path this
+        // type hands out is rooted here, and `pending_files` feeds both the
+        // checkpoint and the merge's write locks — which the file tools take
+        // on canonicalized paths. Two spellings of one file are two lock
+        // keys, which is no lock at all.
+        let project_top = std::fs::canonicalize(&project_top).unwrap_or(project_top);
         // An unborn HEAD has no commit to branch a worktree from.
         anyhow::ensure!(
             git(&project_top)
@@ -623,16 +632,50 @@ mod tests {
         std::fs::write(wt.root().join("sub").join("added.txt"), "new\n").unwrap();
 
         let pending = wt.pending_files().unwrap();
-        // Absolute, project-side paths — what `create_checkpoint` wants.
+        // Absolute, project-side paths — what `create_checkpoint` wants, and
+        // what the merge takes its write locks on. Anchored on the canonical
+        // root rather than the path this test built: `%TEMP%` hands out 8.3
+        // short names on Windows, and elsewhere a symlinked route spells the
+        // same directory differently. Those are the spellings that made the
+        // lock keys diverge in the first place.
+        let root = wt.project_root();
         assert_eq!(pending.len(), 2, "{pending:?}");
+        assert!(pending.contains(&root.join("tracked.txt")), "{pending:?}");
         assert!(
-            pending.contains(&project.join("tracked.txt")),
+            pending.contains(&root.join("sub").join("added.txt")),
             "{pending:?}"
         );
-        assert!(
-            pending.contains(&project.join("sub").join("added.txt")),
-            "{pending:?}"
-        );
+        wt.destroy();
+    }
+
+    #[test]
+    fn pending_files_are_spelled_the_way_the_file_tools_lock_them() {
+        let project = unique_dir("canonical");
+        if !init_project(&project) {
+            return;
+        }
+        let wt = AgentWorktree::create(&project, "a1").unwrap();
+        std::fs::write(wt.root().join("tracked.txt"), "edited\n").unwrap();
+
+        // The merge takes its write locks on these paths, and the file tools
+        // take theirs on canonicalized ones. Two spellings of one file are
+        // two keys, so a merge and a concurrent `write_file` would not
+        // exclude each other at all — which is silent, and exactly the
+        // interleaving isolation exists to prevent.
+        let canonical_root = std::fs::canonicalize(&project).unwrap();
+        for path in wt.pending_files().unwrap() {
+            assert!(
+                path.starts_with(&canonical_root),
+                "{} is not under the canonical root {}",
+                path.display(),
+                canonical_root.display()
+            );
+            assert_eq!(
+                std::fs::canonicalize(&path).unwrap(),
+                path,
+                "a pending path must already be canonical"
+            );
+        }
         wt.destroy();
     }
 

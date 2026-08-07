@@ -210,11 +210,14 @@ async fn two_children_editing_one_file_produce_exactly_one_conflict() {
             // the work must be recoverable.
             assert!(msg.contains("did not land"), "{msg}");
             assert!(msg.contains("do NOT apply"), "{msg}");
+            // The path is on its own line precisely because data dirs
+            // contain spaces (macOS `Library/Application Support`), so read
+            // the whole line rather than splitting on whitespace.
             let patch = msg
-                .split_whitespace()
-                .map(|w| w.trim_end_matches('.'))
-                .find(|w| w.ends_with(".patch"))
-                .expect("the rejected patch must be named");
+                .lines()
+                .map(str::trim)
+                .find(|line| line.ends_with(".patch"))
+                .expect("the rejected patch must be named on its own line");
             assert!(Path::new(patch).exists(), "saved patch missing: {patch}");
         }
     }
