@@ -37,8 +37,8 @@ pub struct ModelPickerWidget<'a> {
     pub cursor: usize,
     /// Discovery still running — distinguishes "looking" from "none found".
     pub loading: bool,
-    /// The session's active model, marked with a check so the picker always
-    /// answers "what am I on right now?" without a second command.
+    /// The session's active model, marked so the picker always answers "what am
+    /// I on right now?" without a second command.
     pub current: &'a str,
 }
 
@@ -123,8 +123,8 @@ impl<'a> Widget for ModelPickerWidget<'a> {
     }
 }
 
-/// One model row: cursor, id, a `✔` when it is the active model, and the dim
-/// detail column right-padded to the pane width.
+/// One model row: cursor, id, a `(current)` tag when it is the active model,
+/// and the dim detail column right-padded to the pane width.
 fn row(
     choice: &ModelChoice,
     highlighted: bool,
@@ -145,7 +145,14 @@ fn row(
     // openrouter id can be 60+ cells on its own, so truncating it is the only
     // way the row fits — and the marker that says "this is your current model"
     // is worth more than the tail of a name.
-    let current_mark = if choice.id == current { " ✔" } else { "" };
+    // Spelled out rather than a check glyph: Mermaid's output is deliberately
+    // emoji-free (enforced by `.github/scripts/check_no_emoji.py`, which flags
+    // the whole dingbats block), and a word survives truncation legibly anyway.
+    let current_mark = if choice.id == current {
+        " (current)"
+    } else {
+        ""
+    };
     let pull_mark = if choice.ready { "" } else { " (not pulled)" };
     let reserved = prefix.width() + current_mark.width() + pull_mark.width();
     let id = super::truncate_to_cells(&choice.id, width.saturating_sub(reserved));
@@ -236,7 +243,7 @@ mod tests {
             "provider heading missing:\n{out}"
         );
         assert!(
-            out.contains("claude-opus-4-5 ✔"),
+            out.contains("claude-opus-4-5 (current)"),
             "the active model must be marked:\n{out}"
         );
         assert!(out.contains("2 models"), "count missing:\n{out}");
@@ -301,7 +308,7 @@ mod tests {
             // The "you are here" marker survives truncation — it is the one
             // thing the row must never lose.
             assert!(
-                line.spans.iter().any(|s| s.content.contains('✔')),
+                line.spans.iter().any(|s| s.content.contains("(current)")),
                 "the current-model mark was truncated away at width {width}"
             );
         }
