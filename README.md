@@ -712,6 +712,13 @@ CI additionally runs two dependency-free source guards (`.github/scripts/`): no
 emoji/pictographs in source, and `src/domain` stays a pure MVU core (no I/O, no
 wall clock).
 
+A PR runs the suite on Linux, macOS and Windows against **stable**, and all
+three must pass to merge. `beta` and `nightly` answer a different question — is
+a future toolchain about to break us — whose answer does not change from one PR
+to the next, so they run on a daily schedule and on every push to `main` rather
+than on the critical path of your merge. Run them on demand from the Actions tab
+(`workflow_dispatch`) if a change is toolchain-sensitive.
+
 The TUI has a snapshot suite (`src/render/snapshots.rs`) that pins full rendered
 frames for curated scenes at 80x24 and 120x40. One set of `.snap` files serves
 every platform: the suite pins the clock, host, user, version and cwd, and its

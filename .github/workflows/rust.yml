@@ -7,10 +7,42 @@ on:
   # branch) must get the same gate as PRs to main — the Windows jobs
   # especially, since a local Linux gate can't catch cfg(windows) breakage.
   pull_request:
+  # Beta and nightly run here rather than on every PR (see the `rust` matrix).
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+
+# One in-flight run per ref. Pushing a fixup used to leave the superseded run
+# compiling to completion on every leg, producing a verdict on a commit nobody
+# would read it for — while holding the runners the new run then queues behind.
+concurrency:
+  # `event_name` is in the key so the nightly schedule and a push to main do not
+  # share a group and serialize behind each other.
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  # Never cancel a main-branch run: those are the ones a release is cut from.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # ~90% of a CI leg is compilation, not testing: the Windows leg spent ~295s
+  # compiling and 35s running all 2046 tests. So the compile knobs below are
+  # where the wall clock is. Measured together on a cold target dir, building
+  # exactly what CI builds: compile 172s -> 144s (-16%), and the target dir
+  # 8473 MB -> 2616 MB (-69%), which is what rust-cache has to restore.
+  #
+  # Incremental compilation is pure overhead here: it exists to make the SECOND
+  # build in a working tree fast, and CI never gets one. It costs time and is
+  # most of the target-dir bloat.
+  CARGO_INCREMENTAL: 0
+  # Full debuginfo (cargo's default, `debug = 2`) is the expensive half of a
+  # debug build, and on Windows the PDB write dominates linking — 12
+  # integration-test binaries each link the whole lib. `line-tables-only` keeps
+  # what a CI failure is actually read for: backtraces with file:line, paired
+  # with the RUST_BACKTRACE above. What it drops is variable inspection, which
+  # needs an interactive debugger nobody attaches to a runner.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
 
 jobs:
   # Format checking
@@ -51,10 +83,22 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        rust: [stable, beta]
-        include:
-          # Test nightly only on Linux to save CI time
-          - os: ubuntu-latest
+        # A PR gets all three platforms on stable — those are the required
+        # checks, and the merge waits on the slowest of them.
+        #
+        # Beta and nightly answer a different question ("will a future toolchain
+        # break us?"), and the answer does not change between one PR and the
+        # next. Running them per-PR spent 4 of 7 test jobs re-asking it, so they
+        # run on the nightly schedule and on every push to main instead: the
+        # same signal, arriving within a day, off the critical path.
+        rust: ${{ fromJSON(github.event_name == 'pull_request' && '["stable"]' || '["stable", "beta", "nightly"]') }}
+        # Nightly stays Linux-only — enough to catch a future-toolchain break
+        # without tripling the cost of finding it. On a PR the list above has no
+        # nightly to exclude and these are no-ops.
+        exclude:
+          - os: macos-latest
+            rust: nightly
+          - os: windows-latest
             rust: nightly
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -75,10 +119,15 @@ jobs:
         with:
           tool: nextest
 
-      - name: Build
-        run: cargo build --workspace --verbose
-
-      - name: Run tests
+      # No separate `cargo build --workspace` step before this one. It looked
+      # free — surely nextest reuses the artifacts — but it measured 144s cold
+      # against 113s for nextest alone, because the two invocations do not want
+      # the same lib: `build` produces a plain rlib and the bins, nextest wants
+      # the lib again under `cfg(test)`. The integration tests reach the bins
+      # through `env!("CARGO_BIN_EXE_mermaid")`, which makes cargo build them
+      # here anyway, so nothing was lost by dropping the step — a compile error
+      # still fails this step, just with nextest's name on it.
+      - name: Build and run tests
         # nextest runs the same test binaries as `cargo test`, but applies the
         # `.config/nextest.toml` retry policy that auto-heals the documented
         # Windows cancellation flake. `--workspace` covers the mermaid-runtime
