@@ -352,6 +352,7 @@ mod tests {
                 message: "reachable".to_string(),
             },
             remote_providers: vec!["anthropic".to_string()],
+            provider_problems: Vec::new(),
             project_instructions: DoctorCheck {
                 status: "info",
                 message: "none".to_string(),

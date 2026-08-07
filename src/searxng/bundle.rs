@@ -108,7 +108,7 @@ fn unsupported_platform_message(os: &str, arch: &str) -> String {
 }
 
 fn runtime_root() -> Result<PathBuf> {
-    Ok(crate::runtime::data_dir()?.join("searxng"))
+    Ok(mermaid_runtime::data_dir()?.join("searxng"))
 }
 
 fn versioned_runtime_name(version: &str) -> String {

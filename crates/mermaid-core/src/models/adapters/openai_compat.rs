@@ -397,7 +397,7 @@ impl OpenAICompatAdapter {
 
     /// POST `/chat/completions` and return the raw response.
     /// Transparently retries on 5xx, 429, or reqwest connect failures
-    /// via `crate::effect::retry_transient_http`. Useful for Groq /
+    /// via `crate::models::retry::retry_transient_http`. Useful for Groq /
     /// OpenRouter / etc. when an upstream relay hiccups.
     async fn send_chat(&self, body: &Value) -> Result<reqwest::Response> {
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
@@ -409,7 +409,7 @@ impl OpenAICompatAdapter {
         // ignore the header are unaffected. (Anthropic has no documented
         // equivalent; its retries mirror the official SDK default.)
         let idempotency_key = random_idempotency_key();
-        crate::effect::retry_transient_http(|| async {
+        crate::models::retry::retry_transient_http(|| async {
             let mut req = self
                 .client
                 .post(&url)

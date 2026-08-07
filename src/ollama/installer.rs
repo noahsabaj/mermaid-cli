@@ -15,19 +15,27 @@ async fn list_installed_models(config: &Config) -> Vec<String> {
         max_idle_per_host: 2,
         ollama_autostart: config.ollama.auto_start,
     };
+    let autostart = backend.ollama_autostart;
     match OllamaAdapter::new("__list__", Arc::new(backend)).await {
         // This runs pre-TUI on plain console, so the autostart notice can go
         // straight to stderr — otherwise a cold-boot `mermaid` sits silent
         // for the whole server start.
-        Ok(adapter) => adapter
-            .with_status_notify(Arc::new(|ev| {
+        Ok(adapter) => {
+            let adapter = adapter.with_status_notify(Arc::new(|ev| {
                 if let crate::models::StreamEvent::Status(text) = ev {
                     eprintln!("{text}");
                 }
-            }))
-            .list_models()
-            .await
-            .unwrap_or_default(),
+            }));
+            // The startup preflight is an intent path, not a diagnostic one:
+            // it exists to get a model ready, so it keeps the ability to heal
+            // a dead server when the user's config allows it.
+            let adapter = if autostart {
+                adapter.with_recovery(Arc::new(super::OllamaAutostart))
+            } else {
+                adapter
+            };
+            adapter.list_models().await.unwrap_or_default()
+        },
         Err(_) => Vec::new(),
     }
 }
@@ -99,28 +107,20 @@ pub async fn ensure_model(model_name: &str, config: &Config) -> Result<()> {
     Ok(())
 }
 
-/// Check if any Ollama models are available, return error with setup instructions if not.
-pub async fn require_any_model(config: &Config) -> Result<Vec<String>> {
-    // Check if Ollama is installed
+/// The local Ollama daemon's models, for callers deciding whether a local
+/// model is available at all.
+///
+/// `None` means Ollama is not installed on this machine; `Some(vec![])` means
+/// it is installed but has nothing usable (unreachable, or running with
+/// nothing pulled). Neither is an error: Ollama is Mermaid's default backend,
+/// not a prerequisite — a machine with only a remote provider key configured
+/// must still be able to start. Callers that genuinely need an Ollama model
+/// (`ensure_model`) still fail loudly, with [`guide::detect_and_guide`].
+pub async fn local_models(config: &Config) -> Option<Vec<String>> {
     if !detector::is_installed() {
-        guide::detect_and_guide();
-        anyhow::bail!("Ollama is not installed. See instructions above.");
+        return None;
     }
-
-    let models = list_installed_models(config).await;
-
-    if models.is_empty() {
-        anyhow::bail!(
-            "No Ollama models found.\n\n\
-            To get started:\n\
-              1. Browse models at https://ollama.com/library\n\
-              2. Install one with: ollama pull <model-name>\n\
-              3. Run mermaid again\n\n\
-            Example: ollama pull qwen3:8b"
-        );
-    }
-
-    Ok(models)
+    Some(list_installed_models(config).await)
 }
 
 #[cfg(test)]

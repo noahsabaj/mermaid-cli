@@ -1,0 +1,33 @@
+[package]
+name = "mermaid-core"
+version = "0.20.0"
+edition = "2024"
+rust-version = "1.91"
+authors = ["Noah Sabaj <noahsabaj@gmail.com>"]
+description = "Model-layer core for Mermaid: provider adapters, wire types, capability catalog, and the shared utilities they need."
+repository = "https://github.com/noahsabaj/mermaid-cli"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+anyhow = "1.0"
+async-trait = "0.1"
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.6", features = ["derive", "env"] }
+futures = "0.3"
+getrandom = "0.4"
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
+mermaid-runtime = { path = "../mermaid-runtime" }
+regex = "1.12"
+sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls", "gzip", "brotli"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.44", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+temp-env = "0.3"
+tempfile = "3.24"

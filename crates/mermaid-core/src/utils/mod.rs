@@ -44,10 +44,10 @@ pub use proc::{
     Grace, output_with_timeout, terminate_tree, terminate_tree_blocking, write_stdin_with_timeout,
 };
 pub use redact::{redact_json, redact_secrets, sanitize_url_for_display};
-pub(crate) use retry::jitter;
+pub use retry::jitter;
 pub use retry::{RetryConfig, retry_async, retry_async_if};
 pub use sse::drain_sse_events;
-pub(crate) use task::{AbortOnDrop, join_logged, spawn_guarded};
+pub use task::{AbortOnDrop, join_logged, spawn_guarded};
 pub use text::{
     continuation_overlap, format_duration, truncate_content, truncate_middle,
     truncate_middle_bytes, truncate_web_content,

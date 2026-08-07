@@ -454,7 +454,7 @@ fn spawn_granian(
 /// SELinux systems relabels it to a container-private context the normal process
 /// can no longer write. The data dir was never container-touched.
 fn write_settings() -> Result<SettingsFile> {
-    let dir = crate::runtime::data_dir()?.join("searxng");
+    let dir = mermaid_runtime::data_dir()?.join("searxng");
     write_settings_in(&dir)
 }
 

@@ -101,6 +101,30 @@ fn push_capped(buf: &mut String, chunk: &str, truncated: &mut bool, cap: usize) 
     }
 }
 
+/// Brings a dead *local* model server back up.
+///
+/// Injected rather than called directly. Spawning a process is not a wire
+/// adapter's job, and while the adapter reached into `ollama::ensure_running`
+/// itself, the recovery was invisible from the call site — which is how a
+/// connection-refused retry sat inside a read-only listing path unnoticed (see
+/// [`crate::models::retry::retry_transient_http_no_connect_retry`]).
+///
+/// The provider layer supplies an implementation when the user's config allows
+/// autostart. Enumeration verbs simply pass `None`, and that absence *is* the
+/// read-only guarantee: observing state cannot start a server it has no way to
+/// start.
+#[async_trait]
+pub trait LocalServerRecovery: Send + Sync {
+    /// `Ok(())` once the server is up. `Err(Some(hint))` carries an actionable
+    /// next step to append to the connection error; `Err(None)` means there is
+    /// nothing useful to add.
+    async fn ensure_running(
+        &self,
+        base_url: &str,
+        notify: Option<&(dyn for<'a> Fn(&'a str) + Sync)>,
+    ) -> std::result::Result<(), Option<String>>;
+}
+
 /// Ollama model adapter
 pub struct OllamaAdapter {
     client: Client,
@@ -117,10 +141,12 @@ pub struct OllamaAdapter {
     /// warning (sending an image to a model that can't see it is silently
     /// ignored by Ollama); never gates the send.
     vision_cap: tokio::sync::OnceCell<bool>,
-    /// Start a dead *local* server via `ollama::ensure_running` when a
-    /// request is refused (`BackendConfig::ollama_autostart`). The user should
-    /// never have to leave mermaid to run `ollama serve`.
-    autostart: bool,
+    /// How to revive a dead local server when a request is refused. `Some`
+    /// only when the caller opted in — `BackendConfig::ollama_autostart` is
+    /// what the provider layer consults before attaching one. The user should
+    /// never have to leave mermaid to run `ollama serve`, but the adapter no
+    /// longer decides that for itself.
+    recovery: Option<Arc<dyn LocalServerRecovery>>,
     /// Fallback surface for the autostart notice on paths that carry no
     /// stream callback (`list_models` — the startup preflight and the CLI
     /// list verbs). Console constructors attach an stderr printer via
@@ -228,9 +254,17 @@ impl OllamaAdapter {
             capabilities,
             thinking_cap: tokio::sync::OnceCell::new(),
             vision_cap: tokio::sync::OnceCell::new(),
-            autostart: config.ollama_autostart,
+            recovery: None,
             status_notify: None,
         })
+    }
+
+    /// Attach the hook that revives a dead local server. Callers pass one only
+    /// when `BackendConfig::ollama_autostart` is set; leaving it off is what
+    /// makes a path strictly read-only.
+    pub fn with_recovery(mut self, recovery: Arc<dyn LocalServerRecovery>) -> Self {
+        self.recovery = Some(recovery);
+        self
     }
 
     /// Attach a surface for the autostart notice on callback-less paths
@@ -734,7 +768,7 @@ impl OllamaAdapter {
 
     /// POST /api/chat with the given body and return the raw response.
     /// Transparently retries on 5xx, 429, or reqwest connect failures
-    /// via `crate::effect::retry_transient_http`. Mid-stream failures
+    /// via `crate::models::retry::retry_transient_http`. Mid-stream failures
     /// (body consumption) are NOT retried — partial content has already
     /// reached the caller at that point.
     async fn send_chat(
@@ -771,6 +805,15 @@ impl OllamaAdapter {
     /// only when a spawn is actually committed (never on NotLocal /
     /// Disabled / already-healthy / binary-missing), so no false notices
     /// reach the user.
+    ///
+    /// The first round deliberately does NOT retry a refused connection.
+    /// Backing off and asking a closed port again cannot succeed — only
+    /// `ensure_running` can — and on Windows a refused loopback connect costs
+    /// ~2s (the SYN is retransmitted before `WSAECONNREFUSED`), so retrying it
+    /// three times bought ~9s of dead wait ahead of both the recovery and the
+    /// enumeration verbs, which pass `autostart: false` and want the dead state
+    /// reported promptly. 5xx and 429 from a server that IS running still
+    /// retry, here and in the post-recovery round.
     async fn with_local_recovery<F, Fut>(
         &self,
         notify: Option<&StreamCallback>,
@@ -780,10 +823,10 @@ impl OllamaAdapter {
         F: FnMut() -> Fut,
         Fut: std::future::Future<Output = Result<reqwest::Response>>,
     {
-        let first = crate::effect::retry_transient_http(&mut op).await;
-        if !self.autostart {
+        let first = crate::models::retry::retry_transient_http_no_connect_retry(&mut op).await;
+        let Some(recovery) = self.recovery.as_ref() else {
             return first;
-        }
+        };
         if !matches!(
             first,
             Err(ModelError::Backend(BackendError::ConnectionFailed { .. }))
@@ -795,16 +838,16 @@ impl OllamaAdapter {
         let ensured = match notify.or(self.status_notify.as_ref()) {
             Some(cb) => {
                 let forward = |text: &str| cb(StreamEvent::Status(text.to_string()));
-                crate::ollama::ensure_running(&self.base_url, Some(&forward)).await
+                recovery
+                    .ensure_running(&self.base_url, Some(&forward))
+                    .await
             },
-            None => crate::ollama::ensure_running(&self.base_url, None).await,
+            None => recovery.ensure_running(&self.base_url, None).await,
         };
         match ensured {
-            Ok(()) => crate::effect::retry_transient_http(&mut op).await,
-            Err(autostart_err) => match autostart_err.hint() {
-                Some(hint) => first.map_err(|e| append_reason_hint(e, &hint)),
-                None => first,
-            },
+            Ok(()) => crate::models::retry::retry_transient_http(&mut op).await,
+            Err(Some(hint)) => first.map_err(|e| append_reason_hint(e, &hint)),
+            Err(None) => first,
         }
     }
 

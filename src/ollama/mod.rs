@@ -11,5 +11,5 @@ pub use cloud_setup::{
 };
 pub use detector::is_installed;
 pub use guide::detect_and_guide;
-pub use installer::{ensure_model, require_any_model};
-pub use server::{AutostartError, ensure_running};
+pub use installer::{ensure_model, local_models};
+pub use server::{AutostartError, OllamaAutostart, ensure_running};

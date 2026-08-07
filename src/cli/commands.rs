@@ -11,6 +11,7 @@ use crate::{
     },
     models::{BackendConfig, ChatMessage, Model, PROVIDER_REGISTRY, lookup_provider},
     ollama::is_installed as is_ollama_installed,
+    providers::discovery::{configured_remote_provider_names, configured_remote_providers},
     runtime::{NewProviderProbe, RuntimeClient, RuntimeStore, TaskRecord},
     session::ConversationManager,
 };
@@ -241,6 +242,9 @@ pub(crate) struct DoctorReport {
     pub(crate) prompt_customized: bool,
     pub(crate) ollama: DoctorCheck,
     pub(crate) remote_providers: Vec<String>,
+    /// Providers the user configured that still cannot be built, with the
+    /// factory's own reason. Empty on a clean machine.
+    pub(crate) provider_problems: Vec<DoctorProviderProblem>,
     pub(crate) project_instructions: DoctorCheck,
     pub(crate) tools: Vec<String>,
     pub(crate) runtime: DoctorRuntime,
@@ -261,6 +265,14 @@ pub(crate) struct DoctorModelCapabilities {
 pub(crate) struct DoctorCheck {
     pub(crate) status: &'static str,
     pub(crate) message: String,
+}
+
+/// A provider that is configured but unusable. `reason` is `ProviderFactory`'s
+/// own error, so `doctor` reports exactly what a real request would have said.
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct DoctorProviderProblem {
+    pub(crate) name: String,
+    pub(crate) reason: String,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -372,7 +384,14 @@ pub(crate) async fn build_doctor_report(
         }
     };
 
-    let remote_providers = configured_remote_providers(config);
+    let remote_providers = configured_remote_provider_names(config);
+    let provider_problems = crate::providers::provider_problems(config)
+        .into_iter()
+        .map(|problem| DoctorProviderProblem {
+            name: problem.name,
+            reason: problem.reason,
+        })
+        .collect::<Vec<_>>();
     let instruction_paths = crate::app::instructions::find_instruction_files(cwd);
     let project_instructions = if instruction_paths.is_empty() {
         DoctorCheck {
@@ -474,6 +493,7 @@ pub(crate) async fn build_doctor_report(
         prompt_customized: config.prompt.is_customized(),
         ollama,
         remote_providers,
+        provider_problems,
         project_instructions,
         tools,
         runtime: DoctorRuntime {
@@ -537,6 +557,12 @@ fn print_doctor_text(report: &DoctorReport) {
             report.remote_providers.join(", ")
         }
     );
+    for problem in &report.provider_problems {
+        println!(
+            "  [WARNING] Provider {} is configured but unusable: {}",
+            problem.name, problem.reason
+        );
+    }
     println!(
         "  [{}] Project instructions: {}",
         label(report.project_instructions.status),
@@ -717,14 +743,6 @@ fn safety_mode_name(mode: crate::runtime::SafetyMode) -> &'static str {
     mode.as_str()
 }
 
-fn meta_api_key_env(config: &Config) -> &str {
-    config
-        .providers
-        .get("meta")
-        .and_then(|provider| provider.api_key_env.as_deref())
-        .unwrap_or(crate::providers::model::meta::DEFAULT_API_KEY_ENV)
-}
-
 /// Every provider `mermaid login` can store a key for: the bespoke
 /// providers, the OpenAI-compat registry, and user-defined `[providers.*]`
 /// entries. Yields `(name, default_env, override_env)`.
@@ -871,38 +889,6 @@ fn meta_base_url(config: &Config) -> String {
         .get("meta")
         .and_then(|provider| provider.base_url.clone())
         .unwrap_or_else(|| crate::providers::model::meta::DEFAULT_BASE_URL.to_string())
-}
-
-fn configured_remote_providers(config: &Config) -> Vec<String> {
-    let mut names = Vec::new();
-    if meta_api_key(config).is_some() {
-        names.push("meta".to_string());
-    }
-    for profile in PROVIDER_REGISTRY {
-        let override_env = config
-            .providers
-            .get(profile.name)
-            .and_then(|c| c.api_key_env.as_deref());
-        if crate::utils::resolve_provider_key(profile.name, profile.api_key_env, override_env)
-            .is_some()
-        {
-            names.push(profile.name.to_string());
-        }
-    }
-    for (name, provider) in &config.providers {
-        if names.iter().any(|existing| existing == name) {
-            continue;
-        }
-        // Custom providers: api_key_env is their default env, so the keyring
-        // may fill the gap (matches the factory's resolution).
-        if let Some(env) = provider.api_key_env.as_deref()
-            && crate::utils::resolve_provider_key(name, env, None).is_some()
-        {
-            names.push(name.clone());
-        }
-    }
-    names.sort();
-    names
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -2084,32 +2070,43 @@ pub async fn list_models(config: &Config) -> Result<()> {
     }
 
     println!("\nConfigured remote providers:");
-    let mut any = false;
-    if meta_api_key(config).is_some() {
-        any = true;
-        println!("  - meta (via ${})", meta_api_key_env(config));
-    }
-    for profile in PROVIDER_REGISTRY {
-        let override_env = config
-            .providers
-            .get(profile.name)
-            .and_then(|c| c.api_key_env.as_deref());
-        match crate::utils::provider_key_source(profile.name, profile.api_key_env, override_env) {
-            "env" => {
-                any = true;
-                let env = override_env.unwrap_or(profile.api_key_env);
-                println!("  - {} (via ${})", profile.name, env);
-            },
-            "keyring" => {
-                any = true;
-                println!("  - {} (via keyring)", profile.name);
-            },
-            _ => {},
-        }
-    }
-    if !any {
+    let catalogs = crate::providers::discovery::provider_catalogs(config).await;
+    if catalogs.is_empty() {
         println!("  (none — set a provider API key env var to enable)");
     }
+    for catalog in &catalogs {
+        println!(
+            "  - {} ({}) {}",
+            catalog.provider.name,
+            catalog.provider.source_label(),
+            catalog.provider.endpoint
+        );
+        match &catalog.models {
+            // The key resolves but the catalog didn't answer. Say so instead of
+            // printing an empty list that reads as "this provider has nothing".
+            None => {
+                println!("      (model list unavailable — the provider's /models did not answer)")
+            },
+            Some(models) if models.is_empty() => println!("      (provider lists no models)"),
+            Some(models) => {
+                for id in models {
+                    println!("      {}/{}", catalog.provider.name, id);
+                }
+            },
+        }
+    }
+
+    // A provider the user started configuring that still cannot be built. It
+    // belongs on the "what can I use" surface precisely because the answer is
+    // "not this, and here is the one thing missing".
+    let problems = crate::providers::provider_problems(config);
+    if !problems.is_empty() {
+        println!("\nConfigured but not usable:");
+        for problem in &problems {
+            println!("  - {}: {}", problem.name, problem.reason);
+        }
+    }
+
     println!("\nSwitch models in-session with /model <name>.");
     Ok(())
 }
@@ -2381,31 +2378,38 @@ async fn show_status(config: &Config) -> Result<()> {
     println!("Mermaid Status:");
     println!();
 
-    // Check remote providers by API-key env presence (matches the
-    // routing ProviderFactory uses when the user picks a model).
-    let mut available: Vec<String> = Vec::new();
-    if meta_api_key(config).is_some() {
-        available.push("meta".to_string());
-    }
-    for profile in PROVIDER_REGISTRY {
-        let override_env = config
-            .providers
-            .get(profile.name)
-            .and_then(|c| c.api_key_env.as_deref());
-        match crate::utils::provider_key_source(profile.name, profile.api_key_env, override_env) {
-            "env" => available.push(profile.name.to_string()),
-            // Say where the key came from when it ISN'T the usual env var —
-            // the difference matters when debugging a stale login.
-            "keyring" => available.push(format!("{} (keyring)", profile.name)),
-            _ => {},
-        }
-    }
+    // Remote providers: one block, listing exactly what `ProviderFactory`
+    // could build right now — name, where the key came from, and the endpoint
+    // requests would go to. This used to be printed twice, by two walks that
+    // disagreed with each other and with the factory; see `providers::discovery`.
+    let available = configured_remote_providers(config);
     if available.is_empty() {
         println!(
             "  [WARNING] Remote providers: none (no API keys in env or keyring; `mermaid login <provider>`)"
         );
     } else {
-        println!("  [OK] Remote providers: {}", available.join(", "));
+        println!("  [OK] Remote providers: {} configured", available.len());
+        for provider in &available {
+            println!(
+                "      - {} ({}) {}",
+                provider.name,
+                provider.source_label(),
+                provider.endpoint
+            );
+        }
+    }
+    // Half-configured providers are the ones worth a warning: the user set
+    // something up and it still cannot be used. The reason is the factory's own
+    // error, so it says exactly what a real request would have said.
+    let problems = crate::providers::provider_problems(config);
+    if !problems.is_empty() {
+        println!(
+            "  [WARNING] Providers configured but not usable: {}",
+            problems.len()
+        );
+        for problem in &problems {
+            println!("      - {}: {}", problem.name, problem.reason);
+        }
     }
 
     // Check Ollama (via HTTP, so remote deployments are honored).
@@ -2431,8 +2435,12 @@ async fn show_status(config: &Config) -> Result<()> {
                 }
             },
         }
+    } else if available.is_empty() {
+        println!("  [WARNING] Ollama: Not installed (and no remote provider configured)");
     } else {
-        println!("  [ERROR] Ollama: Not installed");
+        // Not a failure: the configured remote providers cover every model
+        // this machine needs. Ollama is only required for local models.
+        println!("  [INFO] Ollama: Not installed (only needed for local models)");
     }
 
     // Check configuration (uses platform-specific path via ProjectDirs)
@@ -2510,11 +2518,6 @@ async fn show_status(config: &Config) -> Result<()> {
         }
     }
 
-    // OpenAI-compatible providers — list anything from the built-in
-    // registry whose API key resolves, plus any user-defined custom
-    // providers. No network probe (would slow `mermaid status`).
-    show_provider_status(config);
-
     // Environment variables (for API providers)
     println!("\n  Environment:");
     if std::env::var("OLLAMA_API_KEY").is_ok() {
@@ -2523,101 +2526,6 @@ async fn show_status(config: &Config) -> Result<()> {
 
     println!();
     Ok(())
-}
-
-/// Print the remote-providers status block. Includes Anthropic (bespoke
-/// Messages API) and any OpenAI-compatible provider whose API key resolves.
-/// Custom providers from `[providers.<name>]` are listed if `base_url`
-/// and `api_key_env` are both set and the env var resolves.
-fn show_provider_status(config: &Config) {
-    let mut configured: Vec<(String, String)> = Vec::new(); // (name, base_url)
-
-    // Anthropic — checked first because it's not in the OpenAI-compat
-    // registry but is a top-tier provider users care about.
-    let anth_cfg = config.providers.get("anthropic");
-    if crate::utils::resolve_provider_key(
-        "anthropic",
-        "ANTHROPIC_API_KEY",
-        anth_cfg.and_then(|c| c.api_key_env.as_deref()),
-    )
-    .is_some()
-    {
-        let url = anth_cfg
-            .and_then(|c| c.base_url.clone())
-            .unwrap_or_else(|| "https://api.anthropic.com/v1".to_string());
-        configured.push(("anthropic".to_string(), url));
-    }
-
-    // Gemini — also bespoke (not in OpenAI-compat registry).
-    let gem_cfg = config.providers.get("gemini");
-    if crate::utils::resolve_provider_key_with_fallback(
-        "gemini",
-        "GOOGLE_API_KEY",
-        "GEMINI_API_KEY",
-        gem_cfg.and_then(|c| c.api_key_env.as_deref()),
-    )
-    .is_some()
-    {
-        let url = gem_cfg
-            .and_then(|c| c.base_url.clone())
-            .unwrap_or_else(|| "https://generativelanguage.googleapis.com/v1beta".to_string());
-        configured.push(("gemini".to_string(), url));
-    }
-
-    if meta_api_key(config).is_some() {
-        configured.push(("meta".to_string(), meta_base_url(config)));
-    }
-
-    for profile in PROVIDER_REGISTRY {
-        let user_cfg = config.providers.get(profile.name);
-        let api_key_present = crate::utils::resolve_provider_key(
-            profile.name,
-            profile.api_key_env,
-            user_cfg.and_then(|c| c.api_key_env.as_deref()),
-        )
-        .is_some();
-        if api_key_present {
-            let url = crate::providers::factory::discovery_base_url(
-                profile,
-                user_cfg.and_then(|c| c.base_url.clone()),
-            )
-            // cloudflare with a token but no account id: show the actual
-            // misconfiguration, not the registry's ACCOUNT_ID placeholder.
-            .unwrap_or_else(|| {
-                "CLOUDFLARE_ACCOUNT_ID not set — set it or [providers.cloudflare].base_url"
-                    .to_string()
-            });
-            configured.push((profile.name.to_string(), url));
-        }
-    }
-
-    // Custom providers — anything in config.providers not in registry
-    // and not a bespoke provider already handled above.
-    for (name, cfg) in &config.providers {
-        if matches!(name.as_str(), "anthropic" | "gemini" | "meta")
-            || lookup_provider(name).is_some()
-        {
-            continue;
-        }
-        if let (Some(url), Some(env)) = (&cfg.base_url, cfg.api_key_env.as_deref())
-            && crate::utils::resolve_provider_key(name, env, None).is_some()
-        {
-            configured.push((name.clone(), url.clone()));
-        }
-    }
-
-    if configured.is_empty() {
-        println!(
-            "  [INFO] Remote providers: None configured (set $ANTHROPIC_API_KEY, \
-             $GOOGLE_API_KEY, $OPENAI_API_KEY, $GROQ_API_KEY, $OPENROUTER_API_KEY, etc., or \
-             add [providers.<name>] to config.toml)"
-        );
-    } else {
-        println!("  [OK] Remote providers: {} configured", configured.len());
-        for (name, url) in configured {
-            println!("      - {} ({})", name, url);
-        }
-    }
 }
 
 /// Dispatch `mermaid pr` subcommands.

@@ -780,9 +780,11 @@ pub struct UserProviderConfig {
     /// field), `"openrouter"` (nested `reasoning: {effort}` object).
     #[serde(default)]
     pub compat: Option<String>,
-    /// Optional preferred model — surfaced by `mermaid status` and used
-    /// as the default when the user picks this provider with no model
-    /// suffix.
+    /// Optional preferred model for this provider (a bare model id like
+    /// `claude-x`; a `vendor/model` id is fine too). Used as the startup
+    /// model when nothing else pins one — no `--model`, no
+    /// `last_used_model`, no `[default_model]`, and no local Ollama — which
+    /// is what lets a machine with only a provider key run bare `mermaid`.
     #[serde(default)]
     pub default_model: Option<String>,
 }
@@ -1817,7 +1819,8 @@ pub fn persist_ollama_allow_ram_offload(enabled: bool) -> Result<()> {
     )
 }
 
-/// Resolve which model to use: CLI arg > last_used > default_model > any available
+/// Resolve which model to use: CLI arg > last_used > `[default_model]` > a
+/// local Ollama model > a configured provider's `default_model`.
 pub async fn resolve_model_id(cli_model: Option<&str>, config: &Config) -> anyhow::Result<String> {
     if let Some(model) = cli_model {
         if let Some(resolved) = resolve_model_alias(model, config)? {
@@ -1837,14 +1840,90 @@ pub async fn resolve_model_id(cli_model: Option<&str>, config: &Config) -> anyho
             config.default_model.provider, config.default_model.name
         ));
     }
-    let available = crate::ollama::require_any_model(config).await?;
-    // `require_any_model` already errors on empty, so this `.first()` is
-    // never `None` in practice. Use `.first()` over `[0]` so the precondition
-    // is enforced by the type system instead of by a comment.
-    let first = available
-        .first()
-        .ok_or_else(|| anyhow::anyhow!("require_any_model returned empty list"))?;
-    Ok(format!("ollama/{}", first))
+    // Nothing pinned. Ollama is Mermaid's default backend, not a prerequisite:
+    // prefer a local model when one is installed, then a remote provider the
+    // user has given an explicit `default_model`, and only then give up — with
+    // a message that offers both routes instead of demanding an Ollama install
+    // from someone who set `ANTHROPIC_API_KEY` and never wanted local models.
+    let local = crate::ollama::local_models(config).await;
+    if let Some(first) = local.as_ref().and_then(|models| models.first()) {
+        return Ok(format!("ollama/{}", first));
+    }
+    if let Some(model_id) = configured_provider_default_model(config) {
+        return Ok(model_id);
+    }
+    Err(no_model_configured_error(config, local.is_some()))
+}
+
+/// A `[providers.<name>].default_model` belonging to a provider whose API key
+/// resolves right now. It is a model id the user typed themselves, so using it
+/// as the startup default requires no guess about which models a vendor
+/// currently ships — Mermaid never invents model names.
+fn configured_provider_default_model(config: &Config) -> Option<String> {
+    for provider in crate::providers::configured_remote_providers(config) {
+        let model = config
+            .providers
+            .get(&provider.name)
+            .and_then(|entry| entry.default_model.as_deref())
+            .map(str::trim)
+            .filter(|model| !model.is_empty());
+        let Some(model) = model else { continue };
+        // The field holds a bare model name, but an id that already carries
+        // its provider prefix (or an OpenRouter-style `vendor/model`) must not
+        // be double-prefixed into `openrouter/openrouter/...`.
+        if model.starts_with(&format!("{}/", provider.name)) {
+            return Some(model.to_string());
+        }
+        return Some(format!("{}/{}", provider.name, model));
+    }
+    None
+}
+
+/// The startup error for "no model is configured yet".
+///
+/// Ollama is one of two ways to get a model, so this never tells a user who
+/// already has a provider key that they must install it. `ollama_installed`
+/// distinguishes "install Ollama" from "you have Ollama, pull a model".
+fn no_model_configured_error(config: &Config, ollama_installed: bool) -> anyhow::Error {
+    let providers = crate::providers::configured_remote_providers(config);
+    let mut lines = vec!["No model configured yet.".to_string(), String::new()];
+
+    if let Some(first) = providers.first() {
+        let names: Vec<&str> = providers.iter().map(|p| p.name.as_str()).collect();
+        lines.push(format!("Remote providers ready: {}", names.join(", ")));
+        lines.push("Name a model to use one, e.g.:".to_string());
+        lines.push(format!("    mermaid --model {}/<model>", first.name));
+        lines.push(
+            "Mermaid remembers the last model you used, so --model is a one-time step; \
+             `mermaid list` shows what is available."
+                .to_string(),
+        );
+        lines.push(String::new());
+        lines.push("Or pin one in config.toml:".to_string());
+        lines.push(format!("    [providers.{}]", first.name));
+        lines.push("    default_model = \"<model>\"".to_string());
+    } else {
+        lines.push(
+            "For a remote model, set a provider key (ANTHROPIC_API_KEY, OPENAI_API_KEY,"
+                .to_string(),
+        );
+        lines.push("GOOGLE_API_KEY, GROQ_API_KEY, OPENROUTER_API_KEY, …) and name a".to_string());
+        lines.push("model: mermaid --model anthropic/<model>".to_string());
+    }
+
+    lines.push(String::new());
+    if ollama_installed {
+        lines.push("For a local model, pull one first: ollama pull qwen3:8b".to_string());
+    } else {
+        lines.push(
+            "For local models, install Ollama (https://ollama.com/download), then: \
+             ollama pull qwen3:8b"
+                .to_string(),
+        );
+    }
+    lines.push("`mermaid doctor` reports what is and isn't ready.".to_string());
+
+    anyhow::anyhow!(lines.join("\n"))
 }
 
 fn resolve_model_alias(requested: &str, config: &Config) -> anyhow::Result<Option<String>> {
@@ -2870,5 +2949,144 @@ port = 11434
         // existing files.
         let blob = toml::to_string(&Config::default()).expect("serialize");
         assert!(!blob.contains("post_approve"));
+    }
+
+    /// Config with one remote provider carrying an explicit `default_model`.
+    fn config_with_provider_default(provider: &str, model: &str) -> Config {
+        let mut config = Config::default();
+        config.providers.insert(
+            provider.to_string(),
+            UserProviderConfig {
+                default_model: Some(model.to_string()),
+                ..Default::default()
+            },
+        );
+        config
+    }
+
+    /// The whole point of the Ollama-optional path: a machine whose only
+    /// backend is Anthropic must resolve a model without Ollama in the picture.
+    #[test]
+    fn provider_default_model_resolves_without_ollama() {
+        let config = config_with_provider_default("anthropic", "claude-x");
+        temp_env::with_vars([("ANTHROPIC_API_KEY", Some("sk-test"))], || {
+            assert_eq!(
+                configured_provider_default_model(&config).as_deref(),
+                Some("anthropic/claude-x")
+            );
+        });
+    }
+
+    /// An unconfigured provider's `default_model` is not a usable default —
+    /// building it would fail on the missing key at the first request.
+    #[test]
+    fn provider_default_model_ignored_without_a_key() {
+        let config = config_with_provider_default("anthropic", "claude-x");
+        temp_env::with_vars([("ANTHROPIC_API_KEY", None::<&str>)], || {
+            // The keyring is the machine's, so only assert the env-var half:
+            // with no key in the environment there is nothing to prefer.
+            if crate::utils::provider_key_source("anthropic", "ANTHROPIC_API_KEY", None) == "none" {
+                assert_eq!(configured_provider_default_model(&config), None);
+            }
+        });
+    }
+
+    /// OpenRouter ids are `vendor/model`, which must be prefixed once, not
+    /// twice — and an id that already names its provider is left alone.
+    #[test]
+    fn provider_default_model_is_prefixed_exactly_once() {
+        temp_env::with_vars([("OPENROUTER_API_KEY", Some("sk-test"))], || {
+            let vendor_model = config_with_provider_default("openrouter", "z-ai/glm-5.2");
+            assert_eq!(
+                configured_provider_default_model(&vendor_model).as_deref(),
+                Some("openrouter/z-ai/glm-5.2")
+            );
+            let already_prefixed =
+                config_with_provider_default("openrouter", "openrouter/z-ai/glm-5.2");
+            assert_eq!(
+                configured_provider_default_model(&already_prefixed).as_deref(),
+                Some("openrouter/z-ai/glm-5.2")
+            );
+        });
+    }
+
+    /// The regression this replaced: startup used to end at "Ollama is not
+    /// installed", which reads as "Mermaid needs Ollama". With a provider key
+    /// present the message must be about naming a model, not about Ollama.
+    #[test]
+    fn missing_model_error_does_not_demand_ollama_when_a_provider_is_ready() {
+        let config = Config::default();
+        temp_env::with_vars([("ANTHROPIC_API_KEY", Some("sk-test"))], || {
+            let msg = no_model_configured_error(&config, false).to_string();
+            assert!(msg.contains("anthropic"), "{msg}");
+            assert!(msg.contains("mermaid --model anthropic/<model>"), "{msg}");
+            assert!(msg.contains("[providers.anthropic]"), "{msg}");
+            // Ollama may still be mentioned as the local option, but never as
+            // a prerequisite for running Mermaid at all.
+            assert!(!msg.contains("Ollama is not installed"), "{msg}");
+        });
+    }
+
+    /// Run `f` with every built-in provider's key env var unset, so a key in
+    /// the developer's own shell can't change what the message says.
+    fn with_no_provider_keys<T>(f: impl FnOnce() -> T) -> T {
+        let cleared: Vec<(&str, Option<&str>)> = [
+            crate::providers::model::anthropic::DEFAULT_API_KEY_ENV,
+            crate::providers::model::gemini::DEFAULT_API_KEY_ENV,
+            crate::providers::model::gemini::LEGACY_API_KEY_ENV,
+            crate::providers::model::meta::DEFAULT_API_KEY_ENV,
+        ]
+        .iter()
+        .map(|env| (*env, None))
+        .chain(
+            crate::models::PROVIDER_REGISTRY
+                .iter()
+                .map(|profile| (profile.api_key_env, None)),
+        )
+        .collect();
+        temp_env::with_vars(cleared, f)
+    }
+
+    /// With nothing configured at all, both routes are offered — the remote
+    /// one first, since it needs no install.
+    #[test]
+    fn missing_model_error_offers_both_routes_when_nothing_is_configured() {
+        with_no_provider_keys(|| {
+            let msg = no_model_configured_error(&Config::default(), false).to_string();
+            assert!(msg.contains("https://ollama.com/download"), "{msg}");
+            // A keyring login would legitimately name a provider instead; only
+            // assert the no-provider wording when there really is none.
+            if !msg.contains("Remote providers ready") {
+                assert!(msg.contains("ANTHROPIC_API_KEY"), "{msg}");
+            }
+        });
+    }
+
+    /// End-to-end through `resolve_model_id` itself: nothing pinned, no local
+    /// model reachable, one configured provider — Mermaid starts on that
+    /// provider instead of erroring out about Ollama.
+    #[test]
+    fn resolve_model_id_falls_back_to_a_configured_provider() {
+        let mut config = config_with_provider_default("anthropic", "claude-x");
+        // Point at a dead port with autostart off, so "no local model" holds
+        // whether or not this machine has Ollama installed.
+        config.ollama.host = "http://127.0.0.1".to_string();
+        config.ollama.port = 1;
+        config.ollama.auto_start = false;
+        temp_env::with_vars([("ANTHROPIC_API_KEY", Some("sk-test"))], || {
+            let runtime = tokio::runtime::Runtime::new().expect("runtime");
+            let resolved = runtime
+                .block_on(resolve_model_id(None, &config))
+                .expect("a configured provider is enough to resolve a model");
+            assert_eq!(resolved, "anthropic/claude-x");
+        });
+    }
+
+    /// An installed-but-empty Ollama needs a pull, not another install.
+    #[test]
+    fn missing_model_error_says_pull_when_ollama_is_installed() {
+        let msg = no_model_configured_error(&Config::default(), true).to_string();
+        assert!(msg.contains("ollama pull qwen3:8b"), "{msg}");
+        assert!(!msg.contains("https://ollama.com/download"), "{msg}");
     }
 }

@@ -81,7 +81,13 @@ Prebuilt binaries (plus `.deb`/`.rpm`) are attached to every release; the crates
 
 </details>
 
-Local inference requires [Ollama](https://ollama.com) (models auto-pull if not found locally). Cloud providers are optional — see [Remote Providers](#remote-providers) below.
+Mermaid needs one model backend, and either kind will do. [Ollama](https://ollama.com) covers local inference (models auto-pull if not found locally) and is **not** required otherwise: a machine with only a provider API key set runs Mermaid fine — see [Remote Providers](#remote-providers) below. Name a remote model once with `mermaid --model anthropic/<model>` and Mermaid remembers it, or pin one per provider:
+
+```toml
+# ~/.config/mermaid/config.toml
+[providers.anthropic]
+default_model = "<model>"
+```
 
 ### First 10 Minutes
 

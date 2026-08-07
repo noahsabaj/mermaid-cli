@@ -20,6 +20,14 @@ use super::super::capabilities::Capabilities;
 use super::super::ctx::{FinalResponse, StreamContext, StreamEvent};
 use super::{ContextSizing, ModelProvider, resolve_limits_cached};
 
+/// Anthropic's Messages-API root, and the env var its key lives in.
+///
+/// One definition, next to the provider, like `meta`'s. `ProviderFactory`
+/// builds the endpoint from these and `providers::discovery` reports it from
+/// the same constants — the literal used to be spelled out separately in both.
+pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com/v1";
+pub const DEFAULT_API_KEY_ENV: &str = "ANTHROPIC_API_KEY";
+
 /// Anthropic adapter fronted by `ModelProvider`.
 pub struct AnthropicProvider {
     adapter: AnthropicAdapter,

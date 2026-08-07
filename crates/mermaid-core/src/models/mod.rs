@@ -1,13 +1,14 @@
 // Gateway module for models
 // All external access must go through this gateway
 
-pub(crate) mod adapters; // Provider adapters (Ollama, OpenAI-compatible) — wrapped by providers/model/*
+pub mod adapters; // Provider adapters (Ollama, OpenAI-compatible) — wrapped by providers/model/*
 mod capabilities; // Per-model capability flags
 pub mod catalog; // Data-driven model-capability catalog (first-match-wins const table)
-pub(crate) mod config; // Unified configuration
+pub mod config; // Unified configuration
 mod error; // Structured error types
 mod providers; // OpenAI-compatible provider profiles + registry
 mod reasoning; // ReasoningLevel, ReasoningCapability, nearest_effort
+pub mod retry; // Transient-HTTP retry policy shared by every adapter
 mod stream; // Typed StreamEvent enum
 pub mod tool_call; // Tool call parsing (native function calling)
 

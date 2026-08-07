@@ -32,7 +32,6 @@
 //! `CancellationToken`.
 
 mod config_watch;
-mod middleware;
 mod turn_scope;
 
 use std::collections::HashMap;
@@ -52,7 +51,12 @@ use crate::providers::model::ModelProvider;
 use crate::providers::{ProviderFactory, StreamEvent, ToolRegistry};
 use crate::utils::{join_logged, spawn_guarded};
 
-pub use middleware::{DEFAULT_MAX_ATTEMPTS, retry_transient_http};
+// The transient-HTTP retry policy lives with the adapters that are its only
+// consumers (`models::retry`), not here. Re-exported under the historical
+// `effect::` path so call sites and docs keep working.
+pub use crate::models::retry::{
+    DEFAULT_MAX_ATTEMPTS, retry_transient_http, retry_transient_http_no_connect_retry,
+};
 pub use turn_scope::TurnScope;
 
 #[cfg(not(test))]
@@ -3443,17 +3447,15 @@ async fn dispatch_probe_vision(
         .await;
 }
 
-/// How long the `/model` picker waits on one provider's catalog. The picker
-/// opens immediately and fills in, so a slow provider costs a late row, not a
-/// stalled UI — but it must not hang the discovery task forever either.
-const MODEL_DISCOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(6);
-
 /// Everything the user could switch to, for the `/model` picker.
 ///
 /// Two sources, both best-effort — a failure anywhere yields fewer rows, never
 /// an error: the local Ollama daemon (queried WITHOUT autostart, so opening a
-/// list can't resurrect a server the user deliberately stopped) and the
-/// `/models` endpoint of every remote provider that has a resolvable key.
+/// list can't resurrect a server the user deliberately stopped) and the model
+/// catalog of every remote provider that has a resolvable key. The catalogs
+/// come from `providers::discovery`, which covers the bespoke providers
+/// (Anthropic, Gemini, Meta) as well as the OpenAI-compatible registry — this
+/// list was registry-only once, and every `meta/muse-spark-*` was missing.
 async fn discover_available_models(
     providers: Option<Arc<ProviderFactory>>,
 ) -> Vec<crate::domain::state::ModelChoice> {
@@ -3477,56 +3479,17 @@ async fn discover_available_models(
     }
 
     // ── Remote catalogs ─────────────────────────────────────────────
-    let client = match reqwest::Client::builder()
-        .timeout(MODEL_DISCOVERY_TIMEOUT)
-        .build()
-    {
-        Ok(client) => client,
-        Err(_) => return out,
-    };
-    for profile in crate::models::PROVIDER_REGISTRY {
-        let user_cfg = config.providers.get(profile.name);
-        let Some(api_key) = crate::utils::resolve_provider_key(
-            profile.name,
-            profile.api_key_env,
-            user_cfg.and_then(|c| c.api_key_env.as_deref()),
-        ) else {
+    for catalog in crate::providers::discovery::provider_catalogs(config).await {
+        // Every row here is selectable, so an unreadable catalog contributes
+        // nothing rather than a placeholder that would switch to a broken id.
+        // `mermaid list` is the surface that says the catalog failed.
+        let Some(models) = catalog.models else {
             continue;
         };
-        let Some(base_url) = crate::providers::factory::discovery_base_url(
-            profile,
-            user_cfg.and_then(|c| c.base_url.clone()),
-        ) else {
-            continue;
-        };
-        let url = format!("{}/models", base_url.trim_end_matches('/'));
-        let mut request = client.get(&url).bearer_auth(api_key);
-        for (name, value) in profile.extra_headers {
-            request = request.header(*name, *value);
-        }
-        let Ok(response) = request.send().await else {
-            continue;
-        };
-        if !response.status().is_success() {
-            continue;
-        }
-        let Ok(body) = response.json::<serde_json::Value>().await else {
-            continue;
-        };
-        // Every provider here is OpenAI-compatible: `{ "data": [{ "id": … }] }`.
-        let ids = body
-            .get("data")
-            .and_then(|d| d.as_array())
-            .map(|rows| {
-                rows.iter()
-                    .filter_map(|r| r.get("id").and_then(|i| i.as_str()).map(str::to_string))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        for id in ids {
+        for id in models {
             out.push(ModelChoice {
-                id: format!("{}/{}", profile.name, id),
-                group: profile.name.to_string(),
+                id: format!("{}/{}", catalog.provider.name, id),
+                group: catalog.provider.name.clone(),
                 detail: String::new(),
                 ready: true,
             });
