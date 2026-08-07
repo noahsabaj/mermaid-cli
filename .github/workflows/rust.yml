@@ -86,10 +86,10 @@ jobs:
         # nextest skipping them loses nothing.
         run: cargo nextest run --workspace
 
-      # The insta snapshot suite is `#[cfg(all(test, unix))]`, so a Windows
-      # developer cannot run it and only learns of a mismatch from CI. insta
-      # writes the rendered frame to a `.snap.new` sibling on failure; publish
-      # those so the diff is reviewable (and appliable) without a unix box.
+      # The insta snapshot suite now runs on every matrix leg (#296), so a
+      # mismatch is reproducible locally. Still publish the `.snap.new` siblings
+      # insta writes on failure: the frame a leg you don't have rendered is what
+      # makes a platform-specific diff reviewable (and appliable) at all.
       - name: Upload pending snapshots
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

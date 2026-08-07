@@ -1128,9 +1128,10 @@ pub(crate) fn render_frame(
     out
 }
 
-// TZ-sensitive (`temp_env` TZ pinning) and fixture scripts assume unix paths;
-// the unit tests above already cover Windows-relevant logic.
-#[cfg(all(test, unix))]
+/// Full-frame snapshots of `render()`. Runs on every platform (#296): the
+/// suite pins its own clock, host/user, version and cwd, so nothing platform-
+/// dependent reaches the frame.
+#[cfg(test)]
 mod snapshots;
 
 /// Idle-frame measurement rig (`#[ignore]`d). See `bench.rs` for how to run it.

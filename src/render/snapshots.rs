@@ -6,11 +6,25 @@
 //! Determinism: every input the frame can observe is pinned — the injected
 //! clock (`fixed_now`, a PAST date so user timestamps take the absolute-date
 //! branch regardless of when the suite runs), the `RenderCache` host/user
-//! strings, busy-turn start times (derived from the fixture clock), and `TZ`
-//! (via `temp_env`, whose global lock also serializes the env mutation).
+//! strings, busy-turn start times (derived from the fixture clock), and the
+//! cwd (a literal, so it prints the same on Windows).
 //! `determinism_same_scene_twice` guards the harness itself: if a residual
 //! env or clock read sneaks into `render()`, it fails here before the pinned
 //! snapshots start flaking across machines.
+//!
+//! Timezone: the suite is TZ-INDEPENDENT rather than TZ-pinned (#296). It used
+//! to set `TZ=UTC` around each scene — which is what kept it off Windows, where
+//! chrono reads the system zone and ignores `TZ`. That pinning did not work on
+//! unix either: chrono resolves the local zone once per process and caches it,
+//! so mutating `TZ` mid-test changes nothing. The snapshots matched because CI
+//! runs in UTC.
+//!
+//! `fixed_now` now names a fixed LOCAL wall clock instead of a fixed instant,
+//! so the one thing a timezone can move — the rendered date and time — reads
+//! the same everywhere, and one set of `.snap` files serves every platform.
+//! `fixture_clock_reads_the_pinned_wall_clock` pins that string directly, so a
+//! regression reports its own cause instead of arriving as a shifted line in
+//! twenty-odd frame diffs.
 //!
 //! Workflow: a mismatch panics with a diff and writes a `.snap.new` sibling
 //! (gitignored); run `just snapshots` (`cargo insta review`) to accept or
@@ -28,12 +42,25 @@ use crate::models::{ChatMessage, ChatMessageKind};
 /// roomy modern terminal (exercises wrapping and layout at both extremes).
 const SIZES: [(u16, u16); 2] = [(80, 24), (120, 40)];
 
-/// Fixture clock: a fixed PAST instant (relative-timestamp rendering falls
-/// through to the absolute-date branch, immune to the live "Today" boundary).
+/// Fixture clock: a fixed PAST *local wall clock* (relative-timestamp rendering
+/// falls through to the absolute-date branch, immune to the live "Today"
+/// boundary).
+///
+/// Local, not a fixed instant: the frame prints this through
+/// `format_relative_timestamp`, which formats in local time. A fixed instant
+/// therefore renders a different date and time in every timezone; a fixed wall
+/// clock renders the same one everywhere, which is what lets the same `.snap`
+/// files serve every platform (#296). Scene-relative times are all derived by
+/// subtracting from this, so their differences stay invariant too.
 fn fixed_now() -> chrono::DateTime<chrono::Local> {
-    chrono::DateTime::parse_from_rfc3339("2026-01-02T03:04:05+00:00")
-        .expect("fixture timestamp parses")
-        .with_timezone(&chrono::Local)
+    use chrono::TimeZone;
+    // `earliest` rather than `single`: a DST fold would make this ambiguous.
+    // January 2nd at 03:04 sits in no real zone's transition, so this is
+    // belt-and-braces — but a panic here would be a baffling way to learn it.
+    chrono::Local
+        .with_ymd_and_hms(2026, 1, 2, 3, 4, 5)
+        .earliest()
+        .expect("fixture wall clock exists in the local timezone")
 }
 
 /// A `RenderCache` with the process-environment and compile-time reads pinned
@@ -58,17 +85,13 @@ fn scene_state() -> State {
     )
 }
 
-/// Render `build()`'s scene at every pinned size under a UTC clock. The state
-/// is built INSIDE the TZ guard so message timestamps and the render share one
-/// timezone view; `with_var`'s global lock serializes the suite.
+/// Render `build()`'s scene at every pinned size.
 fn assert_scene(name: &str, build: impl Fn() -> State) {
-    temp_env::with_var("TZ", Some("UTC"), || {
-        let state = build();
-        for (width, height) in SIZES {
-            let frame = render_frame(&state, &mut snapshot_cache(), width, height);
-            insta::assert_snapshot!(format!("{name}_{width}x{height}"), frame);
-        }
-    });
+    let state = build();
+    for (width, height) in SIZES {
+        let frame = render_frame(&state, &mut snapshot_cache(), width, height);
+        insta::assert_snapshot!(format!("{name}_{width}x{height}"), frame);
+    }
 }
 
 /// `kind`-stamped message, mirroring the helper in `tests`.
@@ -515,14 +538,41 @@ fn system_notice_and_checkpoint() {
 /// before they surface as cross-machine snapshot flakes.
 #[test]
 fn determinism_same_scene_twice() {
-    temp_env::with_var("TZ", Some("UTC"), || {
-        let mut s = scene_state();
-        s.session
-            .append(ChatMessage::user("determinism probe"), s.now);
-        s.session
-            .append(ChatMessage::assistant("stable output"), s.now);
-        let first = render_frame(&s, &mut snapshot_cache(), 80, 24);
-        let second = render_frame(&s, &mut snapshot_cache(), 80, 24);
-        assert_eq!(first, second, "render must be a pure function of State");
-    });
+    let mut s = scene_state();
+    s.session
+        .append(ChatMessage::user("determinism probe"), s.now);
+    s.session
+        .append(ChatMessage::assistant("stable output"), s.now);
+    let first = render_frame(&s, &mut snapshot_cache(), 80, 24);
+    let second = render_frame(&s, &mut snapshot_cache(), 80, 24);
+    assert_eq!(first, second, "render must be a pure function of State");
+}
+
+/// Harness self-check: the fixture clock renders the pinned wall clock.
+///
+/// This stamp is the single thing that made the suite unix-only (#296). The
+/// frame right-aligns it, so a timezone that shifts it also shifts the padding
+/// in front of it — one wrong character here is a diff in every scene carrying
+/// a user message. Asserting the string alone turns that into one legible
+/// failure instead.
+///
+/// This is the whole cross-timezone guard, and it is a real one: the `.snap`
+/// files were generated under UTC, so on any machine that is not UTC this test
+/// asserts agreement ACROSS zones. Verified by mutation — restore the old
+/// fixed-instant `fixed_now`, run under `TZ=Pacific/Kiritimati`, and this fails
+/// alongside every scene that carries a user message.
+///
+/// Note what cannot guard it: rendering twice under `temp_env::with_var("TZ",
+/// …)`. chrono resolves the local zone once and caches it, so both halves see
+/// whichever zone the process started in and the comparison passes no matter
+/// what. That is also why the `TZ=UTC` pinning this suite used to wrap each
+/// scene in was inert on unix too — the snapshots matched because CI runs in
+/// UTC, not because the pinning worked.
+#[test]
+fn fixture_clock_reads_the_pinned_wall_clock() {
+    assert_eq!(
+        crate::utils::format_relative_timestamp(fixed_now()),
+        "January 2nd, 2026 at 3:04am",
+        "the fixture clock must be a fixed LOCAL wall clock, not a fixed instant"
+    );
 }

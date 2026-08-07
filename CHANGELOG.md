@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The render snapshot suite runs on Windows.** It was `#[cfg(all(test, unix))]`,
+  so `just check` on Windows silently skipped every pinned frame — the platform
+  with the least coverage was the one where a contributor was most likely to
+  believe they were covered, and three v0.20.0 bugs that only a rendered frame
+  could catch were invisible there. Measured rather than assumed: of the two
+  reasons in the cfg comment, the unix-path one was already moot (the scenes use
+  a literal cwd, which prints identically on Windows), and the timezone one was
+  real but fixed the wrong way. `TZ=UTC` around each scene cannot work on
+  Windows, where chrono reads the system zone and ignores `TZ` — and it was not
+  working on unix either: chrono resolves the local zone once per process and
+  caches it, so mutating `TZ` mid-test changes nothing. The snapshots matched
+  because CI runs in UTC. So the fixture clock now names a fixed *local wall
+  clock* instead of a fixed instant: the frame formats it in local time, so a
+  fixed instant renders a different stamp in every zone while a fixed wall clock
+  renders the same one everywhere. The suite is timezone-INDEPENDENT rather than
+  timezone-pinned, which is what lets one set of `.snap` files serve every
+  platform — they are unchanged by this, and a UTC-5 Windows box now matches
+  frames generated under UTC. `fixture_clock_reads_the_pinned_wall_clock` guards
+  it, verified by mutation: with the old fixed-instant clock restored and
+  `TZ=Pacific/Kiritimati` set, it fails alongside every scene carrying a user
+  message.
+
 ## [0.20.0] - 2026-08-07
 
 ### Changed
