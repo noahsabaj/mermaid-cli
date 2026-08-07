@@ -740,6 +740,14 @@ pub struct AgentTypeConfig {
     /// Default model id for this type (e.g. `"ollama/qwen3:8b"`); a per-call
     /// `model` arg wins over it.
     pub model: Option<String>,
+    /// Where this type's children write: `shared` (default) puts them in the
+    /// session's directory, `worktree` gives each its own git checkout whose
+    /// changes are applied to the project only when it finishes. A per-call
+    /// `isolation` arg wins over it.
+    ///
+    /// Isolate a type you fan out with; leave a type shared when its writes
+    /// need to be visible to the parent immediately.
+    pub isolation: Option<String>,
 }
 
 /// User-supplied remote provider configuration. All fields are optional for a

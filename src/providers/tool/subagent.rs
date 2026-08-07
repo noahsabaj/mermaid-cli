@@ -60,6 +60,7 @@ use crate::runtime::SafetyMode;
 use super::ToolExecutor;
 use super::ToolRegistry;
 use super::web::WebCapabilities;
+use super::workspace::{Isolation, MergeContext, Workspace, WorkspaceReport};
 
 /// Maximum subagents running simultaneously across the whole process.
 /// Covers the pathological "parent emits 30 agent calls in one turn"
@@ -115,6 +116,8 @@ struct AgentType {
     preamble: Option<String>,
     /// Default model for this type; a per-call `model` arg wins.
     model: Option<String>,
+    /// Where this type's children write; a per-call `isolation` arg wins.
+    isolation: Isolation,
 }
 
 impl AgentType {
@@ -127,23 +130,43 @@ impl AgentType {
 
 fn builtin_agent_type(name: &str) -> Option<AgentType> {
     match name {
+        // Shared by default even though this is the type that fans out: a
+        // worktree costs a checkout and hides the parent's uncommitted work
+        // behind a merge, which is the wrong trade for the single-child case
+        // that dominates. Opt in per type or per call.
         "general" => Some(AgentType {
             name: "general".to_string(),
             tools: None,
             safety_ceiling: SafetyMode::FullAccess,
             preamble: None,
             model: None,
+            isolation: Isolation::Shared,
         }),
+        // Read-only by construction, so there is nothing for a worktree to
+        // isolate — and a checkout would only make its reads go stale.
         "explore" => Some(AgentType {
             name: "explore".to_string(),
             tools: Some(vec!["read_file".to_string(), "execute_command".to_string()]),
             safety_ceiling: SafetyMode::ReadOnly,
             preamble: Some(EXPLORE_PREAMBLE.to_string()),
             model: None,
+            isolation: Isolation::Shared,
         }),
         _ => None,
     }
 }
+
+/// System-prompt block for a child running in its own checkout. Without it
+/// the child reports "I edited `src/foo.rs`" while the user looks at an
+/// unchanged `src/foo.rs` and concludes the agent lied.
+const ISOLATED_PREAMBLE: &str = "\
+## Isolated Workspace
+You are working in a private copy of the project, seeded with the user's \
+current uncommitted state. Your edits are invisible to the user and to any \
+other agent until you finish, at which point they are applied to the real \
+project as one patch. Work normally and use ordinary paths. Do not try to \
+reach outside this directory to \"really\" apply your changes, and do not \
+commit: finishing is what lands the work.";
 
 /// Resolve a requested type name (default `general`) against config-defined
 /// types first, then built-ins. Errors are model-facing and actionable: they
@@ -173,12 +196,22 @@ fn resolve_agent_type(
                 CHILD_TOOL_NAMES.join(", ")
             ));
         }
+        let isolation = match custom.isolation.as_deref() {
+            None => Isolation::default(),
+            Some(s) => Isolation::parse(s).ok_or_else(|| {
+                format!(
+                    "[agents.types.{name}] isolation '{s}' is not one of {}",
+                    Isolation::NAMES
+                )
+            })?,
+        };
         return Ok(AgentType {
             name: name.to_string(),
             tools: custom.tools.clone(),
             safety_ceiling,
             preamble: custom.preamble.clone(),
             model: custom.model.clone(),
+            isolation,
         });
     }
     builtin_agent_type(name).ok_or_else(|| {
@@ -197,6 +230,10 @@ fn resolve_agent_type(
 struct CachedAgent {
     state: State,
     type_name: String,
+    /// The workspace the child built its context in. Held for the cached
+    /// child's whole life: an isolated one owns a checkout on disk that a
+    /// continuation reuses and eviction must clean up.
+    workspace: Workspace,
 }
 
 #[derive(Default)]
@@ -224,14 +261,15 @@ pub struct SubagentSpawner {
 }
 
 /// What `kill_detached` found for an agent id.
-#[derive(Debug, PartialEq, Eq)]
-pub enum KillResult {
+#[derive(Debug)]
+pub(crate) enum KillResult {
     /// A running detached child — its cancel token was fired; expect a
     /// `Msg::BackgroundAgentFinished { cancelled: true, .. }` shortly.
     Killed,
     /// No running child, but a finished one sat in the continuation cache —
-    /// it was evicted (the id can no longer be continued).
-    Evicted,
+    /// it was evicted (the id can no longer be continued). Carries its
+    /// workspace so the caller can discard the checkout it owned.
+    Evicted(Workspace),
     NotFound,
 }
 
@@ -262,17 +300,27 @@ impl SubagentSpawner {
     }
 
     /// Insert (or refresh) a cached agent, evicting the oldest past the cap.
-    fn cache_store(&self, id: String, agent: CachedAgent) {
+    ///
+    /// Returns the evicted agents' workspaces. An isolated one owns a
+    /// checkout on disk, and dropping it here would strand that directory
+    /// until the GC sweep — but cleanup is async and this runs under a
+    /// `std::sync::Mutex`, so the caller does the discarding.
+    #[must_use = "an evicted workspace owns a checkout that has to be discarded"]
+    fn cache_store(&self, id: String, agent: CachedAgent) -> Vec<Workspace> {
         let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
         cache.order.retain(|x| x != &id);
         cache.order.push_back(id.clone());
         cache.entries.insert(id, agent);
+        let mut evicted = Vec::new();
         while cache.entries.len() > MAX_CACHED_AGENTS {
             let Some(oldest) = cache.order.pop_front() else {
                 break;
             };
-            cache.entries.remove(&oldest);
+            if let Some(agent) = cache.entries.remove(&oldest) {
+                evicted.push(agent.workspace);
+            }
         }
+        evicted
     }
 
     fn register_detached(&self, agent_id: String, cancel: CancellationToken) {
@@ -293,7 +341,7 @@ impl SubagentSpawner {
     /// orderly and reports through `Msg::BackgroundAgentFinished`), or —
     /// if the id only names a FINISHED child — evict it from the
     /// continuation cache.
-    pub fn kill_detached(&self, agent_id: &str) -> KillResult {
+    pub(crate) fn kill_detached(&self, agent_id: &str) -> KillResult {
         let cancel = self
             .detached_cancels
             .lock()
@@ -303,8 +351,8 @@ impl SubagentSpawner {
             cancel.cancel();
             return KillResult::Killed;
         }
-        if self.cache_take(agent_id).is_some() {
-            return KillResult::Evicted;
+        if let Some(evicted) = self.cache_take(agent_id) {
+            return KillResult::Evicted(evicted.workspace);
         }
         KillResult::NotFound
     }
@@ -388,6 +436,11 @@ impl ToolExecutor for SubagentTool {
                         "type": "string",
                         "description": "Model id override for this child (e.g. 'ollama/qwen3:8b') — use a cheaper/faster model for search-and-summarize subtasks. Defaults to the type's model, else the session model."
                     },
+                    "isolation": {
+                        "type": "string",
+                        "enum": ["shared", "worktree"],
+                        "description": "Where this child writes. 'shared' (default) is the session's directory. 'worktree' gives it a private git checkout, seeded with the current uncommitted state, whose changes are applied to the project only when it finishes — use it when spawning several writing children at once so their edits cannot interleave. Requires a git repository. Ignored when continuing via agent_id."
+                    },
                     "agent_id": {
                         "type": "string",
                         "description": "Continue a previous child (its conversation context is restored and `prompt` becomes its next user message) or, with action 'kill', the backgrounded child to cancel. Use the id from a prior result's [agent_id: …] trailer or the background notice."
@@ -426,14 +479,20 @@ impl ToolExecutor for SubagentTool {
                     "subagent killed",
                     started.elapsed().as_secs_f64(),
                 ),
-                KillResult::Evicted => ToolOutcome::success(
-                    format!(
-                        "Agent '{id}' had already finished; removed it from the \
-                         continuation cache instead."
-                    ),
-                    "subagent evicted",
-                    started.elapsed().as_secs_f64(),
-                ),
+                KillResult::Evicted(workspace) => {
+                    // Its work already merged (or was reported unmerged) when
+                    // it finished; the checkout was only being kept in case
+                    // the child was continued, which it now cannot be.
+                    workspace.discard().await;
+                    ToolOutcome::success(
+                        format!(
+                            "Agent '{id}' had already finished; removed it from the \
+                             continuation cache instead."
+                        ),
+                        "subagent evicted",
+                        started.elapsed().as_secs_f64(),
+                    )
+                },
                 KillResult::NotFound => ToolOutcome::error(
                     format!(
                         "no background or cached agent '{id}' — it may have already \
@@ -466,6 +525,23 @@ impl ToolExecutor for SubagentTool {
             .and_then(|v| v.as_str())
             .map(str::trim)
             .filter(|s| !s.is_empty());
+        let isolation_override = match args
+            .get("isolation")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            None => None,
+            Some(raw) => match Isolation::parse(raw) {
+                Some(mode) => Some(mode),
+                None => {
+                    return ToolOutcome::error(
+                        format!("isolation '{raw}' is not one of {}", Isolation::NAMES),
+                        started.elapsed().as_secs_f64(),
+                    );
+                },
+            },
+        };
         let continue_id = args
             .get("agent_id")
             .and_then(|v| v.as_str())
@@ -516,7 +592,6 @@ impl ToolExecutor for SubagentTool {
         // (usually empty), which made subagents fail at provider
         // resolution.
         let config = (*ctx.config).clone();
-        let cwd = ctx.workdir.clone();
 
         // Continuation: pull the cached child out of the spawner cache (it
         // stays out while it runs, so concurrent continuations of one id
@@ -551,8 +626,11 @@ impl ToolExecutor for SubagentTool {
             Ok(agent_type) => agent_type,
             Err(e) => {
                 // Don't lose a cached child over a config error — put it back.
+                // Re-storing it cannot evict anything: it came out of the
+                // cache a moment ago, so the cap still has room for it.
                 if let Some(cached) = cached {
-                    self.spawner.cache_store(agent_id, cached);
+                    let evicted = self.spawner.cache_store(agent_id, cached);
+                    debug_assert!(evicted.is_empty());
                 }
                 return ToolOutcome::error(e, started.elapsed().as_secs_f64());
             },
@@ -568,6 +646,23 @@ impl ToolExecutor for SubagentTool {
         // non-replayable tools fail closed (see #3).
         let child_safety = SafetyMode::least_permissive(ctx.safety_mode, agent_type.safety_ceiling);
 
+        // Where the child writes. A continuation keeps the workspace it
+        // built its context in — its transcript is full of paths inside that
+        // checkout, and a fresh one would strand the work already there.
+        let (workspace, cached) = match cached {
+            Some(cached) => (cached.workspace, Some(cached.state)),
+            None => {
+                let isolation = isolation_override.unwrap_or(agent_type.isolation);
+                match Workspace::create(isolation, ctx.workdir.clone(), &agent_id).await {
+                    Ok(workspace) => (workspace, None),
+                    Err(e) => {
+                        return ToolOutcome::error(e, started.elapsed().as_secs_f64());
+                    },
+                }
+            },
+        };
+        let cwd = workspace.root().to_path_buf();
+
         // Model priority: per-call arg > type default > parent's active model.
         let model_id = model_override
             .map(str::to_string)
@@ -581,11 +676,11 @@ impl ToolExecutor for SubagentTool {
             });
 
         let (mut child_state, usage_before) = match cached {
-            Some(cached) => {
+            Some(state) => {
                 // Continuations accumulate usage across drives in one State;
                 // snapshot so only THIS drive's delta rolls up to the parent.
-                let before = cached.state.session.cumulative_token_usage;
-                (cached.state, before)
+                let before = state.session.cumulative_token_usage;
+                (state, before)
             },
             None => (
                 State::new(
@@ -617,7 +712,14 @@ impl ToolExecutor for SubagentTool {
         // contract (final message = the report returned to the parent; never
         // ask questions — nobody is watching to answer them).
         child_state.session.is_subagent = true;
-        child_state.session.agent_preamble = agent_type.preamble.clone();
+        // An isolated child is told so. Left unsaid, it reports edits to
+        // paths the user is looking at unchanged and reads as a liar; worse,
+        // a capable one goes hunting for the "real" project to fix that.
+        child_state.session.agent_preamble = match (&agent_type.preamble, workspace.is_isolated()) {
+            (_, false) => agent_type.preamble.clone(),
+            (None, true) => Some(ISOLATED_PREAMBLE.to_string()),
+            (Some(preamble), true) => Some(format!("{preamble}\n\n{ISOLATED_PREAMBLE}")),
+        };
         // The child shares the parent session's scratchpad: subagent work is
         // part of the same session, and a child never receives its own
         // `EnsureScratchpad`. Sitting in the refresh block means both fresh
@@ -709,6 +811,8 @@ impl ToolExecutor for SubagentTool {
                         usage_before,
                         timeout_secs,
                         started,
+                        workspace,
+                        merge_cx: MergeContext::from_exec(&ctx),
                     });
                 },
                 ev = child_progress_rx.recv(), if progress_open => match ev {
@@ -731,7 +835,10 @@ impl ToolExecutor for SubagentTool {
             started,
             result,
             final_state,
+            workspace,
+            MergeContext::from_exec(&ctx),
         )
+        .await
     }
 }
 
@@ -752,6 +859,11 @@ struct DetachArgs<F> {
     usage_before: TokenUsageTotals,
     timeout_secs: u64,
     started: Instant,
+    /// Moves with the child: a detached agent outlives the turn, so its
+    /// checkout must be merged and cleaned up by the background task rather
+    /// than by the `execute` frame that is about to return.
+    workspace: Workspace,
+    merge_cx: MergeContext,
 }
 
 impl SubagentTool {
@@ -777,6 +889,8 @@ impl SubagentTool {
             usage_before,
             timeout_secs,
             started,
+            workspace,
+            merge_cx,
         } = args;
         if let Some(notify) = &notify {
             let _ = notify.try_send(Msg::BackgroundAgentStarted {
@@ -842,7 +956,10 @@ impl SubagentTool {
                 started,
                 result,
                 final_state,
-            );
+                workspace,
+                merge_cx,
+            )
+            .await;
             if let Some(notify) = notify {
                 let usage = outcome.metadata.token_usage.clone();
                 let tokens_total = usage.as_ref().map_or(tokens, |u| u.total_tokens());
@@ -868,11 +985,12 @@ impl SubagentTool {
     }
 }
 
-/// Shared post-drive processing for foreground and detached children: cache
-/// the child for continuations (unless cancelled), roll up this drive's
-/// usage, and shape the model-facing outcome.
+/// Shared post-drive processing for foreground and detached children: land
+/// an isolated child's work, cache the child for continuations (unless
+/// cancelled), roll up this drive's usage, and shape the model-facing
+/// outcome.
 #[allow(clippy::too_many_arguments)]
-fn finish_drive(
+async fn finish_drive(
     spawner: &SubagentSpawner,
     type_name: String,
     agent_id: String,
@@ -883,8 +1001,27 @@ fn finish_drive(
     started: Instant,
     result: Result<String, DriveError>,
     mut final_state: State,
+    workspace: Workspace,
+    merge_cx: MergeContext,
 ) -> ToolOutcome {
     let child_usage = usage_delta(final_state.session.cumulative_token_usage, usage_before);
+
+    // Land the work, but only for a child that finished. A timed-out or
+    // errored child stopped mid-edit: merging half a change is worse than
+    // merging none, and its checkout is kept so the continuation it invites
+    // can pick up where it left off.
+    let (workspace, workspace_report) = match &result {
+        Ok(_) => workspace.merge(&merge_cx).await,
+        Err(DriveError::Cancelled) => (workspace, WorkspaceReport::default()),
+        Err(_) => {
+            let note = workspace.unmerged_note();
+            let report = WorkspaceReport {
+                note,
+                needs_attention: false,
+            };
+            (workspace, report)
+        },
+    };
 
     // Keep the child for follow-ups unless the parent cancelled (that
     // turn is being torn down). Timeout/error children are kept too —
@@ -892,24 +1029,48 @@ fn finish_drive(
     // a timeout invites. Normalize the turn first: the child's runner is
     // gone, so a mid-turn state could never complete — a continuation
     // must be able to seed a fresh prompt into an Idle child.
-    if !matches!(result, Err(DriveError::Cancelled)) {
+    if matches!(result, Err(DriveError::Cancelled)) {
+        // Nothing will reference this child again, so its checkout would
+        // sit on disk until the GC sweep. Drop it now.
+        workspace.discard().await;
+    } else {
         final_state.turn = TurnState::Idle;
         final_state.ui.queued_messages.clear();
         final_state.ui.live_tool_status.clear();
         final_state.pending_approval.clear();
-        spawner.cache_store(
+        let evicted = spawner.cache_store(
             agent_id.clone(),
             CachedAgent {
                 state: final_state,
                 type_name,
+                workspace,
             },
         );
+        for workspace in evicted {
+            workspace.discard().await;
+        }
     }
 
     let elapsed = started.elapsed().as_secs_f64();
     let trailer = format!("[agent_id: {agent_id} — pass agent_id to continue this child]");
     let metadata = subagent_metadata(child_model_id, child_usage, agent_id);
+    // The workspace note goes above the trailer: what happened to the child's
+    // edits is part of its result, not bookkeeping.
+    let trailer = if workspace_report.note.is_empty() {
+        trailer
+    } else {
+        format!("{}\n\n{trailer}", workspace_report.note)
+    };
     match result {
+        // A child can do its job perfectly and still leave the project
+        // unchanged, if its patch would not apply. Reporting that as success
+        // invites the parent to build on work that is not there, so the
+        // failed landing outranks the successful drive.
+        Ok(summary) if workspace_report.needs_attention => ToolOutcome::error(
+            format!("subagent ({description}) finished but its work did not land.\n\n{summary}\n\n{trailer}"),
+            elapsed,
+        )
+        .with_metadata(metadata),
         Ok(summary) => ToolOutcome::success(
             format!("{summary}\n\n{trailer}"),
             "subagent completed",
@@ -1713,10 +1874,12 @@ mod tests {
                 safety: Some("read_only".to_string()),
                 preamble: Some("You are a scout.".to_string()),
                 model: Some("ollama/qwen3:8b".to_string()),
+                isolation: Some("worktree".to_string()),
             },
         );
         let scout = resolve_agent_type(Some("scout"), &config).unwrap();
         assert_eq!(scout.model.as_deref(), Some("ollama/qwen3:8b"));
+        assert_eq!(scout.isolation, Isolation::Worktree);
         assert_eq!(scout.safety_ceiling, SafetyMode::ReadOnly);
 
         // A custom name shadows the built-in, so users can retune explore.
@@ -1776,6 +1939,9 @@ mod tests {
         let mk = || CachedAgent {
             state: mk_state(),
             type_name: "general".to_string(),
+            workspace: Workspace::Shared {
+                root: PathBuf::from("/tmp"),
+            },
         };
 
         // Handles mint monotonically distinct.
@@ -1783,14 +1949,17 @@ mod tests {
 
         // Store/take round-trip; take REMOVES (a running continuation owns
         // the state exclusively).
-        spawner.cache_store("x".to_string(), mk());
+        assert!(spawner.cache_store("x".to_string(), mk()).is_empty());
         assert!(spawner.cache_take("x").is_some());
         assert!(spawner.cache_take("x").is_none(), "take must remove");
 
-        // Eviction: past the cap, oldest goes first.
+        // Eviction: past the cap, oldest goes first, and the evicted
+        // agent's workspace comes back so its checkout can be discarded.
+        let mut evicted = Vec::new();
         for i in 0..(MAX_CACHED_AGENTS + 2) {
-            spawner.cache_store(format!("e{i}"), mk());
+            evicted.extend(spawner.cache_store(format!("e{i}"), mk()));
         }
+        assert_eq!(evicted.len(), 2, "two past the cap, two handed back");
         assert!(spawner.cache_take("e0").is_none(), "oldest evicted");
         assert!(spawner.cache_take("e1").is_none(), "second-oldest evicted");
         assert!(
@@ -1818,6 +1987,99 @@ mod tests {
         assert!(
             msg.contains("Omit agent_id"),
             "tells the model how to recover: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unparseable_isolation_arg_names_the_valid_modes() {
+        let tool = SubagentTool::new(test_spawner_arc());
+        let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), PathBuf::from("/tmp"));
+        let outcome = tool
+            .execute(
+                serde_json::json!({"prompt": "go", "isolation": "sandbox"}),
+                ctx,
+            )
+            .await;
+        assert_eq!(outcome.status, crate::domain::ToolStatus::Error);
+        let msg = outcome.error_message().unwrap_or_default();
+        assert!(msg.contains("sandbox"), "names what was rejected: {msg}");
+        assert!(msg.contains("worktree"), "names the valid modes: {msg}");
+    }
+
+    #[tokio::test]
+    async fn asking_to_isolate_outside_a_repo_fails_the_spawn() {
+        // The alternative — quietly running shared — would put a fan-out
+        // that asked for isolation back into the collisions it asked to
+        // avoid, with nothing in the transcript saying so.
+        let tool = SubagentTool::new(test_spawner_arc());
+        let dir = std::env::temp_dir().join(format!("mermaid_sub_norepo_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), dir);
+        let outcome = tool
+            .execute(
+                serde_json::json!({"prompt": "go", "isolation": "worktree"}),
+                ctx,
+            )
+            .await;
+        assert_eq!(outcome.status, crate::domain::ToolStatus::Error);
+        let msg = outcome.error_message().unwrap_or_default();
+        assert!(msg.contains("could not isolate"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn a_failed_isolated_child_keeps_its_checkout_and_says_where() {
+        use crate::runtime::git::git;
+        let project = std::env::temp_dir().join(format!("mermaid_sub_keep_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&project);
+        std::fs::create_dir_all(&project).unwrap();
+        if git(&project).args(["init", "-q"]).run().is_err() {
+            return;
+        }
+        std::fs::write(project.join("seed.txt"), "seed\n").unwrap();
+        git(&project).args(["add", "-A"]).run().unwrap();
+        git(&project).args(["commit", "-qm", "init"]).run().unwrap();
+
+        // Point the child at a provider that cannot answer, so the drive
+        // fails without a model: what is under test is the workspace
+        // plumbing around the drive, not the drive.
+        let mut config = crate::app::Config::default();
+        config.ollama.host = "http://127.0.0.1:1".to_string();
+        // The default `Ask` would block the spawn on an approval UI that a
+        // test has no way to answer; the gate itself is covered elsewhere.
+        config.safety.mode = SafetyMode::FullAccess;
+        let providers = Arc::new(ProviderFactory::new(config.clone()));
+        let web = Arc::new(WebCapabilities::resolve(&config.web));
+        let tool = SubagentTool::new(Arc::new(SubagentSpawner::new(providers, web)));
+        let (ctx, _rx) = crate::providers::ctx::test_exec_context_with_config(
+            TurnId(1),
+            ToolCallId(1),
+            project.clone(),
+            config,
+        );
+
+        let outcome = tool
+            .execute(
+                serde_json::json!({
+                    "prompt": "go",
+                    "isolation": "worktree",
+                    "model": "ollama/does-not-exist",
+                }),
+                ctx,
+            )
+            .await;
+
+        // A child that died mid-run has its work left in place rather than
+        // half-merged, and the parent is told where to find it.
+        assert_eq!(outcome.status, crate::domain::ToolStatus::Error);
+        let msg = outcome.error_message().unwrap_or_default();
+        assert!(msg.contains("isolated worktree is kept"), "{msg}");
+        assert!(msg.contains("NOT in the project"), "{msg}");
+        // The checkout named in the report really is there, and the
+        // project's own tree was never touched.
+        assert!(
+            std::fs::read_to_string(project.join("seed.txt")).is_ok(),
+            "the project must survive a failed child"
         );
     }
 
@@ -1942,24 +2204,31 @@ mod tests {
         // Running detached child: token registered → killed exactly once.
         let cancel = CancellationToken::new();
         spawner.register_detached("a1".to_string(), cancel.clone());
-        assert_eq!(spawner.kill_detached("a1"), KillResult::Killed);
+        assert!(matches!(spawner.kill_detached("a1"), KillResult::Killed));
         assert!(cancel.is_cancelled());
         // The handle is consumed — a second kill finds nothing.
-        assert_eq!(spawner.kill_detached("a1"), KillResult::NotFound);
+        assert!(matches!(spawner.kill_detached("a1"), KillResult::NotFound));
 
         // Finished child (continuation cache only): evicted, not killable.
-        spawner.cache_store(
+        // The eviction hands its workspace back for cleanup.
+        let _ = spawner.cache_store(
             "a2".to_string(),
             CachedAgent {
                 state: test_state(),
                 type_name: "general".to_string(),
+                workspace: Workspace::Shared {
+                    root: PathBuf::from("/tmp"),
+                },
             },
         );
-        assert_eq!(spawner.kill_detached("a2"), KillResult::Evicted);
+        assert!(matches!(
+            spawner.kill_detached("a2"),
+            KillResult::Evicted(_)
+        ));
         assert!(spawner.cache_take("a2").is_none(), "eviction is permanent");
 
         // Never-issued id.
-        assert_eq!(spawner.kill_detached("a99"), KillResult::NotFound);
+        assert!(matches!(spawner.kill_detached("a99"), KillResult::NotFound));
 
         // kill_all fires every registered token and drains the map.
         let (c1, c2) = (CancellationToken::new(), CancellationToken::new());

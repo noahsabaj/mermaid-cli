@@ -195,6 +195,13 @@ jobs:
         run: cargo test --test sandbox_network -- --ignored
       - name: Sandbox filesystem confinement (ignored, Linux)
         run: cargo test --test sandbox_fs -- --ignored
+      # Drives real subagents against a live model, so it needs a key. The
+      # test skips itself when `MODEL_API_KEY` is empty, which is what a fork
+      # PR sees — it cannot read secrets.
+      - name: Subagent worktree isolation (ignored, live model)
+        run: cargo test --test subagent_worktree -- --ignored --test-threads=1
+        env:
+          MODEL_API_KEY: ${{ secrets.MODEL_API_KEY }}
       - name: Self-test (deterministic, model-free)
         run: cargo run --bin mermaid -- self-test --format json
 
