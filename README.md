@@ -37,7 +37,7 @@ curl -fsSL https://noahsabaj.github.io/mermaid-cli/install.sh | sh
 irm https://noahsabaj.github.io/mermaid-cli/install.ps1 | iex
 ```
 
-Then run `mermaid` to start, and `mermaid update` for the newest version. (`MERMAID_INSTALL_DIR` changes the location; `MERMAID_VERSION=vX.Y.Z` pins a release.)
+Run `mermaid` to start, `mermaid update` for the newest version. (`MERMAID_INSTALL_DIR` changes the location; `MERMAID_VERSION=vX.Y.Z` pins a release.)
 
 **Or install with a package manager**
 
@@ -55,11 +55,11 @@ scoop install mermaid
 winget install NoahSabaj.Mermaid
 ```
 
-All three are bumped automatically on every release.
+All three are bumped on every release.
 
-With the Rust toolchain, `cargo install mermaid-cli` works too, though the crates.io release can lag the newest tag. Every release also attaches prebuilt binaries and Linux `.deb`/`.rpm` packages.
+With the Rust toolchain, `cargo install mermaid-cli` works too, though crates.io can lag the newest tag. Every release also attaches prebuilt binaries and Linux `.deb`/`.rpm` packages.
 
-Mermaid needs one model backend, and either kind will do. [Ollama](https://ollama.com) covers local inference (models auto-pull) but is **not** required: a machine with only a provider API key runs Mermaid fine — see [Remote providers](#remote-providers). Name a remote model once with `mermaid --model anthropic/<model>` and Mermaid remembers it.
+Mermaid needs one model backend, either kind. [Ollama](https://ollama.com) covers local inference (models auto-pull) but is **not** required — a provider API key alone is enough, see [Remote providers](#remote-providers). Name a remote model once with `mermaid --model anthropic/<model>` and Mermaid remembers it.
 
 ## First 10 minutes
 
@@ -68,7 +68,7 @@ mermaid doctor                         # Check model, tools, safety, and project
 mermaid                                # Start the full-screen terminal coding agent
 ```
 
-Then ask Mermaid to do normal coding-agent work:
+Then ask for normal coding-agent work:
 
 - "read the repo and tell me where the test runner lives"
 - "find the bug in this failing test and fix it"
@@ -97,9 +97,9 @@ mermaid run --plan "refactor the auth"     # Headless plan mode: read-only, deli
 mermaid --sandbox run "refactor this"      # Confine writes to the project, deny network
 ```
 
-The full catalog — every flag, structured output, headless session resume, record/replay — is in [docs/cli-reference.md](docs/cli-reference.md).
+Every flag, structured output, headless session resume, and record/replay: [docs/cli-reference.md](docs/cli-reference.md).
 
-`mermaid add <name>` resolves the name through a built-in registry of 16 popular MCP servers (context7, playwright, git, postgres, notion, slack, and more), prompts for required env vars, validates by spawning the server, and saves it.
+`mermaid add <name>` resolves the name through a registry of 16 popular MCP servers (context7, playwright, git, postgres, notion, slack, and more), prompts for required env vars, and validates by spawning the server.
 
 ## Keyboard shortcuts
 
@@ -116,11 +116,11 @@ The full catalog — every flag, structured output, headless session resume, rec
 | `/` | Open the slash-command palette |
 | `@` | Open the fuzzy file picker |
 
-The [full tables](docs/cli-reference.md#keyboard-shortcuts) cover selection, background processes, and every slash command; `/help` shows the commands grouped in the TUI.
+The [full tables](docs/cli-reference.md#keyboard-shortcuts) add selection, background processes, and every slash command; `/help` groups them in the TUI.
 
 ## Tools
 
-The model uses these autonomously via native tool calling:
+The model calls these autonomously:
 
 | Tool | Description |
 |------|-------------|
