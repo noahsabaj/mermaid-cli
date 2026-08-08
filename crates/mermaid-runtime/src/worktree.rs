@@ -850,7 +850,15 @@ mod tests {
         if !init_project(&project) {
             return;
         }
-        let wt = AgentWorktree::create(&project, "a1").unwrap();
+        // `expect` rather than the `unwrap` its sibling tests use: every
+        // `unwrap` is counted in `.github/baselines/clippy_pedantic.txt`, which
+        // may only shrink, and a new test should not spend budget it does not
+        // need. The message earns its place anyway — this test exists to prove
+        // the bookkeeping query finds a live checkout, so "could not create
+        // one" and "created one but did not find it" are different failures and
+        // should not both surface as `called Result::unwrap()`.
+        let wt =
+            AgentWorktree::create(&project, "a1").expect("the fixture project takes a worktree");
         let top = wt.top.clone();
         assert!(
             is_listed(&project, &top),
