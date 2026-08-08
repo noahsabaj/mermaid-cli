@@ -1,14 +1,8 @@
-use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
-use rusqlite::types::Type;
-use rusqlite::{Connection, OptionalExtension, params};
-use serde::{Deserialize, Serialize};
+use rusqlite::{Connection, params};
 
 // Bumped to 5 for the additive `tasks.prompt` column (the daemon scheduler
 // executes queued tasks later, so the full prompt must be persisted at enqueue
@@ -21,495 +15,14 @@ use serde::{Deserialize, Serialize};
 //
 // History: v2 added the additive `tasks.owner_kind` column (F18/RC-E); v3 added
 // the F75 covering indexes; v4 added the `outcomes` table.
-const SCHEMA_VERSION: i32 = 6;
 
-/// `tasks.owner_kind` value for a task the daemon runs in-process. Only these are
-/// reset by `reconcile_after_restart`; a `NULL` owner (an interactive CLI run, or
-/// any other creator) is left alone so a live `mermaid` session that shares the
-/// store isn't wrongly failed on daemon startup (F18/RC-E).
-const OWNER_KIND_DAEMON: &str = "daemon";
+pub mod records;
+pub mod repos;
+pub mod rows;
 
-/// Durable task state. A task is the daemon-level work unit; a chat
-/// transcript is just one artifact linked to it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TaskStatus {
-    Queued,
-    Running,
-    WaitingForApproval,
-    Blocked,
-    Completed,
-    Failed,
-    Cancelled,
-}
-
-impl TaskStatus {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            TaskStatus::Queued => "queued",
-            TaskStatus::Running => "running",
-            TaskStatus::WaitingForApproval => "waiting_for_approval",
-            TaskStatus::Blocked => "blocked",
-            TaskStatus::Completed => "completed",
-            TaskStatus::Failed => "failed",
-            TaskStatus::Cancelled => "cancelled",
-        }
-    }
-
-    fn from_db(value: &str) -> std::result::Result<Self, UnknownRuntimeEnum> {
-        match value {
-            "queued" => Ok(TaskStatus::Queued),
-            "running" => Ok(TaskStatus::Running),
-            "waiting_for_approval" => Ok(TaskStatus::WaitingForApproval),
-            "blocked" => Ok(TaskStatus::Blocked),
-            "completed" => Ok(TaskStatus::Completed),
-            "failed" => Ok(TaskStatus::Failed),
-            "cancelled" => Ok(TaskStatus::Cancelled),
-            other => Err(UnknownRuntimeEnum::new("task status", other)),
-        }
-    }
-}
-
-impl fmt::Display for TaskStatus {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TaskPriority {
-    Low,
-    Normal,
-    High,
-}
-
-impl TaskPriority {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            TaskPriority::Low => "low",
-            TaskPriority::Normal => "normal",
-            TaskPriority::High => "high",
-        }
-    }
-
-    fn from_db(value: &str) -> std::result::Result<Self, UnknownRuntimeEnum> {
-        match value {
-            "low" => Ok(TaskPriority::Low),
-            "normal" => Ok(TaskPriority::Normal),
-            "high" => Ok(TaskPriority::High),
-            other => Err(UnknownRuntimeEnum::new("task priority", other)),
-        }
-    }
-}
-
-impl fmt::Display for TaskPriority {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ProcessStatus {
-    Running,
-    Exited,
-    Unknown,
-}
-
-impl ProcessStatus {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            ProcessStatus::Running => "running",
-            ProcessStatus::Exited => "exited",
-            ProcessStatus::Unknown => "unknown",
-        }
-    }
-
-    fn from_db(value: &str) -> std::result::Result<Self, UnknownRuntimeEnum> {
-        match value {
-            "running" => Ok(ProcessStatus::Running),
-            "exited" => Ok(ProcessStatus::Exited),
-            "unknown" => Ok(ProcessStatus::Unknown),
-            other => Err(UnknownRuntimeEnum::new("process status", other)),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TaskRecord {
-    pub id: String,
-    pub title: String,
-    pub status: TaskStatus,
-    pub priority: TaskPriority,
-    pub project_path: String,
-    pub model_id: String,
-    pub conversation_id: Option<String>,
-    pub created_at: String,
-    pub updated_at: String,
-    pub final_report: Option<String>,
-    /// Full prompt for deferred daemon execution (v5). `None` for
-    /// metadata-only tasks (interactive CLI runs, external `create_task`
-    /// callers) — the scheduler never claims those.
-    pub prompt: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TaskTimelineEvent {
-    pub id: i64,
-    pub task_id: String,
-    pub kind: String,
-    pub message: String,
-    pub created_at: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionRecord {
-    pub id: String,
-    pub project_path: String,
-    pub model_id: String,
-    pub title: Option<String>,
-    pub conversation_path: Option<String>,
-    pub created_at: String,
-    pub updated_at: String,
-    pub total_tokens: Option<i64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NewSession {
-    pub id: Option<String>,
-    pub project_path: String,
-    pub model_id: String,
-    pub title: Option<String>,
-    pub conversation_path: Option<String>,
-    pub total_tokens: Option<i64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MessageRecord {
-    pub id: i64,
-    pub session_id: String,
-    pub role: String,
-    pub content_json: String,
-    pub created_at: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NewMessage {
-    pub session_id: String,
-    pub role: String,
-    pub content_json: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NewTask {
-    pub title: String,
-    pub project_path: String,
-    pub model_id: String,
-    pub priority: TaskPriority,
-    pub conversation_id: Option<String>,
-    /// Which kind of process owns this task. `Some("daemon")` (set via
-    /// [`Self::daemon_owned`]) marks a task the daemon runs in-process, so the
-    /// startup reconcile may fail it if a crash left it `Running`. `None` — the
-    /// default, used by interactive CLI runs and any other creator — is left
-    /// untouched by reconcile so a live session isn't clobbered (F18/RC-E).
-    pub owner_kind: Option<String>,
-    /// Full prompt for deferred execution by the daemon scheduler. Tasks
-    /// without one are metadata-only and are never claimed.
-    pub prompt: Option<String>,
-}
-
-impl NewTask {
-    pub fn new(
-        title: impl Into<String>,
-        project_path: impl Into<String>,
-        model_id: impl Into<String>,
-    ) -> Self {
-        Self {
-            title: title.into(),
-            project_path: project_path.into(),
-            model_id: model_id.into(),
-            priority: TaskPriority::Normal,
-            conversation_id: None,
-            owner_kind: None,
-            prompt: None,
-        }
-    }
-
-    /// Mark this task as daemon-owned (run in the daemon process). Only such
-    /// tasks are reset by [`RuntimeStore::reconcile_after_restart`]; omit it for
-    /// interactive CLI runs so they survive a daemon restart.
-    pub fn daemon_owned(mut self) -> Self {
-        self.owner_kind = Some(OWNER_KIND_DAEMON.to_string());
-        self
-    }
-
-    /// Persist the full prompt so the scheduler can execute this task later.
-    pub fn with_prompt(mut self, prompt: impl Into<String>) -> Self {
-        self.prompt = Some(prompt.into());
-        self
-    }
-
-    pub fn with_priority(mut self, priority: TaskPriority) -> Self {
-        self.priority = priority;
-        self
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ApprovalRecord {
-    pub id: String,
-    pub task_id: Option<String>,
-    pub proposed_action: String,
-    pub risk_classification: String,
-    pub policy_decision: String,
-    pub user_decision: Option<String>,
-    pub args_summary: Option<String>,
-    pub checkpoint_id: Option<String>,
-    pub pending_action_json: Option<String>,
-    pub created_at: String,
-    pub decided_at: Option<String>,
-    pub archived_at: Option<String>,
-    pub archive_reason: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NewApproval {
-    pub task_id: Option<String>,
-    pub proposed_action: String,
-    pub risk_classification: String,
-    pub policy_decision: String,
-    pub args_summary: Option<String>,
-    pub checkpoint_id: Option<String>,
-    pub pending_action_json: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ToolRunRecord {
-    pub id: String,
-    pub task_id: Option<String>,
-    pub turn_id: Option<String>,
-    pub call_id: Option<String>,
-    pub tool_name: String,
-    pub status: String,
-    pub args_json: Option<String>,
-    pub output_json: Option<String>,
-    pub started_at: String,
-    pub finished_at: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NewToolRun {
-    pub id: Option<String>,
-    pub task_id: Option<String>,
-    pub turn_id: Option<String>,
-    pub call_id: Option<String>,
-    pub tool_name: String,
-    pub args_json: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProcessRecord {
-    pub id: String,
-    pub task_id: Option<String>,
-    pub pid: u32,
-    pub command: String,
-    pub cwd: Option<String>,
-    pub log_path: Option<String>,
-    pub detected_url: Option<String>,
-    pub status: ProcessStatus,
-    pub health: Option<String>,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NewProcess {
-    pub id: Option<String>,
-    pub task_id: Option<String>,
-    pub pid: u32,
-    pub command: String,
-    pub cwd: Option<String>,
-    pub log_path: Option<String>,
-    pub detected_url: Option<String>,
-    pub status: ProcessStatus,
-    pub health: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CheckpointRecord {
-    pub id: String,
-    pub task_id: Option<String>,
-    pub project_path: String,
-    pub snapshot_path: String,
-    pub changed_files_json: String,
-    pub pending_action_json: Option<String>,
-    pub approval_id: Option<String>,
-    pub created_at: String,
-    pub archived_at: Option<String>,
-    pub archive_reason: Option<String>,
-    /// Conversation the checkpointed mutation belonged to, when the tool call
-    /// ran inside an interactive session. `None` for headless/daemon/manual
-    /// checkpoints.
-    pub session_id: Option<String>,
-    /// Conversation length (`messages().len()`) at tool DISPATCH. A rewind
-    /// that forks at user-message index `k` keeps `messages[..k]`, so this
-    /// checkpoint belongs to the discarded timeline iff `message_index > k`
-    /// (STRICT — see `list_for_session`).
-    pub message_index: Option<i64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NewCheckpoint {
-    pub id: Option<String>,
-    pub task_id: Option<String>,
-    pub project_path: String,
-    pub snapshot_path: String,
-    pub changed_files_json: String,
-    pub pending_action_json: Option<String>,
-    pub approval_id: Option<String>,
-    pub session_id: Option<String>,
-    pub message_index: Option<i64>,
-}
-
-/// Provenance of an [`OutcomeRecord`] — the axis that separates a genuine
-/// external training signal from model self-judgement. `verifier` (compiler,
-/// tests, runtime) and `user` (human edit/accept/reject) are the signals that
-/// can actually improve a model; `model` is self-judged and must never be
-/// trained on unfiltered; `system` is bookkeeping (e.g. a task's terminal
-/// status).
-pub const OUTCOME_SOURCE_VERIFIER: &str = "verifier";
-pub const OUTCOME_SOURCE_USER: &str = "user";
-pub const OUTCOME_SOURCE_MODEL: &str = "model";
-pub const OUTCOME_SOURCE_SYSTEM: &str = "system";
-
-/// Graded result of an outcome. Stored as free-form `TEXT` (like
-/// `tool_runs.status`) so the taxonomy can grow without a migration; these
-/// constants are the canonical spellings so callers don't drift.
-pub const OUTCOME_LABEL_SUCCESS: &str = "success";
-pub const OUTCOME_LABEL_FAILURE: &str = "failure";
-pub const OUTCOME_LABEL_PARTIAL: &str = "partial";
-pub const OUTCOME_LABEL_ACCEPTED: &str = "accepted";
-pub const OUTCOME_LABEL_REJECTED: &str = "rejected";
-pub const OUTCOME_LABEL_UNKNOWN: &str = "unknown";
-
-/// A verifiable outcome / reward signal attached to a trajectory (a task, and
-/// optionally a specific tool run). The other durable tables record *what
-/// happened* (messages, tool_runs, checkpoints=diffs); `outcomes` records *how
-/// good it was* and *who says so* ([`source`](Self::source)) — the enrichment
-/// that turns logs into a training set for the self-improving loop.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct OutcomeRecord {
-    pub id: String,
-    pub task_id: Option<String>,
-    pub tool_run_id: Option<String>,
-    /// Signal type, e.g. `task_terminal`, `build`, `test`, `tool_exec`,
-    /// `user_edit`, `git_survival`, `preference`. Free-form.
-    pub kind: String,
-    /// Graded result — one of the `OUTCOME_LABEL_*` values.
-    pub label: String,
-    /// Optional scalar reward (convention: roughly `-1.0..=1.0`). `None` when
-    /// the signal is categorical only.
-    pub reward: Option<f64>,
-    /// Provenance — one of the `OUTCOME_SOURCE_*` values.
-    pub source: String,
-    /// Optional structured payload: test counts, a git sha, or a preference
-    /// pair `{ "chosen": ..., "rejected": ... }` for DPO.
-    pub detail_json: Option<String>,
-    pub created_at: String,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct NewOutcome {
-    pub id: Option<String>,
-    pub task_id: Option<String>,
-    pub tool_run_id: Option<String>,
-    pub kind: String,
-    pub label: String,
-    pub reward: Option<f64>,
-    pub source: String,
-    pub detail_json: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CompactionRecord {
-    pub id: String,
-    pub task_id: Option<String>,
-    pub session_id: Option<String>,
-    pub source_token_estimate: Option<i64>,
-    pub summary_token_count: Option<i64>,
-    pub preserved_turns: Option<i64>,
-    pub archive_path: Option<String>,
-    pub verification_status: Option<String>,
-    pub created_at: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NewCompaction {
-    pub id: Option<String>,
-    pub task_id: Option<String>,
-    pub session_id: Option<String>,
-    pub source_token_estimate: Option<i64>,
-    pub summary_token_count: Option<i64>,
-    pub preserved_turns: Option<i64>,
-    pub archive_path: Option<String>,
-    pub verification_status: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PluginInstallRecord {
-    pub id: String,
-    pub name: String,
-    pub source: String,
-    pub version: Option<String>,
-    pub enabled: bool,
-    pub manifest_json: String,
-    pub installed_at: String,
-    pub updated_at: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NewPluginInstall {
-    pub id: Option<String>,
-    pub name: String,
-    pub source: String,
-    pub version: Option<String>,
-    pub enabled: bool,
-    pub manifest_json: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProviderProbeRecord {
-    pub provider: String,
-    pub model_id: String,
-    pub capability_key: String,
-    pub capability_value: String,
-    pub confidence: String,
-    pub error: Option<String>,
-    pub probed_at: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NewProviderProbe {
-    pub provider: String,
-    pub model_id: String,
-    pub capability_key: String,
-    pub capability_value: String,
-    pub confidence: String,
-    pub error: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PairingTokenRecord {
-    pub id: String,
-    pub token_hash: String,
-    pub label: Option<String>,
-    pub enabled: bool,
-    pub created_at: String,
-    pub last_used_at: Option<String>,
-    /// RFC3339 expiry. `None` = never expires (opt-in via `--ttl-days 0`).
-    pub expires_at: Option<String>,
-}
+pub use records::*;
+pub use repos::*;
+pub use rows::*;
 
 /// SQLite-backed durable runtime state.
 pub struct RuntimeStore {
@@ -799,7 +312,7 @@ impl RuntimeStore {
         Ok(removed)
     }
 
-    fn init_schema(&self) -> Result<()> {
+    pub(crate) fn init_schema(&self) -> Result<()> {
         let conn = &self.conn;
         // Forward-compat gate: read the stored schema version BEFORE writing
         // anything. A DB written by a newer mermaid (higher `user_version`)
@@ -864,7 +377,7 @@ impl RuntimeStore {
         clippy::too_many_lines,
         reason = "predates the lint; see .github/baselines/expect_budget.txt"
     )]
-    fn migrate_within_txn(&self, from_version: i32) -> Result<()> {
+    pub(crate) fn migrate_within_txn(&self, from_version: i32) -> Result<()> {
         self.conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS sessions (
@@ -1126,7 +639,7 @@ impl RuntimeStore {
     /// that, for example, drops or transforms a column, which
     /// `CREATE ... IF NOT EXISTS` and `ensure_column` cannot express. Runs inside
     /// the `init_schema` transaction, exactly once, when a DB upgrades past v2.
-    fn migrate_to_v3(&self) -> Result<()> {
+    pub(crate) fn migrate_to_v3(&self) -> Result<()> {
         Ok(())
     }
 
@@ -1134,1623 +647,15 @@ impl RuntimeStore {
     /// the additive `outcomes` table (applied by the idempotent baseline in
     /// [`Self::migrate_within_txn`]), so this is intentionally a no-op — the
     /// versioned home for a future non-additive change to the outcomes schema.
-    fn migrate_to_v4(&self) -> Result<()> {
+    pub(crate) fn migrate_to_v4(&self) -> Result<()> {
         Ok(())
     }
 
     /// Non-additive migration steps introduced at schema v5. Today v5 only adds
     /// the additive `tasks.prompt` column (applied by `ensure_column` in the
     /// baseline), so this is intentionally a no-op.
-    fn migrate_to_v5(&self) -> Result<()> {
+    pub(crate) fn migrate_to_v5(&self) -> Result<()> {
         Ok(())
-    }
-}
-
-pub struct TasksRepo<'a> {
-    conn: &'a Connection,
-}
-
-pub struct SessionsRepo<'a> {
-    conn: &'a Connection,
-}
-
-impl SessionsRepo<'_> {
-    pub fn upsert(&self, new: NewSession) -> Result<SessionRecord> {
-        let now = now_rfc3339();
-        let id = new.id.unwrap_or_else(|| fresh_id("session"));
-        self.conn.execute(
-            "INSERT INTO sessions
-             (id, project_path, model_id, title, conversation_path, created_at, updated_at, total_tokens)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-             ON CONFLICT(id) DO UPDATE SET
-                project_path = excluded.project_path,
-                model_id = excluded.model_id,
-                title = excluded.title,
-                conversation_path = excluded.conversation_path,
-                updated_at = excluded.updated_at,
-                total_tokens = excluded.total_tokens",
-            params![
-                id,
-                new.project_path,
-                new.model_id,
-                new.title,
-                new.conversation_path,
-                now,
-                now,
-                new.total_tokens,
-            ],
-        )?;
-        self.get(&id)?
-            .context("session was upserted but could not be reloaded")
-    }
-
-    pub fn get(&self, id: &str) -> Result<Option<SessionRecord>> {
-        self.conn
-            .query_row(
-                "SELECT id, project_path, model_id, title, conversation_path,
-                        created_at, updated_at, total_tokens
-                 FROM sessions WHERE id = ?1",
-                [id],
-                session_from_row,
-            )
-            .optional()
-            .map_err(Into::into)
-    }
-
-    pub fn list(&self, limit: usize) -> Result<Vec<SessionRecord>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, project_path, model_id, title, conversation_path,
-                    created_at, updated_at, total_tokens
-             FROM sessions ORDER BY updated_at DESC LIMIT ?1",
-        )?;
-        let rows = stmt.query_map([clamp_limit(limit)], session_from_row)?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(Into::into)
-    }
-}
-
-pub struct MessagesRepo<'a> {
-    conn: &'a Connection,
-}
-
-impl MessagesRepo<'_> {
-    pub fn add(&self, new: NewMessage) -> Result<MessageRecord> {
-        self.conn.execute(
-            "INSERT INTO messages (session_id, role, content_json, created_at)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![new.session_id, new.role, new.content_json, now_rfc3339()],
-        )?;
-        let id = self.conn.last_insert_rowid();
-        self.get(id)?
-            .context("message was inserted but could not be reloaded")
-    }
-
-    pub fn get(&self, id: i64) -> Result<Option<MessageRecord>> {
-        self.conn
-            .query_row(
-                "SELECT id, session_id, role, content_json, created_at
-                 FROM messages WHERE id = ?1",
-                [id],
-                message_from_row,
-            )
-            .optional()
-            .map_err(Into::into)
-    }
-
-    /// Load a session's messages in chronological order, capped at
-    /// [`MAX_SESSION_MESSAGES`] (F24/RC-F).
-    ///
-    /// A session transcript is otherwise unbounded, and the daemon
-    /// `session_messages` path loads it whole into RAM — a pathological session
-    /// could OOM the daemon. We return the **most recent** `MAX_SESSION_MESSAGES`
-    /// (newest activity is what a viewer wants) but still in ascending `id`
-    /// order, by taking the tail in a subquery and re-sorting it ascending.
-    pub fn list_for_session(&self, session_id: &str) -> Result<Vec<MessageRecord>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, session_id, role, content_json, created_at FROM (
-                 SELECT id, session_id, role, content_json, created_at
-                 FROM messages WHERE session_id = ?1
-                 ORDER BY id DESC LIMIT ?2
-             ) ORDER BY id ASC",
-        )?;
-        let rows = stmt.query_map(params![session_id, MAX_SESSION_MESSAGES], message_from_row)?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(Into::into)
-    }
-}
-
-impl TasksRepo<'_> {
-    pub fn create(&self, new: NewTask) -> Result<TaskRecord> {
-        let now = now_rfc3339();
-        // Owner tag isn't part of the public `TaskRecord`; move it out before the
-        // record consumes the rest of `new`, then persist it on its own column.
-        let owner_kind = new.owner_kind;
-        let record = TaskRecord {
-            id: fresh_id("task"),
-            title: new.title,
-            status: TaskStatus::Queued,
-            priority: new.priority,
-            project_path: new.project_path,
-            model_id: new.model_id,
-            conversation_id: new.conversation_id,
-            created_at: now.clone(),
-            updated_at: now.clone(),
-            final_report: None,
-            prompt: new.prompt,
-        };
-        // The task row and its initial event are one logical write — commit
-        // them atomically so a crash between can't leave an event-less task.
-        let tx = self.conn.unchecked_transaction()?;
-        tx.execute(
-            "INSERT INTO tasks
-             (id, title, status, priority, project_path, model_id, conversation_id, created_at, updated_at, final_report, owner_kind, prompt)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-            params![
-                record.id,
-                record.title,
-                record.status.as_str(),
-                record.priority.as_str(),
-                record.project_path,
-                record.model_id,
-                record.conversation_id,
-                record.created_at,
-                record.updated_at,
-                record.final_report,
-                owner_kind,
-                record.prompt,
-            ],
-        )?;
-        tx.execute(
-            "INSERT INTO task_events (task_id, kind, message, created_at)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![record.id, "task_created", "task created", now],
-        )?;
-        tx.commit()?;
-        self.get(&record.id)?
-            .context("task was inserted but could not be reloaded")
-    }
-
-    pub fn get(&self, id: &str) -> Result<Option<TaskRecord>> {
-        self.conn
-            .query_row(
-                "SELECT id, title, status, priority, project_path, model_id, conversation_id,
-                        created_at, updated_at, final_report, prompt
-                 FROM tasks WHERE id = ?1",
-                [id],
-                task_from_row,
-            )
-            .optional()
-            .map_err(Into::into)
-    }
-
-    pub fn list(&self, limit: usize) -> Result<Vec<TaskRecord>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, title, status, priority, project_path, model_id, conversation_id,
-                    created_at, updated_at, final_report, prompt
-             FROM tasks
-             ORDER BY updated_at DESC
-             LIMIT ?1",
-        )?;
-        // F19 (RC-E): skip-and-warn a single undecodable row (e.g. a status enum
-        // a different binary wrote) instead of `collect`ing a `Result` that would
-        // blank the WHOLE tasks panel on one poison row.
-        let rows = stmt.query_map([clamp_limit(limit)], task_from_row_opt)?;
-        collect_tolerant(rows)
-    }
-
-    pub fn update_status(
-        &self,
-        id: &str,
-        status: TaskStatus,
-        final_report: Option<&str>,
-    ) -> Result<()> {
-        let now = now_rfc3339();
-        // Status update + its event are one logical write.
-        let tx = self.conn.unchecked_transaction()?;
-        tx.execute(
-            "UPDATE tasks
-             SET status = ?2, updated_at = ?3, final_report = COALESCE(?4, final_report)
-             WHERE id = ?1",
-            params![id, status.as_str(), now, final_report],
-        )?;
-        tx.execute(
-            "INSERT INTO task_events (task_id, kind, message, created_at)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![
-                id,
-                "status_changed",
-                format!("status changed to {status}"),
-                now
-            ],
-        )?;
-        tx.commit()?;
-        Ok(())
-    }
-
-    /// Atomically claim the next runnable queued task for the daemon scheduler:
-    /// flip it to `Running` and return it, or `None` when the queue is empty.
-    ///
-    /// Only daemon-owned tasks WITH a persisted prompt are claimable —
-    /// metadata-only tasks (interactive CLI runs, external `create_task`
-    /// callers) are never executed by the scheduler. Order: priority
-    /// (high → normal → low), then FIFO by `created_at` (id as tiebreaker,
-    /// since two enqueues can share a coarse-clock timestamp). The claim is a
-    /// single `UPDATE … RETURNING`, so concurrent claimers can never run the
-    /// same task twice.
-    pub fn claim_next_queued(&self) -> Result<Option<TaskRecord>> {
-        let tx = self.conn.unchecked_transaction()?;
-        let claimed = tx
-            .query_row(
-                "UPDATE tasks SET status = 'running', updated_at = ?1
-                 WHERE id = (
-                     SELECT id FROM tasks
-                     WHERE status = 'queued' AND owner_kind = ?2 AND prompt IS NOT NULL
-                     ORDER BY CASE priority
-                                  WHEN 'high' THEN 0
-                                  WHEN 'normal' THEN 1
-                                  WHEN 'low' THEN 2
-                                  ELSE 1
-                              END,
-                              created_at ASC, id ASC
-                     LIMIT 1
-                 )
-                 RETURNING id, title, status, priority, project_path, model_id,
-                           conversation_id, created_at, updated_at, final_report, prompt",
-                params![now_rfc3339(), OWNER_KIND_DAEMON],
-                task_from_row,
-            )
-            .optional()?;
-        if let Some(task) = &claimed {
-            tx.execute(
-                "INSERT INTO task_events (task_id, kind, message, created_at)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![
-                    task.id,
-                    "status_changed",
-                    "status changed to running (claimed by scheduler)",
-                    now_rfc3339(),
-                ],
-            )?;
-        }
-        tx.commit()?;
-        Ok(claimed)
-    }
-
-    pub fn add_event(&self, task_id: &str, kind: &str, message: &str) -> Result<()> {
-        self.conn.execute(
-            "INSERT INTO task_events (task_id, kind, message, created_at)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![task_id, kind, message, now_rfc3339()],
-        )?;
-        Ok(())
-    }
-
-    pub fn events(&self, task_id: &str) -> Result<Vec<TaskTimelineEvent>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, task_id, kind, message, created_at
-             FROM task_events
-             WHERE task_id = ?1
-             ORDER BY id ASC",
-        )?;
-        // F19 (RC-E): one undecodable event row must not blank the whole timeline.
-        let rows = stmt.query_map([task_id], task_event_from_row_opt)?;
-        collect_tolerant(rows)
-    }
-}
-
-pub struct ToolRunsRepo<'a> {
-    conn: &'a Connection,
-}
-
-impl ToolRunsRepo<'_> {
-    pub fn start(&self, mut new: NewToolRun) -> Result<ToolRunRecord> {
-        // The repository is the mandatory persistence choke point. Callers may
-        // pass executable arguments unchanged; only this cloned serialized
-        // representation is scrubbed before SQLite sees it.
-        new.args_json = new
-            .args_json
-            .as_deref()
-            .map(crate::redact::redact_json_text);
-        let id = new.id.unwrap_or_else(|| fresh_id("toolrun"));
-        self.conn.execute(
-            "INSERT INTO tool_runs
-             (id, task_id, turn_id, call_id, tool_name, status, args_json, output_json, started_at, finished_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6, NULL, ?7, NULL)",
-            params![
-                id,
-                new.task_id,
-                new.turn_id,
-                new.call_id,
-                new.tool_name,
-                new.args_json,
-                now_rfc3339(),
-            ],
-        )?;
-        self.get(&id)?
-            .context("tool run was inserted but could not be reloaded")
-    }
-
-    pub fn finish(&self, id: &str, status: &str, output_json: Option<&str>) -> Result<()> {
-        let output_json = output_json.map(crate::redact::redact_json_text);
-        let changed = self.conn.execute(
-            "UPDATE tool_runs
-             SET status = ?2, output_json = ?3, finished_at = ?4
-             WHERE id = ?1",
-            params![id, status, output_json, now_rfc3339()],
-        )?;
-        anyhow::ensure!(changed > 0, "tool run not found: {}", id);
-        Ok(())
-    }
-
-    pub fn get(&self, id: &str) -> Result<Option<ToolRunRecord>> {
-        self.conn
-            .query_row(
-                "SELECT id, task_id, turn_id, call_id, tool_name, status, args_json,
-                        output_json, started_at, finished_at
-                 FROM tool_runs WHERE id = ?1",
-                [id],
-                tool_run_from_row,
-            )
-            .optional()
-            .map_err(Into::into)
-    }
-
-    pub fn list(&self, limit: usize) -> Result<Vec<ToolRunRecord>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, task_id, turn_id, call_id, tool_name, status, args_json,
-                    output_json, started_at, finished_at
-             FROM tool_runs ORDER BY started_at DESC LIMIT ?1",
-        )?;
-        let rows = stmt.query_map([clamp_limit(limit)], tool_run_from_row)?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(Into::into)
-    }
-}
-
-pub struct OutcomesRepo<'a> {
-    conn: &'a Connection,
-}
-
-impl OutcomesRepo<'_> {
-    /// Record a verifiable outcome / reward signal for a trajectory. Append-only
-    /// — the loop reads these; nothing mutates them after the fact.
-    pub fn record(&self, new: NewOutcome) -> Result<OutcomeRecord> {
-        let id = new.id.unwrap_or_else(|| fresh_id("outcome"));
-        self.conn.execute(
-            "INSERT INTO outcomes
-             (id, task_id, tool_run_id, kind, label, reward, source, detail_json, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![
-                id,
-                new.task_id,
-                new.tool_run_id,
-                new.kind,
-                new.label,
-                new.reward,
-                new.source,
-                new.detail_json,
-                now_rfc3339(),
-            ],
-        )?;
-        self.get(&id)?
-            .context("outcome was inserted but could not be reloaded")
-    }
-
-    pub fn get(&self, id: &str) -> Result<Option<OutcomeRecord>> {
-        self.conn
-            .query_row(
-                "SELECT id, task_id, tool_run_id, kind, label, reward, source,
-                        detail_json, created_at
-                 FROM outcomes WHERE id = ?1",
-                [id],
-                outcome_from_row,
-            )
-            .optional()
-            .map_err(Into::into)
-    }
-
-    /// Every outcome recorded against one task, oldest first (the order the
-    /// trajectory earned them).
-    pub fn list_for_task(&self, task_id: &str) -> Result<Vec<OutcomeRecord>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, task_id, tool_run_id, kind, label, reward, source,
-                    detail_json, created_at
-             FROM outcomes WHERE task_id = ?1 ORDER BY created_at ASC",
-        )?;
-        let rows = stmt.query_map([task_id], outcome_from_row)?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(Into::into)
-    }
-
-    pub fn list(&self, limit: usize) -> Result<Vec<OutcomeRecord>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, task_id, tool_run_id, kind, label, reward, source,
-                    detail_json, created_at
-             FROM outcomes ORDER BY created_at DESC LIMIT ?1",
-        )?;
-        let rows = stmt.query_map([clamp_limit(limit)], outcome_from_row)?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(Into::into)
-    }
-}
-
-fn outcome_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OutcomeRecord> {
-    Ok(OutcomeRecord {
-        id: row.get(0)?,
-        task_id: row.get(1)?,
-        tool_run_id: row.get(2)?,
-        kind: row.get(3)?,
-        label: row.get(4)?,
-        reward: row.get(5)?,
-        source: row.get(6)?,
-        detail_json: row.get(7)?,
-        created_at: row.get(8)?,
-    })
-}
-
-pub struct ApprovalsRepo<'a> {
-    conn: &'a Connection,
-}
-
-impl ApprovalsRepo<'_> {
-    pub fn create(&self, new: NewApproval) -> Result<ApprovalRecord> {
-        let record = ApprovalRecord {
-            id: fresh_id("approval"),
-            task_id: new.task_id,
-            proposed_action: new.proposed_action,
-            risk_classification: new.risk_classification,
-            policy_decision: new.policy_decision,
-            user_decision: None,
-            args_summary: new.args_summary,
-            checkpoint_id: new.checkpoint_id,
-            pending_action_json: new.pending_action_json,
-            created_at: now_rfc3339(),
-            decided_at: None,
-            archived_at: None,
-            archive_reason: None,
-        };
-        self.conn.execute(
-            "INSERT INTO approvals
-             (id, task_id, proposed_action, risk_classification, policy_decision, user_decision,
-              args_summary, checkpoint_id, pending_action_json, created_at, decided_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            params![
-                record.id,
-                record.task_id,
-                record.proposed_action,
-                record.risk_classification,
-                record.policy_decision,
-                record.user_decision,
-                record.args_summary,
-                record.checkpoint_id,
-                record.pending_action_json,
-                record.created_at,
-                record.decided_at,
-            ],
-        )?;
-        self.get(&record.id)?
-            .context("approval was inserted but could not be reloaded")
-    }
-
-    pub fn get(&self, id: &str) -> Result<Option<ApprovalRecord>> {
-        self.conn
-            .query_row(
-                "SELECT id, task_id, proposed_action, risk_classification, policy_decision,
-                        user_decision, args_summary, checkpoint_id, pending_action_json,
-                        created_at, decided_at, archived_at, archive_reason
-                 FROM approvals WHERE id = ?1",
-                [id],
-                approval_from_row,
-            )
-            .optional()
-            .map_err(Into::into)
-    }
-
-    pub fn decide(&self, id: &str, user_decision: &str) -> Result<()> {
-        // Single-shot decision: only an undecided, un-archived approval can be
-        // decided, so a denied approval cannot be resurrected as "approved".
-        // `approval::approve_and_replay` runs the (un-rollback-able) replay
-        // effect *before* calling `decide`, so the "approved" mark lands only
-        // after the action ran: a crash mid-replay leaves the row undecided and
-        // safely re-runnable, never "approved but never applied" (#62). Mirrors
-        // the `archive` `WHERE archived_at IS NULL` idempotency pattern below.
-        let changed = self.conn.execute(
-            "UPDATE approvals
-             SET user_decision = ?2, decided_at = ?3
-             WHERE id = ?1 AND user_decision IS NULL AND archived_at IS NULL",
-            params![id, user_decision, now_rfc3339()],
-        )?;
-        anyhow::ensure!(
-            changed > 0,
-            "approval {} cannot be decided (already decided, archived, or not found)",
-            id
-        );
-        Ok(())
-    }
-
-    /// Atomically claim an undecided approval for replay (#118). Sets
-    /// `user_decision='approving'` only when it is currently NULL and
-    /// un-archived, and reports whether THIS caller won the claim. Two concurrent
-    /// `approve <id>` calls race this single UPDATE; exactly one sees
-    /// `rows_affected == 1` and runs the un-rollback-able effect, the other sees
-    /// `false` and bails — so the effect can't fire twice. A claim that crashes
-    /// before finalizing is reset to NULL by the daemon's startup reconcile.
-    pub fn claim(&self, id: &str) -> Result<bool> {
-        let changed = self.conn.execute(
-            "UPDATE approvals
-             SET user_decision = 'approving'
-             WHERE id = ?1 AND user_decision IS NULL AND archived_at IS NULL",
-            params![id],
-        )?;
-        Ok(changed == 1)
-    }
-
-    /// Release a claim taken by [`Self::claim`] back to undecided, so the action
-    /// stays re-runnable after the replay effect failed.
-    pub fn release_claim(&self, id: &str) -> Result<()> {
-        self.conn.execute(
-            "UPDATE approvals SET user_decision = NULL
-             WHERE id = ?1 AND user_decision = 'approving'",
-            params![id],
-        )?;
-        Ok(())
-    }
-
-    /// Finalize a claimed approval's decision (the `approving` → terminal-value
-    /// transition that [`Self::decide`]'s `WHERE user_decision IS NULL` can't make).
-    pub fn finalize_claimed(&self, id: &str, user_decision: &str) -> Result<()> {
-        let changed = self.conn.execute(
-            "UPDATE approvals
-             SET user_decision = ?2, decided_at = ?3
-             WHERE id = ?1 AND user_decision = 'approving'",
-            params![id, user_decision, now_rfc3339()],
-        )?;
-        anyhow::ensure!(changed > 0, "approval {} was not in the claimed state", id);
-        Ok(())
-    }
-
-    pub fn list_pending(&self) -> Result<Vec<ApprovalRecord>> {
-        self.list_pending_with_archived(false)
-    }
-
-    pub fn list_pending_all(&self) -> Result<Vec<ApprovalRecord>> {
-        self.list_pending_with_archived(true)
-    }
-
-    pub fn list_all(&self, limit: usize) -> Result<Vec<ApprovalRecord>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, task_id, proposed_action, risk_classification, policy_decision,
-                    user_decision, args_summary, checkpoint_id, pending_action_json,
-                    created_at, decided_at, archived_at, archive_reason
-             FROM approvals
-             ORDER BY created_at DESC
-             LIMIT ?1",
-        )?;
-        let rows = stmt.query_map([clamp_limit(limit)], approval_from_row)?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(Into::into)
-    }
-
-    fn list_pending_with_archived(&self, include_archived: bool) -> Result<Vec<ApprovalRecord>> {
-        let archived_filter = if include_archived {
-            ""
-        } else {
-            " AND archived_at IS NULL"
-        };
-        let mut stmt = self.conn.prepare(&format!(
-            "SELECT id, task_id, proposed_action, risk_classification, policy_decision,
-                    user_decision, args_summary, checkpoint_id, pending_action_json,
-                    created_at, decided_at, archived_at, archive_reason
-             FROM approvals
-             WHERE user_decision IS NULL{archived_filter}
-             ORDER BY created_at DESC"
-        ))?;
-        let rows = stmt.query_map([], approval_from_row)?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(Into::into)
-    }
-
-    pub fn archive(&self, ids: &[String], reason: &str) -> Result<usize> {
-        let archived_at = now_rfc3339();
-        let mut changed = 0;
-        for id in ids {
-            changed += self.conn.execute(
-                "UPDATE approvals
-                 SET archived_at = COALESCE(archived_at, ?2),
-                     archive_reason = COALESCE(archive_reason, ?3)
-                 WHERE id = ?1 AND archived_at IS NULL",
-                params![id, archived_at, reason],
-            )?;
-        }
-        Ok(changed)
-    }
-
-    pub fn count_archived(&self) -> Result<usize> {
-        self.conn
-            .query_row(
-                "SELECT COUNT(*) FROM approvals WHERE archived_at IS NOT NULL",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .map(|count| count as usize)
-            .map_err(Into::into)
-    }
-}
-
-pub struct ProcessesRepo<'a> {
-    conn: &'a Connection,
-}
-
-impl ProcessesRepo<'_> {
-    pub fn upsert(&self, new: NewProcess) -> Result<ProcessRecord> {
-        let now = now_rfc3339();
-        let id = new.id.unwrap_or_else(|| fresh_id("process"));
-        self.conn.execute(
-            "INSERT INTO processes
-             (id, task_id, pid, command, cwd, log_path, detected_url, status, health, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
-             ON CONFLICT(id) DO UPDATE SET
-                task_id = excluded.task_id,
-                pid = excluded.pid,
-                command = excluded.command,
-                cwd = excluded.cwd,
-                log_path = excluded.log_path,
-                detected_url = excluded.detected_url,
-                status = excluded.status,
-                health = excluded.health,
-                updated_at = excluded.updated_at",
-            params![
-                id,
-                new.task_id,
-                new.pid,
-                new.command,
-                new.cwd,
-                new.log_path,
-                new.detected_url,
-                new.status.as_str(),
-                new.health,
-                now,
-                now,
-            ],
-        )?;
-        self.get(&id)?
-            .context("process was upserted but could not be reloaded")
-    }
-
-    pub fn get(&self, id: &str) -> Result<Option<ProcessRecord>> {
-        self.conn
-            .query_row(
-                "SELECT id, task_id, pid, command, cwd, log_path, detected_url, status, health,
-                        created_at, updated_at
-                 FROM processes WHERE id = ?1",
-                [id],
-                process_from_row,
-            )
-            .optional()
-            .map_err(Into::into)
-    }
-
-    pub fn list(&self, limit: usize) -> Result<Vec<ProcessRecord>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, task_id, pid, command, cwd, log_path, detected_url, status, health,
-                    created_at, updated_at
-             FROM processes
-             ORDER BY updated_at DESC
-             LIMIT ?1",
-        )?;
-        // F19 (RC-E): skip-and-warn an undecodable row (e.g. a status enum a
-        // different binary wrote) rather than blanking the whole processes panel.
-        let rows = stmt.query_map([clamp_limit(limit)], process_from_row_opt)?;
-        collect_tolerant(rows)
-    }
-}
-
-pub struct CheckpointsRepo<'a> {
-    conn: &'a Connection,
-}
-
-impl CheckpointsRepo<'_> {
-    pub fn create(&self, new: NewCheckpoint) -> Result<CheckpointRecord> {
-        let id = new.id.unwrap_or_else(|| fresh_id("checkpoint"));
-        self.conn.execute(
-            "INSERT INTO checkpoints
-             (id, task_id, project_path, snapshot_path, changed_files_json,
-              pending_action_json, approval_id, created_at, session_id, message_index)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            params![
-                id,
-                new.task_id,
-                new.project_path,
-                new.snapshot_path,
-                new.changed_files_json,
-                new.pending_action_json,
-                new.approval_id,
-                now_rfc3339(),
-                new.session_id,
-                new.message_index,
-            ],
-        )?;
-        self.get(&id)?
-            .context("checkpoint was inserted but could not be reloaded")
-    }
-
-    pub fn get(&self, id: &str) -> Result<Option<CheckpointRecord>> {
-        self.conn
-            .query_row(
-                "SELECT id, task_id, project_path, snapshot_path, changed_files_json,
-                        pending_action_json, approval_id, created_at, archived_at, archive_reason,
-                        session_id, message_index
-                 FROM checkpoints WHERE id = ?1",
-                [id],
-                checkpoint_from_row,
-            )
-            .optional()
-            .map_err(Into::into)
-    }
-
-    pub fn set_approval(&self, id: &str, approval_id: &str) -> Result<()> {
-        let changed = self.conn.execute(
-            "UPDATE checkpoints SET approval_id = ?2 WHERE id = ?1",
-            params![id, approval_id],
-        )?;
-        anyhow::ensure!(changed > 0, "checkpoint not found: {}", id);
-        Ok(())
-    }
-
-    /// Delete a checkpoint row outright. Returns whether a row was removed.
-    ///
-    /// F23 (RC-F): coordinates the on-disk checkpoint-dir GC
-    /// ([`crate::checkpoint::gc_old_checkpoint_dirs`]) with the DB. The dir GC
-    /// prunes by mtime regardless of archive state, while storage [`Self`] /
-    /// `gc()` only removes ARCHIVED checkpoint rows — so a never-archived old
-    /// checkpoint would lose its directory while its row survived, and a later
-    /// `restore_checkpoint` would fail on the missing manifest. The dir GC now
-    /// calls this so `list()` and the on-disk dirs stay in agreement.
-    pub fn delete(&self, id: &str) -> Result<bool> {
-        let changed = self
-            .conn
-            .execute("DELETE FROM checkpoints WHERE id = ?1", params![id])?;
-        Ok(changed > 0)
-    }
-
-    pub fn list(&self, limit: usize) -> Result<Vec<CheckpointRecord>> {
-        self.list_with_archived(limit, false)
-    }
-
-    pub fn list_all(&self, limit: usize) -> Result<Vec<CheckpointRecord>> {
-        self.list_with_archived(limit, true)
-    }
-
-    fn list_with_archived(
-        &self,
-        limit: usize,
-        include_archived: bool,
-    ) -> Result<Vec<CheckpointRecord>> {
-        let archived_filter = if include_archived {
-            ""
-        } else {
-            "WHERE archived_at IS NULL"
-        };
-        let mut stmt = self.conn.prepare(&format!(
-            "SELECT id, task_id, project_path, snapshot_path, changed_files_json,
-                    pending_action_json, approval_id, created_at, archived_at, archive_reason,
-                    session_id, message_index
-             FROM checkpoints {archived_filter} ORDER BY created_at DESC LIMIT ?1"
-        ))?;
-        let rows = stmt.query_map([clamp_limit(limit)], checkpoint_from_row)?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(Into::into)
-    }
-
-    /// Unarchived checkpoints of `session_id` anchored STRICTLY past
-    /// `after_message_index`, oldest first. Strict `>` is the fork-boundary
-    /// invariant: a fork at user-message index `k` keeps `messages[..k]`, and
-    /// a checkpoint stamped `message_index == k` snapshotted state from
-    /// BEFORE that user message existed — it belongs to the kept prefix, not
-    /// the discarded timeline. Oldest-first because each checkpoint is a
-    /// PRE-mutation snapshot: the oldest one past the cut holds the file
-    /// state closest to the fork point.
-    pub fn list_for_session(
-        &self,
-        session_id: &str,
-        after_message_index: i64,
-    ) -> Result<Vec<CheckpointRecord>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, task_id, project_path, snapshot_path, changed_files_json,
-                    pending_action_json, approval_id, created_at, archived_at, archive_reason,
-                    session_id, message_index
-             FROM checkpoints
-             WHERE session_id = ?1 AND message_index > ?2 AND archived_at IS NULL
-             ORDER BY created_at ASC",
-        )?;
-        let rows = stmt.query_map(
-            params![session_id, after_message_index],
-            checkpoint_from_row,
-        )?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(Into::into)
-    }
-
-    pub fn archive(&self, ids: &[String], reason: &str) -> Result<usize> {
-        let archived_at = now_rfc3339();
-        let mut changed = 0;
-        for id in ids {
-            changed += self.conn.execute(
-                "UPDATE checkpoints
-                 SET archived_at = COALESCE(archived_at, ?2),
-                     archive_reason = COALESCE(archive_reason, ?3)
-                 WHERE id = ?1 AND archived_at IS NULL",
-                params![id, archived_at, reason],
-            )?;
-        }
-        Ok(changed)
-    }
-
-    pub fn count_archived(&self) -> Result<usize> {
-        self.conn
-            .query_row(
-                "SELECT COUNT(*) FROM checkpoints WHERE archived_at IS NOT NULL",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .map(|count| count as usize)
-            .map_err(Into::into)
-    }
-}
-
-pub struct CompactionsRepo<'a> {
-    conn: &'a Connection,
-}
-
-impl CompactionsRepo<'_> {
-    pub fn create(&self, new: NewCompaction) -> Result<CompactionRecord> {
-        let id = new.id.unwrap_or_else(|| fresh_id("compaction"));
-        self.conn.execute(
-            "INSERT INTO compactions
-             (id, task_id, session_id, source_token_estimate, summary_token_count,
-              preserved_turns, archive_path, verification_status, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-             ON CONFLICT(id) DO UPDATE SET
-                task_id = excluded.task_id,
-                session_id = excluded.session_id,
-                source_token_estimate = excluded.source_token_estimate,
-                summary_token_count = excluded.summary_token_count,
-                preserved_turns = excluded.preserved_turns,
-                archive_path = excluded.archive_path,
-                verification_status = excluded.verification_status",
-            params![
-                id,
-                new.task_id,
-                new.session_id,
-                new.source_token_estimate,
-                new.summary_token_count,
-                new.preserved_turns,
-                new.archive_path,
-                new.verification_status,
-                now_rfc3339(),
-            ],
-        )?;
-        self.get(&id)?
-            .context("compaction was inserted but could not be reloaded")
-    }
-
-    pub fn get(&self, id: &str) -> Result<Option<CompactionRecord>> {
-        self.conn
-            .query_row(
-                "SELECT id, task_id, session_id, source_token_estimate, summary_token_count,
-                        preserved_turns, archive_path, verification_status, created_at
-                 FROM compactions WHERE id = ?1",
-                [id],
-                compaction_from_row,
-            )
-            .optional()
-            .map_err(Into::into)
-    }
-
-    pub fn list(&self, limit: usize) -> Result<Vec<CompactionRecord>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, task_id, session_id, source_token_estimate, summary_token_count,
-                    preserved_turns, archive_path, verification_status, created_at
-             FROM compactions ORDER BY created_at DESC LIMIT ?1",
-        )?;
-        let rows = stmt.query_map([clamp_limit(limit)], compaction_from_row)?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(Into::into)
-    }
-}
-
-pub struct PluginsRepo<'a> {
-    conn: &'a Connection,
-}
-
-impl PluginsRepo<'_> {
-    pub fn install(&self, new: NewPluginInstall) -> Result<PluginInstallRecord> {
-        let now = now_rfc3339();
-        let id = new.id.unwrap_or_else(|| fresh_id("plugin"));
-        self.conn.execute(
-            "INSERT INTO plugin_installs
-             (id, name, source, version, enabled, manifest_json, installed_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-             ON CONFLICT(id) DO UPDATE SET
-                name = excluded.name,
-                source = excluded.source,
-                version = excluded.version,
-                enabled = excluded.enabled,
-                manifest_json = excluded.manifest_json,
-                updated_at = excluded.updated_at",
-            params![
-                id,
-                new.name,
-                new.source,
-                new.version,
-                if new.enabled { 1 } else { 0 },
-                new.manifest_json,
-                now,
-                now,
-            ],
-        )?;
-        self.get(&id)?
-            .context("plugin install was inserted but could not be reloaded")
-    }
-
-    pub fn get(&self, id: &str) -> Result<Option<PluginInstallRecord>> {
-        self.conn
-            .query_row(
-                "SELECT id, name, source, version, enabled, manifest_json, installed_at, updated_at
-                 FROM plugin_installs WHERE id = ?1",
-                [id],
-                plugin_from_row,
-            )
-            .optional()
-            .map_err(Into::into)
-    }
-
-    pub fn list(&self) -> Result<Vec<PluginInstallRecord>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, name, source, version, enabled, manifest_json, installed_at, updated_at
-             FROM plugin_installs ORDER BY name ASC",
-        )?;
-        let rows = stmt.query_map([], plugin_from_row)?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(Into::into)
-    }
-
-    pub fn set_enabled(&self, id: &str, enabled: bool) -> Result<()> {
-        self.conn.execute(
-            "UPDATE plugin_installs SET enabled = ?2, updated_at = ?3 WHERE id = ?1",
-            params![id, if enabled { 1 } else { 0 }, now_rfc3339()],
-        )?;
-        Ok(())
-    }
-}
-
-pub struct ProviderProbesRepo<'a> {
-    conn: &'a Connection,
-}
-
-impl ProviderProbesRepo<'_> {
-    pub fn upsert(&self, new: NewProviderProbe) -> Result<ProviderProbeRecord> {
-        let now = now_rfc3339();
-        let provider = new.provider;
-        let model_id = new.model_id;
-        let capability_key = new.capability_key;
-        self.conn.execute(
-            "INSERT INTO provider_probes
-             (provider, model_id, capability_key, capability_value, confidence, error, probed_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT(provider, model_id, capability_key) DO UPDATE SET
-                capability_value = excluded.capability_value,
-                confidence = excluded.confidence,
-                error = excluded.error,
-                probed_at = excluded.probed_at",
-            params![
-                &provider,
-                &model_id,
-                &capability_key,
-                new.capability_value,
-                new.confidence,
-                new.error,
-                now,
-            ],
-        )?;
-        self.get(&provider, &model_id, &capability_key)?
-            .context("provider probe was inserted but could not be reloaded")
-    }
-
-    pub fn get(
-        &self,
-        provider: &str,
-        model_id: &str,
-        capability_key: &str,
-    ) -> Result<Option<ProviderProbeRecord>> {
-        self.conn
-            .query_row(
-                "SELECT provider, model_id, capability_key, capability_value, confidence, error, probed_at
-                 FROM provider_probes
-                 WHERE provider = ?1 AND model_id = ?2 AND capability_key = ?3",
-                params![provider, model_id, capability_key],
-                provider_probe_from_row,
-            )
-            .optional()
-            .map_err(Into::into)
-    }
-
-    pub fn list(
-        &self,
-        provider: Option<&str>,
-        model_id: Option<&str>,
-    ) -> Result<Vec<ProviderProbeRecord>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT provider, model_id, capability_key, capability_value, confidence, error, probed_at
-             FROM provider_probes ORDER BY provider ASC, model_id ASC, capability_key ASC",
-        )?;
-        let rows = stmt.query_map([], provider_probe_from_row)?;
-        let mut out = Vec::new();
-        for row in rows {
-            let probe = row?;
-            if provider.is_some_and(|p| probe.provider != p) {
-                continue;
-            }
-            if model_id.is_some_and(|m| probe.model_id != m) {
-                continue;
-            }
-            out.push(probe);
-        }
-        Ok(out)
-    }
-}
-
-pub struct PairingTokensRepo<'a> {
-    conn: &'a Connection,
-}
-
-impl PairingTokensRepo<'_> {
-    pub fn create(
-        &self,
-        token_hash: &str,
-        label: Option<&str>,
-        expires_at: Option<&str>,
-    ) -> Result<PairingTokenRecord> {
-        let id = fresh_id("pairing");
-        self.conn.execute(
-            "INSERT INTO pairing_tokens
-                 (id, token_hash, label, enabled, created_at, last_used_at, expires_at)
-             VALUES (?1, ?2, ?3, 1, ?4, NULL, ?5)",
-            params![id, token_hash, label, now_rfc3339(), expires_at],
-        )?;
-        self.get(&id)?
-            .context("pairing token was inserted but could not be reloaded")
-    }
-
-    pub fn get(&self, id: &str) -> Result<Option<PairingTokenRecord>> {
-        self.conn
-            .query_row(
-                "SELECT id, token_hash, label, enabled, created_at, last_used_at, expires_at
-                 FROM pairing_tokens WHERE id = ?1",
-                [id],
-                pairing_from_row,
-            )
-            .optional()
-            .map_err(Into::into)
-    }
-
-    /// Look up an enabled, unexpired pairing token by hash.
-    ///
-    /// The hash is **not** matched in SQL (`WHERE token_hash = ?`) — that is a
-    /// DB-level equality on the secret and a theoretical timing channel.
-    /// Instead we fetch the enabled, unexpired candidates (neither predicate is
-    /// secret) and compare each hash in constant time. The candidate count is
-    /// tiny and not secret. All candidates are scanned without early exit so the
-    /// timing doesn't reveal which (if any) token matched.
-    pub fn verify_token(&self, token_hash: &str) -> Result<Option<PairingTokenRecord>> {
-        // Expiry is evaluated in Rust as a parsed instant (see `is_expired`),
-        // not via a SQL `expires_at > ?` string compare. The skipped-because-
-        // expired branch is on non-secret data; the hash itself is still matched
-        // in constant time over every non-expired candidate with no early exit.
-        let now = chrono::Utc::now();
-        let mut stmt = self.conn.prepare(
-            "SELECT id, token_hash, label, enabled, created_at, last_used_at, expires_at
-             FROM pairing_tokens
-             WHERE enabled = 1",
-        )?;
-        let candidates = stmt
-            .query_map([], pairing_from_row)?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        let mut found = None;
-        for record in candidates {
-            if is_expired(record.expires_at.as_deref(), now) {
-                continue;
-            }
-            if ct_eq(record.token_hash.as_bytes(), token_hash.as_bytes()) {
-                found = Some(record);
-            }
-        }
-        Ok(found)
-    }
-
-    pub fn list(&self) -> Result<Vec<PairingTokenRecord>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, token_hash, label, enabled, created_at, last_used_at, expires_at
-             FROM pairing_tokens ORDER BY created_at DESC",
-        )?;
-        let rows = stmt.query_map([], pairing_from_row)?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(Into::into)
-    }
-
-    /// Like [`list`](Self::list), but with `token_hash` blanked. Use for any
-    /// surface that crosses a trust boundary — e.g. the daemon snapshot served
-    /// over the local socket to same-UID processes. The hash is
-    /// secret-equivalent (it's all `verify_token` compares against) and must
-    /// not leave the store.
-    pub fn list_redacted(&self) -> Result<Vec<PairingTokenRecord>> {
-        Ok(self
-            .list()?
-            .into_iter()
-            .map(|mut record| {
-                record.token_hash = String::new();
-                record
-            })
-            .collect())
-    }
-
-    pub fn mark_used(&self, id: &str) -> Result<()> {
-        self.conn.execute(
-            "UPDATE pairing_tokens SET last_used_at = ?2 WHERE id = ?1 AND enabled = 1",
-            params![id, now_rfc3339()],
-        )?;
-        Ok(())
-    }
-
-    /// Revoke a token by disabling it. Returns `true` if a live token was
-    /// revoked, `false` if it was already disabled or unknown.
-    pub fn revoke(&self, id: &str) -> Result<bool> {
-        let changed = self.conn.execute(
-            "UPDATE pairing_tokens SET enabled = 0 WHERE id = ?1 AND enabled = 1",
-            params![id],
-        )?;
-        Ok(changed > 0)
-    }
-}
-
-/// Add `column` to `table` if it is missing. Returns `true` iff the column was
-/// just created (so the caller can run a one-time backfill).
-///
-/// SQL identifiers cannot be bound as `?` parameters, so `table`/`column`/
-/// `definition` are interpolated. All call sites pass compile-time constants
-/// today; the validation below makes that a hard invariant rather than a latent
-/// injection footgun if a future caller ever threads in dynamic input.
-fn ensure_column(conn: &Connection, table: &str, column: &str, definition: &str) -> Result<bool> {
-    fn is_sql_identifier(s: &str) -> bool {
-        let mut chars = s.chars();
-        matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
-            && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-    }
-    const ALLOWED_DEFINITIONS: &[&str] = &["TEXT", "INTEGER", "REAL", "BLOB"];
-    anyhow::ensure!(
-        is_sql_identifier(table),
-        "invalid table identifier: {table}"
-    );
-    anyhow::ensure!(
-        is_sql_identifier(column),
-        "invalid column identifier: {column}"
-    );
-    anyhow::ensure!(
-        ALLOWED_DEFINITIONS.contains(&definition),
-        "unsupported column definition: {definition}"
-    );
-
-    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
-    let mut rows = stmt.query([])?;
-    while let Some(row) = rows.next()? {
-        let name: String = row.get(1)?;
-        if name == column {
-            return Ok(false);
-        }
-    }
-    // Tolerate a concurrent opener that added the column between our
-    // `table_info` check and this ALTER. SQLite reports that as a "duplicate
-    // column name" schema error (not SQLITE_BUSY, so `busy_timeout` can't retry
-    // it); treat it as already-present rather than failing the whole store open.
-    match conn.execute(
-        &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
-        [],
-    ) {
-        Ok(_) => Ok(true),
-        Err(error) if error.to_string().contains("duplicate column") => Ok(false),
-        Err(error) => Err(error.into()),
-    }
-}
-
-pub fn data_dir() -> Result<PathBuf> {
-    if let Some(proj_dirs) = ProjectDirs::from("", "", "mermaid") {
-        return Ok(proj_dirs.data_dir().to_path_buf());
-    }
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .context("could not determine home directory")?;
-    Ok(PathBuf::from(home).join(".local/share/mermaid"))
-}
-
-fn session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRecord> {
-    Ok(SessionRecord {
-        id: row.get("id")?,
-        project_path: row.get("project_path")?,
-        model_id: row.get("model_id")?,
-        title: row.get("title")?,
-        conversation_path: row.get("conversation_path")?,
-        created_at: row.get("created_at")?,
-        updated_at: row.get("updated_at")?,
-        total_tokens: row.get("total_tokens")?,
-    })
-}
-
-fn message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MessageRecord> {
-    Ok(MessageRecord {
-        id: row.get("id")?,
-        session_id: row.get("session_id")?,
-        role: row.get("role")?,
-        content_json: row.get("content_json")?,
-        created_at: row.get("created_at")?,
-    })
-}
-
-fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRecord> {
-    let status_raw: String = row.get("status")?;
-    let priority_raw: String = row.get("priority")?;
-    Ok(TaskRecord {
-        id: row.get("id")?,
-        title: row.get("title")?,
-        status: TaskStatus::from_db(&status_raw)
-            .map_err(|e| enum_from_sql_error("status", status_raw, e))?,
-        priority: TaskPriority::from_db(&priority_raw)
-            .map_err(|e| enum_from_sql_error("priority", priority_raw, e))?,
-        project_path: row.get("project_path")?,
-        model_id: row.get("model_id")?,
-        conversation_id: row.get("conversation_id")?,
-        created_at: row.get("created_at")?,
-        updated_at: row.get("updated_at")?,
-        final_report: row.get("final_report")?,
-        prompt: row.get("prompt")?,
-    })
-}
-
-fn process_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProcessRecord> {
-    let status_raw: String = row.get("status")?;
-    let pid: i64 = row.get("pid")?;
-    Ok(ProcessRecord {
-        id: row.get("id")?,
-        task_id: row.get("task_id")?,
-        pid: pid as u32,
-        command: row.get("command")?,
-        cwd: row.get("cwd")?,
-        log_path: row.get("log_path")?,
-        detected_url: row.get("detected_url")?,
-        status: ProcessStatus::from_db(&status_raw)
-            .map_err(|e| enum_from_sql_error("status", status_raw, e))?,
-        health: row.get("health")?,
-        created_at: row.get("created_at")?,
-        updated_at: row.get("updated_at")?,
-    })
-}
-
-fn tool_run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ToolRunRecord> {
-    Ok(ToolRunRecord {
-        id: row.get("id")?,
-        task_id: row.get("task_id")?,
-        turn_id: row.get("turn_id")?,
-        call_id: row.get("call_id")?,
-        tool_name: row.get("tool_name")?,
-        status: row.get("status")?,
-        args_json: row.get("args_json")?,
-        output_json: row.get("output_json")?,
-        started_at: row.get("started_at")?,
-        finished_at: row.get("finished_at")?,
-    })
-}
-
-fn approval_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ApprovalRecord> {
-    Ok(ApprovalRecord {
-        id: row.get("id")?,
-        task_id: row.get("task_id")?,
-        proposed_action: row.get("proposed_action")?,
-        risk_classification: row.get("risk_classification")?,
-        policy_decision: row.get("policy_decision")?,
-        user_decision: row.get("user_decision")?,
-        args_summary: row.get("args_summary")?,
-        checkpoint_id: row.get("checkpoint_id")?,
-        pending_action_json: row.get("pending_action_json")?,
-        created_at: row.get("created_at")?,
-        decided_at: row.get("decided_at")?,
-        archived_at: row.get("archived_at")?,
-        archive_reason: row.get("archive_reason")?,
-    })
-}
-
-fn checkpoint_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CheckpointRecord> {
-    Ok(CheckpointRecord {
-        id: row.get("id")?,
-        task_id: row.get("task_id")?,
-        project_path: row.get("project_path")?,
-        snapshot_path: row.get("snapshot_path")?,
-        changed_files_json: row.get("changed_files_json")?,
-        pending_action_json: row.get("pending_action_json")?,
-        approval_id: row.get("approval_id")?,
-        created_at: row.get("created_at")?,
-        archived_at: row.get("archived_at")?,
-        archive_reason: row.get("archive_reason")?,
-        session_id: row.get("session_id")?,
-        message_index: row.get("message_index")?,
-    })
-}
-
-fn compaction_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CompactionRecord> {
-    Ok(CompactionRecord {
-        id: row.get("id")?,
-        task_id: row.get("task_id")?,
-        session_id: row.get("session_id")?,
-        source_token_estimate: row.get("source_token_estimate")?,
-        summary_token_count: row.get("summary_token_count")?,
-        preserved_turns: row.get("preserved_turns")?,
-        archive_path: row.get("archive_path")?,
-        verification_status: row.get("verification_status")?,
-        created_at: row.get("created_at")?,
-    })
-}
-
-fn plugin_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PluginInstallRecord> {
-    let enabled: i64 = row.get("enabled")?;
-    Ok(PluginInstallRecord {
-        id: row.get("id")?,
-        name: row.get("name")?,
-        source: row.get("source")?,
-        version: row.get("version")?,
-        enabled: enabled != 0,
-        manifest_json: row.get("manifest_json")?,
-        installed_at: row.get("installed_at")?,
-        updated_at: row.get("updated_at")?,
-    })
-}
-
-fn provider_probe_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProviderProbeRecord> {
-    Ok(ProviderProbeRecord {
-        provider: row.get("provider")?,
-        model_id: row.get("model_id")?,
-        capability_key: row.get("capability_key")?,
-        capability_value: row.get("capability_value")?,
-        confidence: row.get("confidence")?,
-        error: row.get("error")?,
-        probed_at: row.get("probed_at")?,
-    })
-}
-
-fn pairing_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PairingTokenRecord> {
-    let enabled: i64 = row.get("enabled")?;
-    Ok(PairingTokenRecord {
-        id: row.get("id")?,
-        token_hash: row.get("token_hash")?,
-        label: row.get("label")?,
-        enabled: enabled != 0,
-        created_at: row.get("created_at")?,
-        last_used_at: row.get("last_used_at")?,
-        expires_at: row.get("expires_at")?,
-    })
-}
-
-fn task_event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskTimelineEvent> {
-    Ok(TaskTimelineEvent {
-        id: row.get("id")?,
-        task_id: row.get("task_id")?,
-        kind: row.get("kind")?,
-        message: row.get("message")?,
-        created_at: row.get("created_at")?,
-    })
-}
-
-/// Whether a row error is a per-row DECODE failure — a value a different binary
-/// wrote that this build can't parse: an unknown enum
-/// ([`rusqlite::Error::FromSqlConversionFailure`], how `task_from_row` /
-/// `process_from_row` surface an unknown status) or a column type mismatch
-/// ([`rusqlite::Error::InvalidColumnType`]). F19 (RC-E): the list/events paths
-/// skip-and-warn on these so one poison row can't blank an entire panel, while a
-/// genuine infrastructure error (a locked DB, a dropped column) still propagates.
-fn is_row_decode_error(err: &rusqlite::Error) -> bool {
-    matches!(
-        err,
-        rusqlite::Error::FromSqlConversionFailure(..) | rusqlite::Error::InvalidColumnType(..)
-    )
-}
-
-/// Tolerant [`task_from_row`]: `Ok(None)` (with a warning) for a row this build
-/// can't decode, so [`TasksRepo::list`] skips it instead of failing the list.
-fn task_from_row_opt(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<TaskRecord>> {
-    match task_from_row(row) {
-        Ok(record) => Ok(Some(record)),
-        Err(err) if is_row_decode_error(&err) => {
-            tracing::warn!(error = %err, "skipping task row this build can't decode (version skew?)");
-            Ok(None)
-        },
-        Err(err) => Err(err),
-    }
-}
-
-/// Tolerant [`process_from_row`] — see [`task_from_row_opt`].
-fn process_from_row_opt(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<ProcessRecord>> {
-    match process_from_row(row) {
-        Ok(record) => Ok(Some(record)),
-        Err(err) if is_row_decode_error(&err) => {
-            tracing::warn!(error = %err, "skipping process row this build can't decode (version skew?)");
-            Ok(None)
-        },
-        Err(err) => Err(err),
-    }
-}
-
-/// Tolerant [`task_event_from_row`] — see [`task_from_row_opt`].
-fn task_event_from_row_opt(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<TaskTimelineEvent>> {
-    match task_event_from_row(row) {
-        Ok(record) => Ok(Some(record)),
-        Err(err) if is_row_decode_error(&err) => {
-            tracing::warn!(error = %err, "skipping task event row this build can't decode");
-            Ok(None)
-        },
-        Err(err) => Err(err),
-    }
-}
-
-/// Collect rows from a tolerant decoder (one that yields `Ok(None)` for a
-/// skipped poison row), dropping the `None`s and propagating any real error.
-fn collect_tolerant<T>(rows: impl Iterator<Item = rusqlite::Result<Option<T>>>) -> Result<Vec<T>> {
-    let mut out = Vec::new();
-    for row in rows {
-        if let Some(item) = row? {
-            out.push(item);
-        }
-    }
-    Ok(out)
-}
-
-fn enum_from_sql_error(
-    column: &'static str,
-    value: String,
-    source: UnknownRuntimeEnum,
-) -> rusqlite::Error {
-    let _ = value;
-    rusqlite::Error::FromSqlConversionFailure(column_index(column), Type::Text, Box::new(source))
-}
-
-fn column_index(column: &str) -> usize {
-    match column {
-        "status" => 2,
-        "priority" => 3,
-        _ => 0,
-    }
-}
-
-#[derive(Debug)]
-struct UnknownRuntimeEnum {
-    kind: &'static str,
-    value: String,
-}
-
-impl UnknownRuntimeEnum {
-    fn new(kind: &'static str, value: &str) -> Self {
-        Self {
-            kind,
-            value: value.to_string(),
-        }
-    }
-}
-
-impl fmt::Display for UnknownRuntimeEnum {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "unknown {} value `{}`", self.kind, self.value)
-    }
-}
-
-impl std::error::Error for UnknownRuntimeEnum {}
-
-fn now_rfc3339() -> String {
-    chrono::Utc::now().to_rfc3339()
-}
-
-/// Constant-time byte-slice equality. Unlike `==` (or a SQL `=`), it never
-/// short-circuits on the first differing byte, so it leaks no timing signal
-/// about how much of a secret matched. Lengths are compared first; the length
-/// of a token hash is fixed and not secret.
-fn ct_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
-}
-
-/// Whether a pairing token's `expires_at` is in the past relative to `now`.
-///
-/// `None` (SQL `NULL`) means "never expires" — the documented `--ttl-days 0`
-/// opt-out. A present-but-unparseable value fails closed (treated as expired).
-/// Expiry is compared as a parsed instant rather than via a SQL `expires_at > ?`
-/// string compare, which only orders correctly while every stored value is the
-/// canonical `now_rfc3339()` shape (#64).
-fn is_expired(expires_at: Option<&str>, now: chrono::DateTime<chrono::Utc>) -> bool {
-    match expires_at {
-        None => false,
-        Some(raw) => match chrono::DateTime::parse_from_rfc3339(raw) {
-            Ok(dt) => dt <= now,
-            Err(_) => true,
-        },
-    }
-}
-
-/// Upper bound on any `LIMIT` we bind. A caller-supplied `limit` (e.g. a daemon
-/// request body's `limit`) can be a huge `u64` that, cast straight to `i64`,
-/// wraps negative — and SQLite reads a negative `LIMIT` as *unbounded*, so the
-/// query returns every row (#128). Clamp at the `usize` level before the cast.
-const MAX_QUERY_LIMIT: usize = 10_000;
-
-fn clamp_limit(limit: usize) -> i64 {
-    limit.min(MAX_QUERY_LIMIT) as i64
-}
-
-/// Upper bound on the rows [`MessagesRepo::list_for_session`] returns (F24/RC-F).
-/// A session transcript is unbounded and the daemon `session_messages` path loads
-/// it whole into RAM; this caps the worst-case load at the most recent N messages
-/// so one pathological session can't OOM the daemon. 5000 turns is far beyond any
-/// real interactive session yet bounds memory.
-const MAX_SESSION_MESSAGES: i64 = 5_000;
-
-pub(crate) fn fresh_id(prefix: &str) -> String {
-    // In-process monotonic counter: two ids minted in the same nanosecond (a
-    // coarse clock, or a clock stepping backward) can never be equal, so the
-    // `ON CONFLICT(id) DO UPDATE` upserts can't silently overwrite an unrelated
-    // row (#61). A per-process random salt removes the clock dependence so ids
-    // minted across a daemon restart don't collide either (getrandom is already
-    // a dependency — see `daemon.rs`).
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    static SALT: OnceLock<u64> = OnceLock::new();
-    let salt = *SALT.get_or_init(|| {
-        let mut bytes = [0u8; 8];
-        // The monotonic counter alone still guarantees in-process uniqueness if
-        // the RNG ever fails, so a best-effort fill is fine here.
-        let _ = getrandom::fill(&mut bytes);
-        u64::from_le_bytes(bytes)
-    });
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or_default();
-    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-    format!("{prefix}-{nanos:x}-{salt:x}-{seq:x}")
-}
-
-/// Acquire an exclusive, auto-released advisory lock on `path` — a process
-/// singleton guard for the daemon (#131). Returns the held `File` on success
-/// (keep it alive to hold the lock), or `None` if another process already holds
-/// it. `flock` releases automatically when the file is dropped OR the process
-/// exits/crashes, so a dead holder never wedges the lock the way an `O_EXCL`
-/// pidfile would. Holding it across the socket probe → unlink → bind closes that
-/// TOCTOU: two daemons can't both decide a stale socket is theirs to rebind.
-///
-/// Unix-only: it backs the `#[cfg(unix)]` daemon singleton and relies on
-/// `flock`, which `rustix` exposes only on Unix targets.
-#[cfg(unix)]
-pub fn try_exclusive_lock(path: &std::path::Path) -> std::io::Result<Option<std::fs::File>> {
-    use rustix::fs::{FlockOperation, flock};
-    // A lockfile's content is irrelevant — only the flock matters — so don't
-    // truncate (avoids a needless write and any truncate/lock ordering race).
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(false)
-        .open(path)?;
-    match flock(&file, FlockOperation::NonBlockingLockExclusive) {
-        Ok(()) => Ok(Some(file)),
-        Err(rustix::io::Errno::WOULDBLOCK) => Ok(None),
-        Err(e) => Err(e.into()),
     }
 }
 
@@ -2759,7 +664,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn open_enables_wal_and_busy_timeout() {
+    pub(crate) fn open_enables_wal_and_busy_timeout() {
         // H19: every connection must use WAL so daemon/CLI/effect writers
         // don't hit a hard SQLITE_BUSY.
         let path = temp_db("wal_check");
@@ -2771,7 +676,7 @@ mod tests {
         assert_eq!(mode.to_lowercase(), "wal");
     }
 
-    fn temp_db(name: &str) -> PathBuf {
+    pub(crate) fn temp_db(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("mermaid_runtime_store_{}", name));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create temp dir");
@@ -2779,7 +684,7 @@ mod tests {
     }
 
     #[test]
-    fn outcomes_round_trip_and_list_for_task() {
+    pub(crate) fn outcomes_round_trip_and_list_for_task() {
         let path = temp_db("outcomes");
         let store = RuntimeStore::open(&path).expect("open store");
         let task = store
@@ -2843,7 +748,7 @@ mod tests {
     }
 
     #[test]
-    fn claim_next_queued_orders_by_priority_then_fifo_and_skips_unclaimable() {
+    pub(crate) fn claim_next_queued_orders_by_priority_then_fifo_and_skips_unclaimable() {
         let path = temp_db("claim_queue");
         let store = RuntimeStore::open(&path).expect("open store");
 
@@ -2930,7 +835,7 @@ mod tests {
     }
 
     #[test]
-    fn outcome_allows_null_task_and_tool_run() {
+    pub(crate) fn outcome_allows_null_task_and_tool_run() {
         // A free-floating outcome (no task/tool_run) is valid — task_id is
         // nullable with ON DELETE SET NULL, so the loop never loses a signal to
         // a deleted subject.
@@ -2956,7 +861,7 @@ mod tests {
     }
 
     #[test]
-    fn initializes_runtime_schema() {
+    pub(crate) fn initializes_runtime_schema() {
         let path = temp_db("schema");
         let store = RuntimeStore::open(&path).expect("open store");
         assert_eq!(store.path(), path.as_path());
@@ -2969,7 +874,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_newer_schema_version() {
+    pub(crate) fn rejects_newer_schema_version() {
         // Forward-compat gate: a DB stamped with a newer schema must be
         // refused, not silently down-labeled and operated on (RC-5).
         let path = temp_db("newer_schema");
@@ -2993,7 +898,7 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_anchor_round_trips_and_list_for_session_is_strict() {
+    pub(crate) fn checkpoint_anchor_round_trips_and_list_for_session_is_strict() {
         let path = temp_db("checkpoint_anchor");
         let store = RuntimeStore::open(&path).expect("open store");
         for (id, idx) in [("cp-a", 3_i64), ("cp-b", 5), ("cp-c", 9)] {
@@ -3052,7 +957,7 @@ mod tests {
     }
 
     #[test]
-    fn v5_database_upgrades_with_null_checkpoint_anchors() {
+    pub(crate) fn v5_database_upgrades_with_null_checkpoint_anchors() {
         // A DB created by the previous build (schema v5, no anchor columns)
         // must open cleanly, gain the columns, and load old rows as None.
         let path = temp_db("v5_upgrade");
@@ -3093,7 +998,7 @@ mod tests {
     }
 
     #[test]
-    fn init_schema_is_idempotent_across_opens() {
+    pub(crate) fn init_schema_is_idempotent_across_opens() {
         // Re-opening the same DB re-runs `init_schema`; it must succeed (the
         // create script and `ensure_column` are idempotent) and keep the
         // version stamped.
@@ -3108,7 +1013,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
-    fn explain_query_plan(conn: &Connection, sql: &str) -> String {
+    pub(crate) fn explain_query_plan(conn: &Connection, sql: &str) -> String {
         let mut stmt = conn
             .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
             .expect("prepare EXPLAIN QUERY PLAN");
@@ -3123,7 +1028,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_and_reconcile_scans_use_indexes() {
+    pub(crate) fn pending_and_reconcile_scans_use_indexes() {
         // F75: the pending-approval scan and the reconcile scan must hit their
         // covering indexes rather than full-table scans.
         let path = temp_db("scan_indexes");
@@ -3166,7 +1071,7 @@ mod tests {
     }
 
     #[test]
-    fn upgrades_from_v2_to_current_and_adds_indexes() {
+    pub(crate) fn upgrades_from_v2_to_current_and_adds_indexes() {
         // F75/F76: a DB stamped at the previous schema version must migrate forward
         // on the next open — re-run the idempotent baseline, pick up the F75
         // indexes, and stamp the current version — exercising the per-version
@@ -3208,7 +1113,7 @@ mod tests {
     }
 
     #[test]
-    fn task_create_commits_task_and_event_atomically() {
+    pub(crate) fn task_create_commits_task_and_event_atomically() {
         // The task row and its `task_created` event commit in one transaction.
         let path = temp_db("task_txn");
         let store = RuntimeStore::open(&path).expect("open");
@@ -3225,7 +1130,7 @@ mod tests {
     }
 
     #[test]
-    fn task_lifecycle_round_trips() {
+    pub(crate) fn task_lifecycle_round_trips() {
         let path = temp_db("task");
         let store = RuntimeStore::open(&path).expect("open store");
         let session = store
@@ -3281,7 +1186,7 @@ mod tests {
     }
 
     #[test]
-    fn approval_and_process_records_round_trip() {
+    pub(crate) fn approval_and_process_records_round_trip() {
         let path = temp_db("approval_process");
         let store = RuntimeStore::open(&path).expect("open store");
         let task = store
@@ -3351,7 +1256,7 @@ mod tests {
     }
 
     #[test]
-    fn approval_decide_is_single_shot() {
+    pub(crate) fn approval_decide_is_single_shot() {
         let path = temp_db("approval_decide_guard");
         let store = RuntimeStore::open(&path).expect("open store");
         let make = |action: &str| {
@@ -3395,7 +1300,7 @@ mod tests {
     }
 
     #[test]
-    fn archived_approvals_and_checkpoints_are_hidden_from_visible_lists() {
+    pub(crate) fn archived_approvals_and_checkpoints_are_hidden_from_visible_lists() {
         let path = temp_db("archive_visibility");
         let store = RuntimeStore::open(&path).expect("open store");
 
@@ -3468,7 +1373,7 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_compaction_plugin_probe_and_pairing_round_trip() {
+    pub(crate) fn checkpoint_compaction_plugin_probe_and_pairing_round_trip() {
         let path = temp_db("everything_else");
         let store = RuntimeStore::open(&path).expect("open store");
 
@@ -3559,7 +1464,7 @@ mod tests {
     }
 
     #[test]
-    fn pairing_token_expiry_and_revoke() {
+    pub(crate) fn pairing_token_expiry_and_revoke() {
         let path = temp_db("pairing_ttl");
         let store = RuntimeStore::open(&path).expect("open store");
         let tokens = store.pairing_tokens();
@@ -3624,7 +1529,7 @@ mod tests {
     }
 
     #[test]
-    fn ct_eq_matches_only_identical_bytes() {
+    pub(crate) fn ct_eq_matches_only_identical_bytes() {
         assert!(ct_eq(b"abc", b"abc"));
         assert!(!ct_eq(b"abc", b"abd"));
         assert!(!ct_eq(b"abc", b"ab"));
@@ -3633,7 +1538,7 @@ mod tests {
     }
 
     #[test]
-    fn fresh_id_is_collision_free_in_tight_loop() {
+    pub(crate) fn fresh_id_is_collision_free_in_tight_loop() {
         // The #61 stress: ids minted back-to-back (same nanosecond on a coarse
         // clock) must all be distinct and keep the `prefix-` shape.
         let mut seen = std::collections::HashSet::new();
@@ -3645,7 +1550,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_run_repository_redacts_arguments_and_outcomes() {
+    pub(crate) fn tool_run_repository_redacts_arguments_and_outcomes() {
         let path = temp_db("persistence_redaction");
         let store = RuntimeStore::open(&path).expect("open store");
         let run = store
@@ -3711,7 +1616,7 @@ mod tests {
     }
 
     #[test]
-    fn ensure_column_rejects_non_identifier() {
+    pub(crate) fn ensure_column_rejects_non_identifier() {
         let path = temp_db("ensure_col");
         let store = RuntimeStore::open(&path).expect("open store");
         assert!(ensure_column(&store.conn, "approvals; DROP", "x", "TEXT").is_err());
@@ -3721,7 +1626,7 @@ mod tests {
     }
 
     #[test]
-    fn clamp_limit_never_binds_negative() {
+    pub(crate) fn clamp_limit_never_binds_negative() {
         // #128: a huge `limit` must clamp, not wrap to a negative i64 (which
         // SQLite reads as unbounded).
         assert_eq!(clamp_limit(10), 10);
@@ -3729,7 +1634,7 @@ mod tests {
         assert!(clamp_limit(usize::MAX) > 0);
     }
 
-    fn make_approval(store: &RuntimeStore, action: &str) -> ApprovalRecord {
+    pub(crate) fn make_approval(store: &RuntimeStore, action: &str) -> ApprovalRecord {
         store
             .approvals()
             .create(NewApproval {
@@ -3745,7 +1650,7 @@ mod tests {
     }
 
     #[test]
-    fn approval_claim_is_single_winner_releasable_and_finalizable() {
+    pub(crate) fn approval_claim_is_single_winner_releasable_and_finalizable() {
         // #118: exactly one concurrent claim wins; a released claim re-claims; a
         // finalized one is decided and unclaimable.
         let path = temp_db("approval_claim");
@@ -3786,7 +1691,7 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_after_restart_recovers_running_tasks_and_claims() {
+    pub(crate) fn reconcile_after_restart_recovers_running_tasks_and_claims() {
         // #120/#118: a daemon-owned Running task and an 'approving' claim left by a
         // crashed daemon are recovered on the next startup.
         let path = temp_db("reconcile");
@@ -3822,7 +1727,7 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_after_restart_spares_non_daemon_running_tasks() {
+    pub(crate) fn reconcile_after_restart_spares_non_daemon_running_tasks() {
         // F18 (RC-E): a Running task NOT owned by the daemon (an interactive CLI
         // run sharing the store, owner_kind = NULL) must survive a daemon restart
         // — not be flipped to Failed with a spurious "interrupted" event.
@@ -3872,7 +1777,7 @@ mod tests {
     }
 
     #[test]
-    fn gc_prunes_old_archived_but_keeps_active() {
+    pub(crate) fn gc_prunes_old_archived_but_keeps_active() {
         // #130: GC removes archived rows past the retention window, never active
         // ones.
         let path = temp_db("gc");
@@ -3906,7 +1811,7 @@ mod tests {
     }
 
     #[test]
-    fn gc_prunes_outcomes_and_terminal_tasks_on_their_windows() {
+    pub(crate) fn gc_prunes_outcomes_and_terminal_tasks_on_their_windows() {
         // R1: `gc` prunes terminal tasks past the task window and `outcomes` past
         // their own (longer) window, never touching a live task or a recent
         // outcome. When a task is pruned while its outcome survives, the outcome
@@ -4014,7 +1919,7 @@ mod tests {
         clippy::too_many_lines,
         reason = "predates the lint; see .github/baselines/expect_budget.txt"
     )]
-    fn gc_prunes_high_churn_and_old_terminal_rows_but_keeps_active() {
+    pub(crate) fn gc_prunes_high_churn_and_old_terminal_rows_but_keeps_active() {
         // F22 (RC-F): GC prunes finished tool_runs, exited processes, old
         // compactions, and stale sessions/messages past the window — never active
         // data (a running tool_run, a live process, a fresh session).
@@ -4214,7 +2119,7 @@ mod tests {
     }
 
     #[test]
-    fn task_list_skips_undecodable_status_row() {
+    pub(crate) fn task_list_skips_undecodable_status_row() {
         // F19 (RC-E): a task row whose status enum this build can't decode (a
         // different binary wrote it) is skipped, not allowed to blank the list.
         let path = temp_db("poison_task");
@@ -4245,7 +2150,7 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_delete_removes_row() {
+    pub(crate) fn checkpoint_delete_removes_row() {
         // F23 (RC-F): the on-disk dir GC drops a checkpoint's DB row so list()
         // and the on-disk dirs stay in agreement.
         let path = temp_db("ckpt_delete");
@@ -4278,7 +2183,7 @@ mod tests {
     }
 
     #[test]
-    fn list_for_session_caps_at_max_and_keeps_ascending_order() {
+    pub(crate) fn list_for_session_caps_at_max_and_keeps_ascending_order() {
         // F24 (RC-F): a huge session is bounded — list_for_session returns at most
         // MAX_SESSION_MESSAGES, the most recent ones, in ascending id order.
         let path = temp_db("session_cap");

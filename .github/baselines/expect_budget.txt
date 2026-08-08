@@ -22,7 +22,7 @@ expect|clippy::too_many_lines|crates/mermaid-model/src/models/adapters/gemini.rs
 expect|clippy::too_many_lines|crates/mermaid-model/src/models/adapters/openai_compat.rs 2
 expect|clippy::too_many_lines|crates/mermaid-model/src/models/error.rs 1
 expect|clippy::too_many_lines|crates/mermaid-runtime/src/policy/shell/lexer.rs 1
-expect|clippy::too_many_lines|crates/mermaid-runtime/src/storage.rs 2
+expect|clippy::too_many_lines|crates/mermaid-runtime/src/storage/mod.rs 2
 expect|clippy::too_many_lines|src/app/recorder.rs 1
 expect|clippy::too_many_lines|src/app/replay.rs 1
 expect|clippy::too_many_lines|src/app/run.rs 1
