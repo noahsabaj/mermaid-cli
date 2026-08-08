@@ -961,10 +961,10 @@ impl EffectRunner {
                     };
                     let reason = mermaid_model::utils::redact_secrets(&reason);
                     let _ = broker
-                        .update(vec![crate::domain::TaskEdit {
+                        .update(vec![crate::domain::ChecklistEdit {
                             id: task.id,
-                            status: Some(crate::domain::TaskStatus::InProgress),
-                            ..crate::domain::TaskEdit::default()
+                            status: Some(crate::domain::ChecklistStatus::InProgress),
+                            ..crate::domain::ChecklistEdit::default()
                         }])
                         .await;
                     let _ = tx

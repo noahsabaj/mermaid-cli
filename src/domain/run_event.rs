@@ -316,8 +316,8 @@ pub struct TaskLine {
     pub origin: Option<String>,
 }
 
-impl From<&crate::domain::TaskItem> for TaskLine {
-    fn from(task: &crate::domain::TaskItem) -> Self {
+impl From<&crate::domain::ChecklistItem> for TaskLine {
+    fn from(task: &crate::domain::ChecklistItem) -> Self {
         Self {
             id: task.id,
             subject: task.subject.clone(),
@@ -327,8 +327,8 @@ impl From<&crate::domain::TaskItem> for TaskLine {
             tokens_spent: task.tokens_spent,
             origin: Some(
                 match task.origin {
-                    crate::domain::TaskOrigin::Model => "model",
-                    crate::domain::TaskOrigin::User => "user",
+                    crate::domain::ChecklistOrigin::Model => "model",
+                    crate::domain::ChecklistOrigin::User => "user",
                 }
                 .to_string(),
             ),

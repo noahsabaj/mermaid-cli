@@ -1,6 +1,6 @@
 //! Single-writer broker for the task checklist.
 //!
-//! Owns the authoritative [`TaskStore`]. The three task tools, `/tasks` user
+//! Owns the authoritative [`ChecklistStore`]. The three task tools, `/tasks` user
 //! edits (`Cmd::UserTaskEdit`), evidence recording, and the `task_completed`
 //! veto path all mutate through here; every mutation publishes a full
 //! snapshot as `Msg::TasksUpdated`, which the reducer copies onto
@@ -28,14 +28,14 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
 use crate::domain::Msg;
-use crate::domain::tasks::{
-    ApplyReport, EvidenceEntry, Stamp, TaskEdit, TaskItem, TaskOrigin, TaskSpec, TaskStatus,
-    TaskStore, UserTaskEdit,
+use crate::domain::checklist::{
+    ApplyReport, ChecklistEdit, ChecklistItem, ChecklistOrigin, ChecklistSpec, ChecklistStatus,
+    ChecklistStore, EvidenceEntry, Stamp, UserChecklistEdit,
 };
 
 #[derive(Clone)]
 pub struct TaskBroker {
-    store: Arc<Mutex<TaskStore>>,
+    store: Arc<Mutex<ChecklistStore>>,
     /// Session-monotonic completion-token counter, accumulated by the effect
     /// runner as providers report usage. Task cost deltas are computed
     /// between the readings at in_progress and completed.
@@ -46,7 +46,7 @@ pub struct TaskBroker {
 impl TaskBroker {
     pub fn new(msg_tx: mpsc::Sender<Msg>) -> Self {
         Self {
-            store: Arc::new(Mutex::new(TaskStore::default())),
+            store: Arc::new(Mutex::new(ChecklistStore::default())),
             tokens: Arc::new(AtomicU64::new(0)),
             msg_tx,
         }
@@ -55,7 +55,7 @@ impl TaskBroker {
     /// Overwrite the store wholesale: startup resume seeding, rewind/fork
     /// and `/clear` (empty store). No publish — the reducer already holds
     /// this truth; it is telling us, not the other way around.
-    pub fn seed(&self, store: TaskStore) {
+    pub fn seed(&self, store: ChecklistStore) {
         *self.lock() = store;
     }
 
@@ -70,9 +70,9 @@ impl TaskBroker {
     /// Append new tasks; returns the created items and publishes.
     pub async fn create(
         &self,
-        specs: Vec<TaskSpec>,
-        origin: TaskOrigin,
-    ) -> (Vec<TaskItem>, TaskStore) {
+        specs: Vec<ChecklistSpec>,
+        origin: ChecklistOrigin,
+    ) -> (Vec<ChecklistItem>, ChecklistStore) {
         let (created, snapshot) = {
             let mut store = self.lock();
             let ids = store.create(specs, origin, self.stamp());
@@ -90,7 +90,7 @@ impl TaskBroker {
 
     /// Apply differential edits; returns the per-item report (with advisory
     /// notes) and publishes.
-    pub async fn update(&self, edits: Vec<TaskEdit>) -> (ApplyReport, TaskStore) {
+    pub async fn update(&self, edits: Vec<ChecklistEdit>) -> (ApplyReport, ChecklistStore) {
         let (report, snapshot) = {
             let mut store = self.lock();
             let report = store.apply(&edits, self.stamp());
@@ -102,10 +102,10 @@ impl TaskBroker {
 
     /// Apply a `/tasks` user edit. Returns the outcome line shown in the
     /// transcript and the id it affected (for the model notice).
-    pub async fn user_edit(&self, edit: UserTaskEdit) -> (String, TaskStore) {
+    pub async fn user_edit(&self, edit: UserChecklistEdit) -> (String, ChecklistStore) {
         let (line, snapshot) = {
             let mut store = self.lock();
-            let subject_of = |store: &TaskStore, id: u32| {
+            let subject_of = |store: &ChecklistStore, id: u32| {
                 store
                     .tasks
                     .iter()
@@ -114,26 +114,26 @@ impl TaskBroker {
                     .unwrap_or_default()
             };
             let line = match edit {
-                UserTaskEdit::Add { subject } => {
+                UserChecklistEdit::Add { subject } => {
                     let ids = store.create(
-                        vec![TaskSpec {
+                        vec![ChecklistSpec {
                             active_form: subject.clone(),
                             subject: subject.clone(),
                             description: None,
                             in_progress: false,
                         }],
-                        TaskOrigin::User,
+                        ChecklistOrigin::User,
                         self.stamp(),
                     );
                     format!("Added task #{} '{subject}'", ids[0])
                 },
-                UserTaskEdit::Remove { id } => {
+                UserChecklistEdit::Remove { id } => {
                     let subject = subject_of(&store, id);
                     let report = store.apply(
-                        &[TaskEdit {
+                        &[ChecklistEdit {
                             id,
-                            status: Some(TaskStatus::Deleted),
-                            ..TaskEdit::default()
+                            status: Some(ChecklistStatus::Deleted),
+                            ..ChecklistEdit::default()
                         }],
                         self.stamp(),
                     );
@@ -142,13 +142,13 @@ impl TaskBroker {
                         None => format!("Removed task #{id} '{subject}'"),
                     }
                 },
-                UserTaskEdit::Done { id } => {
+                UserChecklistEdit::Done { id } => {
                     let subject = subject_of(&store, id);
                     let report = store.apply(
-                        &[TaskEdit {
+                        &[ChecklistEdit {
                             id,
-                            status: Some(TaskStatus::Completed),
-                            ..TaskEdit::default()
+                            status: Some(ChecklistStatus::Completed),
+                            ..ChecklistEdit::default()
                         }],
                         self.stamp(),
                     );
@@ -157,8 +157,8 @@ impl TaskBroker {
                         None => format!("Marked task #{id} '{subject}' completed"),
                     }
                 },
-                UserTaskEdit::Clear => {
-                    *store = TaskStore::default();
+                UserChecklistEdit::Clear => {
+                    *store = ChecklistStore::default();
                     "Cleared the task list".to_string()
                 },
             };
@@ -180,7 +180,7 @@ impl TaskBroker {
         }
     }
 
-    pub fn snapshot(&self) -> TaskStore {
+    pub fn snapshot(&self) -> ChecklistStore {
         self.lock().clone()
     }
 
@@ -194,7 +194,7 @@ impl TaskBroker {
         }
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, TaskStore> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, ChecklistStore> {
         self.store
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -202,7 +202,7 @@ impl TaskBroker {
 
     /// Fire-and-forget snapshot to the reducer. A closed channel (shutdown)
     /// is ignored — the broker's copy is still truth for any later reader.
-    async fn publish(&self, store: TaskStore) {
+    async fn publish(&self, store: ChecklistStore) {
         let _ = self.msg_tx.send(Msg::TasksUpdated { store }).await;
     }
 }
@@ -211,8 +211,8 @@ impl TaskBroker {
 mod tests {
     use super::*;
 
-    fn spec(subject: &str, in_progress: bool) -> TaskSpec {
-        TaskSpec {
+    fn spec(subject: &str, in_progress: bool) -> ChecklistSpec {
+        ChecklistSpec {
             subject: subject.into(),
             active_form: format!("{subject}ing"),
             description: None,
@@ -220,7 +220,7 @@ mod tests {
         }
     }
 
-    async fn recv_store(rx: &mut mpsc::Receiver<Msg>) -> TaskStore {
+    async fn recv_store(rx: &mut mpsc::Receiver<Msg>) -> ChecklistStore {
         match rx.recv().await {
             Some(Msg::TasksUpdated { store }) => store,
             other => panic!("expected TasksUpdated, got {other:?}"),
@@ -232,16 +232,19 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(8);
         let broker = TaskBroker::new(tx);
         let (created, _) = broker
-            .create(vec![spec("a", true), spec("b", false)], TaskOrigin::Model)
+            .create(
+                vec![spec("a", true), spec("b", false)],
+                ChecklistOrigin::Model,
+            )
             .await;
         assert_eq!(created.len(), 2);
         assert_eq!(recv_store(&mut rx).await.counts(), (0, 2));
 
         let (report, _) = broker
-            .update(vec![TaskEdit {
+            .update(vec![ChecklistEdit {
                 id: created[0].id,
-                status: Some(TaskStatus::Completed),
-                ..TaskEdit::default()
+                status: Some(ChecklistStatus::Completed),
+                ..ChecklistEdit::default()
             }])
             .await;
         assert!(report.errors.is_empty());
@@ -255,14 +258,14 @@ mod tests {
         let broker = TaskBroker::new(tx);
         broker.add_tokens(1_000);
         let (created, _) = broker
-            .create(vec![spec("a", true)], TaskOrigin::Model)
+            .create(vec![spec("a", true)], ChecklistOrigin::Model)
             .await;
         broker.add_tokens(8_400);
         let (_, snapshot) = broker
-            .update(vec![TaskEdit {
+            .update(vec![ChecklistEdit {
                 id: created[0].id,
-                status: Some(TaskStatus::Completed),
-                ..TaskEdit::default()
+                status: Some(ChecklistStatus::Completed),
+                ..ChecklistEdit::default()
             }])
             .await;
         assert_eq!(snapshot.tasks[0].tokens_spent, Some(8_400));
@@ -272,10 +275,10 @@ mod tests {
     async fn seed_overwrites_without_publishing() {
         let (tx, mut rx) = mpsc::channel(8);
         let broker = TaskBroker::new(tx);
-        let mut store = TaskStore::default();
+        let mut store = ChecklistStore::default();
         store.create(
             vec![spec("seeded", false)],
-            TaskOrigin::Model,
+            ChecklistOrigin::Model,
             Stamp::default(),
         );
         broker.seed(store);
@@ -288,14 +291,17 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(8);
         let broker = TaskBroker::new(tx);
         let (line, _) = broker
-            .user_edit(UserTaskEdit::Add {
+            .user_edit(UserChecklistEdit::Add {
                 subject: "review the docs".into(),
             })
             .await;
         assert_eq!(line, "Added task #1 'review the docs'");
-        assert_eq!(recv_store(&mut rx).await.tasks[0].origin, TaskOrigin::User);
+        assert_eq!(
+            recv_store(&mut rx).await.tasks[0].origin,
+            ChecklistOrigin::User
+        );
 
-        let (line, snapshot) = broker.user_edit(UserTaskEdit::Remove { id: 9 }).await;
+        let (line, snapshot) = broker.user_edit(UserChecklistEdit::Remove { id: 9 }).await;
         assert_eq!(line, "#9: no such task");
         assert_eq!(snapshot.visible().count(), 1);
     }
@@ -315,7 +321,7 @@ mod tests {
         assert!(rx.try_recv().is_err());
 
         broker
-            .create(vec![spec("a", true)], TaskOrigin::Model)
+            .create(vec![spec("a", true)], ChecklistOrigin::Model)
             .await;
         let _ = recv_store(&mut rx).await;
         broker

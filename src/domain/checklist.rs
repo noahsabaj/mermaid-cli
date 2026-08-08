@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 /// tombstones so ids are never reused or re-resolved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum TaskStatus {
+pub enum ChecklistStatus {
     Pending,
     InProgress,
     /// Stalled on something outside the task itself (a failing dependency, a
@@ -31,7 +31,7 @@ pub enum TaskStatus {
     Deleted,
 }
 
-impl TaskStatus {
+impl ChecklistStatus {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Pending => "pending",
@@ -58,7 +58,7 @@ impl TaskStatus {
 /// marker and are called out to the model in a turn-start notice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum TaskOrigin {
+pub enum ChecklistOrigin {
     #[default]
     Model,
     User,
@@ -87,7 +87,7 @@ pub struct Stamp {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TaskItem {
+pub struct ChecklistItem {
     /// Stable, monotonic, never reused.
     pub id: u32,
     /// Short imperative description ("Wire the broker into ExecContext").
@@ -96,9 +96,9 @@ pub struct TaskItem {
     pub active_form: String,
     #[serde(default)]
     pub description: Option<String>,
-    pub status: TaskStatus,
+    pub status: ChecklistStatus,
     #[serde(default)]
-    pub origin: TaskOrigin,
+    pub origin: ChecklistOrigin,
     /// Epoch seconds when the task first entered `InProgress`.
     #[serde(default)]
     pub started_at: Option<u64>,
@@ -117,7 +117,7 @@ pub struct TaskItem {
     pub evidence: Vec<EvidenceEntry>,
 }
 
-impl TaskItem {
+impl ChecklistItem {
     /// Elapsed seconds from start to completion, when both stamps exist.
     pub fn elapsed_secs(&self) -> Option<u64> {
         match (self.started_at, self.completed_at) {
@@ -130,7 +130,7 @@ impl TaskItem {
 /// A new task requested via `task_create` (or `/tasks add`), before an id is
 /// assigned.
 #[derive(Debug, Clone)]
-pub struct TaskSpec {
+pub struct ChecklistSpec {
     pub subject: String,
     pub active_form: String,
     pub description: Option<String>,
@@ -140,9 +140,9 @@ pub struct TaskSpec {
 /// One differential edit requested via `task_update` (or `/tasks rm|done`).
 /// Only `id` is required; absent fields are left untouched.
 #[derive(Debug, Clone, Default)]
-pub struct TaskEdit {
+pub struct ChecklistEdit {
     pub id: u32,
-    pub status: Option<TaskStatus>,
+    pub status: Option<ChecklistStatus>,
     pub subject: Option<String>,
     pub active_form: Option<String>,
     pub description: Option<String>,
@@ -153,14 +153,14 @@ pub struct TaskEdit {
 /// `TaskBroker` — the single writer — so user edits and concurrent tool calls
 /// serialize instead of racing.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum UserTaskEdit {
+pub enum UserChecklistEdit {
     Add { subject: String },
     Remove { id: u32 },
     Done { id: u32 },
     Clear,
 }
 
-/// Result of applying a batch of [`TaskEdit`]s: which ids were applied,
+/// Result of applying a batch of [`ChecklistEdit`]s: which ids were applied,
 /// per-item errors (unknown/deleted ids), and soft-validation notes for the
 /// model. Errors never abort the rest of the batch.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -171,31 +171,36 @@ pub struct ApplyReport {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct TaskStore {
+pub struct ChecklistStore {
     #[serde(default)]
-    pub tasks: Vec<TaskItem>,
+    pub tasks: Vec<ChecklistItem>,
     /// Last id handed out; 0 means the first task gets id 1.
     #[serde(default)]
     pub next_id: u32,
 }
 
-impl TaskStore {
+impl ChecklistStore {
     /// Append new tasks in order, assigning ids. Returns the assigned ids.
     /// A spec flagged `in_progress` is stamped as started.
-    pub fn create(&mut self, specs: Vec<TaskSpec>, origin: TaskOrigin, stamp: Stamp) -> Vec<u32> {
+    pub fn create(
+        &mut self,
+        specs: Vec<ChecklistSpec>,
+        origin: ChecklistOrigin,
+        stamp: Stamp,
+    ) -> Vec<u32> {
         let mut ids = Vec::with_capacity(specs.len());
         for spec in specs {
             self.next_id += 1;
             let in_progress = spec.in_progress;
-            self.tasks.push(TaskItem {
+            self.tasks.push(ChecklistItem {
                 id: self.next_id,
                 subject: spec.subject,
                 active_form: spec.active_form,
                 description: spec.description,
                 status: if in_progress {
-                    TaskStatus::InProgress
+                    ChecklistStatus::InProgress
                 } else {
-                    TaskStatus::Pending
+                    ChecklistStatus::Pending
                 },
                 origin,
                 started_at: in_progress.then_some(stamp.now_epoch),
@@ -212,7 +217,7 @@ impl TaskStore {
     /// Apply each edit independently; unknown or deleted ids become per-item
     /// errors, valid edits still land. Status transitions pick up cost stamps.
     /// Soft-validation notes compare the store before and after the batch.
-    pub fn apply(&mut self, edits: &[TaskEdit], stamp: Stamp) -> ApplyReport {
+    pub fn apply(&mut self, edits: &[ChecklistEdit], stamp: Stamp) -> ApplyReport {
         let before = self.clone();
         let mut report = ApplyReport::default();
         for edit in edits {
@@ -220,7 +225,9 @@ impl TaskStore {
                 report.errors.push(format!("#{}: no such task", edit.id));
                 continue;
             };
-            if task.status == TaskStatus::Deleted && edit.status != Some(TaskStatus::Deleted) {
+            if task.status == ChecklistStatus::Deleted
+                && edit.status != Some(ChecklistStatus::Deleted)
+            {
                 report
                     .errors
                     .push(format!("#{}: task was deleted; create a new one", edit.id));
@@ -250,7 +257,7 @@ impl TaskStore {
         let Some(task) = self
             .tasks
             .iter_mut()
-            .find(|t| t.status == TaskStatus::InProgress)
+            .find(|t| t.status == ChecklistStatus::InProgress)
         else {
             return false;
         };
@@ -262,10 +269,10 @@ impl TaskStore {
     }
 
     /// All non-deleted tasks, in creation order.
-    pub fn visible(&self) -> impl Iterator<Item = &TaskItem> {
+    pub fn visible(&self) -> impl Iterator<Item = &ChecklistItem> {
         self.tasks
             .iter()
-            .filter(|t| t.status != TaskStatus::Deleted)
+            .filter(|t| t.status != ChecklistStatus::Deleted)
     }
 
     /// `(completed, total)` over visible tasks.
@@ -274,7 +281,7 @@ impl TaskStore {
         let mut total = 0;
         for task in self.visible() {
             total += 1;
-            if task.status == TaskStatus::Completed {
+            if task.status == ChecklistStatus::Completed {
                 completed += 1;
             }
         }
@@ -297,28 +304,30 @@ impl TaskStore {
     }
 
     /// The current in-progress task (first, if the model broke discipline).
-    pub fn active(&self) -> Option<&TaskItem> {
+    pub fn active(&self) -> Option<&ChecklistItem> {
         self.tasks
             .iter()
-            .find(|t| t.status == TaskStatus::InProgress)
+            .find(|t| t.status == ChecklistStatus::InProgress)
     }
 
     /// The next pending task, in creation order.
-    pub fn next_pending(&self) -> Option<&TaskItem> {
-        self.tasks.iter().find(|t| t.status == TaskStatus::Pending)
+    pub fn next_pending(&self) -> Option<&ChecklistItem> {
+        self.tasks
+            .iter()
+            .find(|t| t.status == ChecklistStatus::Pending)
     }
 
     /// Tasks that flipped to `Completed` relative to `before` — drives the
     /// `task_completed` hook.
-    pub fn newly_completed<'a>(&'a self, before: &TaskStore) -> Vec<&'a TaskItem> {
+    pub fn newly_completed<'a>(&'a self, before: &ChecklistStore) -> Vec<&'a ChecklistItem> {
         self.visible()
             .filter(|t| {
-                t.status == TaskStatus::Completed
+                t.status == ChecklistStatus::Completed
                     && before
                         .tasks
                         .iter()
                         .find(|b| b.id == t.id)
-                        .is_none_or(|b| b.status != TaskStatus::Completed)
+                        .is_none_or(|b| b.status != ChecklistStatus::Completed)
             })
             .collect()
     }
@@ -328,12 +337,12 @@ impl TaskStore {
 /// entering `InProgress` stamps start time/tokens (first entry only —
 /// a veto re-entry keeps the original start), entering `Completed`
 /// stamps completion and the token delta.
-fn transition(task: &mut TaskItem, status: TaskStatus, stamp: Stamp) {
+fn transition(task: &mut ChecklistItem, status: ChecklistStatus, stamp: Stamp) {
     if task.status == status {
         return;
     }
     match status {
-        TaskStatus::InProgress => {
+        ChecklistStatus::InProgress => {
             if task.started_at.is_none() {
                 task.started_at = Some(stamp.now_epoch);
                 task.tokens_at_start = Some(stamp.run_tokens);
@@ -342,7 +351,7 @@ fn transition(task: &mut TaskItem, status: TaskStatus, stamp: Stamp) {
             task.completed_at = None;
             task.tokens_spent = None;
         },
-        TaskStatus::Completed => {
+        ChecklistStatus::Completed => {
             task.completed_at = Some(stamp.now_epoch);
             task.tokens_spent = task
                 .tokens_at_start
@@ -350,7 +359,7 @@ fn transition(task: &mut TaskItem, status: TaskStatus, stamp: Stamp) {
         },
         // Blocked keeps `started_at`, so a later return to in_progress
         // preserves the original start stamp (see the InProgress arm).
-        TaskStatus::Pending | TaskStatus::Blocked | TaskStatus::Deleted => {},
+        ChecklistStatus::Pending | ChecklistStatus::Blocked | ChecklistStatus::Deleted => {},
     }
     task.status = status;
 }
@@ -359,17 +368,21 @@ fn transition(task: &mut TaskItem, status: TaskStatus, stamp: Stamp) {
 /// rejection (a hard reject risks retry loops; codex's enforce-nothing
 /// approach lets malformed checklists render silently). Strictness changes
 /// edit this list of checks only.
-pub fn advisory_notes(before: &TaskStore, edits: &[TaskEdit], after: &TaskStore) -> Vec<String> {
+pub fn advisory_notes(
+    before: &ChecklistStore,
+    edits: &[ChecklistEdit],
+    after: &ChecklistStore,
+) -> Vec<String> {
     let mut notes = Vec::new();
     notes.extend(check_single_in_progress(after));
     notes.extend(check_no_status_jump(before, edits));
     notes
 }
 
-fn check_single_in_progress(after: &TaskStore) -> Option<String> {
+fn check_single_in_progress(after: &ChecklistStore) -> Option<String> {
     let in_progress: Vec<u32> = after
         .visible()
-        .filter(|t| t.status == TaskStatus::InProgress)
+        .filter(|t| t.status == ChecklistStatus::InProgress)
         .map(|t| t.id)
         .collect();
     (in_progress.len() > 1).then(|| {
@@ -382,15 +395,15 @@ fn check_single_in_progress(after: &TaskStore) -> Option<String> {
     })
 }
 
-fn check_no_status_jump(before: &TaskStore, edits: &[TaskEdit]) -> Option<String> {
+fn check_no_status_jump(before: &ChecklistStore, edits: &[ChecklistEdit]) -> Option<String> {
     let jumped: Vec<u32> = edits
         .iter()
-        .filter(|e| e.status == Some(TaskStatus::Completed))
+        .filter(|e| e.status == Some(ChecklistStatus::Completed))
         .filter(|e| {
             before
                 .tasks
                 .iter()
-                .any(|t| t.id == e.id && t.status == TaskStatus::Pending)
+                .any(|t| t.id == e.id && t.status == ChecklistStatus::Pending)
         })
         .map(|e| e.id)
         .collect();
@@ -410,8 +423,8 @@ fn check_no_status_jump(before: &TaskStore, edits: &[TaskEdit]) -> Option<String
 mod tests {
     use super::*;
 
-    fn spec(subject: &str) -> TaskSpec {
-        TaskSpec {
+    fn spec(subject: &str) -> ChecklistSpec {
+        ChecklistSpec {
             subject: subject.into(),
             active_form: format!("{subject}ing"),
             description: None,
@@ -419,29 +432,33 @@ mod tests {
         }
     }
 
-    fn store_with(n: u32) -> TaskStore {
-        let mut store = TaskStore::default();
+    fn store_with(n: u32) -> ChecklistStore {
+        let mut store = ChecklistStore::default();
         store.create(
             (0..n).map(|i| spec(&format!("task {i}"))).collect(),
-            TaskOrigin::Model,
+            ChecklistOrigin::Model,
             Stamp::default(),
         );
         store
     }
 
-    fn edit(id: u32, status: TaskStatus) -> TaskEdit {
-        TaskEdit {
+    fn edit(id: u32, status: ChecklistStatus) -> ChecklistEdit {
+        ChecklistEdit {
             id,
             status: Some(status),
-            ..TaskEdit::default()
+            ..ChecklistEdit::default()
         }
     }
 
     #[test]
     fn ids_are_monotonic_across_deletes() {
         let mut store = store_with(2);
-        store.apply(&[edit(2, TaskStatus::Deleted)], Stamp::default());
-        let ids = store.create(vec![spec("later")], TaskOrigin::Model, Stamp::default());
+        store.apply(&[edit(2, ChecklistStatus::Deleted)], Stamp::default());
+        let ids = store.create(
+            vec![spec("later")],
+            ChecklistOrigin::Model,
+            Stamp::default(),
+        );
         assert_eq!(ids, vec![3]);
         assert_eq!(store.visible().count(), 2);
     }
@@ -451,8 +468,8 @@ mod tests {
         let mut store = store_with(1);
         let report = store.apply(
             &[
-                edit(1, TaskStatus::InProgress),
-                edit(9, TaskStatus::Completed),
+                edit(1, ChecklistStatus::InProgress),
+                edit(9, ChecklistStatus::Completed),
             ],
             Stamp::default(),
         );
@@ -463,8 +480,8 @@ mod tests {
     #[test]
     fn deleted_tasks_reject_edits_and_hide() {
         let mut store = store_with(1);
-        store.apply(&[edit(1, TaskStatus::Deleted)], Stamp::default());
-        let report = store.apply(&[edit(1, TaskStatus::InProgress)], Stamp::default());
+        store.apply(&[edit(1, ChecklistStatus::Deleted)], Stamp::default());
+        let report = store.apply(&[edit(1, ChecklistStatus::InProgress)], Stamp::default());
         assert!(report.applied.is_empty());
         assert_eq!(report.errors.len(), 1);
         assert!(store.is_empty());
@@ -472,16 +489,19 @@ mod tests {
 
     #[test]
     fn blocked_round_trips_and_stays_out_of_the_flow() {
-        assert_eq!(TaskStatus::parse("blocked"), Some(TaskStatus::Blocked));
-        assert_eq!(TaskStatus::Blocked.as_str(), "blocked");
+        assert_eq!(
+            ChecklistStatus::parse("blocked"),
+            Some(ChecklistStatus::Blocked)
+        );
+        assert_eq!(ChecklistStatus::Blocked.as_str(), "blocked");
 
         let mut store = store_with(2);
-        store.apply(&[edit(1, TaskStatus::Blocked)], Stamp::default());
+        store.apply(&[edit(1, ChecklistStatus::Blocked)], Stamp::default());
         // Blocked is neither the active task nor the next pending one, and it
         // keeps the list from reading all-done.
         assert!(store.active().is_none());
         assert_eq!(store.next_pending().map(|t| t.id), Some(2));
-        store.apply(&[edit(2, TaskStatus::Completed)], Stamp::default());
+        store.apply(&[edit(2, ChecklistStatus::Completed)], Stamp::default());
         assert!(!store.all_done());
         assert_eq!(store.counts(), (1, 2));
     }
@@ -490,28 +510,28 @@ mod tests {
     fn blocked_preserves_the_original_start_stamp() {
         let mut store = store_with(1);
         store.apply(
-            &[edit(1, TaskStatus::InProgress)],
+            &[edit(1, ChecklistStatus::InProgress)],
             Stamp {
                 now_epoch: 100,
                 run_tokens: 1_000,
             },
         );
         store.apply(
-            &[edit(1, TaskStatus::Blocked)],
+            &[edit(1, ChecklistStatus::Blocked)],
             Stamp {
                 now_epoch: 200,
                 run_tokens: 2_000,
             },
         );
         store.apply(
-            &[edit(1, TaskStatus::InProgress)],
+            &[edit(1, ChecklistStatus::InProgress)],
             Stamp {
                 now_epoch: 300,
                 run_tokens: 3_000,
             },
         );
         let task = store.tasks.iter().find(|t| t.id == 1).unwrap();
-        assert_eq!(task.status, TaskStatus::InProgress);
+        assert_eq!(task.status, ChecklistStatus::InProgress);
         assert_eq!(
             task.started_at,
             Some(100),
@@ -525,8 +545,8 @@ mod tests {
         let mut store = store_with(2);
         let report = store.apply(
             &[
-                edit(1, TaskStatus::InProgress),
-                edit(2, TaskStatus::InProgress),
+                edit(1, ChecklistStatus::InProgress),
+                edit(2, ChecklistStatus::InProgress),
             ],
             Stamp::default(),
         );
@@ -537,7 +557,7 @@ mod tests {
     #[test]
     fn pending_to_completed_jump_yields_note() {
         let mut store = store_with(1);
-        let report = store.apply(&[edit(1, TaskStatus::Completed)], Stamp::default());
+        let report = store.apply(&[edit(1, ChecklistStatus::Completed)], Stamp::default());
         assert_eq!(report.notes.len(), 1);
         assert!(report.notes[0].contains("pending straight to completed"));
     }
@@ -545,11 +565,11 @@ mod tests {
     #[test]
     fn clean_update_yields_no_notes() {
         let mut store = store_with(2);
-        store.apply(&[edit(1, TaskStatus::InProgress)], Stamp::default());
+        store.apply(&[edit(1, ChecklistStatus::InProgress)], Stamp::default());
         let report = store.apply(
             &[
-                edit(1, TaskStatus::Completed),
-                edit(2, TaskStatus::InProgress),
+                edit(1, ChecklistStatus::Completed),
+                edit(2, ChecklistStatus::InProgress),
             ],
             Stamp::default(),
         );
@@ -561,14 +581,14 @@ mod tests {
     fn cost_stamps_ride_the_transitions() {
         let mut store = store_with(1);
         store.apply(
-            &[edit(1, TaskStatus::InProgress)],
+            &[edit(1, ChecklistStatus::InProgress)],
             Stamp {
                 now_epoch: 100,
                 run_tokens: 1_000,
             },
         );
         store.apply(
-            &[edit(1, TaskStatus::Completed)],
+            &[edit(1, ChecklistStatus::Completed)],
             Stamp {
                 now_epoch: 230,
                 run_tokens: 9_400,
@@ -583,21 +603,21 @@ mod tests {
     fn veto_reopen_keeps_original_start() {
         let mut store = store_with(1);
         store.apply(
-            &[edit(1, TaskStatus::InProgress)],
+            &[edit(1, ChecklistStatus::InProgress)],
             Stamp {
                 now_epoch: 100,
                 run_tokens: 10,
             },
         );
         store.apply(
-            &[edit(1, TaskStatus::Completed)],
+            &[edit(1, ChecklistStatus::Completed)],
             Stamp {
                 now_epoch: 200,
                 run_tokens: 20,
             },
         );
         store.apply(
-            &[edit(1, TaskStatus::InProgress)],
+            &[edit(1, ChecklistStatus::InProgress)],
             Stamp {
                 now_epoch: 300,
                 run_tokens: 30,
@@ -617,7 +637,7 @@ mod tests {
             target: "a.rs".into(),
             status: "ok".into(),
         }));
-        store.apply(&[edit(2, TaskStatus::InProgress)], Stamp::default());
+        store.apply(&[edit(2, ChecklistStatus::InProgress)], Stamp::default());
         for i in 0..(EVIDENCE_CAP + 5) {
             assert!(store.record_evidence(EvidenceEntry {
                 tool: "execute_command".into(),
@@ -633,11 +653,11 @@ mod tests {
     #[test]
     fn progress_and_active_and_next() {
         let mut store = store_with(3);
-        store.apply(&[edit(1, TaskStatus::InProgress)], Stamp::default());
+        store.apply(&[edit(1, ChecklistStatus::InProgress)], Stamp::default());
         store.apply(
             &[
-                edit(1, TaskStatus::Completed),
-                edit(2, TaskStatus::InProgress),
+                edit(1, ChecklistStatus::Completed),
+                edit(2, ChecklistStatus::InProgress),
             ],
             Stamp::default(),
         );
@@ -650,9 +670,9 @@ mod tests {
     #[test]
     fn newly_completed_diff() {
         let mut store = store_with(2);
-        store.apply(&[edit(1, TaskStatus::InProgress)], Stamp::default());
+        store.apply(&[edit(1, ChecklistStatus::InProgress)], Stamp::default());
         let before = store.clone();
-        store.apply(&[edit(1, TaskStatus::Completed)], Stamp::default());
+        store.apply(&[edit(1, ChecklistStatus::Completed)], Stamp::default());
         let fresh = store.newly_completed(&before);
         assert_eq!(fresh.len(), 1);
         assert_eq!(fresh[0].id, 1);
@@ -663,15 +683,15 @@ mod tests {
     #[test]
     fn serde_roundtrip_and_legacy_defaults() {
         let mut store = store_with(1);
-        store.apply(&[edit(1, TaskStatus::InProgress)], Stamp::default());
+        store.apply(&[edit(1, ChecklistStatus::InProgress)], Stamp::default());
         let json = serde_json::to_string(&store).unwrap();
-        let back: TaskStore = serde_json::from_str(&json).unwrap();
+        let back: ChecklistStore = serde_json::from_str(&json).unwrap();
         assert_eq!(store, back);
         // A minimal item (as an older snapshot would carry) still loads.
-        let legacy: TaskItem =
+        let legacy: ChecklistItem =
             serde_json::from_str(r#"{"id":1,"subject":"s","active_form":"a","status":"pending"}"#)
                 .unwrap();
-        assert_eq!(legacy.origin, TaskOrigin::Model);
+        assert_eq!(legacy.origin, ChecklistOrigin::Model);
         assert!(legacy.evidence.is_empty());
     }
 }

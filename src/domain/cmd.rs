@@ -135,7 +135,7 @@ pub enum Cmd {
     /// reducer changes checklist truth outside the broker's own publish
     /// cycle: rewind/fork and `/clear` (both clear it) and `--replay`
     /// re-seeding. Fire-and-forget to the broker, not turn-scoped.
-    SyncTaskStore(crate::domain::tasks::TaskStore),
+    SyncTaskStore(crate::domain::checklist::ChecklistStore),
     /// Persist the `[plan]` table to the user config file (the `/plan
     /// config` picker edits live state; this writes it through the
     /// key-scoped updater so unrelated keys and defaults stay unfrozen).
@@ -145,13 +145,13 @@ pub enum Cmd {
     /// `TaskBroker` (the single writer) instead of mutating reducer state
     /// directly, so a concurrent tool call can't clobber it; the broker's
     /// `Msg::TasksUpdated` publish brings the result back.
-    UserTaskEdit(crate::domain::tasks::UserTaskEdit),
+    UserTaskEdit(crate::domain::checklist::UserChecklistEdit),
 
     /// A task transitioned to completed: run the gated `task_completed`
     /// plugin hook. A denying hook flips the task back to in_progress via
     /// the broker and queues a notice for the model's next turn.
     NotifyTaskCompleted {
-        task: crate::domain::tasks::TaskItem,
+        task: crate::domain::checklist::ChecklistItem,
         completed: u32,
         total: u32,
     },

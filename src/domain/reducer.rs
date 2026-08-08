@@ -1970,9 +1970,13 @@ fn handle_rewind_picker_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCod
 /// snapshot, firing `Cmd::NotifyTaskCompleted` for each task that flipped to
 /// completed relative to the previous copy (a re-sent identical snapshot
 /// fires nothing — the diff is the dedupe).
-fn handle_tasks_updated(state: &mut State, cmds: &mut Vec<Cmd>, store: crate::domain::TaskStore) {
+fn handle_tasks_updated(
+    state: &mut State,
+    cmds: &mut Vec<Cmd>,
+    store: crate::domain::ChecklistStore,
+) {
     let (completed, total) = store.counts();
-    let fresh: Vec<crate::domain::TaskItem> = store
+    let fresh: Vec<crate::domain::ChecklistItem> = store
         .newly_completed(&state.session.conversation.tasks)
         .into_iter()
         .cloned()
@@ -1992,7 +1996,7 @@ fn handle_tasks_updated(state: &mut State, cmds: &mut Vec<Cmd>, store: crate::do
 /// list; edits route through `Cmd::UserTaskEdit` to the TaskBroker (single
 /// writer), whose publish updates the band and whose notice tells the model.
 fn handle_todos_command(state: &mut State, cmds: &mut Vec<Cmd>, arg: Option<&str>) {
-    use crate::domain::UserTaskEdit;
+    use crate::domain::UserChecklistEdit;
     let arg = arg.unwrap_or("").trim();
     if arg.is_empty() {
         state
@@ -2005,12 +2009,12 @@ fn handle_todos_command(state: &mut State, cmds: &mut Vec<Cmd>, arg: Option<&str
     let parse_id =
         |rest: &str| -> Option<u32> { rest.strip_prefix('#').unwrap_or(rest).parse().ok() };
     let edit = match verb {
-        "add" if !rest.is_empty() => Some(UserTaskEdit::Add {
+        "add" if !rest.is_empty() => Some(UserChecklistEdit::Add {
             subject: rest.to_string(),
         }),
-        "rm" | "remove" => parse_id(rest).map(|id| UserTaskEdit::Remove { id }),
-        "done" => parse_id(rest).map(|id| UserTaskEdit::Done { id }),
-        "clear" => Some(UserTaskEdit::Clear),
+        "rm" | "remove" => parse_id(rest).map(|id| UserChecklistEdit::Remove { id }),
+        "done" => parse_id(rest).map(|id| UserChecklistEdit::Done { id }),
+        "clear" => Some(UserChecklistEdit::Clear),
         _ => None,
     };
     match edit {
@@ -2040,7 +2044,7 @@ fn todos_text(state: &State) -> String {
             task.id,
             task.status.as_str(),
             task.subject,
-            if task.origin == crate::domain::TaskOrigin::User {
+            if task.origin == crate::domain::ChecklistOrigin::User {
                 " (you)"
             } else {
                 ""
@@ -2159,7 +2163,7 @@ fn fork_conversation_at(state: &mut State, cmds: &mut Vec<Cmd>, message_index: u
     // Marked as an estimate (the `~` prefix) until the next real call returns
     // provider-counted usage.
     state.session.context_usage = Some(estimate_current_context(state));
-    cmds.push(Cmd::SyncTaskStore(crate::domain::TaskStore::default()));
+    cmds.push(Cmd::SyncTaskStore(crate::domain::ChecklistStore::default()));
     // The fork minted a fresh conversation id, so it gets its own scratch
     // dir too — the original session's scratch contents describe work on
     // the timeline being discarded.
@@ -4319,7 +4323,7 @@ fn handle_confirm_accepted(state: &mut State, cmds: &mut Vec<Cmd>) {
             state.turn = TurnState::Idle;
             // The fresh conversation starts with an empty checklist; the
             // broker must forget the old one too (single-writer sync).
-            cmds.push(Cmd::SyncTaskStore(crate::domain::TaskStore::default()));
+            cmds.push(Cmd::SyncTaskStore(crate::domain::ChecklistStore::default()));
             // New conversation id -> new scratch dir. The old one stays on
             // disk until the sweep reaps it (its pid lock expires with us).
             refresh_scratchpad(state, cmds);
@@ -5199,8 +5203,8 @@ fn handle_stream_done(
                 " · {completed} task{} completed",
                 if completed == 1 { "" } else { "s" }
             ));
-            state.session.conversation.tasks = crate::domain::TaskStore::default();
-            cmds.push(Cmd::SyncTaskStore(crate::domain::TaskStore::default()));
+            state.session.conversation.tasks = crate::domain::ChecklistStore::default();
+            cmds.push(Cmd::SyncTaskStore(crate::domain::ChecklistStore::default()));
         }
         state
             .session
@@ -6734,19 +6738,19 @@ fn seed_plan_tasks(state: &mut State, cmds: &mut Vec<Cmd>, body: &str) {
     if specs.is_empty() {
         return;
     }
-    use super::tasks::{Stamp, TaskEdit, TaskOrigin, TaskStatus};
+    use super::checklist::{ChecklistEdit, ChecklistOrigin, ChecklistStatus, Stamp};
     let mut store = state.session.conversation.tasks.clone();
     let completed: std::collections::HashSet<String> = store
         .visible()
-        .filter(|t| t.status == TaskStatus::Completed)
+        .filter(|t| t.status == ChecklistStatus::Completed)
         .map(|t| t.subject.trim().to_ascii_lowercase())
         .collect();
-    let stale: Vec<TaskEdit> = store
+    let stale: Vec<ChecklistEdit> = store
         .visible()
-        .filter(|t| t.status != TaskStatus::Completed)
-        .map(|t| TaskEdit {
+        .filter(|t| t.status != ChecklistStatus::Completed)
+        .map(|t| ChecklistEdit {
             id: t.id,
-            status: Some(TaskStatus::Deleted),
+            status: Some(ChecklistStatus::Deleted),
             subject: None,
             active_form: None,
             description: None,
@@ -6760,7 +6764,7 @@ fn seed_plan_tasks(state: &mut State, cmds: &mut Vec<Cmd>, body: &str) {
         .filter(|s| !completed.contains(&s.subject.trim().to_ascii_lowercase()))
         .collect();
     if !fresh.is_empty() {
-        store.create(fresh, TaskOrigin::Model, Stamp::default());
+        store.create(fresh, ChecklistOrigin::Model, Stamp::default());
     }
     state.session.conversation.tasks = store.clone();
     cmds.push(Cmd::SyncTaskStore(store));
@@ -9260,7 +9264,7 @@ mod tests {
     /// the count — the record of the work, where the run's totals live.
     #[test]
     fn run_end_retires_a_fully_completed_checklist() {
-        use crate::domain::TaskStatus::Completed;
+        use crate::domain::ChecklistStatus::Completed;
         let mut state = fresh_state();
         state.session.conversation.tasks = sample_task_store(&[Completed, Completed, Completed]);
         let (state, cmds) = finish_run(state);
@@ -9290,7 +9294,7 @@ mod tests {
     /// fully-green list retires.
     #[test]
     fn run_end_keeps_a_checklist_with_unfinished_work() {
-        use crate::domain::TaskStatus::{Completed, Pending};
+        use crate::domain::ChecklistStatus::{Completed, Pending};
         let mut state = fresh_state();
         state.session.conversation.tasks = sample_task_store(&[Completed, Pending]);
         let (state, cmds) = finish_run(state);
@@ -9320,7 +9324,7 @@ mod tests {
     /// checklist — green or not — stays put.
     #[test]
     fn cancelled_run_keeps_a_fully_completed_checklist() {
-        use crate::domain::TaskStatus::Completed;
+        use crate::domain::ChecklistStatus::Completed;
         let mut state = fresh_state();
         state.session.conversation.tasks = sample_task_store(&[Completed, Completed]);
         state.runtime.run_started = Some(std::time::SystemTime::from(state.now));
@@ -9341,7 +9345,7 @@ mod tests {
     /// loads with an empty store instead of resurrecting a zombie band.
     #[test]
     fn seeding_a_conversation_preserves_the_saved_checklist() {
-        use crate::domain::TaskStatus::{Completed, Pending};
+        use crate::domain::ChecklistStatus::{Completed, Pending};
         let mut history = crate::session::ConversationHistory::new(
             "/tmp/project".to_string(),
             "ollama/test".to_string(),
@@ -13337,7 +13341,7 @@ mod tests {
     /// contradiction re-injected itself every `TASK_STALENESS_CALLS` dispatches.
     #[test]
     fn no_task_staleness_nudge_while_the_checklist_writers_are_withdrawn() {
-        use crate::domain::TaskStatus::InProgress;
+        use crate::domain::ChecklistStatus::InProgress;
         let mut state = fresh_state();
         state.session.conversation.tasks = sample_task_store(&[InProgress]);
         enter_planning(&mut state, "/tmp/project/.mermaid/plans/x.md");
@@ -14225,33 +14229,35 @@ mod tests {
 
     #[test]
     fn replan_reconcile_preserves_completed_tasks() {
-        use crate::domain::tasks::{Stamp, TaskEdit, TaskOrigin, TaskSpec, TaskStatus};
+        use crate::domain::checklist::{
+            ChecklistEdit, ChecklistOrigin, ChecklistSpec, ChecklistStatus, Stamp,
+        };
         let mut state = fresh_state();
         enter_planning(&mut state, "/tmp/project/.mermaid/plans/x.md");
         // Prior round: one completed, one still open.
-        let mut store = crate::domain::tasks::TaskStore::default();
+        let mut store = crate::domain::checklist::ChecklistStore::default();
         let ids = store.create(
             vec![
-                TaskSpec {
+                ChecklistSpec {
                     subject: "Add the flag".into(),
                     active_form: "Add the flag".into(),
                     description: None,
                     in_progress: false,
                 },
-                TaskSpec {
+                ChecklistSpec {
                     subject: "Old open step".into(),
                     active_form: "Old open step".into(),
                     description: None,
                     in_progress: false,
                 },
             ],
-            TaskOrigin::Model,
+            ChecklistOrigin::Model,
             Stamp::default(),
         );
         store.apply(
-            &[TaskEdit {
+            &[ChecklistEdit {
                 id: ids[0],
-                status: Some(TaskStatus::Completed),
+                status: Some(ChecklistStatus::Completed),
                 subject: None,
                 active_form: None,
                 description: None,
@@ -14264,7 +14270,7 @@ mod tests {
         let body = "## Tasks\n1. Add the flag\n2. New step\n";
         finish_plan_mode(&mut state, &mut cmds, body, false);
 
-        let visible: Vec<(String, crate::domain::tasks::TaskStatus)> = state
+        let visible: Vec<(String, crate::domain::checklist::ChecklistStatus)> = state
             .session
             .conversation
             .tasks
@@ -14275,8 +14281,8 @@ mod tests {
         assert_eq!(
             visible,
             [
-                ("Add the flag".to_string(), TaskStatus::Completed),
-                ("New step".to_string(), TaskStatus::Pending),
+                ("Add the flag".to_string(), ChecklistStatus::Completed),
+                ("New step".to_string(), ChecklistStatus::Pending),
             ]
         );
         // start=false: nothing queued.
@@ -14804,31 +14810,33 @@ mod tests {
         assert!(!state.ui.tasks_collapsed, "second press expands again");
     }
 
-    fn sample_task_store(statuses: &[crate::domain::TaskStatus]) -> crate::domain::TaskStore {
-        use crate::domain::tasks::{Stamp, TaskEdit, TaskSpec};
-        let mut store = crate::domain::TaskStore::default();
+    fn sample_task_store(
+        statuses: &[crate::domain::ChecklistStatus],
+    ) -> crate::domain::ChecklistStore {
+        use crate::domain::checklist::{ChecklistEdit, ChecklistSpec, Stamp};
+        let mut store = crate::domain::ChecklistStore::default();
         store.create(
             statuses
                 .iter()
                 .enumerate()
-                .map(|(i, _)| TaskSpec {
+                .map(|(i, _)| ChecklistSpec {
                     subject: format!("task {i}"),
                     active_form: format!("doing {i}"),
                     description: None,
                     in_progress: false,
                 })
                 .collect(),
-            crate::domain::TaskOrigin::Model,
+            crate::domain::ChecklistOrigin::Model,
             Stamp::default(),
         );
-        let edits: Vec<TaskEdit> = statuses
+        let edits: Vec<ChecklistEdit> = statuses
             .iter()
             .enumerate()
-            .filter(|(_, s)| **s != crate::domain::TaskStatus::Pending)
-            .map(|(i, s)| TaskEdit {
+            .filter(|(_, s)| **s != crate::domain::ChecklistStatus::Pending)
+            .map(|(i, s)| ChecklistEdit {
                 id: (i + 1) as u32,
                 status: Some(*s),
-                ..TaskEdit::default()
+                ..ChecklistEdit::default()
             })
             .collect();
         store.apply(&edits, Stamp::default());
@@ -14837,7 +14845,7 @@ mod tests {
 
     #[test]
     fn tasks_updated_replaces_snapshot_and_diffs_completions() {
-        use crate::domain::TaskStatus::{Completed, InProgress, Pending};
+        use crate::domain::ChecklistStatus::{Completed, InProgress, Pending};
         let state = fresh_state();
         // First snapshot: nothing completed — no notifications.
         let (state, cmds) = update(
@@ -14888,7 +14896,7 @@ mod tests {
 
     #[test]
     fn fork_clears_tasks_and_syncs_the_broker() {
-        use crate::domain::TaskStatus::InProgress;
+        use crate::domain::ChecklistStatus::InProgress;
         let state = fresh_state();
         let (mut state, _) = update(
             state,
@@ -14936,7 +14944,7 @@ mod tests {
         );
         assert!(cmds.iter().any(|c| matches!(
             c,
-            Cmd::UserTaskEdit(crate::domain::UserTaskEdit::Add { subject }) if subject == "review the docs"
+            Cmd::UserTaskEdit(crate::domain::UserChecklistEdit::Add { subject }) if subject == "review the docs"
         )));
         assert!(state.session.conversation.tasks.is_empty());
 
@@ -14947,7 +14955,7 @@ mod tests {
         );
         assert!(cmds.iter().any(|c| matches!(
             c,
-            Cmd::UserTaskEdit(crate::domain::UserTaskEdit::Done { id: 3 })
+            Cmd::UserTaskEdit(crate::domain::UserChecklistEdit::Done { id: 3 })
         )));
         let (state, _) = update(
             state,
@@ -14987,7 +14995,7 @@ mod tests {
 
     #[test]
     fn stale_in_progress_task_triggers_a_nudge_every_n_calls() {
-        use crate::domain::TaskStatus::InProgress;
+        use crate::domain::ChecklistStatus::InProgress;
         let state = fresh_state();
         let (mut state, _) = update(
             state,

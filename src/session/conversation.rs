@@ -158,7 +158,7 @@ pub struct ConversationHistory {
     /// Snapshotted on every save so --resume/--continue restore an in-flight
     /// plan; sessions saved before this field existed load an empty store.
     #[serde(default)]
-    pub tasks: crate::domain::TaskStore,
+    pub tasks: crate::domain::ChecklistStore,
 }
 
 /// Best-effort current git branch of `dir`, for labelling `--resume` rows.
@@ -292,7 +292,7 @@ impl ConversationHistory {
             parent_session: None,
             cli_version: None,
             git_sha: None,
-            tasks: crate::domain::TaskStore::default(),
+            tasks: crate::domain::ChecklistStore::default(),
         }
     }
 
@@ -840,13 +840,13 @@ mod tests {
     fn tasks_round_trip_through_conversation_json() {
         let mut fresh = touched("/tmp/proj");
         fresh.tasks.create(
-            vec![crate::domain::TaskSpec {
+            vec![crate::domain::ChecklistSpec {
                 subject: "wire broker".into(),
                 active_form: "wiring broker".into(),
                 description: Some("through ExecContext".into()),
                 in_progress: true,
             }],
-            crate::domain::TaskOrigin::Model,
+            crate::domain::ChecklistOrigin::Model,
             crate::domain::Stamp {
                 now_epoch: 42,
                 run_tokens: 7,

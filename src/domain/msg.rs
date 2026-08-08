@@ -251,7 +251,7 @@ pub enum Msg {
     /// turn-scoped: `/tasks` edits arrive outside any turn, and gating would
     /// only let the render copy drift from the broker's truth.
     TasksUpdated {
-        store: crate::domain::tasks::TaskStore,
+        store: crate::domain::checklist::ChecklistStore,
     },
     /// A one-line checklist notice for the model's next request (user
     /// `/todos` edit, vetoed completion). Buffered on

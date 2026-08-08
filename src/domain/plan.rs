@@ -3,8 +3,8 @@
 //! `describe_all` never emits them), and the Tasks-section parser that seeds
 //! the checklist when a plan is approved.
 
+use super::checklist::ChecklistSpec;
 use super::cmd::ToolDefinition;
-use super::tasks::TaskSpec;
 
 /// Wire name of the tool the model calls to present the finished plan for
 /// approval. Advertised only while `session.plan` is `Some`.
@@ -46,7 +46,7 @@ pub fn enter_plan_mode_definition() -> ToolDefinition {
 /// top-level list item (numbered `1.` / `1)` or bulleted `-` / `*`), in
 /// order. Continuation/indent lines and prose are ignored — the plan file
 /// remains the detail carrier; the checklist carries the headline steps.
-pub fn parse_plan_tasks(body: &str) -> Vec<TaskSpec> {
+pub fn parse_plan_tasks(body: &str) -> Vec<ChecklistSpec> {
     let mut specs = Vec::new();
     let mut in_tasks = false;
     for line in body.lines() {
@@ -68,7 +68,7 @@ pub fn parse_plan_tasks(body: &str) -> Vec<TaskSpec> {
         if item.is_empty() {
             continue;
         }
-        specs.push(TaskSpec {
+        specs.push(ChecklistSpec {
             subject: item.to_string(),
             active_form: item.to_string(),
             description: None,
