@@ -261,6 +261,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A worktree test failed roughly once in 43 runs on a commit hash, not on a
+  bug.** `destroy_leaves_no_checkout_and_no_git_bookkeeping` asserted
+  `!listed.contains("a1")` over the output of `git worktree list` — which
+  prints `<path> <abbrev-hash> [<branch>]`, so the substring test was also
+  testing the commit hash. A 7-hex-char abbreviation contains `a1` about 2.3%
+  of the time (measured at 7 of 300; 6/256 by construction), and the test then
+  failed against bookkeeping that had in fact been pruned correctly.
+
+  It did not self-clear on retry either, which is what made it look like a
+  race. `init_project` commits identical content under an identical message
+  and git stamps commits to the second, so a nextest retry landing in the same
+  second rebuilds the *same* commit and fails identically — verified: two
+  inits one second apart produced different hashes, two within one second
+  produced the same one. Only a job re-run minutes later drew a new hash. Two
+  CI failures on 2026-08-08, on branches that changed doc comments and
+  timestamp formatting respectively, were this and not the worktree code.
+
+  The query is now `git worktree list --porcelain`, whose `worktree <path>`
+  lines carry no hash, matched against the checkout's own directory name
+  (`a1-<pid>-<seq>`) rather than the bare agent id. A new
+  `a_live_checkout_is_listed_in_the_bookkeeping` is the matched positive
+  control: without it the negative assertion would keep passing even if the
+  query silently matched nothing. Both were checked against an injected fault
+  — a `destroy` that deletes the checkout but skips git's bookkeeping — which
+  the tightened assertion catches and the control survives.
+
+  `AgentWorktree::destroy` is unchanged. It was never the problem.
+
 - **Windows: hardening the data directory locked Mermaid out of its own
   runtime database.** The one-shot `icacls <dir> /inheritance:r /grant:r
   <user>:(OI)(CI)F /T` did exactly what it was told, and what it was told was
