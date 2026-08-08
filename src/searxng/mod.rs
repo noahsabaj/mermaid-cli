@@ -140,6 +140,15 @@ impl SearxngManager {
     /// provisions the bundle (download + verify + unpack on a version miss),
     /// spawns Granian, and waits until its JSON API answers; later calls return
     /// the cached URL for the rest of the process.
+    ///
+    /// # Errors
+    ///
+    /// Reconciling an existing server, provisioning the bundle (see
+    /// [`bundle::ensure_bundle`]), reserving a port, writing the settings file,
+    /// spawning Granian — which also rejects the unpacked generation as broken,
+    /// reporting it if that too fails — and the server not answering within the
+    /// readiness wait. On an unsupported platform the error carries the
+    /// fallback hint rather than a generic failure.
     pub async fn ensure_running(&self) -> Result<String> {
         let mut running = self.running.lock().await;
         if let Some(base_url) = reconcile_existing(&mut running).await? {

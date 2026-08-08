@@ -76,6 +76,13 @@ pub(crate) fn ensure_column(
     }
 }
 
+/// The app data dir: the platform location, or `~/.local/share/mermaid` when
+/// the platform has none.
+///
+/// # Errors
+///
+/// Only the fallback path failing, when neither `HOME` nor `USERPROFILE` is
+/// set. The directory is not created or checked for here.
 pub fn data_dir() -> Result<PathBuf> {
     if let Some(proj_dirs) = ProjectDirs::from("", "", "mermaid") {
         return Ok(proj_dirs.data_dir().to_path_buf());
@@ -459,6 +466,12 @@ pub(crate) fn fresh_id(prefix: &str) -> String {
 ///
 /// Unix-only: it backs the `#[cfg(unix)]` daemon singleton and relies on
 /// `flock`, which `rustix` exposes only on Unix targets.
+///
+/// # Errors
+///
+/// Opening `path` (a missing parent directory, no permission), and any `flock`
+/// failure other than the lock being taken. That one case is `Ok(None)`, not
+/// an error — losing the singleton race is the answer this exists to give.
 #[cfg(unix)]
 pub fn try_exclusive_lock(path: &std::path::Path) -> std::io::Result<Option<std::fs::File>> {
     use rustix::fs::{FlockOperation, flock};

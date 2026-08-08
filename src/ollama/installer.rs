@@ -44,6 +44,14 @@ async fn list_installed_models(config: &Config) -> Vec<String> {
 ///
 /// Uses the user's configured Ollama host/port (via `config`) so a remote
 /// Ollama instance is honored.
+///
+/// # Errors
+///
+/// Ollama not being installed — printed as the platform install guidance
+/// first — and `ollama pull` failing to run or exiting nonzero, which usually
+/// means the model name is wrong. A `:cloud` model returns `Ok` without any
+/// local check: it cannot be pulled and is proxied by the daemon at request
+/// time. A model that is already present is `Ok` with nothing pulled.
 pub async fn ensure_model(model_name: &str, config: &Config) -> Result<()> {
     // Check if Ollama is installed
     if !detector::is_installed() {

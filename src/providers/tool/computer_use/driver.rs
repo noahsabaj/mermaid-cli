@@ -158,6 +158,12 @@ impl ComputerUseDriver {
     /// `execute()`; if the display went away after registration,
     /// they return a clean error instead of hanging on subprocess
     /// dispatch.
+    ///
+    /// # Errors
+    ///
+    /// The display probe not reaching the backend — a detached session, a
+    /// changed `DISPLAY`. The message names the backend, because that is the
+    /// only thing the caller can act on.
     pub fn ensure_alive(&self) -> Result<(), String> {
         if super::display_is_reachable(self.backend) {
             Ok(())
@@ -173,6 +179,12 @@ impl ComputerUseDriver {
     /// Async form of [`Self::ensure_alive`]. The X11 display probe spawns a
     /// `xdpyinfo`/`xdotool` subprocess and blocks on its exit; on the async
     /// tool path that would block a worker, so run it on the blocking pool (#34).
+    ///
+    /// # Errors
+    ///
+    /// [`Self::ensure_alive`]'s, plus the blocking task itself failing to run
+    /// — reported distinctly, since "the probe never ran" is not the same
+    /// claim as "the display is gone".
     pub async fn ensure_alive_async(&self) -> Result<(), String> {
         let backend = self.backend;
         match tokio::task::spawn_blocking(move || super::display_is_reachable(backend)).await {
@@ -188,6 +200,14 @@ impl ComputerUseDriver {
 
     /// Translate model-space coords to screen-space using the metadata
     /// registered for `screenshot_id` (or the latest if None).
+    ///
+    /// # Errors
+    ///
+    /// A poisoned registry lock; a `screenshot_id` no longer in the registry,
+    /// which after `SCREENSHOT_REGISTRY_CAPACITY` newer frames means evicted,
+    /// so the message says to capture a fresh one; and no screenshot
+    /// registered at all when `screenshot_id` is `None`. Out-of-frame coords
+    /// are not an error — they are clamped into the frame's bounds.
     pub fn scale_coords(
         &self,
         x: i32,
@@ -260,6 +280,14 @@ impl ComputerUseDriver {
 
     /// Capture and return the encoded result. Respects cancellation
     /// via `token.cancelled()` races in the subprocess wait.
+    ///
+    /// # Errors
+    ///
+    /// An unreachable display, resolving the private scratch dir, the capture
+    /// subprocess failing or timing out, the downscale, and reading the frame
+    /// back. Cancellation via `token` also arrives as an `Err` — at the
+    /// capture, the downscale, or the read — so a caller must not read one as
+    /// a broken display. Temp files are removed on every path.
     pub async fn capture(
         &self,
         spec: ScreenshotSpec,
@@ -392,6 +420,13 @@ const CURSOR_LANDED_TOLERANCE_PX: i32 = 5;
 impl ComputerUseDriver {
     /// Click at the given SCREEN coordinates (already scaled by
     /// `scale_coords`). `button` is `"left" | "middle" | "right"`.
+    ///
+    /// # Errors
+    ///
+    /// A backend that is neither X11 nor Wayland, a Wayland session with no
+    /// `ydotool`, the tool itself failing or exiting nonzero, and cancellation
+    /// via `token`. An unrecognized `button` is not an error — it falls back
+    /// to left.
     pub async fn click(
         &self,
         sx: i32,
@@ -449,6 +484,13 @@ impl ComputerUseDriver {
     /// Type text at the current focus. Per-keystroke delay from
     /// `TYPE_KEY_DELAY_MS` — empirically needed for slow Electron /
     /// web targets that drop characters at lower rates.
+    ///
+    /// # Errors
+    ///
+    /// A backend that is neither X11 nor Wayland, a Wayland session with
+    /// neither `wtype` nor `ydotool`, the tool failing or exiting nonzero, and
+    /// cancellation via `token`. A cancelled call may have typed part of
+    /// `text` already — there is no way to unsend keystrokes.
     pub async fn type_text(&self, text: &str, token: &CancellationToken) -> Result<()> {
         let delay = mermaid_model::constants::TYPE_KEY_DELAY_MS.to_string();
         match self.backend {
@@ -483,6 +525,13 @@ impl ComputerUseDriver {
     }
 
     /// Press a key (or key combination like `"ctrl+shift+t"`).
+    ///
+    /// # Errors
+    ///
+    /// A backend that is neither X11 nor Wayland, a Wayland session with
+    /// neither `wtype` nor `ydotool`, the tool failing or exiting nonzero, and
+    /// cancellation via `token`. A `key` the tool does not recognize surfaces
+    /// as that tool's nonzero exit, not as a check here.
     pub async fn press_key(&self, key: &str, token: &CancellationToken) -> Result<()> {
         match self.backend {
             Backend::X11 => {
@@ -518,6 +567,13 @@ impl ComputerUseDriver {
     }
 
     /// Scroll `amount` ticks in `direction` ("up" / "down").
+    ///
+    /// # Errors
+    ///
+    /// A backend that is neither X11 nor Wayland, a Wayland session with no
+    /// `ydotool`, the tool failing or exiting nonzero, and cancellation via
+    /// `token`. Any `direction` other than `"up"` is treated as down rather
+    /// than rejected.
     pub async fn scroll(
         &self,
         direction: &str,
@@ -555,6 +611,13 @@ impl ComputerUseDriver {
     }
 
     /// Move the mouse cursor to SCREEN coords (already scaled).
+    ///
+    /// # Errors
+    ///
+    /// A backend that is neither X11 nor Wayland, a Wayland session with no
+    /// `ydotool`, the tool failing or exiting nonzero, and cancellation via
+    /// `token`. Coordinates off the screen are the tool's business, not
+    /// checked here.
     pub async fn mouse_move(&self, sx: i32, sy: i32, token: &CancellationToken) -> Result<()> {
         match self.backend {
             Backend::X11 => {
@@ -592,6 +655,13 @@ impl ComputerUseDriver {
 
     /// List visible window titles. X11 only; Wayland has no portable
     /// enumeration primitive.
+    ///
+    /// # Errors
+    ///
+    /// Any backend other than X11, and the `xdotool search` that lists window
+    /// ids failing. A window whose title cannot be read afterwards is skipped
+    /// rather than failing the call, so the list can be shorter than the
+    /// search found.
     pub async fn list_windows(&self, _token: &CancellationToken) -> Result<Vec<String>> {
         if !matches!(self.backend, Backend::X11) {
             anyhow::bail!(

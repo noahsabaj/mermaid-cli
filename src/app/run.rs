@@ -76,6 +76,13 @@ fn host_identity() -> (String, String) {
 /// Interactive TUI main loop with explicit options. `recorder` (if
 /// provided) appends one JSONL line per reducer input to the file for
 /// debugging / replay.
+///
+/// # Errors
+///
+/// Setting up the terminal, opening the recorder when one is requested, and a
+/// failure in the main loop or in the shutdown that follows it. A model or
+/// tool that fails mid-session is not among them: those surface in the
+/// transcript and the loop continues, which is what makes a session survivable.
 #[expect(
     clippy::too_many_lines,
     reason = "predates the lint; see .github/baselines/expect_budget.txt"

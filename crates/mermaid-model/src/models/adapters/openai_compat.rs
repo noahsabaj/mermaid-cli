@@ -170,6 +170,14 @@ impl OpenAICompatAdapter {
     /// Create a new adapter. `base_url` is the resolved URL (registry
     /// default OR user override); `api_key` is already resolved (caller uses
     /// `crate::utils::resolve_api_key`), or `None` for a keyless local endpoint.
+    ///
+    /// # Errors
+    ///
+    /// Only the HTTP client build can fail, as
+    /// [`BackendError::ConnectionFailed`] — reqwest reads TLS roots and proxy
+    /// settings from the environment there. Nothing here contacts the
+    /// endpoint, so a wrong `base_url` or missing key still constructs fine
+    /// and fails on the first request.
     pub fn new(
         profile: &'static ProviderProfile,
         base_url: String,
@@ -895,6 +903,12 @@ impl OpenAICompatAdapter {
     /// `top_provider.*`) instead of collapsing to bare ids. The `Model` trait's
     /// `list_models` delegates here; the provider wrapper uses the limits to
     /// resolve the live context window / output ceiling.
+    ///
+    /// # Errors
+    ///
+    /// Whatever `GET /models` fails with — transport, auth, a non-success
+    /// status — plus [`ModelError::ParseError`] when the body is not the
+    /// OpenAI list shape. An empty catalog is `Ok(vec![])`.
     pub async fn list_models_detailed(&self) -> Result<Vec<ModelListing>> {
         let url = format!("{}/models", self.base_url.trim_end_matches('/'));
         let response = self.get_models_response(&url).await?;
@@ -913,6 +927,14 @@ impl OpenAICompatAdapter {
     /// (context window + output cap, but only the curated marketplace
     /// subset), then the default format (context window only, full catalog)
     /// when the model isn't in that subset.
+    ///
+    /// # Errors
+    ///
+    /// For most providers, exactly [`Self::list_models_detailed`]'s errors.
+    /// For Cloudflare, only the default-format search's failure is returned;
+    /// an `openrouter`-format failure falls through to it silently. That
+    /// distinction is deliberate — the surviving `Err` is what stops the
+    /// wrapper caching `None` limits for a whole probe TTL over a blip.
     pub async fn list_models_for_limits(&self) -> Result<Vec<ModelListing>> {
         let Some(search_base) = self.cloudflare_models_search_base() else {
             return self.list_models_detailed().await;

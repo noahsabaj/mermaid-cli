@@ -387,6 +387,13 @@ impl std::fmt::Display for CompactionSkip {
     }
 }
 
+/// # Errors
+///
+/// The `Err` is a [`CompactionSkip`] reason, not a failure: it says why this
+/// turn does not need compacting. `AutoDisabled` and `Suppressed` come from
+/// policy and the request; `NoKnownContextLimit` means the snapshot carries no
+/// usable `max_tokens`, so there is no threshold to be over; `BelowThreshold`
+/// means usage is under both the percentage trigger and the response reserve.
 pub fn should_auto_compact(
     snapshot: &ContextUsageSnapshot,
     request: &ChatRequest,
@@ -432,6 +439,13 @@ pub fn context_exceeds_hard_limit(
     snapshot.used_tokens.saturating_add(reserve) >= max_tokens
 }
 
+/// # Errors
+///
+/// The `Err` is a [`CompactionSkip`] reason, not a failure. `NothingToCompact`
+/// when the history is too short to split, or the split would leave either
+/// half empty. `WindowTooSmall` when the window cannot fund a summary at the
+/// output floor — checkpointing into it would produce a request the model
+/// cannot answer.
 pub fn prepare_compaction(
     request: &CompactionRequest,
     max_context_tokens: Option<usize>,
@@ -696,6 +710,13 @@ pub fn normalize_summary(text: &str) -> String {
     trimmed.to_string()
 }
 
+/// # Errors
+///
+/// Returns the rejection message to show the model on a retry: either the ten
+/// required headings are missing, reordered, or duplicated, or one of them has
+/// a body that is empty, a bare `-`, or an unfilled `- [...]` placeholder.
+/// Only the ten known headings count as structure — a checkpoint that quotes
+/// other `## ` markdown in its body is valid.
 pub fn validate_summary_structure(summary: &str) -> Result<(), String> {
     const HEADINGS: [&str; 10] = [
         "## Goal",

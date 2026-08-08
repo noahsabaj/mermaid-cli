@@ -62,6 +62,15 @@ pub struct ReplayReport {
 
 /// Read `path`, fold its first session through the reducer (twice, for the
 /// determinism verdict), and report.
+///
+/// # Errors
+///
+/// Everything `Replay::open` reports, plus an I/O failure while reading a
+/// later line. A line that will not parse or reconstruct is not among them: it
+/// is counted as skipped in the report, so a partially corrupt recording still
+/// yields a verdict. A non-deterministic fold is also `Ok` — that is
+/// `ReplayReport::deterministic`, which is what [`run_replay`] turns into an
+/// exit code.
 pub fn replay_recording(path: &Path) -> Result<ReplayReport> {
     let (header, lines) = Replay::open(path)?;
 
@@ -161,6 +170,11 @@ fn fold(header: &SessionHeader, msgs: &[(usize, DateTime<Local>, Msg)]) -> (Stat
 /// CLI entry point for `--replay`: fold, print the report + reconstructed
 /// transcript to stdout, and return the determinism verdict (`false` means
 /// the caller should exit non-zero — the purity invariant is broken).
+///
+/// # Errors
+///
+/// Only [`replay_recording`]'s. A non-deterministic fold is `Ok(false)`, not
+/// an error: the report still prints, which is the point of running it.
 pub fn run_replay(path: &Path) -> Result<bool> {
     let report = replay_recording(path)?;
     print!("{}", render_report(path, &report));

@@ -85,6 +85,14 @@ pub struct RunOptions {
 
 /// Drive one prompt to completion with explicit per-call options. Bounded by a
 /// generous 20-minute wall-clock so a runaway model doesn't hang a script.
+///
+/// # Errors
+///
+/// Resolving the provider for `model_id`, the run exceeding the 20-minute
+/// wall-clock, and a failure in the driving loop. A model that answers with a
+/// refusal, a tool that fails, and a turn that ends without finishing the task
+/// are all `Ok` — that is what the returned [`RunResult`] describes, and the
+/// caller turns it into an exit code.
 #[expect(
     clippy::too_many_lines,
     reason = "predates the lint; see .github/baselines/expect_budget.txt"

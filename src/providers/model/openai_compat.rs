@@ -30,6 +30,13 @@ pub struct OpenAICompatProvider {
 }
 
 impl OpenAICompatProvider {
+    /// Wrap a fresh [`OpenAICompatAdapter`] as a `ModelProvider`.
+    ///
+    /// # Errors
+    ///
+    /// Only [`OpenAICompatAdapter::new`]'s — the HTTP client build. The
+    /// endpoint is not contacted here, so a wrong `base_url` or missing key
+    /// still constructs and fails on the first request.
     pub fn new(
         profile: &'static ProviderProfile,
         base_url: String,

@@ -12,10 +12,19 @@
 use base64::{Engine as _, engine::general_purpose};
 use serde::{Deserialize, Deserializer, Serializer};
 
+/// # Errors
+///
+/// Only what the serializer reports while writing the string; encoding itself
+/// is infallible.
 pub fn serialize<S: Serializer>(bytes: &[u8], ser: S) -> Result<S::Ok, S::Error> {
     ser.serialize_str(&general_purpose::STANDARD.encode(bytes))
 }
 
+/// # Errors
+///
+/// When the field is not a string, and when that string is not valid standard
+/// base64 — a recording hand-edited into an undecodable payload fails the load
+/// rather than yielding empty bytes.
 pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<Vec<u8>, D::Error> {
     let s = String::deserialize(de)?;
     general_purpose::STANDARD
@@ -29,10 +38,20 @@ pub mod string {
     use base64::{Engine as _, engine::general_purpose};
     use serde::{Deserialize, Deserializer, Serializer};
 
+    /// # Errors
+    ///
+    /// Only what the serializer reports while writing the string; encoding
+    /// itself is infallible.
     pub fn serialize<S: Serializer>(value: &str, ser: S) -> Result<S::Ok, S::Error> {
         ser.serialize_str(&general_purpose::STANDARD.encode(value.as_bytes()))
     }
 
+    /// # Errors
+    ///
+    /// When the field is not a string, when that string is not valid standard
+    /// base64, and when the decoded bytes are not UTF-8. The last check is why
+    /// this module exists separately: the value is opaque on the wire, so
+    /// UTF-8 is only established here, at load.
     pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<String, D::Error> {
         let encoded = String::deserialize(de)?;
         let bytes = general_purpose::STANDARD

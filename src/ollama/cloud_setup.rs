@@ -13,6 +13,12 @@ pub fn is_cloud_configured() -> bool {
 /// `config.toml` (#88), matching how every other provider key is handled. So
 /// this explains how to set the variable rather than prompting for and saving a
 /// secret to disk. Returns whether the key is currently configured.
+///
+/// # Errors
+///
+/// None today: this only prints instructions and re-reads the environment. The
+/// `Result` is kept because every caller is already in one, and because a
+/// version of this that ever writes anything would need it.
 pub fn setup_cloud_interactive() -> Result<bool> {
     println!("\n=== Ollama Cloud Setup ===\n");
     println!("Ollama Cloud runs large models on datacenter-grade hardware.");
@@ -52,6 +58,12 @@ pub fn is_cloud_model(model_name: &str) -> bool {
 
 /// Prompt the user to configure cloud access if a cloud model is requested
 /// without `OLLAMA_API_KEY` set.
+///
+/// # Errors
+///
+/// Only [`setup_cloud_interactive`]'s, which today are none. A cloud model
+/// with no key configured is `Ok(false)`, not an error — the caller decides
+/// whether to proceed.
 pub fn prompt_cloud_setup_if_needed(model_name: &str) -> Result<bool> {
     if !is_cloud_model(model_name) {
         return Ok(true); // Not a cloud model, proceed.

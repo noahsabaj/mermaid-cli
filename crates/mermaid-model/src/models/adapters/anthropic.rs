@@ -553,6 +553,14 @@ pub struct AnthropicAdapter {
 impl AnthropicAdapter {
     /// Create a new adapter. `api_key` is already resolved (caller uses
     /// `crate::utils::resolve_api_key`).
+    ///
+    /// # Errors
+    ///
+    /// Only the HTTP client build can fail, as
+    /// [`BackendError::ConnectionFailed`] — reqwest reads TLS roots and proxy
+    /// settings from the environment there. Nothing here contacts the API, so
+    /// an invalid key or unreachable `base_url` still constructs fine and
+    /// fails on the first request.
     pub fn new(api_key: String, model_name: String, base_url: String) -> Result<Self> {
         let client = Client::builder()
             .pool_max_idle_per_host(10)
@@ -805,6 +813,13 @@ impl AnthropicAdapter {
     /// output ceiling). A 404 is a definitive "id not in the catalog"
     /// (gateway alias, fine-tune) → `Ok` all-`None` so callers can cache the
     /// absence; transport/auth/5xx failures are `Err` (never cached).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BackendError::ConnectionFailed`] when the request does not
+    /// reach the API, the mapped HTTP error for any non-success status other
+    /// than 404, and [`ModelError::ParseError`] when a success body is not the
+    /// documented model-info shape. A 404 is deliberately not an error.
     pub async fn fetch_model_limits(&self) -> Result<ModelLimits> {
         let url = format!(
             "{}/models/{}",

@@ -37,10 +37,24 @@ pub fn clamp_pairing_ttl_days(ttl_days: i64) -> i64 {
     }
 }
 
+/// Path of the per-user daemon control socket.
+///
+/// # Errors
+///
+/// Only resolving the data dir. The socket itself is neither created nor
+/// checked for, so an `Ok` path says nothing about whether a daemon is
+/// listening.
 pub fn daemon_socket_path() -> Result<PathBuf> {
     Ok(data_dir()?.join("mermaidd.sock"))
 }
 
+/// Mint a pairing token, returning `(token, sha256 hash)` — the caller shows
+/// the token once and stores only the hash.
+///
+/// # Errors
+///
+/// Only the OS random source refusing to fill 32 bytes. There is no fallback:
+/// a token from a weakened source would be worse than no token.
 pub fn generate_pairing_token() -> Result<(String, String)> {
     let mut bytes = [0_u8; 32];
     getrandom::fill(&mut bytes)
@@ -56,6 +70,12 @@ pub fn hash_pairing_token(token: &str) -> String {
     crate::hex_lower(&digest)
 }
 
+/// Send one request to the daemon, injecting `auth.token` from
+/// `MERMAID_DAEMON_TOKEN` when `body` carries none.
+///
+/// # Errors
+///
+/// Exactly [`request_daemon_text`]'s.
 pub fn request_daemon_json(mut body: serde_json::Value) -> Result<serde_json::Value> {
     if body.get("auth").is_none()
         && let Ok(token) = std::env::var(DAEMON_TOKEN_ENV)
@@ -97,6 +117,16 @@ fn daemon_exchange<S: Read + Write>(mut stream: S, line: &str) -> Result<serde_j
     Ok(value)
 }
 
+/// Send `line` verbatim to the daemon and return its single JSON response.
+///
+/// # Errors
+///
+/// Connecting to the socket or pipe — which is what a daemon that is simply
+/// not running looks like, and callers with a local fallback treat it as such
+/// rather than as a failure. Then the write, the read, a response that is not
+/// JSON, and a well-formed response carrying `ok: false`, whose `error` string
+/// becomes the message. On a platform with neither Unix sockets nor Windows
+/// named pipes every call is an error.
 pub fn request_daemon_text(line: &str) -> Result<serde_json::Value> {
     #[cfg(unix)]
     {
@@ -128,6 +158,13 @@ pub fn request_daemon_text(line: &str) -> Result<serde_json::Value> {
 /// `result`) — `request_daemon_json` reads exactly one line and closes.
 /// `auth.token` is injected from `MERMAID_DAEMON_TOKEN` like the one-shot
 /// path.
+///
+/// # Errors
+///
+/// Connecting to the socket or pipe, and writing the request line. Nothing is
+/// read here, so a daemon that accepts the connection and then answers with an
+/// error still yields `Ok` — that shows up as the first item of the iterator,
+/// and each subsequent read can fail independently.
 pub fn subscribe_daemon_lines(
     mut body: serde_json::Value,
 ) -> Result<impl Iterator<Item = Result<String>>> {
@@ -195,6 +232,13 @@ pub fn pipe_sddl(sid: &str) -> String {
 /// String SID (`S-1-5-21-…`) of the user this process runs as, read from the
 /// process token. Both ends derive the pipe name from it, and the server bakes
 /// it into the pipe ACL.
+///
+/// # Errors
+///
+/// Any of the four Win32 calls failing — `OpenProcessToken`, either
+/// `GetTokenInformation` (sizing and fetch), or `ConvertSidToStringSidW` —
+/// each reported with its `GetLastError` code. The process token is closed on
+/// every path, including these.
 #[cfg(windows)]
 pub fn current_user_sid() -> Result<String> {
     use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, LocalFree};
@@ -247,6 +291,11 @@ pub fn current_user_sid() -> Result<String> {
 }
 
 /// Control-pipe name for the current user (see [`pipe_name_for_sid`]).
+///
+/// # Errors
+///
+/// Only [`current_user_sid`]'s. The pipe is neither created nor opened here,
+/// so an `Ok` name says nothing about whether a daemon is listening.
 #[cfg(windows)]
 pub fn daemon_pipe_name() -> Result<String> {
     Ok(pipe_name_for_sid(&current_user_sid()?))
@@ -264,6 +313,15 @@ pub struct PipeSecurity {
 
 #[cfg(windows)]
 impl PipeSecurity {
+    /// Build the owner-only descriptor for the current user's SID.
+    ///
+    /// # Errors
+    ///
+    /// [`current_user_sid`]'s, and
+    /// `ConvertStringSecurityDescriptorToSecurityDescriptorW` rejecting the
+    /// SDDL — reported with its `GetLastError` code. The listener must not
+    /// fall back to a default descriptor on either: that would publish the
+    /// pipe with an inherited DACL.
     pub fn owner_only() -> Result<Self> {
         use windows_sys::Win32::Foundation::GetLastError;
         use windows_sys::Win32::Security::Authorization::{

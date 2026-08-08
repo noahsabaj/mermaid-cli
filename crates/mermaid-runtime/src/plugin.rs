@@ -66,6 +66,14 @@ pub struct PluginCapabilityPreview {
     pub bin: Vec<String>,
 }
 
+/// Check a manifest before anything it declares is installed or run.
+///
+/// # Errors
+///
+/// An empty `name`, and any entry under `skills`, `agents`, `hooks`, `mcp`,
+/// `prompts`, or `bin` that is absolute or escapes `root` — a plugin may only
+/// point at files inside its own directory. Declared `capabilities` are not
+/// checked: they are advisory disclosures, not something this can enforce.
 pub fn validate_plugin_manifest(manifest: &PluginManifest, root: &Path) -> Result<()> {
     anyhow::ensure!(!manifest.name.trim().is_empty(), "plugin name is required");
     ensure_relative_paths("skills", &manifest.skills, root)?;
@@ -77,6 +85,16 @@ pub fn validate_plugin_manifest(manifest: &PluginManifest, root: &Path) -> Resul
     Ok(())
 }
 
+/// Install the plugin at `path`, disabled.
+///
+/// # Errors
+///
+/// A missing or unparseable manifest, anything
+/// [`validate_plugin_manifest`] rejects, opening the runtime store, the
+/// install row itself (a name already installed), and rewriting the lockfile.
+/// A lockfile failure leaves the row in place, so the plugin is installed but
+/// the lockfile is stale — nothing runs regardless, since install never
+/// enables.
 pub fn install_plugin_from_path(path: &Path) -> Result<PluginInstallRecord> {
     let (_manifest_path, root, manifest) = load_plugin_manifest(path)?;
     validate_plugin_manifest(&manifest, &root)?;
@@ -98,6 +116,14 @@ pub fn install_plugin_from_path(path: &Path) -> Result<PluginInstallRecord> {
     Ok(record)
 }
 
+/// Read what the plugin at `path` declares, for the pre-install disclosure.
+///
+/// # Errors
+///
+/// A missing or unparseable manifest, anything [`validate_plugin_manifest`]
+/// rejects, and an unreadable or invalid `capabilities.toml`. An absent
+/// `capabilities.toml` is not an error — that field is simply `None`. Nothing
+/// is installed or executed here.
 pub fn plugin_capability_preview(path: &Path) -> Result<PluginCapabilityPreview> {
     let (_manifest_path, root, manifest) = load_plugin_manifest(path)?;
     validate_plugin_manifest(&manifest, &root)?;
@@ -119,6 +145,13 @@ pub fn plugin_capability_preview(path: &Path) -> Result<PluginCapabilityPreview>
     })
 }
 
+/// Rewrite `plugins.lock.json` from the installed set. Returns its path.
+///
+/// # Errors
+///
+/// Opening the runtime store, listing the plugins, resolving the data dir,
+/// creating its parent, and the atomic write. The write is atomic, so a
+/// failure leaves the previous lockfile intact rather than a truncated one.
 pub fn write_plugin_lockfile() -> Result<PathBuf> {
     let store = RuntimeStore::open_default()?;
     let plugins = store.plugins().list()?;
@@ -236,6 +269,14 @@ struct HookSpecificWire {
 /// responses (empty when no plugin responds — most events, most hooks).
 /// Callers that gate on the result aggregate via [`aggregate_hook_responses`];
 /// fire-and-forget callers keep ignoring the return value.
+///
+/// # Errors
+///
+/// Only the setup: opening the runtime store, serializing `payload`, and
+/// listing the plugins. Nothing a single plugin does can fail the call — an
+/// unparseable manifest, a source directory that has been deleted, and a hook
+/// that exits nonzero are each logged and skipped. An `Ok` therefore means the
+/// hooks were dispatched, not that they all succeeded.
 pub fn run_plugin_hooks(event: &str, payload: &serde_json::Value) -> Result<Vec<HookResponse>> {
     let store = RuntimeStore::open_default()?;
     let payload_bytes = std::sync::Arc::new(serde_json::to_string(payload)?.into_bytes());

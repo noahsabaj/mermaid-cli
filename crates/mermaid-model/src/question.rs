@@ -122,6 +122,15 @@ pub enum TextValidate {
 /// Validate a typed input value against its question kind. `Ok(())` means valid
 /// (an empty value is treated as "skipped"). Pure — performs no filesystem I/O,
 /// so `Path { must_exist }` is not enforced here.
+///
+/// # Errors
+///
+/// Returns the message to show under the field: out of a `Number` question's
+/// `min`/`max` range, unparseable as a number for `Number` or
+/// [`TextValidate::Number`], not matching a [`TextValidate::Regex`] pattern,
+/// or not `YYYY-MM-DD` for [`QuestionKind::Date`]. A regex that itself fails
+/// to compile is `Ok` — an author's broken pattern must not lock the user out
+/// of answering.
 pub fn validate_input(kind: &QuestionKind, value: &str) -> Result<(), String> {
     let v = value.trim();
     if v.is_empty() {

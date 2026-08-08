@@ -206,6 +206,14 @@ fn think_for_ollama(
 
 impl OllamaAdapter {
     /// Create a new Ollama adapter for a specific model
+    ///
+    /// # Errors
+    ///
+    /// Only the HTTP client build can fail, as
+    /// [`BackendError::ConnectionFailed`]. Despite being `async`, this awaits
+    /// nothing on the wire: the server is never contacted, and the model's
+    /// `thinking`/`vision` capabilities are probed lazily on first use. A
+    /// stopped Ollama still constructs fine.
     pub async fn new(model_name: &str, config: Arc<BackendConfig>) -> Result<Self> {
         let base_url = normalize_url(&config.ollama_url);
 

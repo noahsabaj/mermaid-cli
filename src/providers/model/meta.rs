@@ -38,6 +38,14 @@ pub struct MetaProvider {
 }
 
 impl MetaProvider {
+    /// Build the Responses-API provider for a Meta model.
+    ///
+    /// # Errors
+    ///
+    /// Only the HTTP client build, as [`BackendError::ConnectionFailed`]. The
+    /// API is not contacted here; a `model_name` outside the `muse-spark`
+    /// family is not an error either — it simply advertises no documented
+    /// context or output limits.
     pub fn new(
         api_key: String,
         model_name: String,

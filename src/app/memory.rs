@@ -360,6 +360,12 @@ fn render_file(
 
 /// Write a memory into `dir` (created if needed). Returns the file path.
 /// Testable core of `write_memory`.
+///
+/// # Errors
+///
+/// Creating `dir` and writing the file. A `name` that slugifies to an existing
+/// file is not an error — the memory is overwritten, which is how an update
+/// works.
 pub fn write_to_dir(
     dir: &Path,
     name: &str,
@@ -389,6 +395,11 @@ pub fn write_to_dir(
 }
 
 /// Write a memory at the resolved directory for `scope`/`cwd`.
+///
+/// # Errors
+///
+/// `scope` resolving to no directory — `NotFound`, e.g. a project scope with
+/// no project — then [`write_to_dir`]'s.
 pub fn write_memory(
     cwd: &Path,
     scope: MemoryScope,
@@ -422,6 +433,11 @@ pub fn find(cwd: &Path, id_or_name: &str) -> Option<MemoryEntry> {
 
 /// Delete a memory by name or file-stem id. Returns the deleted path, or
 /// `None` if no match.
+///
+/// # Errors
+///
+/// Removing the file once a match is found. No match is `Ok(None)`, not an
+/// error.
 pub fn delete_memory(cwd: &Path, id_or_name: &str) -> std::io::Result<Option<PathBuf>> {
     match find(cwd, id_or_name) {
         Some(entry) => {

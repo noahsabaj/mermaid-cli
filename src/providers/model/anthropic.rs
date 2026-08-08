@@ -35,6 +35,13 @@ pub struct AnthropicProvider {
 }
 
 impl AnthropicProvider {
+    /// Wrap a fresh [`AnthropicAdapter`] as a `ModelProvider`.
+    ///
+    /// # Errors
+    ///
+    /// Only [`AnthropicAdapter::new`]'s — the HTTP client build. The API is
+    /// not contacted here, so an invalid key or unreachable `base_url` still
+    /// constructs and fails on the first request.
     pub fn new(api_key: String, model_name: String, base_url: String) -> Result<Self> {
         let adapter = AnthropicAdapter::new(api_key, model_name, base_url)?;
         let capabilities = adapter.capabilities().clone().with_provider_continuation();

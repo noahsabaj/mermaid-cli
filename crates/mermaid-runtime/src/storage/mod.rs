@@ -171,6 +171,15 @@ pub struct RuntimeStore {
 }
 
 impl RuntimeStore {
+    /// Open the store at its default location under the app data dir,
+    /// creating and (best-effort) locking down that dir first.
+    ///
+    /// # Errors
+    ///
+    /// Resolving the data dir, creating it, and everything [`Self::open`]
+    /// reports. Tightening permissions is best-effort on both platforms and
+    /// never fails the open, so an `Ok` store is not proof the data dir is
+    /// owner-only.
     pub fn open_default() -> Result<Self> {
         let dir = data_dir()?;
         std::fs::create_dir_all(&dir)
@@ -208,6 +217,16 @@ impl RuntimeStore {
         Self::open(dir.join("runtime.sqlite3"))
     }
 
+    /// Open (creating if needed) the SQLite store at `path`, then apply the
+    /// connection pragmas and run the schema migration.
+    ///
+    /// # Errors
+    ///
+    /// Creating the parent directory, opening the database — a corrupt file or
+    /// a directory the process cannot write — setting the connection pragmas,
+    /// and the schema migration. A concurrent opener is not among them: WAL
+    /// plus the busy timeout is exactly what keeps a second process from
+    /// failing here with `SQLITE_BUSY`.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         if let Some(parent) = path.parent() {
@@ -302,6 +321,14 @@ impl RuntimeStore {
     /// wrongly flipped to `failed` (with a spurious "interrupted" event) just
     /// because the daemon restarted. The daemon tags the tasks it runs in-process
     /// via [`NewTask::daemon_owned`].
+    /// # Errors
+    ///
+    /// Taking the `BEGIN IMMEDIATE` write lock — which waits out a concurrent
+    /// writer for `busy_timeout` before giving up — and any statement in the
+    /// pass. Every failure rolls the transaction back, so recovery is
+    /// all-or-nothing: no task is left flipped to `failed` without its
+    /// `interrupted` event, and no claim is released without the tasks beside
+    /// it. The caller may simply run it again.
     pub fn reconcile_after_restart(&self) -> Result<(usize, usize)> {
         let now = now_rfc3339();
         // Take the write lock up front with BEGIN IMMEDIATE rather than a DEFERRED
@@ -363,6 +390,11 @@ impl RuntimeStore {
     /// terminal-and-old rows — **active data is never touched** (a running task,
     /// a still-open tool run, a live process, or a recently-updated session all
     /// survive). Returns the number of rows removed.
+    /// # Errors
+    ///
+    /// Opening the transaction and any `DELETE` in it. The whole pass is one
+    /// transaction, so a failure prunes nothing and the returned count is
+    /// never partial. Having nothing to prune is `Ok(0)`.
     pub fn gc(&self, retention_days: i64, outcomes_retention_days: i64) -> Result<u64> {
         let now = chrono::Utc::now();
         let cutoff = (now - chrono::Duration::days(retention_days)).to_rfc3339();

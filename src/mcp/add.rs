@@ -18,6 +18,14 @@ use super::registry;
 /// Prompts for required env vars, validates by spawning the server,
 /// then saves to config.toml. When `command` is set, skips registry
 /// resolution and registers that raw command verbatim instead.
+///
+/// # Errors
+///
+/// Reading the existing config, prompting on a terminal that will not read,
+/// resolution failing or being declined at the untrusted-package gate,
+/// malformed `--env` pairs, the validation spawn failing, and the config
+/// write. A user who answers "no" to the overwrite prompt is `Ok` with nothing
+/// written.
 pub async fn add_server(
     name: &str,
     assume_yes: bool,
@@ -155,6 +163,14 @@ fn confirm_overwrite(name: &str) -> Result<bool> {
 ///
 /// `header_pairs` are literal `'Name: Value'` headers; `env_header_pairs` are
 /// `Header=ENV_VAR` mappings resolved from the environment at request time.
+///
+/// # Errors
+///
+/// Reading the existing config or prompting, a malformed `--header` or
+/// `--env-header` pair, the validation connect failing — the server is
+/// contacted before anything is saved, so an unreachable `url` is never
+/// written to the config — and the write itself. Declining the overwrite
+/// prompt is `Ok`.
 pub async fn add_http_server(
     name: &str,
     url: String,
@@ -276,6 +292,12 @@ fn parse_env_pairs(pairs: &[String]) -> Result<HashMap<String, String>> {
 }
 
 /// Remove an MCP server from the config.
+///
+/// # Errors
+///
+/// The config read-modify-write, and re-reading the config to list what is
+/// configured. A `name` that was not configured is `Ok` — it prints that,
+/// along with the servers that are.
 pub async fn remove_server(name: &str) -> Result<()> {
     if remove_user_config_key(&["mcp_servers", name])? {
         println!("Removed MCP server '{name}' from config.");

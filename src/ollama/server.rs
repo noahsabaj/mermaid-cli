@@ -136,6 +136,16 @@ pub const STARTING_NOTICE: &str =
 /// Callers route it to their user-visible surface (stream status line,
 /// stderr); the up-to-15s wait behind a generic spinner, the invisible
 /// detached process, and file-only tracing are otherwise all silent.
+///
+/// # Errors
+///
+/// [`AutostartError::NotLocal`] when `base_url` is not loopback — a remote
+/// Ollama is never ours to start; [`AutostartError::Disabled`] when autostart
+/// is turned off; and [`AutostartError::Unhealthy`] when the probe client
+/// cannot be built, the binary is missing, or the spawned server does not
+/// answer within the wait. A failure is cached for a cooldown window and
+/// returned verbatim to callers inside it, so a repeated `Err` need not mean a
+/// repeated spawn attempt.
 pub async fn ensure_running(
     base_url: &str,
     notify: Option<&(dyn for<'a> Fn(&'a str) + Sync)>,

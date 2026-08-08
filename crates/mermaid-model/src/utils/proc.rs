@@ -199,6 +199,13 @@ const REAP_GRACE: Duration = Duration::from_millis(500);
 ///
 /// Pipes are drained on background threads, so a child that writes more than
 /// a pipe buffer's worth can't deadlock against the wait loop.
+///
+/// # Errors
+///
+/// Spawning `cmd` (missing binary, no permission), a failure inside the wait
+/// loop, and expiry of `timeout` as [`std::io::ErrorKind::TimedOut`]. A child
+/// that runs to completion with a non-zero exit status is `Ok` — the status is
+/// in the returned [`Output`].
 pub fn output_with_timeout(cmd: &mut Command, timeout: Duration) -> std::io::Result<Output> {
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -226,6 +233,13 @@ pub fn output_with_timeout(cmd: &mut Command, timeout: Duration) -> std::io::Res
 /// block the caller, and dropping the handle after the write delivers EOF.
 /// A write against a dead child (EPIPE) is ignored — the exit status or the
 /// timeout already tells that story.
+///
+/// # Errors
+///
+/// Spawning `cmd`, a failure inside the wait loop, and expiry of `timeout` as
+/// [`std::io::ErrorKind::TimedOut`]. Writing `input` cannot fail the call: it
+/// happens on a detached thread, so a child that exits without reading gives
+/// `Ok` with its exit status.
 pub fn write_stdin_with_timeout(
     cmd: &mut Command,
     input: Vec<u8>,

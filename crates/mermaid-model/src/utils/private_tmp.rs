@@ -12,6 +12,13 @@ use std::path::PathBuf;
 /// Return (creating if needed) a `0700` per-user scratch directory under the app
 /// data dir. Callers write transient sensitive files here instead of the shared
 /// system temp dir.
+///
+/// # Errors
+///
+/// Returns an error when the app data dir cannot be resolved, and when
+/// creating `<data dir>/tmp` fails. Tightening the mode to `0700` is
+/// best-effort and never fails the call, so a returned path is not proof the
+/// directory is owner-only.
 pub fn private_temp_dir() -> std::io::Result<PathBuf> {
     // Straight to the runtime crate, not through `crate::runtime` — that module
     // is a re-export facade, and routing through it made `utils` look like it

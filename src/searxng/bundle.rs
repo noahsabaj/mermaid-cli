@@ -63,6 +63,15 @@ static UNIQUE_PATH_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// Ensure the bundle for this platform is present and current under the data
 /// dir, returning the unpacked runtime root. Downloads + sha256-verifies +
 /// unpacks on a version miss; otherwise returns immediately.
+///
+/// # Errors
+///
+/// A platform with no bundle (see [`managed_backend_viability`]), resolving
+/// the data dir, acquiring the interprocess provision lock — including waiting
+/// past its timeout on an owner that never finishes — and the provision
+/// itself: the download, a sha256 that does not match the pinned checksum, and
+/// the unpack. A generation another process published while we waited is not
+/// an error; it is rechecked under the lock and returned.
 pub async fn ensure_bundle() -> Result<PathBuf> {
     let target = managed_backend_viability().map_err(anyhow::Error::msg)?;
     let expected_sha = bundle_manifest::bundle_sha256(target)
@@ -84,6 +93,14 @@ pub async fn ensure_bundle() -> Result<PathBuf> {
 /// Report whether the managed backend is usable on this compile target and
 /// return the pinned release-asset triple when it is. Capability resolution,
 /// diagnostics, and tool registration should all consume this single answer.
+///
+/// # Errors
+///
+/// An OS/arch with no bundle triple — the message names the alternatives
+/// (Ollama search, or a self-hosted SearXNG) — and a triple the pinned
+/// manifest carries no checksum for, which would mean provisioning an
+/// unverifiable download. Purely compile-target inspection: nothing on disk or
+/// on the network is consulted.
 pub fn managed_backend_viability() -> std::result::Result<&'static str, String> {
     viability_for(std::env::consts::OS, std::env::consts::ARCH)
 }

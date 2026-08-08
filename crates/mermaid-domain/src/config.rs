@@ -874,6 +874,14 @@ impl McpServerConfig {
     /// exactly one of `command` / `url` set, and an HTTP url must be `https`
     /// anywhere or `http` to a loopback host only (plaintext to a routable
     /// host would leak `Authorization` headers in cleartext).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the config sets both `command` and `url` or
+    /// neither, when the `url` does not parse, and when it parses to anything
+    /// other than `https` or loopback `http` — plaintext to a routable host
+    /// and unsupported schemes are both rejected here rather than at connect
+    /// time.
     pub fn transport_kind(&self) -> Result<TransportKind> {
         match (&self.url, self.command.is_empty()) {
             (Some(_), false) => Err(anyhow::anyhow!(
