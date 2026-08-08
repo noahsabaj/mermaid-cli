@@ -24,6 +24,146 @@ pub use records::*;
 pub use repos::*;
 pub use rows::*;
 
+/// Windows ACL hardening for the data directory, and the repair path for
+/// machines an earlier version locked out of their own database.
+///
+/// # What went wrong
+///
+/// The original hardening was one command:
+///
+/// ```text
+/// icacls <dir> /inheritance:r /grant:r <user>:(OI)(CI)F /T
+/// ```
+///
+/// `(OI)(CI)` are *inheritance* flags: they describe what the children of a
+/// container inherit. `/T` applies the ACE string verbatim to every existing
+/// item underneath, and on a leaf file those flags grant nothing — so
+/// `/inheritance:r` stripped the file's inherited ACE and the replacement put
+/// nothing back. Measured on a fresh directory:
+///
+/// ```text
+/// <dir>            ACEs=1 [FullControl]     <- correct
+/// <dir>\db.sqlite3 ACEs=0 []                <- locked out
+/// <dir>\sub        ACEs=1 [FullControl]     <- correct
+/// <dir>\sub\x.txt  ACEs=0 []                <- locked out
+/// ```
+///
+/// SQLite then returns SQLITE_CANTOPEN (14) forever, and the sentinel — written
+/// on `icacls` exit 0, which it earned — stopped the block ever running again.
+///
+/// # What replaces it
+///
+/// Harden the **directory only** and let Windows do the propagating. Removing
+/// inheritance on the parent recomputes every child's inherited ACEs from the
+/// new parent DACL, so existing files end up with exactly the intended access
+/// and subdirectories keep their `(OI)(CI)` flags, which is what makes files
+/// created *later* inherit correctly too.
+///
+/// The obvious-looking alternative — a `/T` pass granting plain `<user>:F`,
+/// then re-flagging the directory — was measured and rejected: it leaves every
+/// subdirectory with an unflagged ACE, reintroducing the same bug one level
+/// down for every file created afterwards.
+#[cfg(windows)]
+mod windows_acl {
+    use std::path::Path;
+    use std::process::{Command, Stdio};
+
+    fn icacls(args: &[&std::ffi::OsStr]) -> bool {
+        Command::new("icacls")
+            .args(args)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    /// Restrict `dir` to the current user, and only `dir`. Children follow by
+    /// inheritance. Best-effort: a machine with no `USERNAME`, or an `icacls`
+    /// that fails, leaves the directory as it was rather than failing the open.
+    pub(super) fn harden_data_dir(dir: &Path) -> bool {
+        let Ok(user) = std::env::var("USERNAME") else {
+            return false;
+        };
+        if user.is_empty() {
+            return false;
+        }
+        icacls(&[
+            dir.as_os_str(),
+            "/inheritance:r".as_ref(),
+            "/grant:r".as_ref(),
+            format!("{user}:(OI)(CI)F").as_ref(),
+        ])
+    }
+
+    /// Give the current user access back to a single file whose DACL came out
+    /// empty. An owner always retains `WRITE_DAC`, so this succeeds on exactly
+    /// the machines the bug created and fails harmlessly everywhere else.
+    ///
+    /// `/grant` and not `/grant:r`: this is a repair, and it must add the
+    /// missing ACE without discarding whatever else is legitimately there.
+    pub(super) fn restore_owner_access(path: &Path) -> bool {
+        let Ok(user) = std::env::var("USERNAME") else {
+            return false;
+        };
+        if user.is_empty() {
+            return false;
+        }
+        icacls(&[
+            path.as_os_str(),
+            "/grant".as_ref(),
+            format!("{user}:(F)").as_ref(),
+        ])
+    }
+
+    /// Can SQLite actually open this path? The only question the sentinel is
+    /// allowed to be written on the answer to.
+    pub(super) fn sqlite_opens(path: &Path) -> bool {
+        rusqlite::Connection::open(path).is_ok()
+    }
+}
+
+/// Open the connection, repairing a Windows ACL lockout once before giving up.
+///
+/// Scoped to SQLITE_CANTOPEN on a file that exists: any other failure, or a
+/// missing file, means something the ACL cannot explain and must surface
+/// unchanged.
+#[cfg(windows)]
+fn open_connection(path: &Path) -> Result<Connection> {
+    let err = match Connection::open(path) {
+        Ok(conn) => return Ok(conn),
+        Err(err) => err,
+    };
+    let cannot_open = matches!(
+        err,
+        rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: rusqlite::ErrorCode::CannotOpen,
+                ..
+            },
+            _
+        )
+    );
+    if !cannot_open || !path.is_file() || !windows_acl::restore_owner_access(path) {
+        return Err(err).with_context(|| format!("failed to open runtime DB {}", path.display()));
+    }
+    tracing::warn!(
+        path = %path.display(),
+        "runtime DB was unreadable (an earlier Mermaid left its ACL empty); \
+         restored owner access and retried"
+    );
+    Connection::open(path).with_context(|| {
+        format!(
+            "failed to open runtime DB {} even after restoring owner access",
+            path.display()
+        )
+    })
+}
+
+#[cfg(not(windows))]
+fn open_connection(path: &Path) -> Result<Connection> {
+    Connection::open(path).with_context(|| format!("failed to open runtime DB {}", path.display()))
+}
+
 /// SQLite-backed durable runtime state.
 pub struct RuntimeStore {
     conn: Connection,
@@ -52,24 +192,17 @@ impl RuntimeStore {
         #[cfg(windows)]
         {
             let sentinel = dir.join(".acl-hardened");
+            let db = dir.join("runtime.sqlite3");
+            // The sentinel is written only after the DB is confirmed openable,
+            // NOT on `icacls` exit 0. Those are different claims, and the gap
+            // between them is what shipped: the old command exited 0 having
+            // done exactly what it was told, and what it was told left the
+            // database unreadable. See `windows_acl` for the mechanism.
             if !sentinel.exists()
-                && let Ok(user) = std::env::var("USERNAME")
-                && !user.is_empty()
+                && windows_acl::harden_data_dir(&dir)
+                && windows_acl::sqlite_opens(&db)
             {
-                let hardened = std::process::Command::new("icacls")
-                    .arg(&dir)
-                    .arg("/inheritance:r")
-                    .arg("/grant:r")
-                    .arg(format!("{user}:(OI)(CI)F"))
-                    .arg("/T")
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status()
-                    .map(|status| status.success())
-                    .unwrap_or(false);
-                if hardened {
-                    let _ = std::fs::write(&sentinel, b"1");
-                }
+                let _ = std::fs::write(&sentinel, b"1");
             }
         }
         Self::open(dir.join("runtime.sqlite3"))
@@ -82,8 +215,7 @@ impl RuntimeStore {
                 format!("failed to create SQLite parent dir {}", parent.display())
             })?;
         }
-        let conn = Connection::open(&path)
-            .with_context(|| format!("failed to open runtime DB {}", path.display()))?;
+        let conn = open_connection(&path)?;
         // The daemon, CLI, and per-turn effect tasks each open their own
         // connection (often in separate processes). Without WAL + a busy
         // timeout, a writer holding the DB makes a concurrent write fail
@@ -681,6 +813,95 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create temp dir");
         dir.join("runtime.sqlite3")
+    }
+
+    /// Hardening must not lock the owner out of the database it is protecting.
+    ///
+    /// The shipped version did exactly that, and nothing caught it because
+    /// every existing assertion looked at the *directory* — which was always
+    /// correct. The broken half was the file inside it, and no test opened one
+    /// after hardening. This does, and it opens the DB the way production
+    /// does rather than checking an ACE count, so it stays true whatever the
+    /// implementation is.
+    #[cfg(windows)]
+    #[test]
+    fn hardening_leaves_the_database_and_its_subdirectories_usable() {
+        let path = temp_db("acl_hardening");
+        let dir = path.parent().expect("temp dir").to_path_buf();
+
+        // A DB, a subdirectory, and a file inside it: the real data dir has
+        // `checkpoints/`, `memory/`, `projects/` and friends, and a fix that
+        // only rescues top-level files would pass a shallower test.
+        drop(RuntimeStore::open(&path).expect("seed the DB before hardening"));
+        let sub = dir.join("checkpoints");
+        std::fs::create_dir_all(&sub).expect("create subdir");
+        std::fs::write(sub.join("existing.json"), b"{}").expect("seed a nested file");
+
+        assert!(
+            super::windows_acl::harden_data_dir(&dir),
+            "icacls hardening did not run; the rest of this test would be vacuous"
+        );
+
+        // `sqlite_opens` and not `RuntimeStore::open`: the latter now repairs
+        // an empty DACL, so it would paper over broken hardening and this
+        // assertion would hold for the wrong reason. The claim here is that
+        // hardening never needs the repair.
+        assert!(
+            super::windows_acl::sqlite_opens(&path),
+            "hardening locked the owner out of the database it was protecting"
+        );
+        std::fs::read(sub.join("existing.json")).expect("a nested file must stay readable");
+
+        // Files created AFTER hardening inherit from the directory. This is
+        // the half the rejected two-pass fix broke: it left subdirectories
+        // with an unflagged ACE, so anything written into `checkpoints/`
+        // later came out unreadable.
+        std::fs::write(sub.join("created-after.json"), b"{}").expect("write a new nested file");
+        std::fs::read(sub.join("created-after.json"))
+            .expect("a file created after hardening must be readable");
+    }
+
+    /// The repair path, driven from the state the bug actually produces.
+    #[cfg(windows)]
+    #[test]
+    fn an_empty_dacl_is_repaired_on_open_rather_than_surfaced() {
+        let path = temp_db("acl_repair");
+        drop(RuntimeStore::open(&path).expect("seed the DB"));
+
+        // `/inheritance:r` with no `/grant` removes every inherited ACE and
+        // adds nothing, which reaches the bug's end state — an empty DACL —
+        // directly. The first version of this test re-ran the shipped
+        // `(OI)(CI)F` command instead and depended on that quirk producing a
+        // lockout, which is one platform behavior more than the test needs.
+        let stripped = std::process::Command::new("icacls")
+            .arg(&path)
+            .arg("/inheritance:r")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("run icacls");
+        assert!(stripped.success(), "icacls must strip the DACL");
+
+        if std::fs::read(&path).is_ok() {
+            // Not every Windows can stage this. A caller holding
+            // SeBackupPrivilege — every elevated GitHub Actions runner — reads
+            // straight through an empty DACL, so there is no lockout here to
+            // repair. Assert what is still true rather than assert something
+            // false; the machines this bug actually reaches are unprivileged
+            // desktops, where the branch below runs.
+            println!(
+                "note: this environment reads through an empty DACL; \
+                 asserting the repair grant only"
+            );
+            assert!(
+                super::windows_acl::restore_owner_access(&path),
+                "the repair must still be able to grant"
+            );
+            RuntimeStore::open(&path).expect("open must succeed");
+            return;
+        }
+
+        RuntimeStore::open(&path).expect("open must repair the ACL and succeed");
     }
 
     #[test]
