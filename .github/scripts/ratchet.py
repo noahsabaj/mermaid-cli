@@ -49,26 +49,31 @@ def read_baseline(name: str) -> dict[str, int]:
     return out
 
 
-def write_baseline(
-    name: str, findings: dict[str, int], title: str, regen: str = "just ratchet"
-) -> None:
-    path = BASELINE_DIR / f"{name}.txt"
-    path.parent.mkdir(parents=True, exist_ok=True)
+def render_baseline(
+    findings: dict[str, int], title: str, regen: str = "just ratchet"
+) -> str:
     total = sum(findings.values())
     body = "".join(f"{k} {findings[k]}\n" for k in sorted(findings))
     # The `N keys / M occurrences` line is rewritten on every regeneration, so
     # the debt counter lands in every diff that touches this file. That single
     # line is what makes the mechanism social rather than merely technical.
-    path.write_text(
+    return (
         f"# Ratchet baseline: {title}\n"
         f"#\n"
         f"# Debt that predates the guard. This file may only SHRINK.\n"
         f"# Regenerate with: {regen}\n"
         f"#\n"
         f"# {len(findings)} keys / {total} occurrences\n"
-        f"{body}",
-        encoding="utf-8",
+        f"{body}"
     )
+
+
+def write_baseline(
+    name: str, findings: dict[str, int], title: str, regen: str = "just ratchet"
+) -> None:
+    path = BASELINE_DIR / f"{name}.txt"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(render_baseline(findings, title, regen), encoding="utf-8")
 
 
 def ratchet(

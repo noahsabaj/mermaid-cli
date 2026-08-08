@@ -39,6 +39,14 @@ NOT WIRED INTO `just ratchet`. Every other guard reads files and finishes in
 milliseconds; this one changes clippy's lint fingerprint and rebuilds the
 workspace, so folding it in would take `just ratchet` from instant to minutes.
 It has its own recipes, `just clippy-debt` and `just clippy-debt-record`.
+
+THE BASELINE IS A LINUX MEASUREMENT, and unlike every other guard here it has
+to be. The others read source text and get the same answer everywhere; this one
+reports what the compiler actually linted, and four whole test files plus 99
+items under `src/` are `#[cfg(unix)]`. Running `just clippy-debt-record` on
+Windows produces a *different, wrong* file. That is why a failure prints the
+full baseline it measured rather than only telling you to regenerate: on the
+platform that cannot regenerate it, the CI log is the source.
 """
 
 import json
@@ -125,14 +133,23 @@ def main(argv: list[str]) -> int:
     if "CLIPPY_RATCHET_TARGET_DIR" in os.environ:
         os.environ["CARGO_TARGET_DIR"] = os.environ["CLIPPY_RATCHET_TARGET_DIR"]
     findings, occurrences = collect()
-    return ratchet.ratchet(
-        "clippy_pedantic",
-        "pedantic + nursery debt",
-        findings,
-        occurrences,
-        argv,
-        regen="just clippy-debt-record",
+    title = "pedantic + nursery debt"
+    regen = "just clippy-debt-record"
+    rc = ratchet.ratchet(
+        "clippy_pedantic", title, findings, occurrences, argv, regen=regen
     )
+    if rc != 0 and "--write-baseline" not in argv:
+        # These counts are PLATFORM-DEPENDENT in a way the other guards' are
+        # not: they come from what the compiler actually linted, and four whole
+        # test files plus 99 items under `src/` are `#[cfg(unix)]`. A Windows
+        # machine cannot produce the Linux number by running this script, so a
+        # failure that only says "regenerate it" is an instruction that cannot
+        # be followed. Print the file instead, so the CI log always carries the
+        # exact bytes to commit.
+        print("\n--- .github/baselines/clippy_pedantic.txt as measured here ---")
+        print(ratchet.render_baseline(findings, title, regen), end="")
+        print("--- end ---")
+    return rc
 
 
 if __name__ == "__main__":
