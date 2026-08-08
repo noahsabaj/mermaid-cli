@@ -24,12 +24,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use mermaid_cli::domain::{ChatRequest, Cmd, Msg, TurnId};
 use mermaid_cli::effect::EffectRunner;
-use mermaid_cli::models::{ChatMessage, ProviderContinuation, ReasoningLevel};
 use mermaid_cli::providers::ProviderFactory;
 use mermaid_cli::providers::model::ModelProvider;
 use mermaid_cli::providers::tool::ToolRegistry;
+use mermaid_domain::{ChatRequest, Cmd, Msg, TurnId};
+use mermaid_model::models::{ChatMessage, ProviderContinuation, ReasoningLevel};
 
 #[path = "harness/stub_model.rs"]
 mod stub_model;
@@ -53,7 +53,7 @@ fn request(messages: Vec<ChatMessage>) -> ChatRequest {
 
 fn runner_with(model: Arc<ScriptedModel>) -> (EffectRunner, tokio::sync::mpsc::Receiver<Msg>) {
     let providers = Arc::new(ProviderFactory::with_seeded_providers(
-        mermaid_cli::app::Config::default(),
+        mermaid_domain::Config::default(),
         [(STUB.to_string(), model as Arc<dyn ModelProvider>)],
     ));
     EffectRunner::pair_from(PathBuf::from("."), providers, Arc::new(ToolRegistry::new()))

@@ -18,6 +18,7 @@
 //!   identifiers so the reducer can match results to the call that
 //!   produced them.
 
+use mermaid_domain::ProgressEvent;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -25,10 +26,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::domain::{Msg, ToolCallId, TurnId};
-use crate::models::tool_call::ToolCall as ModelToolCall;
-use crate::models::{ChatMessage, FinishReason, ProviderContinuation, ReasoningChunk, TokenUsage};
-use crate::runtime::SafetyMode;
+use mermaid_domain::{Msg, ToolCallId, TurnId};
+use mermaid_model::models::tool_call::ToolCall as ModelToolCall;
+use mermaid_model::models::{
+    ChatMessage, FinishReason, ProviderContinuation, ReasoningChunk, TokenUsage,
+};
+use mermaid_runtime::SafetyMode;
 
 use super::approval::ApprovalBroker;
 use super::auto_classifier::AutoClassifier;
@@ -57,7 +60,7 @@ impl WebByteBudget {
     /// counter so every later response observes an exhausted budget before it
     /// polls another body.
     pub fn charge(&self, bytes: usize) -> Result<usize, usize> {
-        let limit = crate::constants::MAX_WEB_TURN_BYTES;
+        let limit = mermaid_model::constants::MAX_WEB_TURN_BYTES;
         let prior = self
             .used
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
@@ -73,7 +76,8 @@ impl WebByteBudget {
     }
 
     pub fn remaining(&self) -> usize {
-        crate::constants::MAX_WEB_TURN_BYTES.saturating_sub(self.used.load(Ordering::Acquire))
+        mermaid_model::constants::MAX_WEB_TURN_BYTES
+            .saturating_sub(self.used.load(Ordering::Acquire))
     }
 }
 
@@ -141,12 +145,12 @@ pub struct ExecContext {
     pub call_id: ToolCallId,
     pub turn: TurnId,
     pub workdir: PathBuf,
-    /// Parent session's `app::Config`. Needed by `SubagentTool` so the
+    /// Parent session's `domain::Config`. Needed by `SubagentTool` so the
     /// child reducer uses the same Ollama host, reasoning prefs, MCP
     /// servers, etc. Other tools don't consult it — keeping it as a
     /// typed field (rather than a global) means the dependency is
     /// explicit in the signature.
-    pub config: Arc<crate::app::Config>,
+    pub config: Arc<mermaid_domain::Config>,
     /// Parent session's active model id (e.g. `"anthropic/claude-opus-4-7"`).
     /// Subagents inherit this so they hit the same provider.
     pub model_id: String,
@@ -179,7 +183,7 @@ pub struct ExecContext {
     /// LIVE per-category plan permission levels, threaded from the reducer
     /// (the frozen startup `config` would go stale under `/plan config`
     /// edits). Only consulted while `plan_file` is `Some`; defaults in `new`.
-    pub plan_permissions: crate::app::PlanPermissions,
+    pub plan_permissions: mermaid_domain::PlanPermissions,
     /// Context-window fill at dispatch, when known (`exit_plan_mode` shows
     /// it on the clear-context approval option). Defaults to `None` in `new`.
     pub context_percent: Option<u8>,
@@ -241,14 +245,14 @@ impl std::fmt::Debug for ExecContext {
 }
 
 impl ExecContext {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub fn new(
         token: CancellationToken,
         progress: mpsc::Sender<ProgressEvent>,
         call_id: ToolCallId,
         turn: TurnId,
         workdir: PathBuf,
-        config: Arc<crate::app::Config>,
+        config: Arc<mermaid_domain::Config>,
         model_id: String,
         task_id: Option<String>,
         session_id: Option<String>,
@@ -268,7 +272,7 @@ impl ExecContext {
             background: CancellationToken::new(),
             notify: None,
             plan_file: None,
-            plan_permissions: crate::app::PlanPermissions::default(),
+            plan_permissions: mermaid_domain::PlanPermissions::default(),
             context_percent: None,
             // Field-set by the live execute path alongside `background`/
             // `notify`; tests and bare contexts leave it unset.
@@ -307,64 +311,13 @@ impl ExecContext {
     /// Checkpoint provenance for this call — every checkpoint-creating tool
     /// passes this so file snapshots anchor to the conversation position
     /// that produced them (rewind/fork surfaces them by anchor).
-    pub fn checkpoint_origin(&self) -> crate::runtime::CheckpointOrigin {
-        crate::runtime::CheckpointOrigin {
+    pub fn checkpoint_origin(&self) -> mermaid_runtime::CheckpointOrigin {
+        mermaid_runtime::CheckpointOrigin {
             task_id: self.task_id.clone(),
             session_id: self.session_id.clone(),
             message_index: self.message_index,
         }
     }
-}
-
-/// Tool-side progress event. The reducer already knows `ToolStarted`
-/// and `ToolFinished`; this carries everything in between (streaming
-/// subprocess output, long-running download status, multimodal
-/// artifacts like inline screenshots, and nested activity from
-/// subagents).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub enum ProgressEvent {
-    /// Partial stdout/stderr chunk.
-    Output(String),
-    /// Arbitrary status string for display.
-    Status(String),
-    /// Byte-count progress for long downloads/transfers. `total` is
-    /// None when the producer doesn't know the final size.
-    Bytes { done: u64, total: Option<u64> },
-    /// Binary artifact produced mid-execution (screenshot preview,
-    /// generated file, etc.). MIME string determines routing in the
-    /// reducer — `image/*` attaches inline to the active assistant
-    /// message; anything else lands on the status line as a label.
-    Artifact {
-        mime: String,
-        #[serde(with = "crate::utils::serde_base64")]
-        data: Vec<u8>,
-        caption: Option<String>,
-    },
-    /// A child subagent just started or finished a tool call. Carries
-    /// the CHILD's call identity + tool name + phase so the parent UI
-    /// can surface it without needing to recurse into the child's
-    /// event vocabulary.
-    SubagentToolCall {
-        child_call_id: ToolCallId,
-        tool_name: String,
-        phase: SubagentPhase,
-    },
-    /// Coarse phase label for a child subagent ("starting…",
-    /// "thinking", "replying"). Emitted only on phase CHANGE — never
-    /// per stream chunk — so the parent status stays calm.
-    SubagentActivity(String),
-    /// Cumulative output-token estimate for a child subagent's current
-    /// drive. Throttled at the source (≥500ms apart); powers the live
-    /// per-agent token counters without per-chunk churn.
-    SubagentTokens(usize),
-}
-
-/// Phase a subagent tool-call is in, from the parent's perspective.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum SubagentPhase {
-    Started,
-    Finished,
-    Errored,
 }
 
 /// Narrow shim from the reducer's `ChatRequest` to the adapter-facing
@@ -395,8 +348,8 @@ pub fn test_exec_context(
     call_id: ToolCallId,
     workdir: PathBuf,
 ) -> (ExecContext, mpsc::Receiver<ProgressEvent>) {
-    let mut config = crate::app::Config::default();
-    config.safety.mode = crate::runtime::SafetyMode::FullAccess;
+    let mut config = mermaid_domain::Config::default();
+    config.safety.mode = mermaid_runtime::SafetyMode::FullAccess;
     test_exec_context_with_config(turn, call_id, workdir, config)
 }
 
@@ -408,7 +361,7 @@ pub fn test_exec_context_with_config(
     turn: TurnId,
     call_id: ToolCallId,
     workdir: PathBuf,
-    config: crate::app::Config,
+    config: mermaid_domain::Config,
 ) -> (ExecContext, mpsc::Receiver<ProgressEvent>) {
     let token = CancellationToken::new();
     let (tx, rx) = mpsc::channel(64);
@@ -478,21 +431,21 @@ mod tests {
     fn web_budget_is_atomic_and_never_crosses_the_turn_limit() {
         let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(2), PathBuf::from("/tmp"));
         assert_eq!(ctx.charge_web_bytes(1024), Ok(1024));
-        let remaining = crate::constants::MAX_WEB_TURN_BYTES - 1024;
+        let remaining = mermaid_model::constants::MAX_WEB_TURN_BYTES - 1024;
         assert_eq!(
             ctx.charge_web_bytes(remaining),
-            Ok(crate::constants::MAX_WEB_TURN_BYTES)
+            Ok(mermaid_model::constants::MAX_WEB_TURN_BYTES)
         );
         assert_eq!(
             ctx.charge_web_bytes(1),
-            Err(crate::constants::MAX_WEB_TURN_BYTES)
+            Err(mermaid_model::constants::MAX_WEB_TURN_BYTES)
         );
     }
 
     #[test]
     fn web_budget_overflow_saturates_and_stays_exhausted() {
         let budget = WebByteBudget::isolated();
-        let limit = crate::constants::MAX_WEB_TURN_BYTES;
+        let limit = mermaid_model::constants::MAX_WEB_TURN_BYTES;
         assert_eq!(budget.charge(limit - 1), Ok(limit - 1));
         assert_eq!(budget.charge(2), Err(limit));
         assert_eq!(budget.remaining(), 0);

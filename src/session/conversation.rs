@@ -1,9 +1,9 @@
-use crate::domain::CompactionArchive;
-use crate::models::{ChatMessage, MessageRole};
 use anyhow::Result;
 use chrono::{DateTime, Local};
+use mermaid_domain::{CompactionArchive, ConversationHistory};
+use mermaid_model::models::{ChatMessage, MessageRole};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -82,85 +82,6 @@ fn strip_persisted_screenshots(messages: &[ChatMessage]) -> Option<Vec<ChatMessa
     Some(out)
 }
 
-/// A complete conversation history
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConversationHistory {
-    pub id: String,
-    pub title: String,
-    /// PRIVATE on purpose. Every mutation must go through
-    /// [`ConversationHistory::messages_mut`], which bumps [`Self::revision`] —
-    /// the render layer's memo keys off that counter instead of re-hashing the
-    /// whole transcript on every frame. A public field would make the counter a
-    /// convention someone eventually forgets; this makes forgetting impossible
-    /// from outside this module.
-    messages: Vec<ChatMessage>,
-    /// Bumped on every mutable access to `messages`. Session-only (never
-    /// serialized): a resumed conversation starts at 0 with an empty render
-    /// memo, so no stale key can survive a reload.
-    #[serde(skip)]
-    revision: u64,
-    pub model_name: String,
-    pub project_path: String,
-    pub created_at: DateTime<Local>,
-    pub updated_at: DateTime<Local>,
-    /// Metadata for context compactions performed in this conversation.
-    #[serde(default)]
-    pub compactions: Vec<crate::domain::CompactionRecord>,
-    /// History of user input prompts for navigation (up/down arrows)
-    #[serde(default)]
-    pub input_history: VecDeque<String>,
-    /// Git branch this session was worked on, for the `--resume` picker.
-    /// Captured at startup (impure) — `ConversationHistory::new` leaves it
-    /// `None` so the pure reducer / `--replay` stay deterministic. Empty for
-    /// non-git dirs and for sessions saved before this field existed.
-    #[serde(default)]
-    pub git_branch: Option<String>,
-    /// Live session state that rides on `Session` (which is NOT serialized —
-    /// only this `ConversationHistory` is), snapshotted here on every save via
-    /// `Session::snapshot_conversation` so `--resume`/`--continue` restore the
-    /// safety mode and token/context meters instead of resetting them. All
-    /// `#[serde(default)]`: sessions saved before these existed omit them, and
-    /// a `None` safety mode falls back to the config default on resume.
-    #[serde(default)]
-    pub safety_mode: Option<crate::runtime::SafetyMode>,
-    /// Plan-mode-in-progress (see `domain::PlanState`): `Some` only when the
-    /// session was saved mid-planning, so `--resume` re-enters plan mode with
-    /// the same plan file and restore target.
-    #[serde(default)]
-    pub plan: Option<crate::domain::PlanState>,
-    /// The mode-defining facts the model was last told about (see
-    /// `domain::AdvertisedContext`) — the dispatch-time context-delta
-    /// injector's baseline. Rides the conversation (not `Session`) so
-    /// save/resume, `/clear`, and forks inherit the right baseline for
-    /// free. `None` on fresh conversations and pre-field saves: the first
-    /// dispatch stamps it silently instead of announcing current state.
-    #[serde(default)]
-    pub advertised_context: Option<crate::domain::AdvertisedContext>,
-    #[serde(default)]
-    pub last_token_usage: Option<crate::domain::TokenUsageTotals>,
-    #[serde(default)]
-    pub cumulative_token_usage: crate::domain::TokenUsageTotals,
-    #[serde(default)]
-    pub context_usage: Option<crate::domain::ContextUsageSnapshot>,
-    /// Session lineage / provenance, all `#[serde(default)]` (older files omit
-    /// them). Stamped in the impure startup path, never the pure reducer.
-    /// `forked_from`/`parent_session` are set when a session is branched from
-    /// another; `cli_version` and `git_sha` record the environment at creation.
-    #[serde(default)]
-    pub forked_from: Option<String>,
-    #[serde(default)]
-    pub parent_session: Option<String>,
-    #[serde(default)]
-    pub cli_version: Option<String>,
-    #[serde(default)]
-    pub git_sha: Option<String>,
-    /// The task checklist (task_create/task_update tools + /tasks command).
-    /// Snapshotted on every save so --resume/--continue restore an in-flight
-    /// plan; sessions saved before this field existed load an empty store.
-    #[serde(default)]
-    pub tasks: crate::domain::TaskStore,
-}
-
 /// Best-effort current git branch of `dir`, for labelling `--resume` rows.
 /// `None` when `dir` isn't a git work tree, git is absent, or HEAD is
 /// detached. Kept out of the pure reducer — callers invoke it in the impure
@@ -219,168 +140,9 @@ impl ConversationMeta {
             title: h.title.clone(),
             updated_at: h.updated_at,
             git_branch: h.git_branch.clone(),
-            message_count: h.messages.len(),
+            message_count: h.messages().len(),
             forked_from: h.forked_from.clone(),
         }
-    }
-}
-
-impl ConversationHistory {
-    /// Read the committed transcript.
-    pub fn messages(&self) -> &[ChatMessage] {
-        &self.messages
-    }
-
-    /// Mutable access to the transcript. Bumps [`Self::revision`], which is
-    /// what lets the render memo skip re-hashing every message on every frame.
-    ///
-    /// Deliberately conservative: it bumps on ACCESS, not on actual change, so
-    /// a caller that takes the handle and changes nothing merely costs one memo
-    /// miss. The reverse error — a change that does not bump — would paint a
-    /// stale transcript, so the cheap direction is the safe one.
-    pub fn messages_mut(&mut self) -> &mut Vec<ChatMessage> {
-        self.revision = self.revision.wrapping_add(1);
-        &mut self.messages
-    }
-
-    /// Replace the transcript wholesale (compaction, `/clear`, fork, load).
-    pub fn set_messages(&mut self, messages: Vec<ChatMessage>) {
-        self.revision = self.revision.wrapping_add(1);
-        self.messages = messages;
-    }
-
-    /// Monotonic counter identifying the current transcript contents. Changes
-    /// whenever `messages` is touched; never serialized.
-    pub fn revision(&self) -> u64 {
-        self.revision
-    }
-
-    /// Create a new conversation history.
-    ///
-    /// `now` is injected rather than read from the wall clock because this
-    /// runs inside the pure reducer (`/clear` mints a fresh conversation, and
-    /// `State::new` mints the initial one): the id and title are a
-    /// deterministic function of the caller's clock, so `--replay` reproduces
-    /// them exactly.
-    pub fn new(project_path: String, model_name: String, now: DateTime<Local>) -> Self {
-        // Include subsecond precision to avoid ID collisions within the same second
-        let id = format!("{}", now.format("%Y%m%d_%H%M%S_%3f"));
-        Self {
-            id: id.clone(),
-            title: format!("Session {}", now.format("%Y-%m-%d %H:%M")),
-            messages: Vec::new(),
-            revision: 0,
-            model_name,
-            project_path,
-            created_at: now,
-            updated_at: now,
-            compactions: Vec::new(),
-            input_history: VecDeque::new(),
-            // Populated by the impure startup path (`detect_git_branch`), not
-            // here — the reducer stays pure/deterministic for `--replay`.
-            git_branch: None,
-            // Snapshotted from `Session` on save (see `snapshot_conversation`).
-            safety_mode: None,
-            plan: None,
-            // Stamped by the injector at the first dispatch (silent seed).
-            advertised_context: None,
-            last_token_usage: None,
-            cumulative_token_usage: crate::domain::TokenUsageTotals::default(),
-            context_usage: None,
-            // Lineage/provenance filled in by the impure startup path.
-            forked_from: None,
-            parent_session: None,
-            cli_version: None,
-            git_sha: None,
-            tasks: crate::domain::TaskStore::default(),
-        }
-    }
-
-    /// Add messages to the conversation. `now` is the caller's injected
-    /// clock (`state.now` inside the reducer) — mutation methods never read
-    /// the wall clock themselves so `update()` stays a pure function.
-    pub fn add_messages(&mut self, messages: &[ChatMessage], now: DateTime<Local>) {
-        self.messages.extend_from_slice(messages);
-        self.updated_at = now;
-        self.update_title();
-    }
-
-    /// Replace the model-visible message log without deriving a new title.
-    /// Used by context compaction: the original title still describes the
-    /// session better than the generated checkpoint. The messages keep their
-    /// own timestamps (they rode in on the `Msg` payload); only `updated_at`
-    /// is stamped, from the injected clock.
-    pub fn replace_messages(&mut self, messages: Vec<ChatMessage>, now: DateTime<Local>) {
-        self.messages = messages;
-        self.updated_at = now;
-    }
-
-    /// Record a completed context compaction. `now` injected — see
-    /// [`Self::add_messages`].
-    pub fn add_compaction(
-        &mut self,
-        record: crate::domain::CompactionRecord,
-        now: DateTime<Local>,
-    ) {
-        self.compactions.push(record);
-        self.updated_at = now;
-    }
-
-    /// Add input to history (with deduplication of consecutive identical inputs)
-    pub fn add_to_input_history(&mut self, input: String) {
-        // Skip empty inputs
-        if input.trim().is_empty() {
-            return;
-        }
-
-        // Don't add if it's identical to the last entry
-        if let Some(last) = self.input_history.back()
-            && last == &input
-        {
-            return;
-        }
-
-        // Cap history at 100 entries to prevent unbounded growth
-        if self.input_history.len() >= 100 {
-            self.input_history.pop_front(); // O(1) instead of O(n)
-        }
-
-        self.input_history.push_back(input);
-    }
-
-    /// Update the title based on the first user message.
-    /// Short-circuits if the title was already derived from a user message.
-    fn update_title(&mut self) {
-        // Only set title once — it comes from the first user message
-        if !self.title.starts_with("Session ") {
-            return;
-        }
-        if let Some(first_user_msg) = self.messages.iter().find(|m| m.role == MessageRole::User) {
-            let preview = if first_user_msg.content.len() > 60 {
-                let end = first_user_msg.content.floor_char_boundary(60);
-                format!("{}...", &first_user_msg.content[..end])
-            } else {
-                first_user_msg.content.clone()
-            };
-            self.title = preview;
-        }
-    }
-
-    /// Get a summary for display
-    pub fn summary(&self) -> String {
-        let message_count = self.messages.len();
-        let duration = self.updated_at.signed_duration_since(self.created_at);
-        let hours = duration.num_hours();
-        let minutes = duration.num_minutes() % 60;
-
-        format!(
-            "{} | {} messages | {}h {}m | {}",
-            self.updated_at.format("%Y-%m-%d %H:%M"),
-            message_count,
-            hours,
-            minutes,
-            self.title
-        )
     }
 }
 
@@ -413,7 +175,7 @@ static CONFLICT_COUNTER: AtomicU64 = AtomicU64::new(0);
 #[derive(Clone)]
 pub struct ConversationManager {
     /// The project directory the manager was built for — keys the
-    /// scratchpad cascade in [`delete_conversation`].
+    /// scratchpad cascade in [`ConversationManager::delete_conversation`].
     project_dir: PathBuf,
     conversations_dir: PathBuf,
     compactions_dir: PathBuf,
@@ -479,7 +241,7 @@ impl ConversationManager {
         // sending anything — has no transcript. Never persist it, so it can't
         // clutter the `--resume` picker or be reached by `--continue`; the first
         // real message triggers the next save, which creates the file then.
-        if conversation.messages.is_empty() {
+        if conversation.messages().is_empty() {
             return Ok(());
         }
 
@@ -490,15 +252,15 @@ impl ConversationManager {
         // AND scrub credential-shaped strings, so a persisted `read_file` of
         // `.env` or an API error echoing a key can't sit in cleartext (mirrors
         // the --record redaction in recorder.rs). Only clones when scrubbing.
-        let mut value = match strip_persisted_screenshots(&conversation.messages) {
+        let mut value = match strip_persisted_screenshots(conversation.messages()) {
             Some(sanitized) => {
                 let mut stripped = conversation.clone();
-                stripped.messages = sanitized;
+                *stripped.messages_mut() = sanitized;
                 serde_json::to_value(&stripped)?
             },
             None => serde_json::to_value(conversation)?,
         };
-        crate::utils::redact_json(&mut value);
+        mermaid_model::utils::redact_json(&mut value);
         let json = serde_json::to_string_pretty(&value)?;
 
         // Optimistic-concurrency guard (F73). Without this, two processes (e.g. a
@@ -519,7 +281,7 @@ impl ConversationManager {
         {
             let sibling = self.conflict_sibling_path(&conversation.id);
             // Keep the existing atomic-write for the preserved copy too (owner-only).
-            crate::runtime::write_atomic_with_mode(&sibling, json.as_bytes(), 0o600)?;
+            mermaid_runtime::write_atomic_with_mode(&sibling, json.as_bytes(), 0o600)?;
             tracing::warn!(
                 id = %conversation.id,
                 main = %path.display(),
@@ -532,7 +294,7 @@ impl ConversationManager {
         // Atomic write: a crash mid-save must not empty/corrupt the session
         // file (this is the hot path, rewritten after nearly every message).
         // Owner-only (0o600): the transcript can carry secrets in cleartext.
-        crate::runtime::write_atomic_with_mode(&path, json.as_bytes(), 0o600)?;
+        mermaid_runtime::write_atomic_with_mode(&path, json.as_bytes(), 0o600)?;
         // Refresh our baseline to the file we just wrote so the NEXT save by this
         // process compares against our own write, not the pre-save state.
         self.record_stamp(&conversation.id, &path);
@@ -545,7 +307,8 @@ impl ConversationManager {
             let meta_path = self
                 .conversations_dir
                 .join(format!("{}.meta", conversation.id));
-            let _ = crate::runtime::write_atomic_with_mode(&meta_path, meta_json.as_bytes(), 0o600);
+            let _ =
+                mermaid_runtime::write_atomic_with_mode(&meta_path, meta_json.as_bytes(), 0o600);
         }
 
         Ok(())
@@ -579,11 +342,11 @@ impl ConversationManager {
             },
             None => serde_json::to_value(archive)?,
         };
-        crate::utils::redact_json(&mut value);
+        mermaid_model::utils::redact_json(&mut value);
         let json = serde_json::to_string_pretty(&value)?;
         // Atomic write: the archive is the ONLY durable copy of messages
         // dropped by a compaction — a partial write would lose them. Owner-only.
-        crate::runtime::write_atomic_with_mode(&path, json.as_bytes(), 0o600)?;
+        mermaid_runtime::write_atomic_with_mode(&path, json.as_bytes(), 0o600)?;
         Ok(path)
     }
 
@@ -645,7 +408,7 @@ impl ConversationManager {
             }
             // Skip untouched (message-less) sessions — `--continue` resumes the
             // last chat with real history, not a blank one opened and closed.
-            if conv.messages.is_empty() {
+            if conv.messages().is_empty() {
                 continue;
             }
             // Capture the load-time baseline for the optimistic-concurrency
@@ -669,7 +432,7 @@ impl ConversationManager {
                     && let Ok(conv) = serde_json::from_str::<ConversationHistory>(&json)
                     // Skip untouched (message-less) sessions — they carry no
                     // history worth resuming, so they never appear in the picker.
-                    && !conv.messages.is_empty()
+                    && !conv.messages().is_empty()
                 {
                     conversations.push(conv);
                 }
@@ -685,7 +448,7 @@ impl ConversationManager {
     /// Fast session list: read each `<id>.meta` sidecar; for a session that
     /// lacks a (valid) one — older, or written by a pre-sidecar build — fall
     /// back to fully parsing its `<id>.json`. Message-less sessions are skipped.
-    /// Newest-first. Cheaper than [`list_conversations`] for display-only paths.
+    /// Newest-first. Cheaper than [`Self::list_conversations`] for display-only paths.
     pub fn list_conversation_metas(&self) -> Result<Vec<ConversationMeta>> {
         let mut metas = Vec::new();
         let mut seen = std::collections::HashSet::new();
@@ -711,7 +474,7 @@ impl ConversationManager {
                 && !seen.contains(stem)
                 && let Ok(json) = read_conversation_capped(path)
                 && let Ok(conv) = serde_json::from_str::<ConversationHistory>(&json)
-                && !conv.messages.is_empty()
+                && !conv.messages().is_empty()
             {
                 metas.push(ConversationMeta::from_history(&conv));
             }
@@ -744,6 +507,17 @@ impl ConversationManager {
 
     pub fn compactions_dir(&self) -> &Path {
         &self.compactions_dir
+    }
+}
+
+/// Probe the session's provenance. Impure — spawns `git` twice — so it is a
+/// value the shell resolves once at startup and delivers as
+/// `Msg::SessionProvenanceResolved`.
+pub fn probe_session_provenance(cwd: &Path) -> mermaid_domain::SessionProvenance {
+    mermaid_domain::SessionProvenance {
+        git_branch: detect_git_branch(cwd),
+        git_sha: detect_git_sha(cwd),
+        cli_version: Some(env!("CARGO_PKG_VERSION").to_string()),
     }
 }
 
@@ -805,7 +579,7 @@ mod tests {
         assert_eq!(conv.safety_mode, None);
         assert_eq!(
             conv.cumulative_token_usage,
-            crate::domain::TokenUsageTotals::default()
+            mermaid_domain::TokenUsageTotals::default()
         );
         assert!(conv.last_token_usage.is_none());
         assert!(conv.context_usage.is_none());
@@ -820,9 +594,9 @@ mod tests {
     #[test]
     fn advertised_context_round_trips_through_conversation_json() {
         let mut fresh = touched("/tmp/proj");
-        fresh.advertised_context = Some(crate::domain::AdvertisedContext {
+        fresh.advertised_context = Some(mermaid_domain::AdvertisedContext {
             plan_path: Some(std::path::PathBuf::from("/tmp/proj/.mermaid/plans/x.md")),
-            safety_mode: crate::runtime::SafetyMode::Ask,
+            safety_mode: mermaid_runtime::SafetyMode::Ask,
             model_id: "ollama/test".to_string(),
         });
         let round: ConversationHistory =
@@ -839,14 +613,14 @@ mod tests {
     fn tasks_round_trip_through_conversation_json() {
         let mut fresh = touched("/tmp/proj");
         fresh.tasks.create(
-            vec![crate::domain::TaskSpec {
+            vec![mermaid_domain::ChecklistSpec {
                 subject: "wire broker".into(),
                 active_form: "wiring broker".into(),
                 description: Some("through ExecContext".into()),
                 in_progress: true,
             }],
-            crate::domain::TaskOrigin::Model,
-            crate::domain::Stamp {
+            mermaid_domain::ChecklistOrigin::Model,
+            mermaid_domain::Stamp {
                 now_epoch: 42,
                 run_tokens: 7,
             },
@@ -860,8 +634,8 @@ mod tests {
     #[test]
     fn session_state_round_trips_through_json() {
         let mut conv = ConversationHistory::new("/tmp/p".into(), "m".into(), Local::now());
-        conv.safety_mode = Some(crate::runtime::SafetyMode::FullAccess);
-        conv.cumulative_token_usage = crate::domain::TokenUsageTotals {
+        conv.safety_mode = Some(mermaid_runtime::SafetyMode::FullAccess);
+        conv.cumulative_token_usage = mermaid_domain::TokenUsageTotals {
             prompt_tokens: 777,
             ..Default::default()
         };
@@ -869,7 +643,7 @@ mod tests {
             serde_json::from_str(&serde_json::to_string(&conv).unwrap()).unwrap();
         assert_eq!(
             round.safety_mode,
-            Some(crate::runtime::SafetyMode::FullAccess)
+            Some(mermaid_runtime::SafetyMode::FullAccess)
         );
         assert_eq!(round.cumulative_token_usage.total_tokens(), 777);
     }
@@ -919,7 +693,7 @@ mod tests {
         let dir = std::env::temp_dir().join("mermaid_strip_test");
         let _ = fs::create_dir_all(&dir);
         let mut conv = ConversationHistory::new("/tmp/p".into(), "m".into(), Local::now());
-        conv.messages = vec![
+        *conv.messages_mut() = vec![
             ChatMessage::user("u").with_images(vec!["USERIMG".to_string()]),
             ChatMessage::assistant("a").with_images(vec!["SHOTBYTES".to_string()]),
         ];
@@ -938,7 +712,7 @@ mod tests {
         assert!(raw.contains("USERIMG"), "user image should persist");
         // Live conversation untouched — still carries the screenshot in-session.
         assert_eq!(
-            conv.messages[1].images.as_deref(),
+            conv.messages()[1].images.as_deref(),
             Some(["SHOTBYTES".to_string()].as_slice())
         );
         let _ = fs::remove_file(dir.join(format!("{}.json", conv.id)));
@@ -951,7 +725,7 @@ mod tests {
         let _ = fs::create_dir_all(&dir);
         let mut conv = ConversationHistory::new("/tmp/p".into(), "m".into(), Local::now());
         // A read_file of .env lands in a tool-result message in cleartext today.
-        conv.messages = vec![
+        *conv.messages_mut() = vec![
             ChatMessage::user("read .env"),
             ChatMessage::assistant("OPENAI_API_KEY=sk-abcdefghijklmnop1234"),
         ];
@@ -982,7 +756,11 @@ mod tests {
             );
         }
         // Live conversation untouched — the model still sees the real content in-session.
-        assert!(conv.messages[1].content.contains("sk-abcdefghijklmnop1234"));
+        assert!(
+            conv.messages()[1]
+                .content
+                .contains("sk-abcdefghijklmnop1234")
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -993,7 +771,7 @@ mod tests {
         assert!(conv.title.starts_with("Session "));
         assert_eq!(conv.model_name, "test-model");
         assert_eq!(conv.project_path, "/tmp/project");
-        assert!(conv.messages.is_empty());
+        assert!(conv.messages().is_empty());
     }
 
     #[test]
@@ -1131,7 +909,7 @@ mod tests {
 
         assert_eq!(loaded.id, conv.id);
         assert_eq!(loaded.title, conv.title);
-        assert_eq!(loaded.messages.len(), 1);
+        assert_eq!(loaded.messages().len(), 1);
         assert_eq!(loaded.input_history.len(), 1);
 
         let _ = fs::remove_dir_all(&dir);
@@ -1278,9 +1056,9 @@ mod tests {
         let loaded = manager
             .load_conversation(id)
             .expect("must load despite an unknown role");
-        assert_eq!(loaded.messages.len(), 1);
+        assert_eq!(loaded.messages().len(), 1);
         assert_eq!(
-            loaded.messages[0].role,
+            loaded.messages()[0].role,
             MessageRole::System,
             "an unknown role becomes a neutral System message"
         );
@@ -1425,7 +1203,7 @@ mod tests {
         let on_disk: ConversationHistory =
             serde_json::from_str(&fs::read_to_string(&main).unwrap()).unwrap();
         assert_eq!(
-            on_disk.messages.len(),
+            on_disk.messages().len(),
             2,
             "the concurrent writer's file must be left intact"
         );
@@ -1482,7 +1260,7 @@ mod tests {
             "our own repeated saves must not be flagged as conflicts"
         );
         let loaded = manager.load_conversation(&conv.id).unwrap();
-        assert_eq!(loaded.messages.len(), 2, "latest save must win for us");
+        assert_eq!(loaded.messages().len(), 2, "latest save must win for us");
 
         let _ = fs::remove_dir_all(&dir);
     }

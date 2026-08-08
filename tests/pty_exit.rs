@@ -9,10 +9,24 @@ use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 const EXIT_MARKER: &str = "__MERMAID_EXITED__:";
 const INJECTED_MOUSE_REPORT: &[u8] = b"\x1b[<35;24;54M";
 
-#[test]
-fn double_ctrl_c_from_empty_tui_exits_and_restores_terminal_modes() {
+/// A real Mermaid TUI running in a real pty, waited to the alternate screen.
+///
+/// Everything up to that point was duplicated line for line between the two
+/// tests below — sandbox, pty, reader thread, shell wrapper, spawn, and the
+/// alt-screen wait — and so was the teardown. What actually differs is what
+/// each test types once it is here and what it asserts afterwards.
+struct TuiPty {
+    writer: Box<dyn Write + Send>,
+    child: Box<dyn portable_pty::Child + Send + Sync>,
+    output: Arc<Mutex<Vec<u8>>>,
+    reader_done: std::sync::mpsc::Receiver<()>,
+}
+
+/// `trailing_shell` runs after Mermaid exits and after the exit marker is
+/// printed, so a test can capture post-exit terminal state (`stty -a`).
+fn start_tui(sandbox_prefix: &str, model: &str, trailing_shell: &str) -> TuiPty {
     let binary = env!("CARGO_BIN_EXE_mermaid");
-    let sandbox = test_sandbox("mermaid-pty-exit");
+    let sandbox = test_sandbox(sandbox_prefix);
     let home = sandbox.join("home");
     let config = sandbox.join("config");
     let project = sandbox.join("project");
@@ -51,9 +65,11 @@ fn double_ctrl_c_from_empty_tui_exits_and_restores_terminal_modes() {
     });
 
     let script = format!(
-        "stty sane; {} --model anthropic/pty-exit-test; status=$?; printf '\\n{}%s\\n' \"$status\"; stty -a",
+        "stty sane; {} --model {}; status=$?; printf '\\n{}%s\\n' \"$status\"{}",
         shell_quote(binary),
+        model,
         EXIT_MARKER,
+        trailing_shell,
     );
     let mut cmd = CommandBuilder::new("bash");
     cmd.args(["--noprofile", "--norc", "-lc", &script]);
@@ -63,7 +79,7 @@ fn double_ctrl_c_from_empty_tui_exits_and_restores_terminal_modes() {
     cmd.env("NO_COLOR", "1");
     cmd.env("RUST_BACKTRACE", "0");
 
-    let mut child = pair.slave.spawn_command(cmd).expect("spawn shell in pty");
+    let child = pair.slave.spawn_command(cmd).expect("spawn shell in pty");
     drop(pair.slave);
 
     assert!(
@@ -76,36 +92,63 @@ fn double_ctrl_c_from_empty_tui_exits_and_restores_terminal_modes() {
         output_text(&output)
     );
 
-    let mut writer = pair.master.take_writer().expect("take pty writer");
-    writer
-        .write_all(INJECTED_MOUSE_REPORT)
-        .expect("write injected mouse report");
-    writer.flush().expect("flush mouse report");
+    TuiPty {
+        writer: pair.master.take_writer().expect("take pty writer"),
+        child,
+        output,
+        reader_done: reader_done_rx,
+    }
+}
+
+impl TuiPty {
+    fn send(&mut self, what: &str, bytes: &[u8]) {
+        self.writer
+            .write_all(bytes)
+            .unwrap_or_else(|error| panic!("write {what}: {error}"));
+        self.writer
+            .flush()
+            .unwrap_or_else(|error| panic!("flush {what}: {error}"));
+    }
+
+    /// Press-twice-to-exit: the first Ctrl+C arms the confirm window, the
+    /// second (inside the 3s window) exits. The gap must be long enough that
+    /// the two bytes can't coalesce into one read burst, short enough to stay
+    /// inside the window even on a slow runner.
+    fn double_ctrl_c(&mut self) {
+        self.send("first Ctrl+C", &[0x03]);
+        std::thread::sleep(Duration::from_millis(150));
+        self.send("second Ctrl+C", &[0x03]);
+    }
+
+    /// Wait for the shell wrapper to report Mermaid's exit status, then drain
+    /// the reader thread and hand back everything the pty saw.
+    fn finish(mut self) -> (portable_pty::ExitStatus, Vec<u8>, String) {
+        let status = wait_for_child(&mut self.child, Duration::from_secs(8))
+            .unwrap_or_else(|| {
+                let _ = self.child.kill();
+                panic!(
+                    "Mermaid did not exit after double Ctrl+C. Output:\n{}",
+                    output_text(&self.output)
+                );
+            })
+            .expect("wait for child");
+        drop(self.writer);
+
+        let _ = self.reader_done.recv_timeout(Duration::from_secs(2));
+        let bytes = self.output.lock().expect("output lock").clone();
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        (status, bytes, text)
+    }
+}
+
+#[test]
+fn double_ctrl_c_from_empty_tui_exits_and_restores_terminal_modes() {
+    let mut tui = start_tui("mermaid-pty-exit", "anthropic/pty-exit-test", "; stty -a");
+
+    tui.send("injected mouse report", INJECTED_MOUSE_REPORT);
     std::thread::sleep(Duration::from_millis(50));
-    // Press-twice-to-exit: the first Ctrl+C arms the confirm window, the
-    // second (inside the 3s window) exits. The gap must be long enough that
-    // the two bytes can't coalesce into one read burst, short enough to stay
-    // inside the window even on a slow runner.
-    writer.write_all(&[0x03]).expect("write first Ctrl+C");
-    writer.flush().expect("flush first Ctrl+C");
-    std::thread::sleep(Duration::from_millis(150));
-    writer.write_all(&[0x03]).expect("write second Ctrl+C");
-    writer.flush().expect("flush second Ctrl+C");
-
-    let status = wait_for_child(&mut child, Duration::from_secs(8))
-        .unwrap_or_else(|| {
-            let _ = child.kill();
-            panic!(
-                "Mermaid did not exit after double Ctrl+C. Output:\n{}",
-                output_text(&output)
-            );
-        })
-        .expect("wait for child");
-    drop(writer);
-
-    let _ = reader_done_rx.recv_timeout(Duration::from_secs(2));
-    let bytes = output.lock().expect("output lock").clone();
-    let text = String::from_utf8_lossy(&bytes);
+    tui.double_ctrl_c();
+    let (status, bytes, text) = tui.finish();
 
     assert!(
         status.success(),
@@ -143,10 +186,7 @@ fn double_ctrl_c_from_empty_tui_exits_and_restores_terminal_modes() {
         text
     );
 
-    let after_marker = text
-        .split_once(EXIT_MARKER)
-        .map(|(_, after)| after)
-        .unwrap_or_default();
+    let after_marker = text.split_once(EXIT_MARKER).map_or("", |(_, after)| after);
     assert!(
         terminal_mode_token_present(after_marker, "icanon")
             && terminal_mode_token_present(after_marker, "echo")
@@ -169,104 +209,21 @@ fn double_ctrl_c_from_empty_tui_exits_and_restores_terminal_modes() {
 /// terminal at all: Ctrl+L here must neither emit ESC[6n nor kill the app.
 #[test]
 fn ctrl_l_full_repaint_does_not_query_cursor_or_crash() {
-    let binary = env!("CARGO_BIN_EXE_mermaid");
-    let sandbox = test_sandbox("mermaid-pty-repaint");
-    let home = sandbox.join("home");
-    let config = sandbox.join("config");
-    let project = sandbox.join("project");
-    std::fs::create_dir_all(&home).expect("create test home");
-    std::fs::create_dir_all(&config).expect("create test config");
-    std::fs::create_dir_all(&project).expect("create test project");
-
-    let pty_system = native_pty_system();
-    let pair = pty_system
-        .openpty(PtySize {
-            rows: 30,
-            cols: 100,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("open pty");
-
-    let output = Arc::new(Mutex::new(Vec::new()));
-    let output_for_reader = Arc::clone(&output);
-    let mut reader = pair.master.try_clone_reader().expect("clone pty reader");
-    let (reader_done_tx, reader_done_rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let mut buf = [0_u8; 4096];
-        loop {
-            match reader.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => output_for_reader
-                    .lock()
-                    .expect("output lock")
-                    .extend(&buf[..n]),
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(_) => break,
-            }
-        }
-        let _ = reader_done_tx.send(());
-    });
-
-    let script = format!(
-        "stty sane; {} --model anthropic/pty-repaint-test; status=$?; printf '\\n{}%s\\n' \"$status\"",
-        shell_quote(binary),
-        EXIT_MARKER,
-    );
-    let mut cmd = CommandBuilder::new("bash");
-    cmd.args(["--noprofile", "--norc", "-lc", &script]);
-    cmd.cwd(project.as_os_str());
-    cmd.env("HOME", home.as_os_str());
-    cmd.env("XDG_CONFIG_HOME", config.as_os_str());
-    cmd.env("NO_COLOR", "1");
-    cmd.env("RUST_BACKTRACE", "0");
-
-    let mut child = pair.slave.spawn_command(cmd).expect("spawn shell in pty");
-    drop(pair.slave);
-
-    assert!(
-        wait_for_output(
-            &output,
-            |bytes| bytes.windows(8).any(|w| w == b"\x1b[?1049h"),
-            Duration::from_secs(3)
-        ),
-        "Mermaid did not enter the alternate screen. Output:\n{}",
-        output_text(&output)
-    );
+    let mut tui = start_tui("mermaid-pty-repaint", "anthropic/pty-repaint-test", "");
 
     // Let the startup kitty-protocol probe expire (2s, unanswered in a pty)
     // so Ctrl+L is handled by the steady-state main loop, matching the
     // real-world trigger timing.
     std::thread::sleep(Duration::from_millis(2500));
 
-    let mut writer = pair.master.take_writer().expect("take pty writer");
-    writer.write_all(&[0x0C]).expect("write Ctrl+L");
-    writer.flush().expect("flush Ctrl+L");
+    tui.send("Ctrl+L", &[0x0C]);
 
     // Outlive crossterm's 2s cursor-position deadline: the buggy repaint
     // path dies here; the fixed one repaints and keeps running.
     std::thread::sleep(Duration::from_millis(3000));
 
-    writer.write_all(&[0x03]).expect("write first Ctrl+C");
-    writer.flush().expect("flush first Ctrl+C");
-    std::thread::sleep(Duration::from_millis(150));
-    writer.write_all(&[0x03]).expect("write second Ctrl+C");
-    writer.flush().expect("flush second Ctrl+C");
-
-    let status = wait_for_child(&mut child, Duration::from_secs(8))
-        .unwrap_or_else(|| {
-            let _ = child.kill();
-            panic!(
-                "Mermaid did not exit after double Ctrl+C. Output:\n{}",
-                output_text(&output)
-            );
-        })
-        .expect("wait for child");
-    drop(writer);
-
-    let _ = reader_done_rx.recv_timeout(Duration::from_secs(2));
-    let bytes = output.lock().expect("output lock").clone();
-    let text = String::from_utf8_lossy(&bytes);
+    tui.double_ctrl_c();
+    let (status, bytes, text) = tui.finish();
 
     assert!(
         status.success(),

@@ -13,7 +13,6 @@ mod net;
 mod open;
 mod private_tmp;
 mod proc;
-mod redact;
 mod retry;
 pub mod serde_base64;
 mod sse;
@@ -43,9 +42,16 @@ pub use proc::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
 pub use proc::{
     Grace, output_with_timeout, terminate_tree, terminate_tree_blocking, write_stdin_with_timeout,
 };
-pub use redact::{redact_json, redact_secrets, sanitize_url_for_display};
+// Redaction has exactly one implementation, in `mermaid-runtime`, so every
+// SQLite repository enforces the same rules whoever calls it. Forwarded here
+// rather than wrapped: the wrapper file was 77 lines of which 70 were tests
+// re-testing another crate, and its forward silently dropped
+// `redact_json_text` so that one name did not resolve while its three
+// siblings did.
+pub use mermaid_runtime::{
+    redact_json, redact_json_text, redact_secrets, sanitize_url_for_display,
+};
 pub use retry::jitter;
-pub use retry::{RetryConfig, retry_async, retry_async_if};
 pub use sse::drain_sse_events;
 pub use task::{AbortOnDrop, join_logged, spawn_guarded};
 pub use text::{

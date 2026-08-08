@@ -1,23 +1,25 @@
 pub mod app;
 pub mod cli;
 pub mod clipboard;
-pub mod domain;
 pub mod effect;
 pub mod mcp;
 pub mod ollama;
-pub mod prompts;
 pub mod providers;
 pub mod render;
-pub mod runtime;
+pub mod runtime_client;
 pub mod searxng;
 pub mod session;
 
-// `constants`, `models`, and `utils` live in the `mermaid-model` crate — the
-// dependency-closed bottom of the tree, where the compiler can enforce that
-// nothing in it reaches back up into `app`, `domain`, `providers`, or `effect`.
-// Re-exported under their historical paths so every `crate::models::…` call
-// site still resolves; same shim pattern `crate::runtime` uses for
-// `mermaid-runtime`. See `mermaid_model`'s crate docs for what moved and why.
-pub use mermaid_model::{constants, models, utils};
-
-pub use app::{Config, load_config, persist_last_model};
+// `constants`, `models`, and `utils` live in the `mermaid-model` crate; the
+// durable runtime services live in `mermaid-runtime`. Both are named directly
+// at every call site rather than re-exported under a `crate::`-local alias.
+//
+// The aliases used to exist so a crate extraction could land without touching
+// call sites, which is what they were for. Kept past that they became a fog:
+// `crate::models::` read as a local module, so nothing in a diff showed that
+// `src/domain` was reaching across a crate boundary, and one file managed to
+// spell the same two crates three different ways. AGENTS.md bans back-compat
+// shims; these were the largest ones left.
+//
+// `pub use app::{Config, load_config, persist_last_model}` lived here too, with
+// zero consumers — all 76 call sites used `crate::app::` directly.

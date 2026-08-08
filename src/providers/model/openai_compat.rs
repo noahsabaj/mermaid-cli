@@ -12,21 +12,21 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 
-use crate::domain::ChatRequest;
-use crate::models::adapters::ModelLimits;
-use crate::models::adapters::openai_compat::OpenAICompatAdapter;
-use crate::models::{Model, ModelConfig, ModelError, ProviderProfile, Result};
+use mermaid_domain::ChatRequest;
+use mermaid_model::models::adapters::ModelLimits;
+use mermaid_model::models::adapters::openai_compat::OpenAICompatAdapter;
+use mermaid_model::models::{Model, ModelConfig, ModelError, ProviderProfile, Result};
 
-use super::super::capabilities::Capabilities;
 use super::super::ctx::{FinalResponse, StreamContext, StreamEvent};
 use super::{
     ContextSizing, ModelProvider, learn_output_cap, output_cap_from_error, resolve_limits_cached,
     retry_cap,
 };
+use mermaid_model::models::ModelCapabilities;
 
 pub struct OpenAICompatProvider {
     adapter: OpenAICompatAdapter,
-    capabilities: Capabilities,
+    capabilities: ModelCapabilities,
 }
 
 impl OpenAICompatProvider {
@@ -39,7 +39,7 @@ impl OpenAICompatProvider {
     ) -> Result<Self> {
         let adapter =
             OpenAICompatAdapter::new(profile, base_url, api_key, model_name, extra_headers)?;
-        let capabilities = Capabilities::from_legacy(adapter.capabilities());
+        let capabilities = adapter.capabilities().clone();
         Ok(Self {
             adapter,
             capabilities,
@@ -49,7 +49,7 @@ impl OpenAICompatProvider {
 
 #[async_trait]
 impl ModelProvider for OpenAICompatProvider {
-    fn capabilities(&self) -> &Capabilities {
+    fn capabilities(&self) -> &ModelCapabilities {
         &self.capabilities
     }
 
@@ -149,7 +149,7 @@ impl ModelProvider for OpenAICompatProvider {
             stop_reason: stop_reason.clone(),
         });
         drop(relay_tx);
-        crate::utils::join_logged(relay_handle.take(), "stream_relay").await;
+        mermaid_model::utils::join_logged(relay_handle.take(), "stream_relay").await;
 
         Ok(FinalResponse {
             usage,
@@ -185,7 +185,7 @@ mod tests {
             messages: vec![],
             system_prompt: "sys".to_string(),
             instructions: None,
-            reasoning: crate::models::ReasoningLevel::Medium,
+            reasoning: mermaid_model::models::ReasoningLevel::Medium,
             temperature: 0.7,
             max_tokens: 4096,
             tools: vec![],

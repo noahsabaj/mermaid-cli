@@ -20,9 +20,9 @@
 
 use std::sync::Arc;
 
-use mermaid_cli::domain::TurnId;
 use mermaid_cli::providers::model::ModelProvider;
 use mermaid_cli::providers::{AutoClassifier, ModelAutoClassifier, ProviderFactory, VetRequest};
+use mermaid_domain::TurnId;
 use tokio_util::sync::CancellationToken;
 
 #[path = "harness/stub_model.rs"]
@@ -33,7 +33,7 @@ const STUB: &str = "stub/scripted";
 
 fn classifier(model: Arc<ScriptedModel>) -> ModelAutoClassifier {
     let providers = ProviderFactory::with_seeded_providers(
-        mermaid_cli::app::Config::default(),
+        mermaid_domain::Config::default(),
         [(STUB.to_string(), model as Arc<dyn ModelProvider>)],
     );
     ModelAutoClassifier::new(Arc::new(providers), STUB.to_string())

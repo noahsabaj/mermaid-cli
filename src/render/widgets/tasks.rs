@@ -21,9 +21,9 @@
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
-use crate::domain::tasks::{TaskItem, TaskStatus, TaskStore};
-use crate::domain::{TaskOrigin, TurnState};
 use crate::render::theme::Theme;
+use mermaid_domain::checklist::{ChecklistItem, ChecklistStatus, ChecklistStore};
+use mermaid_domain::{ChecklistOrigin, TurnState};
 
 use super::truncate_to_cells;
 
@@ -35,7 +35,12 @@ const MAX_ROWS: usize = 8;
 /// work stays visible only while unfinished work remains). Collapsed with no
 /// status widget above (`attached` false) renders nothing — the state
 /// persists and the one-liner reappears when the next run starts.
-pub fn tasks_visible(store: &TaskStore, turn: &TurnState, collapsed: bool, attached: bool) -> bool {
+pub fn tasks_visible(
+    store: &ChecklistStore,
+    turn: &TurnState,
+    collapsed: bool,
+    attached: bool,
+) -> bool {
     if store.is_empty() {
         return false;
     }
@@ -50,7 +55,7 @@ pub fn tasks_visible(store: &TaskStore, turn: &TurnState, collapsed: bool, attac
 /// first row carries the `⎿` connector; detached rows sit flush-left.
 /// `width` is the zone's inner width in cells.
 pub fn build_task_lines(
-    store: &TaskStore,
+    store: &ChecklistStore,
     collapsed: bool,
     attached: bool,
     width: u16,
@@ -68,7 +73,7 @@ pub fn build_task_lines(
         return vec![collapsed_line(store, width, theme, meta_style)];
     }
 
-    let visible: Vec<&TaskItem> = store.visible().collect();
+    let visible: Vec<&ChecklistItem> = store.visible().collect();
     let (window, hidden_completed, hidden_pending, hidden_blocked) = window_rows(&visible);
 
     let mut lines = Vec::with_capacity(window.len() + 1);
@@ -97,7 +102,7 @@ pub fn build_task_lines(
 }
 
 /// Height the layout should reserve for the checklist zone.
-pub fn tasks_height(store: &TaskStore, collapsed: bool) -> u16 {
+pub fn tasks_height(store: &ChecklistStore, collapsed: bool) -> u16 {
     if collapsed {
         return 1;
     }
@@ -113,31 +118,31 @@ pub fn tasks_height(store: &TaskStore, collapsed: bool) -> u16 {
 /// Pick the rows to show: everything when it fits; otherwise start at the
 /// first non-completed task (completed rows scroll away first, matching the
 /// screenshots) and summarize the rest in the footer.
-fn window_rows<'a>(visible: &[&'a TaskItem]) -> (Vec<&'a TaskItem>, usize, usize, usize) {
+fn window_rows<'a>(visible: &[&'a ChecklistItem]) -> (Vec<&'a ChecklistItem>, usize, usize, usize) {
     if visible.len() <= MAX_ROWS {
         return (visible.to_vec(), 0, 0, 0);
     }
     let start = visible
         .iter()
-        .position(|t| t.status != TaskStatus::Completed)
+        .position(|t| t.status != ChecklistStatus::Completed)
         .unwrap_or(0);
     // Keep the window from overshooting the tail: back it up so MAX_ROWS
     // always fill when enough tasks exist.
     let start = start.min(visible.len() - MAX_ROWS);
-    let window: Vec<&TaskItem> = visible[start..start + MAX_ROWS].to_vec();
-    let hidden = |slice: &[&TaskItem], status: TaskStatus| {
+    let window: Vec<&ChecklistItem> = visible[start..start + MAX_ROWS].to_vec();
+    let hidden = |slice: &[&ChecklistItem], status: ChecklistStatus| {
         slice.iter().filter(|t| t.status == status).count()
     };
     let before = &visible[..start];
     let after = &visible[start + MAX_ROWS..];
     (
         window,
-        hidden(before, TaskStatus::Completed) + hidden(after, TaskStatus::Completed),
-        hidden(before, TaskStatus::Pending)
-            + hidden(after, TaskStatus::Pending)
-            + hidden(before, TaskStatus::InProgress)
-            + hidden(after, TaskStatus::InProgress),
-        hidden(before, TaskStatus::Blocked) + hidden(after, TaskStatus::Blocked),
+        hidden(before, ChecklistStatus::Completed) + hidden(after, ChecklistStatus::Completed),
+        hidden(before, ChecklistStatus::Pending)
+            + hidden(after, ChecklistStatus::Pending)
+            + hidden(before, ChecklistStatus::InProgress)
+            + hidden(after, ChecklistStatus::InProgress),
+        hidden(before, ChecklistStatus::Blocked) + hidden(after, ChecklistStatus::Blocked),
     )
 }
 
@@ -145,7 +150,7 @@ fn window_rows<'a>(visible: &[&'a TaskItem]) -> (Vec<&'a TaskItem>, usize, usize
 /// visually connects the list to the spinner line above and the rest indent
 /// to align; detached there is nothing to hang from, so rows sit flush-left.
 fn task_row(
-    task: &TaskItem,
+    task: &ChecklistItem,
     first: bool,
     attached: bool,
     width: usize,
@@ -162,12 +167,12 @@ fn task_row(
     let text = Style::new().fg(theme.colors.text_primary.to_color());
 
     // Completed rows earn a dim cost suffix when stamps exist: "(2m 10s · 8.4k tok)".
-    let suffix = if task.status == TaskStatus::Completed {
+    let suffix = if task.status == ChecklistStatus::Completed {
         cost_suffix(task)
     } else {
         String::new()
     };
-    let user_marker = if task.origin == TaskOrigin::User {
+    let user_marker = if task.origin == ChecklistOrigin::User {
         " (you)"
     } else {
         ""
@@ -181,27 +186,27 @@ fn task_row(
 
     let mut spans = vec![Span::styled(gutter.to_string(), meta_style)];
     match task.status {
-        TaskStatus::Completed => {
+        ChecklistStatus::Completed => {
             spans.push(Span::styled("√ ", brand));
             spans.push(Span::styled(subject, meta_style.crossed_out()));
         },
-        TaskStatus::InProgress => {
+        ChecklistStatus::InProgress => {
             spans.push(Span::styled("■ ", warning));
             spans.push(Span::styled(subject, brand.bold()));
         },
-        TaskStatus::Pending => {
+        ChecklistStatus::Pending => {
             spans.push(Span::styled("□ ", meta_style));
             spans.push(Span::styled(subject, text));
         },
         // ⊘ (U+2298, Mathematical Operators) stays outside the banned emoji
         // ranges like the other glyphs.
-        TaskStatus::Blocked => {
+        ChecklistStatus::Blocked => {
             spans.push(Span::styled("⊘ ", warning));
             spans.push(Span::styled(subject, text));
         },
         // Deleted never reaches here (filtered by `visible()`), but the
         // match stays exhaustive per house rule.
-        TaskStatus::Deleted => {
+        ChecklistStatus::Deleted => {
             spans.push(Span::styled("x ", meta_style));
             spans.push(Span::styled(subject, meta_style));
         },
@@ -218,7 +223,7 @@ fn task_row(
 /// The collapsed one-liner: what's up next (the active task already shows on
 /// the spinner line). All done → the plain progress count.
 fn collapsed_line(
-    store: &TaskStore,
+    store: &ChecklistStore,
     width: usize,
     theme: &Theme,
     meta_style: Style,
@@ -241,7 +246,7 @@ fn collapsed_line(
 }
 
 /// `" (2m 10s · 8.4k tok)"` for a completed task, empty when unstamped.
-fn cost_suffix(task: &TaskItem) -> String {
+fn cost_suffix(task: &ChecklistItem) -> String {
     let mut bits = Vec::new();
     if let Some(secs) = task.elapsed_secs()
         && secs > 0
@@ -253,7 +258,7 @@ fn cost_suffix(task: &TaskItem) -> String {
     {
         bits.push(format!(
             "{} tok",
-            crate::domain::format_compact_count(tokens as usize)
+            mermaid_domain::format_compact_count(tokens as usize)
         ));
     }
     if bits.is_empty() {
@@ -276,33 +281,33 @@ fn format_duration(secs: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::TaskEdit;
-    use crate::domain::tasks::{Stamp, TaskSpec};
+    use mermaid_domain::ChecklistEdit;
+    use mermaid_domain::checklist::{ChecklistSpec, Stamp};
 
-    fn store_of(statuses: &[TaskStatus]) -> TaskStore {
-        let mut store = TaskStore::default();
+    fn store_of(statuses: &[ChecklistStatus]) -> ChecklistStore {
+        let mut store = ChecklistStore::default();
         store.create(
             statuses
                 .iter()
                 .enumerate()
-                .map(|(i, _)| TaskSpec {
+                .map(|(i, _)| ChecklistSpec {
                     subject: format!("task number {i}"),
                     active_form: format!("doing task {i}"),
                     description: None,
                     in_progress: false,
                 })
                 .collect(),
-            TaskOrigin::Model,
+            ChecklistOrigin::Model,
             Stamp::default(),
         );
-        let edits: Vec<TaskEdit> = statuses
+        let edits: Vec<ChecklistEdit> = statuses
             .iter()
             .enumerate()
-            .filter(|(_, s)| **s != TaskStatus::Pending)
-            .map(|(i, s)| TaskEdit {
+            .filter(|(_, s)| **s != ChecklistStatus::Pending)
+            .map(|(i, s)| ChecklistEdit {
                 id: (i + 1) as u32,
                 status: Some(*s),
-                ..TaskEdit::default()
+                ..ChecklistEdit::default()
             })
             .collect();
         store.apply(&edits, Stamp::default());
@@ -323,7 +328,7 @@ mod tests {
 
     #[test]
     fn visibility_rules() {
-        use TaskStatus::*;
+        use ChecklistStatus::*;
         let store = store_of(&[Completed, InProgress, Pending]);
         assert!(tasks_visible(&store, &TurnState::Idle, false, false));
         let done = store_of(&[Completed, Completed]);
@@ -332,7 +337,7 @@ mod tests {
             "all-done idle retires"
         );
         assert!(!tasks_visible(
-            &TaskStore::default(),
+            &ChecklistStore::default(),
             &TurnState::Idle,
             false,
             true
@@ -345,7 +350,7 @@ mod tests {
 
     #[test]
     fn expanded_rows_carry_glyphs_and_gutter() {
-        use TaskStatus::*;
+        use ChecklistStatus::*;
         let store = store_of(&[Completed, InProgress, Pending]);
         let lines = build_task_lines(&store, false, true, 80, &Theme::dark());
         let rows = rendered(&lines);
@@ -357,7 +362,7 @@ mod tests {
 
     #[test]
     fn detached_rows_drop_elbow_and_sit_flush() {
-        use TaskStatus::*;
+        use ChecklistStatus::*;
         let store = store_of(&[Completed, InProgress, Pending]);
         let lines = build_task_lines(&store, false, false, 80, &Theme::dark());
         let rows = rendered(&lines);
@@ -370,8 +375,8 @@ mod tests {
 
     #[test]
     fn long_lists_window_and_summarize() {
-        use TaskStatus::*;
-        let statuses: Vec<TaskStatus> = [Completed, Completed]
+        use ChecklistStatus::*;
+        let statuses: Vec<ChecklistStatus> = [Completed, Completed]
             .into_iter()
             .chain([InProgress])
             .chain(std::iter::repeat_n(Pending, 9))
@@ -394,14 +399,14 @@ mod tests {
 
     #[test]
     fn blocked_rows_render_glyph_and_footer_counts_them() {
-        use TaskStatus::*;
+        use ChecklistStatus::*;
         let store = store_of(&[Blocked, InProgress, Pending]);
         let lines = build_task_lines(&store, false, true, 80, &Theme::dark());
         let rows = rendered(&lines);
         assert!(rows[0].starts_with(" ⎿ ⊘ "), "{:?}", rows[0]);
 
         // A blocked task hidden past the window shows up in the footer.
-        let statuses: Vec<TaskStatus> = [InProgress]
+        let statuses: Vec<ChecklistStatus> = [InProgress]
             .into_iter()
             .chain(std::iter::repeat_n(Pending, 7))
             .chain([Blocked])
@@ -416,7 +421,7 @@ mod tests {
 
     #[test]
     fn collapsed_shows_next_pending() {
-        use TaskStatus::*;
+        use ChecklistStatus::*;
         let store = store_of(&[Completed, InProgress, Pending]);
         let lines = build_task_lines(&store, true, true, 80, &Theme::dark());
         let rows = rendered(&lines);
@@ -437,25 +442,25 @@ mod tests {
 
     #[test]
     fn completed_rows_show_cost_and_user_marker() {
-        let mut store = TaskStore::default();
+        let mut store = ChecklistStore::default();
         store.create(
-            vec![TaskSpec {
+            vec![ChecklistSpec {
                 subject: "review the docs".into(),
                 active_form: "reviewing the docs".into(),
                 description: None,
                 in_progress: true,
             }],
-            TaskOrigin::User,
+            ChecklistOrigin::User,
             Stamp {
                 now_epoch: 100,
                 run_tokens: 1_000,
             },
         );
         store.apply(
-            &[TaskEdit {
+            &[ChecklistEdit {
                 id: 1,
-                status: Some(TaskStatus::Completed),
-                ..TaskEdit::default()
+                status: Some(ChecklistStatus::Completed),
+                ..ChecklistEdit::default()
             }],
             Stamp {
                 now_epoch: 230,

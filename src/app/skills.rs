@@ -11,6 +11,7 @@
 //! Loading is startup-only (no watcher): skills are rarely-edited authored
 //! artifacts; restart to pick up changes.
 
+use mermaid_domain::{LoadedSkills, SkillEntry, SkillSource};
 use std::path::{Path, PathBuf};
 
 /// Hard cap on indexed skills — the index is prompt real estate.
@@ -22,53 +23,6 @@ const MAX_INDEX_BYTES: usize = 8 * 1024;
 /// Bounded read for each SKILL.md — only the frontmatter matters here, and the
 /// model reads the full body itself on activation.
 const MAX_SKILL_FILE_BYTES: usize = 8 * 1024;
-
-/// Where a skill was discovered — also its precedence class (project wins).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SkillSource {
-    /// `<git-root>/.mermaid/skills/<name>/SKILL.md` — shared with the team.
-    Project,
-    /// `<config_dir>/skills/<name>/SKILL.md` — this machine's user.
-    User,
-    /// Declared by an enabled plugin's manifest `skills` list.
-    Plugin,
-}
-
-impl SkillSource {
-    /// Short label rendered in the index so the model (and the user reading a
-    /// transcript) can see where each playbook comes from.
-    fn label(self) -> &'static str {
-        match self {
-            SkillSource::Project => "project",
-            SkillSource::User => "user",
-            SkillSource::Plugin => "plugin",
-        }
-    }
-}
-
-/// One discovered skill: index metadata plus the absolute SKILL.md path the
-/// model reads on activation.
-#[derive(Debug, Clone)]
-pub struct SkillEntry {
-    /// Frontmatter `name:`, falling back to the skill's directory name.
-    pub name: String,
-    /// Frontmatter `description:`, falling back to the first body line.
-    pub description: String,
-    /// Absolute path to the SKILL.md file.
-    pub path: PathBuf,
-    /// Discovery origin (and precedence class).
-    pub source: SkillSource,
-}
-
-/// Snapshot of all discovered skills plus the pre-rendered index block that
-/// `build_chat_request` injects into the instructions suffix.
-#[derive(Debug, Clone)]
-pub struct LoadedSkills {
-    /// Deduplicated entries in precedence order (project, user, plugin).
-    pub entries: Vec<SkillEntry>,
-    /// The rendered `# Skills` block (capped; see `render_index`).
-    pub index: String,
-}
 
 /// Discover every skill visible from `cwd`, or `None` when there are none.
 /// Never errors: an unreadable root or file is skipped (per-file tolerance) —
@@ -115,7 +69,7 @@ fn discover_dir(root: &Path, source: SkillSource) -> Vec<SkillEntry> {
 /// Parse one SKILL.md into an entry. `None` when the file is missing or
 /// unreadable — discovery is tolerant so one broken skill never hides the rest.
 fn read_skill_entry(path: &Path, source: SkillSource) -> Option<SkillEntry> {
-    let raw = match crate::utils::read_file_capped(path, MAX_SKILL_FILE_BYTES) {
+    let raw = match mermaid_model::utils::read_file_capped(path, MAX_SKILL_FILE_BYTES) {
         Ok((bytes, _truncated)) => String::from_utf8_lossy(&bytes).into_owned(),
         Err(e) => {
             tracing::warn!(path = %path.display(), error = %e, "skills: skipping unreadable SKILL.md");
@@ -225,7 +179,7 @@ fn plugin_skill_paths(canonical_root: &Path, declared: &[String]) -> Vec<PathBuf
 /// Skills declared by enabled plugins. Store/parse failures degrade to empty —
 /// skills are additive context, never a startup blocker.
 fn plugin_entries() -> Vec<SkillEntry> {
-    let Ok(store) = crate::runtime::RuntimeStore::open_default() else {
+    let Ok(store) = mermaid_runtime::RuntimeStore::open_default() else {
         return Vec::new();
     };
     let Ok(plugins) = store.plugins().list() else {
@@ -239,7 +193,7 @@ fn plugin_entries() -> Vec<SkillEntry> {
             continue;
         }
         let Ok(manifest) =
-            serde_json::from_str::<crate::runtime::PluginManifest>(&plugin.manifest_json)
+            serde_json::from_str::<mermaid_runtime::PluginManifest>(&plugin.manifest_json)
         else {
             continue;
         };

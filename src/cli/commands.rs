@@ -2,17 +2,24 @@ use anyhow::{Context, Result, anyhow, bail};
 use std::path::Path;
 use std::sync::Arc;
 
+use mermaid_runtime::{NewProviderProbe, RuntimeStore, TaskRecord};
+
+use mermaid_model::models::{
+    BackendConfig, ChatMessage, Model, PROVIDER_REGISTRY, lookup_provider,
+};
+
+use mermaid_domain::Config;
+
+use mermaid_domain::{
+    ChatRequest, Cmd, CompactionEvent, CompactionResult, CompactionTrigger, Msg, SlashCmd, State,
+    build_replacement_messages, estimate_context_usage_for_request, prepare_compaction, update,
+};
+
 use crate::{
-    app::{Config, get_config_dir, init_config, load_config_or_warn},
-    domain::{
-        ChatRequest, Cmd, CompactionRecord, CompactionResult, CompactionTrigger, Msg, SlashCmd,
-        State, build_replacement_messages, estimate_context_usage_for_request, prepare_compaction,
-        update,
-    },
-    models::{BackendConfig, ChatMessage, Model, PROVIDER_REGISTRY, lookup_provider},
+    app::{get_config_dir, init_config, load_config_or_warn},
     ollama::is_installed as is_ollama_installed,
     providers::discovery::{configured_remote_provider_names, configured_remote_providers},
-    runtime::{NewProviderProbe, RuntimeClient, RuntimeStore, TaskRecord},
+    runtime_client::{RuntimeClient, record_static_provider_probes},
     session::ConversationManager,
 };
 
@@ -21,6 +28,10 @@ use super::{Commands, GitHost, OutputFormat, PairCommand, PluginCommand, PrComma
 /// Handle CLI subcommands
 /// Returns Ok(true) if the command was handled and we should exit
 /// Returns Ok(false) if we should continue to the main application
+#[expect(
+    clippy::too_many_lines,
+    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+)]
 pub async fn handle_command(
     command: &Commands,
     config: &Config,
@@ -236,7 +247,7 @@ pub(crate) struct DoctorReport {
     pub(crate) active_profile: Option<String>,
     pub(crate) active_model: Option<String>,
     pub(crate) model_error: Option<String>,
-    pub(crate) model_capabilities: Option<DoctorModelCapabilities>,
+    pub(crate) model_capabilities: Option<DoctorCapabilities>,
     pub(crate) safety_mode: String,
     pub(crate) checkpoint_on_mutation: bool,
     pub(crate) prompt_customized: bool,
@@ -252,7 +263,7 @@ pub(crate) struct DoctorReport {
 }
 
 #[derive(Debug, serde::Serialize)]
-pub(crate) struct DoctorModelCapabilities {
+pub(crate) struct DoctorCapabilities {
     pub(crate) provider: String,
     pub(crate) name: String,
     pub(crate) supports_tools: bool,
@@ -289,7 +300,7 @@ fn web_doctor_entries(config: &Config) -> (Vec<String>, Vec<String>) {
         ("web_fetch", capabilities.fetch),
         ("web_search", capabilities.search),
     ] {
-        if config.safety.network == crate::app::NetworkPolicy::Deny {
+        if config.safety.network == mermaid_domain::NetworkPolicy::Deny {
             next_steps.push(format!(
                 "{name} is disabled by safety.network = \"deny\" (selected backend '{}'; {}).",
                 status.backend, status.trust_destination
@@ -325,6 +336,10 @@ async fn show_doctor(
 
 /// Assemble the full readiness report without printing — shared by
 /// `mermaid doctor` and the `mermaid feedback` diagnostic bundle.
+#[expect(
+    clippy::too_many_lines,
+    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+)]
 pub(crate) async fn build_doctor_report(
     config: &Config,
     cwd: &Path,
@@ -333,11 +348,11 @@ pub(crate) async fn build_doctor_report(
     let active_model_result = crate::app::resolve_model_id(cli_model, config).await;
     let (active_model, model_error, model_capabilities) = match active_model_result {
         Ok(model) => {
-            let snapshot = crate::domain::ProviderCapabilitySnapshot::from_model_id(&model);
+            let snapshot = mermaid_domain::ProviderCapabilitySnapshot::from_model_id(&model);
             (
                 Some(model),
                 None,
-                Some(DoctorModelCapabilities {
+                Some(DoctorCapabilities {
                     provider: snapshot.provider,
                     name: snapshot.model,
                     supports_tools: snapshot.supports_tools,
@@ -629,15 +644,21 @@ fn run_self_test(config: &Config, format: OutputFormat, keep_workspace: bool) ->
         },
         Err(err) => DoctorCheck {
             status: "warning",
-            message: err.to_string(),
+            // `{err:#}` and not `to_string()`: this is the only report the
+            // user gets, and the outermost context is always the same
+            // "failed to open runtime DB <path>" — the sentence that says
+            // WHY (a locked file, a schema this build will not migrate, a
+            // permissions denial) is the rusqlite cause underneath it, which
+            // `to_string()` drops on the floor.
+            message: format!("{err:#}"),
         },
     };
 
     // Real per-platform probes (Linux: the seccomp filter / Landlock ruleset
     // assemble; macOS: /usr/bin/sandbox-exec exists; elsewhere: no backend
     // yet, truthfully "no" instead of the old hardcoded "yes").
-    let sandbox_available = crate::runtime::network_killswitch_available();
-    let fs_sandbox_available = crate::runtime::fs_confinement_available();
+    let sandbox_available = mermaid_runtime::network_killswitch_available();
+    let fs_sandbox_available = mermaid_runtime::fs_confinement_available();
     let (network_check, fs_check) = if cfg!(target_os = "linux") {
         (
             "network kill-switch (seccomp) builds on this platform",
@@ -739,7 +760,7 @@ fn label(status: &str) -> &'static str {
     }
 }
 
-fn safety_mode_name(mode: crate::runtime::SafetyMode) -> &'static str {
+fn safety_mode_name(mode: mermaid_runtime::SafetyMode) -> &'static str {
     mode.as_str()
 }
 
@@ -805,8 +826,11 @@ fn login(provider: Option<&str>, config: &Config) -> Result<()> {
             "Provider API-key status (env beats keyring; `mermaid login <provider>` stores a key):\n"
         );
         for (name, default_env, override_env) in &rows {
-            let source =
-                crate::utils::provider_key_source(name, default_env, override_env.as_deref());
+            let source = mermaid_model::utils::provider_key_source(
+                name,
+                default_env,
+                override_env.as_deref(),
+            );
             let env_name = override_env.as_deref().unwrap_or(default_env);
             println!("  {:<14} {:<8} (${})", name, source, env_name);
         }
@@ -829,7 +853,7 @@ fn login(provider: Option<&str>, config: &Config) -> Result<()> {
         .context("read API key")?;
     let key = key.trim();
     anyhow::ensure!(!key.is_empty(), "no key entered; nothing stored");
-    let store = crate::utils::default_store();
+    let store = mermaid_model::utils::default_store();
     store
         .set(&name, key)
         .with_context(|| format!("store key for {}", name))?;
@@ -839,7 +863,7 @@ fn login(provider: Option<&str>, config: &Config) -> Result<()> {
         store.label()
     );
     // The env var, when set, silently wins — say so now, not at 2am.
-    if crate::utils::resolve_api_key(&default_env, override_env.as_deref()).is_some() {
+    if mermaid_model::utils::resolve_api_key(&default_env, override_env.as_deref()).is_some() {
         let env_name = override_env.as_deref().unwrap_or(&default_env);
         println!(
             "Note: ${} is currently set and takes precedence over the stored key.",
@@ -856,7 +880,7 @@ fn logout(provider: &str, config: &Config) -> Result<()> {
     // Unknown names are allowed here — a key may be stored for a provider
     // that was since removed from config; deleting it must stay possible.
     let _ = config;
-    let store = crate::utils::default_store();
+    let store = mermaid_model::utils::default_store();
     if store
         .delete(&provider)
         .with_context(|| format!("delete key for {}", provider))?
@@ -873,7 +897,7 @@ fn logout(provider: &str, config: &Config) -> Result<()> {
 }
 
 fn meta_api_key(config: &Config) -> Option<String> {
-    crate::utils::resolve_provider_key(
+    mermaid_model::utils::resolve_provider_key(
         "meta",
         crate::providers::model::meta::DEFAULT_API_KEY_ENV,
         config
@@ -925,6 +949,10 @@ impl QaCompactSmokeReport {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+)]
 fn run_qa_compact_smoke(
     config: &Config,
     cwd: &Path,
@@ -970,7 +998,7 @@ fn run_qa_compact_smoke(
     );
 
     let summary = deterministic_compaction_summary(&prepared, turns);
-    let mut record = CompactionRecord {
+    let mut record = CompactionEvent {
         id: format!("qa_compact_{}", fresh_qa_id()),
         trigger: CompactionTrigger::Manual,
         created_at: chrono::Local::now(),
@@ -981,11 +1009,11 @@ fn run_qa_compact_smoke(
         preserved_turn_count: prepared
             .preserved_messages
             .iter()
-            .filter(|message| message.role == crate::models::MessageRole::User)
+            .filter(|message| message.role == mermaid_model::models::MessageRole::User)
             .count(),
         summary_tokens: summary.len().div_ceil(4),
         duration_secs: 0.0,
-        review_status: crate::domain::CompactionReviewStatus::DraftValidated,
+        review_status: mermaid_domain::CompactionReviewStatus::DraftValidated,
         review_error: None,
         focus: Some("qa compact smoke".to_string()),
         archive_path: None,
@@ -1065,9 +1093,9 @@ fn run_qa_compact_smoke(
     );
     checks.push("conversation records compaction metadata".to_string());
     anyhow::ensure!(
-        messages
-            .first()
-            .is_some_and(|msg| msg.kind == crate::models::ChatMessageKind::ContextCheckpoint),
+        messages.first().is_some_and(
+            |msg| msg.kind == mermaid_model::models::ChatMessageKind::ContextCheckpoint
+        ),
         "replacement does not start with a context checkpoint"
     );
     checks.push("replacement starts with context checkpoint".to_string());
@@ -1184,7 +1212,7 @@ fn synthetic_compaction_messages(turns: usize) -> Vec<ChatMessage> {
 }
 
 fn deterministic_compaction_summary(
-    prepared: &crate::domain::PreparedCompaction,
+    prepared: &mermaid_domain::PreparedCompaction,
     turns: usize,
 ) -> String {
     format!(
@@ -1313,7 +1341,7 @@ async fn show_models(config: &Config) -> Result<()> {
 }
 
 async fn show_model_info(model: &str, config: &Config) -> Result<()> {
-    let snapshot = crate::domain::ProviderCapabilitySnapshot::from_model_id(model);
+    let snapshot = mermaid_domain::ProviderCapabilitySnapshot::from_model_id(model);
     let store = RuntimeStore::open_default()?;
     let provider = snapshot.provider.clone();
 
@@ -1334,7 +1362,7 @@ async fn show_model_info(model: &str, config: &Config) -> Result<()> {
             messages: vec![],
             system_prompt: String::new(),
             instructions: None,
-            reasoning: crate::models::ReasoningLevel::None,
+            reasoning: mermaid_model::models::ReasoningLevel::None,
             temperature: 0.0,
             max_tokens: 0,
             tools: vec![],
@@ -1404,7 +1432,7 @@ async fn show_model_info(model: &str, config: &Config) -> Result<()> {
             })
     );
     if let Some(profile) = lookup_provider(&snapshot.provider) {
-        crate::runtime::record_static_provider_probes(&store, profile, &provider, &snapshot.model);
+        record_static_provider_probes(&store, profile, &provider, &snapshot.model);
         println!("Token budget field: {:?}", profile.max_tokens_param);
         println!(
             "Single-tool-call models: {}",
@@ -1424,7 +1452,7 @@ async fn probe_configured_provider_models(config: &Config) -> Result<()> {
         .build()?;
     for profile in PROVIDER_REGISTRY {
         let user_cfg = config.providers.get(profile.name);
-        let Some(api_key) = crate::utils::resolve_provider_key(
+        let Some(api_key) = mermaid_model::utils::resolve_provider_key(
             profile.name,
             profile.api_key_env,
             user_cfg.and_then(|c| c.api_key_env.as_deref()),
@@ -1646,8 +1674,8 @@ fn deny(id: &str) -> Result<()> {
 /// Daemon-only — there is no local fallback (the events only exist while the
 /// daemon executes the run).
 fn follow_task(id: &str) -> Result<()> {
-    let lines = crate::runtime::subscribe_daemon_lines(
-        crate::runtime::DaemonRequest::SubscribeTask {
+    let lines = mermaid_runtime::subscribe_daemon_lines(
+        crate::runtime_client::DaemonRequest::SubscribeTask {
             task_id: id.to_string(),
         }
         .to_wire(),
@@ -1696,8 +1724,8 @@ fn follow_task(id: &str) -> Result<()> {
 /// cancelled straight in the local store when no daemon is reachable, since
 /// queued tasks only ever execute via the daemon's claim query.
 fn cancel_task(id: &str) -> Result<()> {
-    match crate::runtime::request_daemon_json(
-        crate::runtime::DaemonRequest::CancelTask { id: id.to_string() }.to_wire(),
+    match mermaid_runtime::request_daemon_json(
+        crate::runtime_client::DaemonRequest::CancelTask { id: id.to_string() }.to_wire(),
     ) {
         Ok(response) => {
             if response.get("cancelling").and_then(|v| v.as_bool()) == Some(true) {
@@ -1708,12 +1736,12 @@ fn cancel_task(id: &str) -> Result<()> {
             Ok(())
         },
         Err(daemon_err) => {
-            let store = crate::runtime::RuntimeStore::open_default()?;
+            let store = mermaid_runtime::RuntimeStore::open_default()?;
             match store.tasks().get(id)? {
-                Some(task) if task.status == crate::runtime::TaskStatus::Queued => {
+                Some(task) if task.status == mermaid_runtime::TaskStatus::Queued => {
                     store.tasks().update_status(
                         id,
-                        crate::runtime::TaskStatus::Cancelled,
+                        mermaid_runtime::TaskStatus::Cancelled,
                         Some("cancelled before start"),
                     )?;
                     println!("Cancelled {} (was queued; daemon unreachable)", id);
@@ -1781,7 +1809,7 @@ fn restore_checkpoint(id: &str, force: bool) -> Result<()> {
     // Restoring overwrites the working tree from the checkpoint. Confirm first
     // (default NO); `--force` is the scripted-use bypass, and a non-interactive
     // session without it refuses rather than clobbering the tree unprompted (#113).
-    if !crate::utils::confirm_or_refuse(
+    if !mermaid_model::utils::confirm_or_refuse(
         &format!("Restore checkpoint {id}? This overwrites the current working tree."),
         force,
     )? {
@@ -1805,9 +1833,9 @@ fn restore_checkpoint(id: &str, force: bool) -> Result<()> {
 fn handle_plugin(command: &PluginCommand) -> Result<()> {
     match command {
         PluginCommand::Install { path } => {
-            let preview = crate::runtime::plugin_capability_preview(path)?;
+            let preview = mermaid_runtime::plugin_capability_preview(path)?;
             print_plugin_capability_preview(&preview);
-            let record = crate::runtime::install_plugin_from_path(path)?;
+            let record = mermaid_runtime::install_plugin_from_path(path)?;
             println!(
                 "Installed plugin {} ({}) — DISABLED.",
                 record.name, record.id
@@ -1846,7 +1874,7 @@ fn handle_plugin(command: &PluginCommand) -> Result<()> {
                 .into_iter()
                 .find(|p| p.id == *id || p.name == *id)
                 && let Ok(preview) =
-                    crate::runtime::plugin_capability_preview(Path::new(&plugin.source))
+                    mermaid_runtime::plugin_capability_preview(Path::new(&plugin.source))
             {
                 print_plugin_capability_preview(&preview);
             }
@@ -1864,10 +1892,10 @@ fn handle_plugin(command: &PluginCommand) -> Result<()> {
                 path.clone()
             };
             let raw = std::fs::read_to_string(&manifest_path)?;
-            let manifest: crate::runtime::PluginManifest = toml::from_str(&raw)?;
+            let manifest: mermaid_runtime::PluginManifest = toml::from_str(&raw)?;
             let root = manifest_path.parent().unwrap_or_else(|| Path::new("."));
-            crate::runtime::validate_plugin_manifest(&manifest, root)?;
-            let preview = crate::runtime::plugin_capability_preview(path)?;
+            mermaid_runtime::validate_plugin_manifest(&manifest, root)?;
+            let preview = mermaid_runtime::plugin_capability_preview(path)?;
             println!("Plugin manifest is valid: {}", manifest.name);
             print_plugin_capability_preview(&preview);
         },
@@ -1875,9 +1903,9 @@ fn handle_plugin(command: &PluginCommand) -> Result<()> {
     Ok(())
 }
 
-fn print_plugin_capability_preview(preview: &crate::runtime::PluginCapabilityPreview) {
+fn print_plugin_capability_preview(preview: &mermaid_runtime::PluginCapabilityPreview) {
     println!(
-        "Capabilities declared by plugin {} (advisory, not sandbox-enforced):",
+        "ModelCapabilities declared by plugin {} (advisory, not sandbox-enforced):",
         preview.name
     );
     if preview.declared_capabilities.is_empty() && preview.capabilities_toml.is_none() {
@@ -1908,9 +1936,9 @@ fn handle_pair(command: &PairCommand) -> Result<()> {
     let store = RuntimeStore::open_default()?;
     match command {
         PairCommand::Create { label, ttl_days } => {
-            let ttl = ttl_days.unwrap_or(crate::runtime::DEFAULT_PAIRING_TTL_DAYS);
-            let expires_at = crate::runtime::pairing_expiry_from_now(ttl);
-            let (token, hash) = crate::runtime::generate_pairing_token()?;
+            let ttl = ttl_days.unwrap_or(mermaid_runtime::DEFAULT_PAIRING_TTL_DAYS);
+            let expires_at = mermaid_runtime::pairing_expiry_from_now(ttl);
+            let (token, hash) = mermaid_runtime::generate_pairing_token()?;
             let record =
                 store
                     .pairing_tokens()
@@ -1923,7 +1951,7 @@ fn handle_pair(command: &PairCommand) -> Result<()> {
             );
             println!(
                 "Use with daemon JSON by setting {}.",
-                crate::runtime::daemon::DAEMON_TOKEN_ENV
+                mermaid_runtime::daemon::DAEMON_TOKEN_ENV
             );
             println!("Store this now; Mermaid will not print it again.");
         },
@@ -2038,7 +2066,7 @@ fn restart_process(id: &str) -> Result<()> {
 
 fn open_target(target: &str) -> Result<()> {
     if RuntimeClient::auto().open_process(target).is_err() {
-        crate::utils::open_file(target);
+        mermaid_model::utils::open_file(target);
     }
     Ok(())
 }
@@ -2121,7 +2149,7 @@ pub async fn list_models(config: &Config) -> Result<()> {
 /// intent paths (chat's `send_chat`, the startup preflight in
 /// `ollama::installer`) keep autostart; that's where a dead server heals.
 async fn list_ollama_models(config: &Config) -> Option<Vec<String>> {
-    use crate::models::adapters::ollama::OllamaAdapter;
+    use mermaid_model::models::adapters::ollama::OllamaAdapter;
     let backend = BackendConfig {
         ollama_url: format!("{}:{}", config.ollama.host, config.ollama.port),
         timeout_secs: 5,
@@ -2204,7 +2232,7 @@ async fn run_update(check: bool, force: bool) -> Result<()> {
     } else {
         INSTALL_SH_URL
     };
-    if !crate::utils::confirm_or_refuse(
+    if !mermaid_model::utils::confirm_or_refuse(
         &format!(
             "About to download and run {script_url} to replace {}.",
             install_dir.display()
@@ -2247,7 +2275,7 @@ async fn run_install_script(client: &reqwest::Client, install_dir: &Path) -> Res
     // exec (#F50). The previous world-readable, predictable
     // `temp_dir()/mermaid-update-<pid>.<ext>` allowed both a symlink redirect and
     // a write→exec TOCTOU.
-    let dir = crate::utils::private_temp_dir()
+    let dir = mermaid_model::utils::private_temp_dir()
         .map_err(|e| anyhow!("could not create private temp dir for install script: {e}"))?;
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2374,6 +2402,10 @@ fn show_mcp_servers() {
 }
 
 /// Show status of all dependencies
+#[expect(
+    clippy::too_many_lines,
+    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+)]
 async fn show_status(config: &Config) -> Result<()> {
     println!("Mermaid Status:");
     println!();
@@ -2728,9 +2760,9 @@ mod tests {
     #[test]
     fn doctor_uses_resolved_keyless_web_capabilities() {
         let config = Config {
-            web: crate::app::WebConfig {
-                fetch_backend: crate::app::FetchBackend::Native,
-                search_backend: crate::app::SearchBackend::Searxng,
+            web: mermaid_domain::WebConfig {
+                fetch_backend: mermaid_domain::FetchBackend::Native,
+                search_backend: mermaid_domain::SearchBackend::Searxng,
                 searxng_url: "http://127.0.0.1:8080".to_string(),
             },
             ..Config::default()
@@ -2756,9 +2788,9 @@ mod tests {
     #[test]
     fn doctor_reports_global_network_deny_instead_of_advertising_web() {
         let mut config = Config::default();
-        config.web.search_backend = crate::app::SearchBackend::Searxng;
+        config.web.search_backend = mermaid_domain::SearchBackend::Searxng;
         config.web.searxng_url = "http://127.0.0.1:8080".to_string();
-        config.safety.network = crate::app::NetworkPolicy::Deny;
+        config.safety.network = mermaid_domain::NetworkPolicy::Deny;
 
         let (tools, next_steps) = web_doctor_entries(&config);
         assert!(

@@ -7,6 +7,161 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The purity guard now checks dependency direction, not just I/O tokens.**
+  `check_domain_purity.py` scanned `src/domain` for seven strings —
+  `std::fs`, `tokio::`, `reqwest`, and friends. `use crate::app::Config`
+  contains none of them, so the guard reported OK while the "pure" MVU core
+  accumulated 34 production edges into `app`, `session`, `providers`, and
+  `render`. Two of those are cycles: `app::CompactionConfig::policy()` returns
+  a `domain::CompactionPolicy`, and `app::stamp_session_provenance` takes
+  `&mut domain::State` — which `state.rs` opens by declaring that nothing
+  outside `update()` may hold one.
+
+  It also read less of the tree than it appeared to. It truncated each file at
+  the first `#[cfg(test)]`, so it scanned 43% of `reducer.rs`; and its `ROOT`
+  was `src/domain` alone, so `src/render` was never scanned at all despite
+  AGENTS.md claiming CI enforced its purity. `src/render` is not pure:
+  `chrono::Local::now()` sits in a render cache key and `std::env::var` is read
+  per frame.
+
+  `.github/scripts/check_layering.py` replaces it. It covers `src/domain`,
+  `src/render`, and `src/prompts.rs`; enforces a declared layer table so an
+  upward import fails with the rationale attached; blanks each `#[cfg(test)]`
+  item by brace matching instead of truncating; resolves
+  `#[cfg(test)] mod foo;` to whole test-only files; and lexes comments, string
+  literals, and nesting-aware block comments out before matching. The
+  forbidden-token list gains `std::env`, `std::io`, `std::thread`,
+  `Command::new`, `rusqlite`, `.await`, `Local::now`/`Utc::now`, and `unsafe`.
+
+  Pre-existing debt is recorded in `.github/baselines/layering.txt` — 16 keys,
+  47 occurrences — via a shared ratchet (`.github/scripts/ratchet.py`) that
+  fails CI when the count *rises* and equally when it *falls without the file
+  being updated*. A baseline that could only be appended to is a place debt
+  goes to be forgotten; requiring it to be edited down puts the number in the
+  diff.
+
+- **`just check` runs the source guards.** AGENTS.md called it "the exact
+  pre-PR gate (also what CI runs)" while CI ran two guards it did not.
+
+- **The lints `.clippy.toml` had been configuring are now enabled.** AGENTS.md
+  said "clippy caps functions at 100 lines". It did not: `too_many_lines` is a
+  *pedantic* lint, no manifest carried a `[lints]` table, and CI ran stock
+  `clippy::all`. The threshold configured a lint that never ran, which is how
+  `update_step` reached 774 lines — and how a `#[allow(clippy::too_many_lines)]`
+  came to sit in `exec.rs` suppressing nothing.
+
+  All three manifests now carry an identical `[lints.clippy]` table denying
+  `too_many_lines`, `excessive_nesting`, `dbg_macro`, `todo`, `unimplemented`,
+  and `mem_forget`. The table is duplicated rather than inherited via
+  `[workspace.lints]`: the `isolated-crate-build` job copies `crates/.` to a
+  directory with no workspace root, where `lints.workspace = true` is a hard
+  manifest-parse error. `tests/lint_policy_drift.rs` guards the duplication and
+  pins that the threshold and the lint stay enabled together.
+
+  The 59 functions already over the cap carry
+  `#[expect(clippy::too_many_lines, reason = ...)]`, counted in
+  `.github/baselines/expect_budget.txt` (45 keys, 69 occurrences) which only
+  shrinks. Every pre-existing `#[allow(clippy::…)]` became `#[expect]` so
+  `unfulfilled_lint_expectations` reports a suppression that stops being
+  necessary — which immediately found four suppressing nothing
+  (`large_enum_variant` on `Msg`, `too_many_arguments` on `block_for_approval`
+  and `hard_break_styled_word`, `too_many_lines` on
+  `finish_foreground_command`). All four removed.
+
+  Seven now-inert keys were deleted from `.clippy.toml` rather than left
+  looking load-bearing, under a stated invariant: every key must configure a
+  lint that is actually enabled.
+
+- **`update_step` enforces its own no-wildcard rule.** AGENTS.md promised the
+  reducer has "no wildcard `_ =>` arms that hide new `Msg`s"; nothing checked
+  it, and the top-level `match msg` merely happened to stay exhaustive. It now
+  carries `#[deny(clippy::wildcard_enum_match_arm,
+  clippy::match_wildcard_for_single_variants)]`. Both, because the first only
+  fires when `_` covers two or more remaining variants — a `_` added beside a
+  single unhandled `Msg` would slip past it. Function-scoped, so the 96
+  legitimate `_ =>` arms on `KeyCode` and friends elsewhere are unaffected.
+
+- **The re-export shims are gone.** AGENTS.md bans back-compat shims; the two
+  largest covered ~1,046 call sites against 2 that named a crate directly. That
+  ratio is now 0 to 1,059. `crate::models::` read as a local module, so nothing
+  in a diff showed `src/domain` reaching across a crate boundary — the exact
+  property the crate split exists to make visible.
+
+  Deleted: `src/lib.rs`'s re-exports (including
+  `pub use app::{Config, load_config, persist_last_model}`, which had zero
+  consumers), `pub use mermaid_runtime::*`, the three 100%-shim files
+  `src/domain/{action,ids,question}.rs`, the embedded `tool_run` re-export in
+  `src/domain/runtime.rs`, `src/effect`'s re-export of `models::retry` (which
+  no consumer could reach), and `crates/mermaid-model/src/utils/redact.rs`.
+  Plus 34 dead `pub use` names and 4 unused dependencies (`sysinfo`,
+  `tokio-stream`, `tracing-subscriber`, `tempfile`).
+
+  `src/runtime/` is now `src/runtime_client/`. It is the daemon client and sits
+  *above* `mermaid-runtime`; sharing a name with the crate it wraps is what made
+  `crate::runtime::Foo` ambiguous.
+
+- **A crate-root `pub use` must now have a consumer.**
+  `.github/scripts/check_exports.py` fails on a name re-exported from
+  `src/lib.rs` or `crates/*/src/lib.rs` that nothing in the workspace names.
+  This is the one clause of the "no back-compat shims" rule the compiler cannot
+  help with: a `pub` item is reachable by definition, so `-D warnings` never
+  sees it. The measured cost of not having the check was 34 such names — all
+  twelve `*Repo` types in `mermaid-runtime`'s root, six `OUTCOME_*` constants,
+  and a `redact` forward that had drifted asymmetrically, so
+  `crate::utils::redact_json` resolved while `redact_json_text` did not.
+
+  `cargo-public-api` and `cargo-semver-checks` were both considered and
+  declined: they guard an API these crates explicitly do not promise, and
+  `semver-checks` conflicts outright with the delete-cleanly rule.
+
+- **`cargo deny` replaces `cargo audit`; `cargo machete` joins it.** Same
+  RustSec database, and `deny.toml` sets `unmaintained = "workspace"`, which
+  preserves the judgement the old step encoded by declining `--deny warnings`.
+  Added are the three questions `audit` cannot ask: license compatibility
+  (Mermaid ships static binaries under `MIT OR Apache-2.0` and nothing checked
+  for a transitive copyleft dep), bans (`openssl-sys` must never reappear in a
+  deliberately rustls-only build, and `wildcards = "deny"` stops `foo = "*"`),
+  and source provenance.
+
+  `cargo machete` immediately found five dependencies the root manifest
+  declared and never imported: `bytes`, `regex`, `url`, `nucleo-matcher` — the
+  last three left behind when their code moved down to `mermaid-domain` — plus
+  `keyring` and its companion `dbus-secret-service`, whose every call site is
+  in `mermaid-model`. Workspace feature unification is why `cargo build` never
+  noticed. All six removed; `cargo tree --target x86_64-unknown-linux-gnu`
+  confirms `dbus-secret-service/vendored` and all four keyring features still
+  resolve, now sourced from `mermaid-model` alone.
+
+- **Pedantic and nursery lint debt is tracked.** A `clippy-ratchet` job records
+  `pedantic`, `nursery`, `unwrap_used`, `panic`, `wildcard_enum_match_arm`,
+  `string_slice`, `trivially_copy_pass_by_ref` and `many_single_char_names`
+  against `.github/baselines/clippy_pedantic.txt` — 85 lints, 5,378
+  occurrences. It does not run on pull requests: enabling these lints changes
+  clippy's fingerprint, so the job cannot share the blocking `Clippy` job's
+  cache and rebuilds the workspace, and the answer does not change PR-to-PR.
+  The survey uses `--force-warn` rather than `-W`, because a `deny` in
+  `mermaid-runtime` aborts the build before the crates above it are linted —
+  which is how the first `too_many_lines` count of this workspace came back as
+  3 when the real number was 59.
+
+### Fixed
+
+- **`cargo doc` accepted broken intra-doc links.** The CI step ran without
+  `-D warnings`, so rustdoc printed unresolved links and exited 0. Twenty had
+  accumulated, including `TaskBroker::note_tokens` — a method renamed to
+  `add_tokens` with three doc references left pointing at the old name — plus
+  `<provider>/<model>` placeholders that rustdoc parsed as unclosed HTML tags.
+  All fixed, and the gate is now `RUSTDOCFLAGS: -D warnings`.
+
+- **`mermaid self-test` said the runtime store failed to open without saying
+  why.** The error was rendered with `err.to_string()`, which prints an
+  `anyhow::Error`'s outermost context and drops the chain — and the outermost
+  context is always the same `failed to open runtime DB <path>`. `{err:#}`
+  now carries the cause, which is the sentence that distinguishes a locked
+  file from a permissions denial from a schema this build will not migrate.
+
 ## [0.21.1] - 2026-08-07
 
 ### Fixed

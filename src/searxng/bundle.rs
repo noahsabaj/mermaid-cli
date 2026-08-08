@@ -289,7 +289,7 @@ async fn provision(
         "https://github.com/{BUNDLE_REPO}/releases/download/{}/{asset}",
         bundle_manifest::BUNDLE_VERSION
     );
-    let staging_root = crate::utils::private_temp_dir()
+    let staging_root = mermaid_model::utils::private_temp_dir()
         .context("creating the private staging dir for the SearXNG bundle")?;
     ensure_provisioning_capacity(root, &staging_root)?;
     let (staging, staging_cleanup) = create_unique_dir(&staging_root, "searxng-download")?;

@@ -12,10 +12,11 @@
 //! file is gone, drop the instructions. One stat per turn is
 //! microseconds — no need for a filesystem watcher.
 
+use mermaid_domain::{InstructionSource, LoadedInstructions};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
-use crate::constants::{INSTRUCTIONS_TRUNCATION_MARKER, MAX_INSTRUCTIONS_BYTES};
+use mermaid_model::constants::{INSTRUCTIONS_TRUNCATION_MARKER, MAX_INSTRUCTIONS_BYTES};
 
 /// Instruction files Mermaid understands, in load order. `AGENTS.md` (the
 /// cross-tool open standard) is read first; `MERMAID.md` (mermaid-specific) is
@@ -26,47 +27,6 @@ pub const INSTRUCTION_FILENAMES: &[&str] = &["AGENTS.md", "MERMAID.md"];
 /// Hard cap on how many directory levels `find_instruction_files` walks up
 /// before giving up. Guards against pathological symlink loops.
 const MAX_WALK_DEPTH: usize = 32;
-
-/// One loaded instruction file inside a combined project-instructions
-/// snapshot.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct InstructionSource {
-    pub path: PathBuf,
-    pub mtime: SystemTime,
-    pub byte_len: usize,
-}
-
-/// One-shot snapshot of loaded project instructions. Stored on `App` and
-/// `NonInteractiveRunner` so the per-turn auto-reload check has
-/// something to compare against.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct LoadedInstructions {
-    /// Primary absolute path the content was read from. Kept for
-    /// compatibility with older renderer/status code; `sources`
-    /// carries the full set.
-    pub path: PathBuf,
-    /// File body, possibly truncated. The truncation marker is
-    /// appended in-place so the model sees the elision.
-    pub content: String,
-    /// mtime at last read — compared against the next `stat()` to
-    /// decide whether to re-read.
-    pub mtime: SystemTime,
-    /// Original file size on disk (before any truncation).
-    pub byte_len: usize,
-    /// True when the file was larger than `MAX_INSTRUCTIONS_BYTES`
-    /// and the content was clipped + marker appended.
-    pub truncated: bool,
-    /// All files that contributed to `content`.
-    pub sources: Vec<InstructionSource>,
-}
-
-impl LoadedInstructions {
-    /// Approximate token count for status messages. ~4 chars/token is
-    /// the rule of thumb that's correct enough for user-facing display.
-    pub fn approx_tokens(&self) -> usize {
-        self.content.len() / 4
-    }
-}
 
 /// Outcome of a `refresh()` call. Used to decide whether to emit a
 /// status line so the user knows their context shifted.
@@ -219,7 +179,7 @@ pub fn load_from_paths(paths: &[PathBuf]) -> Option<LoadedInstructions> {
         // true on-disk size comes from the stat above, so `byte_len` stays
         // accurate rather than reflecting the capped read.
         let Ok((bytes, _truncated)) =
-            crate::utils::read_file_capped(path, MAX_INSTRUCTIONS_BYTES.saturating_add(1))
+            mermaid_model::utils::read_file_capped(path, MAX_INSTRUCTIONS_BYTES.saturating_add(1))
         else {
             continue;
         };
@@ -330,11 +290,11 @@ pub fn refresh(
 /// reports as loaded.
 pub fn load_project_context(
     cwd: &Path,
-    mem_cfg: &crate::app::MemoryConfig,
+    mem_cfg: &mermaid_domain::MemoryConfig,
 ) -> (
     Option<LoadedInstructions>,
-    Option<crate::app::memory::LoadedMemory>,
-    Option<crate::app::skills::LoadedSkills>,
+    Option<mermaid_domain::LoadedMemory>,
+    Option<mermaid_domain::LoadedSkills>,
 ) {
     let (instructions, _) = refresh(None, cwd);
     let (memory, _) = crate::app::memory::refresh(None, cwd, mem_cfg);
@@ -663,7 +623,7 @@ mod tests {
         fs::create_dir(dir.join(".git")).unwrap();
         fs::write(dir.join("MERMAID.md"), "sync-loaded instructions").unwrap();
         let (instructions, _memory, _skills) =
-            load_project_context(&dir, &crate::app::MemoryConfig::default());
+            load_project_context(&dir, &mermaid_domain::MemoryConfig::default());
         let content = instructions
             .expect("instructions must load synchronously")
             .content;

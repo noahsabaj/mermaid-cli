@@ -24,15 +24,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use mermaid_cli::domain::CompactionReviewStatus;
-use mermaid_cli::domain::{
-    ChatRequest, Cmd, CompactionPolicy, CompactionRequest, Msg, StatusKind, TurnId,
-};
 use mermaid_cli::effect::EffectRunner;
-use mermaid_cli::models::{ChatMessage, ReasoningLevel};
 use mermaid_cli::providers::ProviderFactory;
 use mermaid_cli::providers::model::ModelProvider;
 use mermaid_cli::providers::tool::ToolRegistry;
+use mermaid_domain::CompactionReviewStatus;
+use mermaid_domain::{
+    ChatRequest, Cmd, CompactionPolicy, CompactionRequest, Msg, StatusKind, TurnId,
+};
+use mermaid_model::models::{ChatMessage, ReasoningLevel};
 
 #[path = "harness/stub_model.rs"]
 mod stub_model;
@@ -108,7 +108,7 @@ fn compaction_request() -> CompactionRequest {
 }
 
 /// The checkpoint text a compaction put into the model-visible history.
-fn landed_summary(result: &mermaid_cli::domain::CompactionResult) -> String {
+fn landed_summary(result: &mermaid_domain::CompactionResult) -> String {
     result
         .replacement_messages
         .iter()
@@ -120,7 +120,7 @@ fn landed_summary(result: &mermaid_cli::domain::CompactionResult) -> String {
 /// Dispatch one compaction against `script` and return the terminal message.
 async fn compact_with(script: Vec<Turn>) -> Msg {
     let model = ScriptedModel::new(script);
-    let config = mermaid_cli::app::Config::default();
+    let config = mermaid_domain::Config::default();
     let providers = Arc::new(ProviderFactory::with_seeded_providers(
         config.clone(),
         [(STUB.to_string(), model as Arc<dyn ModelProvider>)],
@@ -272,7 +272,7 @@ async fn a_conversation_too_short_to_compact_is_a_note_not_an_error() {
     // A benign precondition. Surfacing it as an error trains users to ignore
     // compaction errors, which is the last thing that should be ignorable.
     let model = ScriptedModel::new([]);
-    let config = mermaid_cli::app::Config::default();
+    let config = mermaid_domain::Config::default();
     let providers = Arc::new(ProviderFactory::with_seeded_providers(
         config,
         [(STUB.to_string(), model.clone() as Arc<dyn ModelProvider>)],

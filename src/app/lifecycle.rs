@@ -7,7 +7,7 @@
 
 use tokio::sync::mpsc;
 
-use crate::domain::{Msg, RuntimeSignal};
+use mermaid_domain::{Msg, RuntimeSignal};
 
 /// Small signal stream consumed by the app main loops.
 pub struct RuntimeLifecycle {

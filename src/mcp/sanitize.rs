@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use serde_json::Value;
 
 use super::client::McpToolDef;
-use crate::domain::McpToolSpec;
+use mermaid_domain::McpToolSpec;
 
 /// Maximum length of the full advertised tool name (`mcp__srv__tool`).
 /// 64 is the common safe bound: OpenAI caps function names at 64 chars;

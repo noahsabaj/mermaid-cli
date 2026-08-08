@@ -64,10 +64,7 @@ struct Scheduler {
     /// the subscriber holds a receiver on the sender the executor later uses.
     /// Entries are removed by a drop guard after the terminal status persists.
     streams: std::sync::Mutex<
-        std::collections::HashMap<
-            String,
-            tokio::sync::broadcast::Sender<mermaid_cli::domain::RunEvent>,
-        >,
+        std::collections::HashMap<String, tokio::sync::broadcast::Sender<mermaid_domain::RunEvent>>,
     >,
 }
 
@@ -79,7 +76,7 @@ impl Scheduler {
     fn stream_for(
         &self,
         task_id: &str,
-    ) -> tokio::sync::broadcast::Sender<mermaid_cli::domain::RunEvent> {
+    ) -> tokio::sync::broadcast::Sender<mermaid_domain::RunEvent> {
         self.streams
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -127,7 +124,7 @@ async fn main() -> Result<()> {
 
     // Open (and thereby create/validate) the runtime store up front on every
     // platform: a broken DB should fail the daemon fast, not its first client.
-    drop(mermaid_cli::runtime::RuntimeStore::open_default()?);
+    drop(mermaid_runtime::RuntimeStore::open_default()?);
 
     // Scheduler singleton. Config is read once at startup (a restart picks up
     // changes); the drain loop itself is spawned by the serve fns AFTER the
@@ -167,7 +164,7 @@ async fn scheduler_drain_loop() {
         // With a permit in hand, wait until a task is claimable. Holding the
         // permit while idle is fine — only executions consume permits.
         let task = loop {
-            let claimed = mermaid_cli::runtime::RuntimeStore::open_default()
+            let claimed = mermaid_runtime::RuntimeStore::open_default()
                 .and_then(|store| store.tasks().claim_next_queued());
             match claimed {
                 Ok(Some(task)) => break task,
@@ -218,7 +215,7 @@ impl Drop for RunningGuard {
 /// `cancel_task` can reach it.
 #[cfg(any(unix, windows))]
 async fn execute_claimed_task(
-    task: mermaid_cli::runtime::TaskRecord,
+    task: mermaid_runtime::TaskRecord,
     permit: tokio::sync::OwnedSemaphorePermit,
 ) {
     let _permit = permit;
@@ -228,7 +225,7 @@ async fn execute_claimed_task(
         // NULL`), but never leave a row wedged in Running if it happens.
         persist_terminal_status(
             &task.id,
-            mermaid_cli::runtime::TaskStatus::Failed,
+            mermaid_runtime::TaskStatus::Failed,
             "task has no persisted prompt",
         )
         .await;
@@ -247,7 +244,7 @@ async fn execute_claimed_task(
         task_id: task.id.clone(),
     };
 
-    let _ = mermaid_cli::runtime::run_plugin_hooks(
+    let _ = mermaid_runtime::run_plugin_hooks(
         "task_start",
         &serde_json::json!({
             "id": task.id.clone(),
@@ -286,7 +283,7 @@ async fn execute_claimed_task(
     // and synthesize a terminal event instead of racing the live stream.
     sched.drop_stream(&task.id);
     record_terminal_outcome(&task, status);
-    let _ = mermaid_cli::runtime::run_plugin_hooks(
+    let _ = mermaid_runtime::run_plugin_hooks(
         "task_stop",
         &serde_json::json!({
             "id": task.id.clone(),
@@ -303,7 +300,7 @@ async fn execute_claimed_task(
 #[cfg(any(unix, windows))]
 fn startup_recovery() {
     let daemon = mermaid_cli::app::load_config().unwrap_or_default().daemon;
-    if let Ok(store) = mermaid_cli::runtime::RuntimeStore::open_default() {
+    if let Ok(store) = mermaid_runtime::RuntimeStore::open_default() {
         match store.reconcile_after_restart() {
             Ok((tasks, claims)) if tasks + claims > 0 => {
                 tracing::info!(
@@ -321,7 +318,7 @@ fn startup_recovery() {
             Err(error) => tracing::warn!(error = %error, "startup gc failed"),
         }
     }
-    if let Ok(removed) = mermaid_cli::runtime::gc_old_checkpoint_dirs(daemon.retention_days)
+    if let Ok(removed) = mermaid_runtime::gc_old_checkpoint_dirs(daemon.retention_days)
         && removed > 0
     {
         tracing::info!(removed, "gc removed old checkpoint directories");
@@ -329,7 +326,7 @@ fn startup_recovery() {
     // Subagent worktrees are removed when their child is evicted, but a
     // crash between creating one and cleaning it up strands the checkout —
     // and agent ids are per-session, so nothing reclaims it by name.
-    if let Ok(removed) = mermaid_cli::runtime::gc_orphaned_worktrees(daemon.retention_days)
+    if let Ok(removed) = mermaid_runtime::gc_orphaned_worktrees(daemon.retention_days)
         && removed > 0
     {
         tracing::info!(removed, "gc removed orphaned subagent worktrees");
@@ -356,7 +353,7 @@ fn startup_recovery() {
 /// retention window means the writer is long gone.
 #[cfg(any(unix, windows))]
 fn sweep_stale_bg_logs(retention_days: i64) -> std::io::Result<u64> {
-    sweep_stale_bg_logs_in(&mermaid_cli::utils::private_temp_dir()?, retention_days)
+    sweep_stale_bg_logs_in(&mermaid_model::utils::private_temp_dir()?, retention_days)
 }
 
 /// The `sweep_stale_bg_logs` body over an explicit directory, for testing.
@@ -392,7 +389,7 @@ fn sweep_stale_bg_logs_in(dir: &std::path::Path, retention_days: i64) -> std::io
 
 #[cfg(unix)]
 async fn serve_unix() -> Result<()> {
-    let data_dir = mermaid_cli::runtime::data_dir()?;
+    let data_dir = mermaid_runtime::data_dir()?;
     let socket_path = data_dir.join("mermaidd.sock");
 
     // #66: the 0700 data dir is what makes the 0600 socket meaningful.
@@ -410,7 +407,7 @@ async fn serve_unix() -> Result<()> {
     // bind dance below (one would unlink the other's fresh socket). flock
     // auto-releases on process exit/crash, so a dead daemon never wedges it.
     let lock_path = data_dir.join("mermaidd.lock");
-    let _daemon_lock = match mermaid_cli::runtime::try_exclusive_lock(&lock_path)
+    let _daemon_lock = match mermaid_runtime::try_exclusive_lock(&lock_path)
         .with_context(|| format!("failed to open daemon lock {}", lock_path.display()))?
     {
         Some(file) => file,
@@ -529,8 +526,8 @@ fn uid_allowed(peer_uid: u32, owner_uid: u32) -> bool {
 async fn serve_windows() -> Result<()> {
     use tokio::net::windows::named_pipe::ServerOptions;
 
-    let pipe_name = mermaid_cli::runtime::daemon::daemon_pipe_name()?;
-    let mut security = mermaid_cli::runtime::daemon::PipeSecurity::owner_only()?;
+    let pipe_name = mermaid_runtime::daemon::daemon_pipe_name()?;
+    let mut security = mermaid_runtime::daemon::PipeSecurity::owner_only()?;
 
     // The first instance doubles as the singleton guard (the named-pipe analog
     // of the unix flock, #131): while any mermaidd holds an instance of this
@@ -616,7 +613,7 @@ async fn maybe_spawn_tcp_listener() {
     match tokio::net::TcpListener::bind(&addr).await {
         Ok(listener) => {
             if let Ok(local_addr) = listener.local_addr() {
-                if let Ok(dir) = mermaid_cli::runtime::data_dir() {
+                if let Ok(dir) = mermaid_runtime::data_dir() {
                     let tcp_file = dir.join("mermaidd.tcp");
                     match std::fs::write(&tcp_file, local_addr.to_string()) {
                         Ok(()) => {
@@ -692,26 +689,28 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let timeout =
-        std::time::Duration::from_secs(mermaid_cli::constants::DAEMON_CONNECTION_TIMEOUT_SECS);
+        std::time::Duration::from_secs(mermaid_model::constants::DAEMON_CONNECTION_TIMEOUT_SECS);
     // Bounded read: a pre-auth client (especially over TCP) must not be able to
     // stream bytes without a newline and grow this buffer without bound (#22).
     // The read itself is inside the connection timeout too.
     let mut reader = BufReader::new(stream);
     let line = match tokio::time::timeout(
         timeout,
-        mermaid_cli::utils::read_line_capped(
+        mermaid_model::utils::read_line_capped(
             &mut reader,
-            mermaid_cli::constants::MAX_DAEMON_COMMAND_BYTES,
+            mermaid_model::constants::MAX_DAEMON_COMMAND_BYTES,
         ),
     )
     .await
     .map_err(|_| anyhow::anyhow!("client sent no complete command within the timeout"))??
     {
-        mermaid_cli::utils::CappedLine::Line(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-        mermaid_cli::utils::CappedLine::TooLong => {
+        mermaid_model::utils::CappedLine::Line(bytes) => {
+            String::from_utf8_lossy(&bytes).into_owned()
+        },
+        mermaid_model::utils::CappedLine::TooLong => {
             anyhow::bail!("daemon command exceeded size cap")
         },
-        mermaid_cli::utils::CappedLine::Eof => String::new(),
+        mermaid_model::utils::CappedLine::Eof => String::new(),
     };
     let line = line.trim();
     // Streaming subscriptions are classified BEFORE the connection timeout —
@@ -738,12 +737,12 @@ where
 /// Parse a wire line as a `subscribe_task` request, or `None` for the
 /// one-shot path.
 #[cfg(any(unix, windows))]
-fn parse_subscribe(line: &str) -> Option<mermaid_cli::runtime::DaemonRequest> {
+fn parse_subscribe(line: &str) -> Option<mermaid_cli::runtime_client::DaemonRequest> {
     if !line.starts_with('{') {
         return None;
     }
-    match serde_json::from_str::<mermaid_cli::runtime::DaemonRequest>(line) {
-        Ok(req @ mermaid_cli::runtime::DaemonRequest::SubscribeTask { .. }) => Some(req),
+    match serde_json::from_str::<mermaid_cli::runtime_client::DaemonRequest>(line) {
+        Ok(req @ mermaid_cli::runtime_client::DaemonRequest::SubscribeTask { .. }) => Some(req),
         _ => None,
     }
 }
@@ -762,7 +761,7 @@ fn request_requires_auth_wire(_line: &str) -> bool {
 #[cfg(any(unix, windows))]
 async fn handle_subscribe_stream<S>(
     mut stream: S,
-    request: mermaid_cli::runtime::DaemonRequest,
+    request: mermaid_cli::runtime_client::DaemonRequest,
     authorized: bool,
 ) -> Result<()>
 where
@@ -780,7 +779,7 @@ where
         Ok(())
     }
 
-    let mermaid_cli::runtime::DaemonRequest::SubscribeTask { task_id } = request else {
+    let mermaid_cli::runtime_client::DaemonRequest::SubscribeTask { task_id } = request else {
         anyhow::bail!("handle_subscribe_stream called with a non-subscribe request");
     };
     if !authorized {
@@ -795,7 +794,7 @@ where
         .await?;
         return Ok(());
     }
-    let store = mermaid_cli::runtime::RuntimeStore::open_default()?;
+    let store = mermaid_runtime::RuntimeStore::open_default()?;
     let Some(task) = store.tasks().get(&task_id)? else {
         write_line(
             &mut stream,
@@ -816,25 +815,25 @@ where
             "ok": true,
             "subscribed": task_id,
             "status": task.status.to_string(),
-            "protocol_version": mermaid_cli::domain::RUN_EVENT_PROTOCOL_VERSION,
+            "protocol_version": mermaid_domain::RUN_EVENT_PROTOCOL_VERSION,
         })
         .to_string(),
     )
     .await?;
     let terminal_status = matches!(
         task.status,
-        mermaid_cli::runtime::TaskStatus::Completed
-            | mermaid_cli::runtime::TaskStatus::Failed
-            | mermaid_cli::runtime::TaskStatus::Cancelled
+        mermaid_runtime::TaskStatus::Completed
+            | mermaid_runtime::TaskStatus::Failed
+            | mermaid_runtime::TaskStatus::Cancelled
     );
     if terminal_status {
         // Best-effort synthesis from the persisted record: tokens are not
         // stored per-task, and a failed/cancelled status rides in `errors`.
         let errors = match task.status {
-            mermaid_cli::runtime::TaskStatus::Completed => Vec::new(),
+            mermaid_runtime::TaskStatus::Completed => Vec::new(),
             status => vec![format!("task ended {status}")],
         };
-        let event = mermaid_cli::domain::RunEvent::Result {
+        let event = mermaid_domain::RunEvent::Result {
             response: task.final_report.clone().unwrap_or_default(),
             reasoning: None,
             total_tokens: 0,
@@ -849,7 +848,7 @@ where
     loop {
         match rx.recv().await {
             Ok(event) => {
-                let terminal = matches!(event, mermaid_cli::domain::RunEvent::Result { .. });
+                let terminal = matches!(event, mermaid_domain::RunEvent::Result { .. });
                 write_line(&mut stream, &serde_json::to_string(&event)?).await?;
                 if terminal {
                     break;
@@ -857,7 +856,7 @@ where
             },
             // Lagged: stay inside the RunEvent contract with an error event.
             Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                let event = mermaid_cli::domain::RunEvent::Error {
+                let event = mermaid_domain::RunEvent::Error {
                     message: format!("subscriber lagged; {n} events dropped"),
                 };
                 write_line(&mut stream, &serde_json::to_string(&event)?).await?;
@@ -897,7 +896,7 @@ async fn handle_command(command: &str, require_auth: bool) -> Result<serde_json:
     // through the token-checked JSON path only.
     match command {
         "" | "health" => {
-            let store = mermaid_cli::runtime::RuntimeStore::open_default()?;
+            let store = mermaid_runtime::RuntimeStore::open_default()?;
             Ok(serde_json::json!({
                 "ok": true,
                 "service": "mermaidd",
@@ -918,7 +917,7 @@ async fn handle_json_command(
     body: &serde_json::Value,
     require_remote_auth: bool,
 ) -> Result<serde_json::Value> {
-    use mermaid_cli::runtime::DaemonRequest;
+    use mermaid_cli::runtime_client::DaemonRequest;
     // Parse FIRST so auth gating comes from the exhaustive typed matrix; a
     // malformed request answers with a serde error naming the problem
     // instead of a silent `unknown command`.
@@ -939,7 +938,7 @@ async fn handle_json_command(
     }
     match request {
         DaemonRequest::Health => {
-            let store = mermaid_cli::runtime::RuntimeStore::open_default()?;
+            let store = mermaid_runtime::RuntimeStore::open_default()?;
             Ok(serde_json::json!({
                 "ok": true,
                 "service": "mermaidd",
@@ -989,21 +988,25 @@ async fn handle_json_command(
 }
 
 #[cfg(any(unix, windows))]
+#[expect(
+    clippy::too_many_lines,
+    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+)]
 async fn handle_task_command(
-    request: mermaid_cli::runtime::DaemonRequest,
+    request: mermaid_cli::runtime_client::DaemonRequest,
 ) -> Result<serde_json::Value> {
-    use mermaid_cli::runtime::DaemonRequest;
+    use mermaid_cli::runtime_client::DaemonRequest;
     match request {
         DaemonRequest::CreateTask {
             title,
             project_path,
             model_id,
         } => {
-            let store = mermaid_cli::runtime::RuntimeStore::open_default()?;
+            let store = mermaid_runtime::RuntimeStore::open_default()?;
             // F18 (RC-E): tag daemon-created tasks so the startup reconcile may
             // recover them — interactive CLI tasks stay un-owned and are spared.
             let task = store.tasks().create(
-                mermaid_cli::runtime::NewTask::new(title, project_path, model_id).daemon_owned(),
+                mermaid_runtime::NewTask::new(title, project_path, model_id).daemon_owned(),
             )?;
             Ok(serde_json::json!({"ok": true, "task": task}))
         },
@@ -1025,9 +1028,9 @@ async fn handle_task_command(
                 _ => mermaid_cli::app::resolve_model_id(None, &config).await?,
             };
             let priority = match priority.as_deref() {
-                None | Some("") | Some("normal") => mermaid_cli::runtime::TaskPriority::Normal,
-                Some("high") => mermaid_cli::runtime::TaskPriority::High,
-                Some("low") => mermaid_cli::runtime::TaskPriority::Low,
+                None | Some("") | Some("normal") => mermaid_runtime::TaskPriority::Normal,
+                Some("high") => mermaid_runtime::TaskPriority::High,
+                Some("low") => mermaid_runtime::TaskPriority::Low,
                 // Respond, don't bail: a bail here propagates out of the
                 // handler and the client sees a silent connection drop instead
                 // of an error.
@@ -1038,7 +1041,7 @@ async fn handle_task_command(
                     }));
                 },
             };
-            let store = mermaid_cli::runtime::RuntimeStore::open_default()?;
+            let store = mermaid_runtime::RuntimeStore::open_default()?;
             // Enqueue only — the scheduler claims it when a permit frees, so a
             // burst of runs executes bounded by `daemon.max_concurrent_tasks`
             // instead of stampeding the GPU. The full prompt is persisted for
@@ -1046,7 +1049,7 @@ async fn handle_task_command(
             // F18 (RC-E): daemon-owned, so a crash leaving it `Running` is
             // recovered by the next startup reconcile.
             let task = store.tasks().create(
-                mermaid_cli::runtime::NewTask::new(
+                mermaid_runtime::NewTask::new(
                     task_title_from_prompt(&prompt),
                     project_path.display().to_string(),
                     model_id,
@@ -1074,12 +1077,12 @@ async fn handle_task_command(
             }
             // Not in-flight: a queued task is cancelled by flipping the row —
             // the claim query only ever picks `queued` rows, so this is safe.
-            let store = mermaid_cli::runtime::RuntimeStore::open_default()?;
+            let store = mermaid_runtime::RuntimeStore::open_default()?;
             match store.tasks().get(&id)? {
-                Some(task) if task.status == mermaid_cli::runtime::TaskStatus::Queued => {
+                Some(task) if task.status == mermaid_runtime::TaskStatus::Queued => {
                     store.tasks().update_status(
                         &id,
-                        mermaid_cli::runtime::TaskStatus::Cancelled,
+                        mermaid_runtime::TaskStatus::Cancelled,
                         Some("cancelled before start"),
                     )?;
                     Ok(serde_json::json!({"ok": true, "task": store.tasks().get(&id)?}))
@@ -1099,15 +1102,15 @@ async fn handle_task_command(
             status,
             final_report,
         } => {
-            let store = mermaid_cli::runtime::RuntimeStore::open_default()?;
+            let store = mermaid_runtime::RuntimeStore::open_default()?;
             let status = match status.as_str() {
-                "queued" => mermaid_cli::runtime::TaskStatus::Queued,
-                "running" => mermaid_cli::runtime::TaskStatus::Running,
-                "waiting_for_approval" => mermaid_cli::runtime::TaskStatus::WaitingForApproval,
-                "blocked" => mermaid_cli::runtime::TaskStatus::Blocked,
-                "completed" => mermaid_cli::runtime::TaskStatus::Completed,
-                "failed" => mermaid_cli::runtime::TaskStatus::Failed,
-                "cancelled" => mermaid_cli::runtime::TaskStatus::Cancelled,
+                "queued" => mermaid_runtime::TaskStatus::Queued,
+                "running" => mermaid_runtime::TaskStatus::Running,
+                "waiting_for_approval" => mermaid_runtime::TaskStatus::WaitingForApproval,
+                "blocked" => mermaid_runtime::TaskStatus::Blocked,
+                "completed" => mermaid_runtime::TaskStatus::Completed,
+                "failed" => mermaid_runtime::TaskStatus::Failed,
+                "cancelled" => mermaid_runtime::TaskStatus::Cancelled,
                 other => anyhow::bail!("unknown task status: {}", other),
             };
             store
@@ -1120,12 +1123,14 @@ async fn handle_task_command(
 }
 
 #[cfg(any(unix, windows))]
-fn handle_runtime_read(request: mermaid_cli::runtime::DaemonRequest) -> Result<serde_json::Value> {
-    use mermaid_cli::runtime::DaemonRequest;
-    let service = mermaid_cli::runtime::RuntimeService::open_default()?;
+fn handle_runtime_read(
+    request: mermaid_cli::runtime_client::DaemonRequest,
+) -> Result<serde_json::Value> {
+    use mermaid_cli::runtime_client::DaemonRequest;
+    let service = mermaid_cli::runtime_client::RuntimeService::open_default()?;
     match request {
         DaemonRequest::SessionMessages { id } => {
-            let store = mermaid_cli::runtime::RuntimeStore::open_default()?;
+            let store = mermaid_runtime::RuntimeStore::open_default()?;
             Ok(serde_json::json!({
                 "ok": true,
                 "session": store.sessions().get(&id)?,
@@ -1181,10 +1186,10 @@ fn handle_runtime_read(request: mermaid_cli::runtime::DaemonRequest) -> Result<s
 
 #[cfg(any(unix, windows))]
 fn handle_process_command(
-    request: mermaid_cli::runtime::DaemonRequest,
+    request: mermaid_cli::runtime_client::DaemonRequest,
 ) -> Result<serde_json::Value> {
-    use mermaid_cli::runtime::DaemonRequest;
-    let service = mermaid_cli::runtime::RuntimeService::open_default()?;
+    use mermaid_cli::runtime_client::DaemonRequest;
+    let service = mermaid_cli::runtime_client::RuntimeService::open_default()?;
     match request {
         DaemonRequest::Logs { id, tail_bytes } => {
             Ok(serde_json::to_value(service.process_log(&id, tail_bytes)?)?)
@@ -1204,43 +1209,44 @@ fn handle_process_command(
 }
 
 #[cfg(any(unix, windows))]
-fn handle_admin_command(request: mermaid_cli::runtime::DaemonRequest) -> Result<serde_json::Value> {
-    use mermaid_cli::runtime::DaemonRequest;
+fn handle_admin_command(
+    request: mermaid_cli::runtime_client::DaemonRequest,
+) -> Result<serde_json::Value> {
+    use mermaid_cli::runtime_client::DaemonRequest;
     match request {
         DaemonRequest::RestoreCheckpoint { id } => {
-            let manifest = mermaid_cli::runtime::restore_checkpoint(&id)?;
+            let manifest = mermaid_runtime::restore_checkpoint(&id)?;
             Ok(serde_json::json!({"ok": true, "checkpoint": manifest}))
         },
         DaemonRequest::Approve { id } => {
-            let result = mermaid_cli::runtime::approve_and_replay(&id)?;
+            let result = mermaid_runtime::approve_and_replay(&id)?;
             Ok(
                 serde_json::json!({"ok": true, "approval": result.approval, "replayed": result.replayed, "summary": result.summary}),
             )
         },
         DaemonRequest::Deny { id } => {
-            let result = mermaid_cli::runtime::deny_approval(&id)?;
+            let result = mermaid_runtime::deny_approval(&id)?;
             Ok(
                 serde_json::json!({"ok": true, "approval": result.approval, "replayed": result.replayed, "summary": result.summary}),
             )
         },
         DaemonRequest::PluginPreview { path } => {
-            let preview =
-                mermaid_cli::runtime::plugin_capability_preview(std::path::Path::new(&path))?;
+            let preview = mermaid_runtime::plugin_capability_preview(std::path::Path::new(&path))?;
             Ok(serde_json::json!({"ok": true, "preview": preview}))
         },
         DaemonRequest::PluginInstall { path } => {
             let path = std::path::Path::new(&path);
-            let preview = mermaid_cli::runtime::plugin_capability_preview(path)?;
-            let plugin = mermaid_cli::runtime::install_plugin_from_path(path)?;
+            let preview = mermaid_runtime::plugin_capability_preview(path)?;
+            let plugin = mermaid_runtime::install_plugin_from_path(path)?;
             Ok(serde_json::json!({"ok": true, "preview": preview, "plugin": plugin}))
         },
         DaemonRequest::SetPluginEnabled { id, enabled } => {
-            let service = mermaid_cli::runtime::RuntimeService::open_default()?;
+            let service = mermaid_cli::runtime_client::RuntimeService::open_default()?;
             service.set_plugin_enabled(&id, enabled)?;
             Ok(serde_json::json!({"ok": true}))
         },
         DaemonRequest::SetSafetyMode { mode } => {
-            let service = mermaid_cli::runtime::RuntimeService::open_default()?;
+            let service = mermaid_cli::runtime_client::RuntimeService::open_default()?;
             let safety = service.set_safety_mode(&mode)?;
             Ok(serde_json::json!({"ok": true, "safety": safety}))
         },
@@ -1249,16 +1255,16 @@ fn handle_admin_command(request: mermaid_cli::runtime::DaemonRequest) -> Result<
             ttl_days,
             token_hash,
         } => {
-            let store = mermaid_cli::runtime::RuntimeStore::open_default()?;
-            let ttl_days = ttl_days.unwrap_or(mermaid_cli::runtime::DEFAULT_PAIRING_TTL_DAYS);
+            let store = mermaid_runtime::RuntimeStore::open_default()?;
+            let ttl_days = ttl_days.unwrap_or(mermaid_runtime::DEFAULT_PAIRING_TTL_DAYS);
             // #65: clamp so a socket caller can't mint a never-expiring token by
             // sending ttl_days <= 0.
-            let ttl_days = mermaid_cli::runtime::clamp_pairing_ttl_days(ttl_days);
-            let expires_at = mermaid_cli::runtime::pairing_expiry_from_now(ttl_days);
+            let ttl_days = mermaid_runtime::clamp_pairing_ttl_days(ttl_days);
+            let expires_at = mermaid_runtime::pairing_expiry_from_now(ttl_days);
             let (token, hash) = match token_hash.as_deref() {
                 Some(hash) if !hash.is_empty() => (None, hash.to_string()),
                 _ => {
-                    let (token, hash) = mermaid_cli::runtime::generate_pairing_token()?;
+                    let (token, hash) = mermaid_runtime::generate_pairing_token()?;
                     (Some(token), hash)
                 },
             };
@@ -1282,8 +1288,8 @@ fn authorize(body: &serde_json::Value) -> Result<bool> {
     else {
         return Ok(false);
     };
-    let hash = mermaid_cli::runtime::hash_pairing_token(token);
-    let store = mermaid_cli::runtime::RuntimeStore::open_default()?;
+    let hash = mermaid_runtime::hash_pairing_token(token);
+    let store = mermaid_runtime::RuntimeStore::open_default()?;
     // Constant-time hash match + expiry enforced inside verify_token.
     let Some(record) = store.pairing_tokens().verify_token(&hash)? else {
         return Ok(false);
@@ -1298,14 +1304,10 @@ fn authorize(body: &serde_json::Value) -> Result<bool> {
 /// report). Retry a few times, reopening the store each attempt, and log loudly
 /// if it still can't be written rather than swallowing the error.
 #[cfg(any(unix, windows))]
-async fn persist_terminal_status(
-    task_id: &str,
-    status: mermaid_cli::runtime::TaskStatus,
-    report: &str,
-) {
+async fn persist_terminal_status(task_id: &str, status: mermaid_runtime::TaskStatus, report: &str) {
     const MAX_ATTEMPTS: usize = 3;
     for attempt in 1..=MAX_ATTEMPTS {
-        match mermaid_cli::runtime::RuntimeStore::open_default() {
+        match mermaid_runtime::RuntimeStore::open_default() {
             Ok(store) => match store.tasks().update_status(task_id, status, Some(report)) {
                 Ok(()) => return,
                 Err(error) => tracing::error!(
@@ -1340,8 +1342,8 @@ async fn persist_terminal_status(
 fn classify_run_result<E: std::fmt::Display>(
     cancelled: bool,
     result: std::result::Result<mermaid_cli::app::RunResult, E>,
-) -> (mermaid_cli::runtime::TaskStatus, String, &'static str) {
-    use mermaid_cli::runtime::TaskStatus;
+) -> (mermaid_runtime::TaskStatus, String, &'static str) {
+    use mermaid_runtime::TaskStatus;
     if cancelled {
         return (
             TaskStatus::Cancelled,
@@ -1371,10 +1373,10 @@ fn classify_run_result<E: std::fmt::Display>(
 /// run lifecycle grows hooks for them.
 #[cfg(any(unix, windows))]
 fn record_terminal_outcome(
-    task: &mermaid_cli::runtime::TaskRecord,
-    status: mermaid_cli::runtime::TaskStatus,
+    task: &mermaid_runtime::TaskRecord,
+    status: mermaid_runtime::TaskStatus,
 ) {
-    use mermaid_cli::runtime::{
+    use mermaid_runtime::{
         NewOutcome, OUTCOME_LABEL_FAILURE, OUTCOME_LABEL_SUCCESS, OUTCOME_LABEL_UNKNOWN,
         OUTCOME_SOURCE_SYSTEM, RuntimeStore, TaskStatus,
     };
@@ -1451,7 +1453,7 @@ mod tests {
     fn classify_run_result_maps_empty_response_to_failure() {
         use super::classify_run_result;
         use mermaid_cli::app::RunResult;
-        use mermaid_cli::runtime::TaskStatus;
+        use mermaid_runtime::TaskStatus;
 
         // A real response with no errors → success.
         let (status, report, hook) = classify_run_result::<String>(
@@ -1569,7 +1571,7 @@ mod tests {
 
     #[test]
     fn mutating_json_commands_require_auth_on_local_socket() {
-        use mermaid_cli::runtime::DaemonRequest;
+        use mermaid_cli::runtime_client::DaemonRequest;
         // The historical stringly matrix, now driven by the exhaustive typed
         // one. Wire strings parse into the enum and their gating matches.
         let gated = [
@@ -1671,7 +1673,7 @@ mod tests {
                 "mode": "ask", "model": "m", "task_id": "t",
             });
             body.as_object_mut().unwrap().retain(|_, v| !v.is_null());
-            let parsed = serde_json::from_value::<mermaid_cli::runtime::DaemonRequest>(body);
+            let parsed = serde_json::from_value::<mermaid_cli::runtime_client::DaemonRequest>(body);
             assert!(
                 parsed.is_ok(),
                 "help entry '{name}' no longer parses: {parsed:?}"
@@ -1694,12 +1696,12 @@ mod tests {
         let mut rx = early.subscribe();
         let executor_side = sched.stream_for("t1");
         executor_side
-            .send(mermaid_cli::domain::RunEvent::Error {
+            .send(mermaid_domain::RunEvent::Error {
                 message: "hello".to_string(),
             })
             .expect("subscriber attached");
         match rx.try_recv().expect("event delivered") {
-            mermaid_cli::domain::RunEvent::Error { message } => assert_eq!(message, "hello"),
+            mermaid_domain::RunEvent::Error { message } => assert_eq!(message, "hello"),
             other => panic!("wrong event: {other:?}"),
         }
         // Drop guard cleans the entry; the next stream_for is a fresh channel.
@@ -1729,10 +1731,10 @@ mod tests {
     #[test]
     fn runtime_hygiene_preview_matches_test_artifacts_and_archive_is_idempotent() {
         let path = temp_db("preview");
-        let store = mermaid_cli::runtime::RuntimeStore::open(&path).expect("open store");
+        let store = mermaid_runtime::RuntimeStore::open(&path).expect("open store");
         let checkpoint = store
             .checkpoints()
-            .create(mermaid_cli::runtime::NewCheckpoint {
+            .create(mermaid_runtime::NewCheckpoint {
                 id: Some("checkpoint-test".to_string()),
                 task_id: None,
                 project_path: "/tmp/mermaid_checkpoint_test".to_string(),
@@ -1746,7 +1748,7 @@ mod tests {
             .expect("create checkpoint");
         let approval = store
             .approvals()
-            .create(mermaid_cli::runtime::NewApproval {
+            .create(mermaid_runtime::NewApproval {
                 task_id: None,
                 proposed_action: "restore replay: write_file".to_string(),
                 risk_classification: "restored_action".to_string(),
@@ -1761,7 +1763,7 @@ mod tests {
             .set_approval(&checkpoint.id, &approval.id)
             .expect("link approval");
 
-        let service = mermaid_cli::runtime::RuntimeService::from_store(store);
+        let service = mermaid_cli::runtime_client::RuntimeService::from_store(store);
         let preview = service.hygiene_preview().expect("preview");
         assert_eq!(preview.counts.approvals, 1);
         assert_eq!(preview.counts.checkpoints, 1);
@@ -1769,7 +1771,7 @@ mod tests {
         assert_eq!(archived.archived.total, 2);
         let archived_again = service.hygiene_archive().expect("archive again");
         assert_eq!(archived_again.archived.total, 0);
-        let store = mermaid_cli::runtime::RuntimeStore::open(&path).expect("reopen store");
+        let store = mermaid_runtime::RuntimeStore::open(&path).expect("reopen store");
         assert!(store.approvals().list_pending().unwrap().is_empty());
         assert!(store.checkpoints().list(10).unwrap().is_empty());
         let _ = std::fs::remove_dir_all(path.parent().unwrap());

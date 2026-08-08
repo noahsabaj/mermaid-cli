@@ -39,7 +39,7 @@ pub fn setup_cloud_interactive() -> Result<bool> {
 /// Never persisted to config files (#88); the keyring is the only at-rest
 /// store and it is the OS's. Empty values are treated as unset.
 pub fn get_cloud_api_key() -> Option<String> {
-    crate::utils::resolve_provider_key("ollama", "OLLAMA_API_KEY", None)
+    mermaid_model::utils::resolve_provider_key("ollama", "OLLAMA_API_KEY", None)
 }
 
 /// Check if a model name requires cloud access.

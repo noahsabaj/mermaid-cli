@@ -15,10 +15,12 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 
-use crate::domain::{
+use mermaid_model::question::{
     OptionPreview, Question, QuestionAnswer, QuestionKind, QuestionOption, QuestionResolution,
-    TextValidate, ToolDefinition, ToolMetadata, ToolOutcome, ToolRunMetadata,
+    TextValidate,
 };
+
+use mermaid_domain::{ToolDefinition, ToolMetadata, ToolOutcome, ToolRunMetadata};
 
 use super::super::ctx::ExecContext;
 use super::ToolExecutor;
@@ -216,7 +218,7 @@ fn save_prefs_at(path: &Path, map: &HashMap<String, StoredAnswer>) {
     };
     // Atomic write so a crash mid-save can't truncate the prefs file, and log on
     // failure instead of silently losing the user's "remember this answer" choice.
-    if let Err(err) = crate::runtime::write_atomic(path, json.as_bytes()) {
+    if let Err(err) = mermaid_runtime::write_atomic(path, json.as_bytes()) {
         tracing::warn!(
             error = %err,
             path = %path.display(),
@@ -426,7 +428,7 @@ impl ToolExecutor for AskUserQuestionTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::QuestionAnswer;
+    use mermaid_domain::QuestionAnswer;
 
     #[test]
     fn formats_keyed_answers() {
@@ -464,7 +466,7 @@ mod tests {
 
     #[tokio::test]
     async fn headless_proceeds_without_broker() {
-        use crate::domain::{ToolCallId, TurnId};
+        use mermaid_domain::{ToolCallId, TurnId};
         let (ctx, _rx) = crate::providers::ctx::test_exec_context(
             TurnId(1),
             ToolCallId(1),
@@ -487,7 +489,7 @@ mod tests {
                 ctx,
             )
             .await;
-        assert_eq!(out.status, crate::domain::ToolStatus::Success);
+        assert_eq!(out.status, mermaid_domain::ToolStatus::Success);
         assert!(out.model_content.contains("Proceed"));
     }
 

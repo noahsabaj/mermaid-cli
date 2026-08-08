@@ -7,14 +7,15 @@
 //! calls can quote `screenshot_id` to lock their coordinates to this
 //! specific capture.
 
+use mermaid_domain::ProgressEvent;
 use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
 use serde_json::Value;
 
-use crate::domain::{ToolDefinition, ToolOutcome};
-use crate::providers::ctx::{ExecContext, ProgressEvent};
+use crate::providers::ctx::ExecContext;
+use mermaid_domain::{ToolDefinition, ToolOutcome};
 
 use super::super::ToolExecutor;
 use super::computer_use_success;
@@ -68,7 +69,7 @@ impl ToolExecutor for ScreenshotTool {
         if let Some(blocked) = super::super::policy_gate::gate_external(
             &ctx,
             "screenshot",
-            crate::runtime::ToolCategory::ComputerUse,
+            mermaid_runtime::ToolCategory::ComputerUse,
             "computer-use: screenshot".to_string(),
             &args,
         )

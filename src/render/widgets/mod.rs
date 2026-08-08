@@ -93,8 +93,8 @@ impl GenerationStatus {
     /// active variant maps to `Streaming` (the status-line widget
     /// doesn't distinguish beyond the basic upstream/downstream
     /// arrow).
-    pub fn from_turn(turn: &crate::domain::TurnState) -> Self {
-        use crate::domain::{GenPhase, TurnState};
+    pub fn from_turn(turn: &mermaid_domain::TurnState) -> Self {
+        use mermaid_domain::{GenPhase, TurnState};
         match turn {
             TurnState::Idle => GenerationStatus::Idle,
             TurnState::Generating { phase, .. } => match phase {

@@ -13,17 +13,17 @@ use futures::StreamExt;
 use reqwest::Client;
 use serde_json::{Value, json};
 
-use crate::domain::ChatRequest;
-use crate::models::tool_call::{FunctionCall, ToolCall};
-use crate::models::{
+use mermaid_domain::ChatRequest;
+use mermaid_model::models::tool_call::{FunctionCall, ToolCall};
+use mermaid_model::models::{
     BackendError, FinishReason, MessageRole, MetaResponseItem, ModelError, ProviderContinuation,
     ReasoningCapability, ReasoningChunk, ReasoningLevel, Result, TokenUsage, nearest_effort,
 };
-use crate::utils::drain_sse_events;
+use mermaid_model::utils::drain_sse_events;
 
-use super::super::capabilities::Capabilities;
 use super::super::ctx::{FinalResponse, StreamContext, StreamEvent};
 use super::ModelProvider;
+use mermaid_model::models::ModelCapabilities;
 
 pub const DEFAULT_BASE_URL: &str = "https://api.meta.ai/v1";
 pub const DEFAULT_API_KEY_ENV: &str = "MODEL_API_KEY";
@@ -34,7 +34,7 @@ pub struct MetaProvider {
     api_key: String,
     model_name: String,
     extra_headers: HashMap<String, String>,
-    capabilities: Capabilities,
+    capabilities: ModelCapabilities,
 }
 
 impl MetaProvider {
@@ -60,14 +60,14 @@ impl MetaProvider {
         // Prefix, not exact-id: a future muse-spark-1.2 should inherit the
         // documented family limits instead of regressing to "unknown".
         let muse_spark = model_name.to_ascii_lowercase().starts_with("muse-spark");
-        let capabilities = Capabilities {
+        let capabilities = ModelCapabilities {
             supports_tools: true,
             supports_vision: true,
             supports_reasoning: ReasoningCapability::Levels(meta_reasoning_levels()),
             max_context_tokens: muse_spark
-                .then_some(crate::constants::META_MUSE_SPARK_CONTEXT_WINDOW),
+                .then_some(mermaid_model::constants::META_MUSE_SPARK_CONTEXT_WINDOW),
             max_output_tokens: muse_spark
-                .then_some(crate::constants::META_MUSE_SPARK_MAX_OUTPUT_TOKENS),
+                .then_some(mermaid_model::constants::META_MUSE_SPARK_MAX_OUTPUT_TOKENS),
             emits_provider_continuation: true,
         };
         Ok(Self {
@@ -117,7 +117,7 @@ impl MetaProvider {
 
 #[async_trait]
 impl ModelProvider for MetaProvider {
-    fn capabilities(&self) -> &Capabilities {
+    fn capabilities(&self) -> &ModelCapabilities {
         &self.capabilities
     }
 
@@ -141,10 +141,10 @@ impl ModelProvider for MetaProvider {
             // Bound SSE reassembly like every other streaming adapter: a
             // server that streams bytes but never emits the `\n\n` event
             // separator would otherwise grow `buffer` without bound (#50).
-            if buffer.len() > crate::constants::MAX_SSE_BUFFER_BYTES {
+            if buffer.len() > mermaid_model::constants::MAX_SSE_BUFFER_BYTES {
                 return Err(ModelError::StreamError(format!(
                     "SSE stream exceeded {} byte reassembly cap without a complete event",
-                    crate::constants::MAX_SSE_BUFFER_BYTES
+                    mermaid_model::constants::MAX_SSE_BUFFER_BYTES
                 )));
             }
             buffer.extend_from_slice(&chunk.map_err(|error| {
@@ -315,7 +315,7 @@ fn build_request_body(request: &ChatRequest, model_name: &str) -> Value {
     });
     // Muse is tuned for Meta's 1.0 default. Mermaid's global 0.7 default was
     // chosen for other providers, so omit it here unless the user changed it.
-    if (request.temperature - crate::constants::DEFAULT_TEMPERATURE).abs() > f32::EPSILON {
+    if (request.temperature - mermaid_model::constants::DEFAULT_TEMPERATURE).abs() > f32::EPSILON {
         body["temperature"] = json!(request.temperature);
     }
     let instructions = combined_instructions(request);
@@ -347,7 +347,7 @@ fn build_request_body(request: &ChatRequest, model_name: &str) -> Value {
     body
 }
 
-fn messages_to_input(messages: &[crate::models::ChatMessage]) -> Vec<Value> {
+fn messages_to_input(messages: &[mermaid_model::models::ChatMessage]) -> Vec<Value> {
     let mut input = Vec::new();
     for message in messages {
         if message.role == MessageRole::Assistant
@@ -418,7 +418,11 @@ fn meta_output_to_input(output: &[MetaResponseItem]) -> Vec<Value> {
     input
 }
 
-fn input_message(message: &crate::models::ChatMessage, role: &str, text_type: &str) -> Value {
+fn input_message(
+    message: &mermaid_model::models::ChatMessage,
+    role: &str,
+    text_type: &str,
+) -> Value {
     let mut content = Vec::new();
     if !message.content.is_empty() {
         content.push(json!({"type": text_type, "text": message.content}));
@@ -550,8 +554,8 @@ fn meta_failure(event: &Value) -> ModelError {
             .and_then(|error| error.get("code"))
             .and_then(Value::as_str)
             .map(str::to_string),
-        message: crate::utils::redact_secrets(message),
-        debug: crate::models::ResponseDebugContext::default(),
+        message: mermaid_model::utils::redact_secrets(message),
+        debug: mermaid_model::models::ResponseDebugContext::default(),
     })
 }
 
@@ -560,7 +564,7 @@ async fn http_error(
     token: &tokio_util::sync::CancellationToken,
 ) -> ModelError {
     let status = response.status().as_u16();
-    let debug = crate::models::ResponseDebugContext::from_headers(response.headers());
+    let debug = mermaid_model::models::ResponseDebugContext::from_headers(response.headers());
     let body = tokio::select! {
         biased;
         _ = token.cancelled() => return ModelError::Cancelled,
@@ -568,7 +572,7 @@ async fn http_error(
     };
     ModelError::Backend(BackendError::HttpError {
         status,
-        message: crate::utils::redact_secrets(&body),
+        message: mermaid_model::utils::redact_secrets(&body),
         debug,
     })
 }
@@ -582,9 +586,9 @@ async fn send(sink: &tokio::sync::mpsc::Sender<StreamEvent>, event: StreamEvent)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{ToolDefinition, TurnId};
-    use crate::models::ChatMessage;
     use crate::providers::test_stream_context;
+    use mermaid_domain::{ToolDefinition, TurnId};
+    use mermaid_model::models::ChatMessage;
 
     fn request() -> ChatRequest {
         ChatRequest {
@@ -602,8 +606,8 @@ mod tests {
             }],
             ollama_num_ctx: None,
             ollama_allow_ram_offload: None,
-            resolved_context_window: Some(crate::constants::META_MUSE_SPARK_CONTEXT_WINDOW),
-            resolved_max_output: Some(crate::constants::META_MUSE_SPARK_MAX_OUTPUT_TOKENS),
+            resolved_context_window: Some(mermaid_model::constants::META_MUSE_SPARK_CONTEXT_WINDOW),
+            resolved_max_output: Some(mermaid_model::constants::META_MUSE_SPARK_MAX_OUTPUT_TOKENS),
             output_schema: None,
             suppress_auto_compact: false,
             suppressed_builtin_tools: Vec::new(),
@@ -619,7 +623,7 @@ mod tests {
         assert_eq!(body["reasoning"]["summary"], "auto");
         assert_eq!(
             body["max_output_tokens"],
-            crate::constants::META_MUSE_SPARK_MAX_OUTPUT_TOKENS
+            mermaid_model::constants::META_MUSE_SPARK_MAX_OUTPUT_TOKENS
         );
         assert_eq!(body["instructions"], "system\n\nproject");
         assert_eq!(body["tools"][0]["name"], "read_file");
@@ -634,9 +638,10 @@ mod tests {
     /// reminder passes through in place at the tail.
     #[test]
     fn model_directed_system_messages_reach_the_wire_in_place() {
-        use crate::models::ChatMessageKind;
+        use mermaid_model::models::ChatMessageKind;
         let mut req = request();
-        let mut nudge = crate::models::ChatMessage::system("Reminder: plan mode is active.");
+        let mut nudge =
+            mermaid_model::models::ChatMessage::system("Reminder: plan mode is active.");
         nudge.kind = ChatMessageKind::RecoveryNudge;
         req.messages.push(nudge);
         let body = build_request_body(&req, "muse-spark-1.1");

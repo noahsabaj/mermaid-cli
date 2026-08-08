@@ -17,8 +17,8 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 
-use crate::app::PlanPostApprove;
-use crate::domain::{
+use mermaid_domain::PlanPostApprove;
+use mermaid_domain::{
     Question, QuestionKind, QuestionOption, QuestionResolution, ToolDefinition, ToolMetadata,
     ToolOutcome, ToolRunMetadata,
 };
@@ -235,14 +235,18 @@ async fn handoff_model_candidates(ctx: &ExecContext) -> Vec<String> {
     out
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+)]
 #[async_trait]
 impl ToolExecutor for ExitPlanModeTool {
     fn name(&self) -> &'static str {
-        crate::domain::plan::EXIT_PLAN_MODE_TOOL
+        mermaid_domain::plan::EXIT_PLAN_MODE_TOOL
     }
 
     fn schema(&self) -> ToolDefinition {
-        crate::domain::plan::exit_plan_mode_definition()
+        mermaid_domain::plan::exit_plan_mode_definition()
     }
 
     /// Excluded from `describe_all`; `build_chat_request` advertises it only
@@ -478,7 +482,7 @@ mod tests {
 
     #[tokio::test]
     async fn refuses_outside_plan_mode() {
-        use crate::domain::{ToolCallId, TurnId};
+        use mermaid_domain::{ToolCallId, TurnId};
         let (ctx, _rx) = crate::providers::ctx::test_exec_context(
             TurnId(1),
             ToolCallId(1),
@@ -486,12 +490,12 @@ mod tests {
         );
         // test ctx has plan_file: None.
         let out = ExitPlanModeTool.execute(serde_json::json!({}), ctx).await;
-        assert_eq!(out.status, crate::domain::ToolStatus::Error);
+        assert_eq!(out.status, mermaid_domain::ToolStatus::Error);
     }
 
     #[tokio::test]
     async fn missing_or_empty_plan_file_is_a_teaching_error() {
-        use crate::domain::{ToolCallId, TurnId};
+        use mermaid_domain::{ToolCallId, TurnId};
         let (mut ctx, _rx) = crate::providers::ctx::test_exec_context(
             TurnId(1),
             ToolCallId(1),
@@ -499,7 +503,7 @@ mod tests {
         );
         ctx.plan_file = Some(std::env::temp_dir().join("mermaid_test_plan_missing.md"));
         let out = ExitPlanModeTool.execute(serde_json::json!({}), ctx).await;
-        assert_eq!(out.status, crate::domain::ToolStatus::Error);
+        assert_eq!(out.status, mermaid_domain::ToolStatus::Error);
         assert!(out.model_content.contains("write the plan there first"));
     }
 }

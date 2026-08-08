@@ -39,9 +39,9 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 
-use crate::app::Config;
-use crate::domain::{Msg, Session};
-use crate::session::ConversationHistory;
+use mermaid_domain::Config;
+use mermaid_domain::ConversationHistory;
+use mermaid_domain::{Msg, Session};
 
 /// Bumped when the wire shape changes incompatibly. Replay refuses logs
 /// written by a different version rather than folding garbage.
@@ -111,7 +111,7 @@ impl Recorder {
     /// find a parseable header.
     pub fn record_header(&mut self, header: &SessionHeader) -> Result<()> {
         let mut value = serde_json::to_value(header).context("serialize session header")?;
-        crate::utils::redact_json(&mut value);
+        mermaid_model::utils::redact_json(&mut value);
         writeln!(self.writer, "{}", value).context("write header line")?;
         self.flush()
     }
@@ -147,7 +147,7 @@ impl Recorder {
         // every recorded payload before it hits disk. A `read_file .env` result,
         // a pasted token, or an API error echoing a key would otherwise be
         // persisted in cleartext in the `--record` log (#17).
-        crate::utils::redact_json(&mut body);
+        mermaid_model::utils::redact_json(&mut body);
         let entry = serde_json::json!({
             "ts": now,
             "kind": format!("{:?}", msg.kind()),
@@ -315,7 +315,7 @@ impl Iterator for Replay {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{ClipboardRead, MsgKind, Paste, TurnId};
+    use mermaid_domain::{ClipboardRead, MsgKind, Paste, TurnId};
 
     fn tmpfile(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join("mermaid_recorder_tests");
@@ -581,7 +581,7 @@ mod tests {
     fn trailer_round_trips_and_fingerprint_is_stable() {
         let path = tmpfile("trailer.jsonl");
         let _ = std::fs::remove_file(&path);
-        let session = crate::domain::State::new(
+        let session = mermaid_domain::State::new(
             Config::default(),
             PathBuf::from("/tmp/project"),
             "ollama/test".to_string(),
@@ -620,16 +620,20 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "predates the lint; see .github/baselines/expect_budget.txt"
+    )]
     fn every_msg_kind_has_a_round_trip_sample() {
         // Parity guard: each `MsgKind` gets at least one representative
         // sample that must survive serialize → deserialize exactly. The
         // `covered` match is exhaustive over `MsgKind`, so adding a Msg
         // variant without extending the samples is a compile error here.
-        use crate::domain::{
+        use mermaid_domain::{
             ApprovalKind, ContextUsageSnapshot, Key, KeyCode, KeyMods, PromptTokenBreakdown,
             RuntimeSignal, SlashCmd, StatusKind, ToolCallId, ToolOutcome,
         };
-        use crate::models::ReasoningChunk;
+        use mermaid_model::models::ReasoningChunk;
 
         fn covered(kind: MsgKind) -> bool {
             match kind {
@@ -666,6 +670,7 @@ mod tests {
                 | MsgKind::HookContext
                 | MsgKind::InstructionsChanged
                 | MsgKind::MemoryChanged
+                | MsgKind::SessionProvenanceResolved
                 | MsgKind::SessionSaved
                 | MsgKind::ConversationLoaded
                 | MsgKind::ConversationsListed
@@ -691,16 +696,16 @@ mod tests {
         let samples: Vec<Msg> = vec![
             Msg::TasksUpdated {
                 store: {
-                    let mut store = crate::domain::TaskStore::default();
+                    let mut store = mermaid_domain::ChecklistStore::default();
                     store.create(
-                        vec![crate::domain::TaskSpec {
+                        vec![mermaid_domain::ChecklistSpec {
                             subject: "sample".to_string(),
                             active_form: "sampling".to_string(),
                             description: None,
                             in_progress: true,
                         }],
-                        crate::domain::TaskOrigin::Model,
-                        crate::domain::Stamp {
+                        mermaid_domain::ChecklistOrigin::Model,
+                        mermaid_domain::Stamp {
                             now_epoch: 10,
                             run_tokens: 20,
                         },
@@ -750,7 +755,7 @@ mod tests {
                 report: "all good".to_string(),
                 success: true,
                 cancelled: false,
-                usage: Some(crate::models::TokenUsage::provider(60_000, 30_000)),
+                usage: Some(mermaid_model::models::TokenUsage::provider(60_000, 30_000)),
                 tokens: 90_000,
                 duration_secs: 132,
             },
@@ -771,9 +776,9 @@ mod tests {
             },
             Msg::StreamToolCall {
                 turn: TurnId(1),
-                call: crate::models::tool_call::ToolCall {
+                call: mermaid_model::models::tool_call::ToolCall {
                     id: Some("call_1".to_string()),
-                    function: crate::models::tool_call::FunctionCall {
+                    function: mermaid_model::models::tool_call::FunctionCall {
                         name: "read_file".to_string(),
                         arguments: serde_json::json!({"path": "src/main.rs"}),
                     },
@@ -815,16 +820,16 @@ mod tests {
             Msg::BuiltinToolSchemaTokens(1234),
             Msg::CompactionFailed {
                 turn: TurnId(2),
-                trigger: crate::domain::CompactionTrigger::Manual,
+                trigger: mermaid_domain::CompactionTrigger::Manual,
                 message: "nothing to do".to_string(),
                 kind: StatusKind::Info,
             },
             Msg::CompactionFinished {
                 turn: TurnId(2),
-                result: crate::domain::CompactionResult {
-                    record: crate::domain::CompactionRecord {
+                result: mermaid_domain::CompactionResult {
+                    record: mermaid_domain::CompactionEvent {
                         id: "c1".to_string(),
-                        trigger: crate::domain::CompactionTrigger::Manual,
+                        trigger: mermaid_domain::CompactionTrigger::Manual,
                         created_at: fixed_ts(),
                         before_tokens: 1000,
                         after_tokens: 100,
@@ -833,13 +838,15 @@ mod tests {
                         preserved_turn_count: 1,
                         summary_tokens: 90,
                         duration_secs: 1.5,
-                        review_status: crate::domain::CompactionReviewStatus::Reviewed,
+                        review_status: mermaid_domain::CompactionReviewStatus::Reviewed,
                         review_error: None,
                         focus: None,
                         archive_path: None,
                     },
-                    replacement_messages: vec![crate::models::ChatMessage::system("checkpoint")],
-                    archived_messages: vec![crate::models::ChatMessage::user("old")],
+                    replacement_messages: vec![mermaid_model::models::ChatMessage::system(
+                        "checkpoint",
+                    )],
+                    archived_messages: vec![mermaid_model::models::ChatMessage::user("old")],
                     before_snapshot: ContextUsageSnapshot::from_estimate(
                         PromptTokenBreakdown::default(),
                         Some(128_000),
@@ -854,19 +861,19 @@ mod tests {
             },
             Msg::UpstreamError {
                 turn: TurnId(1),
-                error: crate::models::UserFacingError {
+                error: mermaid_model::models::UserFacingError {
                     summary: "Rate limited".to_string(),
                     message: "429 too many requests".to_string(),
                     suggestion: "retry in a moment".to_string(),
-                    category: crate::models::ErrorCategory::Temporary,
+                    category: mermaid_model::models::ErrorCategory::Temporary,
                     recoverable: true,
                 },
             },
             Msg::StreamDone {
                 turn: TurnId(1),
-                usage: Some(crate::models::TokenUsage::provider(10, 5)),
+                usage: Some(mermaid_model::models::TokenUsage::provider(10, 5)),
                 provider_continuation: None,
-                stop_reason: Some(crate::models::FinishReason::Stop),
+                stop_reason: Some(mermaid_model::models::FinishReason::Stop),
             },
             Msg::TurnCancelled(TurnId(3)),
             Msg::ToolStarted {
@@ -876,7 +883,7 @@ mod tests {
             Msg::ToolProgress {
                 turn: TurnId(1),
                 call_id: ToolCallId(1),
-                event: crate::providers::ProgressEvent::Artifact {
+                event: mermaid_domain::ProgressEvent::Artifact {
                     mime: "image/png".to_string(),
                     data: vec![1, 2, 3],
                     caption: Some("shot".to_string()),
@@ -898,7 +905,7 @@ mod tests {
             },
             Msg::McpServerReady {
                 name: "srv".to_string(),
-                tools: vec![crate::domain::McpToolSpec {
+                tools: vec![mermaid_domain::McpToolSpec {
                     name: "mcp__srv__t".to_string(),
                     raw_name: "t".to_string(),
                     description: "d".to_string(),
@@ -915,13 +922,18 @@ mod tests {
             },
             Msg::InstructionsChanged(None),
             Msg::MemoryChanged(None),
+            Msg::SessionProvenanceResolved(mermaid_domain::SessionProvenance {
+                git_branch: Some("main".to_string()),
+                git_sha: Some("a614aa9f".to_string()),
+                cli_version: Some("0.21.1".to_string()),
+            }),
             Msg::SessionSaved,
             Msg::ConversationLoaded(ConversationHistory::new(
                 "/p".to_string(),
                 "m".to_string(),
                 fixed_ts(),
             )),
-            Msg::ConversationsListed(vec![crate::domain::ConversationSummary {
+            Msg::ConversationsListed(vec![mermaid_domain::ConversationSummary {
                 id: "20260702_120000_123".to_string(),
                 title: "t".to_string(),
                 message_count: 1,
@@ -1003,6 +1015,7 @@ mod tests {
             MsgKind::HookContext,
             MsgKind::InstructionsChanged,
             MsgKind::MemoryChanged,
+            MsgKind::SessionProvenanceResolved,
             MsgKind::SessionSaved,
             MsgKind::ConversationLoaded,
             MsgKind::ConversationsListed,

@@ -24,9 +24,9 @@
 
 use std::time::Duration;
 
-use crate::app::Config;
-use crate::models::PROVIDER_REGISTRY;
 use crate::providers::factory::resolve_provider_endpoint;
+use mermaid_domain::Config;
+use mermaid_model::models::PROVIDER_REGISTRY;
 
 /// A remote provider this machine can actually use right now.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,7 +147,7 @@ fn any_key_resolves(config: &Config, name: &str) -> bool {
         .get(name)
         .and_then(|provider| provider.api_key_env.as_deref());
     if name == "gemini" {
-        return crate::utils::resolve_provider_key_with_fallback(
+        return mermaid_model::utils::resolve_provider_key_with_fallback(
             name,
             crate::providers::model::gemini::DEFAULT_API_KEY_ENV,
             crate::providers::model::gemini::LEGACY_API_KEY_ENV,
@@ -158,7 +158,7 @@ fn any_key_resolves(config: &Config, name: &str) -> bool {
     let Some(default_env) = default_env_for(config, name) else {
         return false;
     };
-    crate::utils::resolve_provider_key(name, &default_env, override_env).is_some()
+    mermaid_model::utils::resolve_provider_key(name, &default_env, override_env).is_some()
 }
 
 /// How long one provider's catalog request may take. The `/model` picker opens
@@ -187,7 +187,7 @@ fn default_env_for(config: &Config, name: &str) -> Option<String> {
         "meta" => return Some(crate::providers::model::meta::DEFAULT_API_KEY_ENV.into()),
         _ => {},
     }
-    if let Some(profile) = crate::models::lookup_provider(name) {
+    if let Some(profile) = mermaid_model::models::lookup_provider(name) {
         return Some(profile.api_key_env.to_string());
     }
     // A user-defined `[providers.<name>]`: its `api_key_env` IS the default.
@@ -261,7 +261,7 @@ async fn fetch_catalog(
     };
     // Registry providers can require analytics headers (OpenRouter) — the same
     // ones the chat adapter sends.
-    if let Some(profile) = crate::models::lookup_provider(name) {
+    if let Some(profile) = mermaid_model::models::lookup_provider(name) {
         for (header, value) in profile.extra_headers {
             request = request.header(*header, *value);
         }
@@ -324,7 +324,7 @@ fn gemini_model_ids(body: &serde_json::Value) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::UserProviderConfig;
+    use mermaid_domain::UserProviderConfig;
 
     /// The bespoke providers were the whole point: before this module they
     /// were absent from the "configured remote providers" set, so a machine

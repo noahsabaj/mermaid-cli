@@ -8,8 +8,8 @@ use std::time::Instant;
 use async_trait::async_trait;
 use serde_json::Value;
 
-use crate::domain::{ToolDefinition, ToolOutcome};
 use crate::providers::ctx::ExecContext;
+use mermaid_domain::{ToolDefinition, ToolOutcome};
 
 use super::super::ToolExecutor;
 use super::computer_use_success;
@@ -50,7 +50,7 @@ impl ToolExecutor for ListWindowsTool {
         if let Some(blocked) = super::super::policy_gate::gate_external(
             &ctx,
             "list_windows",
-            crate::runtime::ToolCategory::ComputerUse,
+            mermaid_runtime::ToolCategory::ComputerUse,
             "computer-use: list_windows".to_string(),
             &args,
         )

@@ -34,13 +34,13 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use mermaid_cli::domain::ChatRequest;
-use mermaid_cli::models::{
-    FinishReason, FunctionCall, ReasoningCapability, Result, TokenUsage, ToolCall,
-};
-use mermaid_cli::providers::capabilities::Capabilities;
 use mermaid_cli::providers::model::ModelProvider;
 use mermaid_cli::providers::{FinalResponse, StreamContext, StreamEvent};
+use mermaid_domain::ChatRequest;
+use mermaid_model::models::ModelCapabilities;
+use mermaid_model::models::{
+    FinishReason, FunctionCall, ReasoningCapability, Result, TokenUsage, ToolCall,
+};
 
 /// One model call's worth of scripted output.
 #[derive(Debug, Clone)]
@@ -50,7 +50,7 @@ pub enum Turn {
     Tools(Vec<(String, serde_json::Value)>),
     /// Emit a final assistant message and stop, optionally handing back an
     /// opaque provider-continuation blob the way Meta and Anthropic do.
-    Say(String, Option<mermaid_cli::models::ProviderContinuation>),
+    Say(String, Option<mermaid_model::models::ProviderContinuation>),
     /// Fail the call. What a provider does on a 500, a dropped connection, or
     /// an expired key — and the only way to check that a caller which is
     /// supposed to fail closed actually does.
@@ -79,7 +79,7 @@ impl Turn {
 
     /// Hand back a continuation blob alongside this turn's text, so a test
     /// can check the loop carries it into the next request.
-    pub fn with_continuation(self, c: mermaid_cli::models::ProviderContinuation) -> Self {
+    pub fn with_continuation(self, c: mermaid_model::models::ProviderContinuation) -> Self {
         match self {
             Self::Say(text, _) => Self::Say(text, Some(c)),
             other => other,
@@ -100,7 +100,7 @@ impl Turn {
 /// A model that replays a fixed script.
 pub struct ScriptedModel {
     name: String,
-    capabilities: Capabilities,
+    capabilities: ModelCapabilities,
     script: Mutex<std::collections::VecDeque<Turn>>,
     /// Every request the loop made, in order. Lets a test assert on what the
     /// agent actually asked for — the system prompt a child was given, say.
@@ -111,7 +111,7 @@ impl ScriptedModel {
     pub fn new(script: impl IntoIterator<Item = Turn>) -> Arc<Self> {
         Arc::new(Self {
             name: "stub/scripted".to_string(),
-            capabilities: Capabilities {
+            capabilities: ModelCapabilities {
                 supports_tools: true,
                 supports_vision: false,
                 supports_reasoning: ReasoningCapability::Unsupported,
@@ -144,7 +144,7 @@ impl ScriptedModel {
 
 #[async_trait]
 impl ModelProvider for ScriptedModel {
-    fn capabilities(&self) -> &Capabilities {
+    fn capabilities(&self) -> &ModelCapabilities {
         &self.capabilities
     }
 
@@ -171,7 +171,7 @@ impl ModelProvider for ScriptedModel {
             Turn::Fail(reason) => {
                 // No `Done` — a failed call never completes its stream, which
                 // is what the real adapters do on a transport error.
-                return Err(mermaid_cli::models::ModelError::InvalidRequest(reason));
+                return Err(mermaid_model::models::ModelError::InvalidRequest(reason));
             },
             Turn::Stall(how_long) => {
                 // Honor cancellation while stalling: a provider that ignored

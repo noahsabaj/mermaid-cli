@@ -7,8 +7,8 @@ use std::time::Instant;
 use async_trait::async_trait;
 use serde_json::Value;
 
-use crate::domain::{ToolDefinition, ToolOutcome};
 use crate::providers::ctx::ExecContext;
+use mermaid_domain::{ToolDefinition, ToolOutcome};
 
 use super::super::ToolExecutor;
 use super::computer_use_success;
@@ -57,7 +57,7 @@ impl ToolExecutor for MouseMoveTool {
         if let Some(blocked) = super::super::policy_gate::gate_external(
             &ctx,
             "mouse_move",
-            crate::runtime::ToolCategory::ComputerUse,
+            mermaid_runtime::ToolCategory::ComputerUse,
             "computer-use: mouse_move".to_string(),
             &args,
         )

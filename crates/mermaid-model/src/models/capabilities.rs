@@ -27,6 +27,22 @@ pub struct ModelCapabilities {
     /// The model's per-response output ceiling in tokens, if known (from
     /// `/models` metadata or a documented per-model table).
     pub max_output_tokens: Option<usize>,
+    /// Does the provider emit opaque continuation data that must round-trip on
+    /// the next request (Anthropic thinking, Meta encrypted reasoning)?
+    ///
+    /// Lived on a near-identical `providers::Capabilities` that wrapped this
+    /// struct field-for-field just to carry it. Adapters default it to `false`
+    /// and opt in via `with_provider_continuation()`.
+    pub emits_provider_continuation: bool,
+}
+
+impl ModelCapabilities {
+    /// Builder: mark that this provider round-trips continuation state.
+    #[must_use]
+    pub fn with_provider_continuation(mut self) -> Self {
+        self.emits_provider_continuation = true;
+        self
+    }
 }
 
 impl ModelCapabilities {
@@ -45,6 +61,7 @@ impl ModelCapabilities {
             supports_reasoning: ReasoningCapability::Binary,
             max_context_tokens: None,
             max_output_tokens: None,
+            emits_provider_continuation: false,
         }
     }
 }

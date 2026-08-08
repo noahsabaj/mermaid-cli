@@ -2,7 +2,7 @@
 //! prompt tests use (`advertised_slash_commands_exist`). The README documents
 //! slash commands and ships a sample config; both rot silently without these.
 
-use mermaid_cli::domain::slash_commands::COMMAND_REGISTRY;
+use mermaid_domain::slash_commands::COMMAND_REGISTRY;
 
 const README: &str = include_str!("../README.md");
 
@@ -68,10 +68,10 @@ fn readme_sample_config_parses() {
         .map(|rest| rest.split("```").next().unwrap_or(""))
         .find(|block| block.contains("[safety]"))
         .expect("README must contain the sample config with a [safety] section");
-    let config: mermaid_cli::app::Config =
+    let config: mermaid_domain::Config =
         toml::from_str(block).expect("README sample config must parse as a valid Config");
     assert!(
-        matches!(config.safety.mode, mermaid_cli::runtime::SafetyMode::Ask),
+        matches!(config.safety.mode, mermaid_runtime::SafetyMode::Ask),
         "sample config's documented default must stay ask"
     );
     assert!(

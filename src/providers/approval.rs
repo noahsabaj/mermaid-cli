@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use crate::domain::{ApprovalChoice, ApprovalKind, Msg, ToolCallId, TurnId};
+use mermaid_domain::{ApprovalChoice, ApprovalKind, Msg, ToolCallId, TurnId};
 
 /// The user's decision, broker-side. `Cmd::ResolveApproval` carries the pure
 /// `domain::ApprovalChoice`; the `EffectRunner` maps it to this.
@@ -78,7 +78,7 @@ impl ApprovalBroker {
     /// Prompt the user and block until they answer (or the turn is cancelled).
     /// Fail-safe: a dropped sender, a gone reducer, or a cancel all resolve to
     /// `Deny`.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub async fn request(
         &self,
         token: &CancellationToken,

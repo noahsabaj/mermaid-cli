@@ -159,6 +159,10 @@ impl std::error::Error for ModelError {}
 
 impl ModelError {
     /// Convert to user-facing error with actionable suggestions
+    #[expect(
+        clippy::too_many_lines,
+        reason = "predates the lint; see .github/baselines/expect_budget.txt"
+    )]
     pub fn to_user_facing(&self) -> UserFacingError {
         match self {
             ModelError::Backend(BackendError::ConnectionFailed { backend, url, .. }) => {

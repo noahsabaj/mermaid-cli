@@ -22,7 +22,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::providers::ExecContext;
-use crate::runtime::worktree::{AgentWorktree, MergeOutcome};
+use mermaid_runtime::worktree::{AgentWorktree, MergeOutcome};
 
 /// How a child's file mutations relate to the parent's working copy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -64,7 +64,7 @@ pub(crate) enum Workspace {
 #[derive(Debug, Clone)]
 pub(crate) struct MergeContext {
     checkpoint: bool,
-    origin: crate::runtime::CheckpointOrigin,
+    origin: mermaid_runtime::CheckpointOrigin,
 }
 
 impl MergeContext {
@@ -268,7 +268,7 @@ async fn checkpoint_pending(
     let origin = cx.origin.clone();
     let action = serde_json::json!({ "tool": "agent" });
     blocking(move || {
-        crate::runtime::create_checkpoint_for_task(&project, &files, Some(action), origin)?;
+        mermaid_runtime::create_checkpoint_for_task(&project, &files, Some(action), origin)?;
         Ok(())
     })
     .await
@@ -306,8 +306,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{ToolCallId, TurnId};
     use crate::providers::ctx::test_exec_context;
+    use mermaid_domain::{ToolCallId, TurnId};
 
     #[test]
     fn isolation_parses_its_spellings_and_rejects_the_rest() {
@@ -340,7 +340,7 @@ mod tests {
     /// tests are about the workspace, and leaving it on would write real
     /// checkpoints into the user's data dir on every run.
     fn project(tag: &str) -> Option<(PathBuf, MergeContext)> {
-        use crate::runtime::git::git;
+        use mermaid_runtime::git::git;
         let dir = std::env::temp_dir().join(format!("mermaid_wsi_{tag}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -351,7 +351,7 @@ mod tests {
         git(&dir).args(["add", "-A"]).run().unwrap();
         git(&dir).args(["commit", "-qm", "init"]).run().unwrap();
 
-        let mut config = crate::app::Config::default();
+        let mut config = mermaid_domain::Config::default();
         config.safety.checkpoint_on_mutation = false;
         let (ctx, _rx) = crate::providers::ctx::test_exec_context_with_config(
             TurnId(1),
@@ -465,7 +465,7 @@ mod tests {
         };
         // Checkpointing on, unlike the other tests here: this is about what
         // happens when that snapshot cannot be taken.
-        let mut config = crate::app::Config::default();
+        let mut config = mermaid_domain::Config::default();
         config.safety.checkpoint_on_mutation = true;
         let (ctx, _rx) = crate::providers::ctx::test_exec_context_with_config(
             TurnId(9),

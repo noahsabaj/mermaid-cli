@@ -1,6 +1,9 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 
+use mermaid_model::utils::init_logger;
+use mermaid_runtime::{NewTask, RuntimeStore, TaskStatus};
+
 use mermaid_cli::{
     app::{
         InteractiveOptions, RunOptions, format_result, load_layered_config_or_warn,
@@ -9,16 +12,14 @@ use mermaid_cli::{
     },
     cli::{Cli, Commands, OutputFormat, resolve_run_prompt},
     ollama::ensure_model as ensure_ollama_model,
-    runtime::{NewTask, RuntimeStore, TaskStatus},
     session::{ConversationManager, SessionEntry, select_conversation},
-    utils::init_logger,
 };
 
 fn main() -> Result<()> {
     // Best-effort process hardening (no core dumps, no ptrace attach) before we
     // parse args or touch config — a crash must not write a core file carrying
     // secrets, and the process shouldn't be trivially attachable.
-    mermaid_cli::runtime::hardening::harden_process();
+    mermaid_runtime::hardening::harden_process();
 
     // The `__sandbox-exec` launcher applies OS confinement to this process and
     // execve's the wrapped command. It must run before the async runtime spawns
@@ -106,7 +107,7 @@ async fn async_main() -> Result<()> {
     dispatch_interactive(cli, config).await
 }
 
-fn apply_prompt_flags(cli: &Cli, config: &mut mermaid_cli::app::Config) -> Result<()> {
+fn apply_prompt_flags(cli: &Cli, config: &mut mermaid_domain::Config) -> Result<()> {
     if let Some(prompt) = cli.system_prompt.as_ref() {
         config.prompt.system_prompt = Some(prompt.clone());
     }
@@ -139,7 +140,7 @@ fn apply_prompt_flags(cli: &Cli, config: &mut mermaid_cli::app::Config) -> Resul
     Ok(())
 }
 
-async fn dispatch_interactive(cli: Cli, mut config: mermaid_cli::app::Config) -> Result<()> {
+async fn dispatch_interactive(cli: Cli, mut config: mermaid_domain::Config) -> Result<()> {
     let cli_model_provided = cli.model.is_some();
     let model_id = resolve_model_id(cli.model.as_deref(), &config).await?;
 
@@ -195,7 +196,7 @@ fn load_seed_conversation(
     continue_session: bool,
     resume: &Option<Option<String>>,
     interactive: bool,
-) -> Result<Option<mermaid_cli::session::ConversationHistory>> {
+) -> Result<Option<mermaid_domain::ConversationHistory>> {
     if continue_session {
         return ConversationManager::new(cwd)?.load_last_conversation();
     }
@@ -279,7 +280,7 @@ struct HeadlessFlags {
 
 async fn dispatch_non_interactive(
     cli: &Cli,
-    mut config: mermaid_cli::app::Config,
+    mut config: mermaid_domain::Config,
     prompt: Option<String>,
     format: OutputFormat,
     output_schema: Option<serde_json::Value>,
@@ -410,7 +411,7 @@ fn create_run_task(
             .tasks()
             .add_event(&task.id, "run_option", "tools disabled by --no-execute");
     }
-    let _ = mermaid_cli::runtime::run_plugin_hooks(
+    let _ = mermaid_runtime::run_plugin_hooks(
         "task_start",
         &serde_json::json!({
             "id": task.id.clone(),
@@ -428,7 +429,7 @@ fn finish_run_task(task_id: Option<&str>, status: TaskStatus, final_report: Opti
     };
     if let Ok(store) = RuntimeStore::open_default() {
         let _ = store.tasks().update_status(task_id, status, final_report);
-        let _ = mermaid_cli::runtime::run_plugin_hooks(
+        let _ = mermaid_runtime::run_plugin_hooks(
             "task_stop",
             &serde_json::json!({
                 "id": task_id,

@@ -25,16 +25,16 @@ use futures::{FutureExt, StreamExt};
 use ratatui::layout::Rect;
 use tokio::time::{Duration, interval};
 
-use crate::app::Config;
 use crate::app::event_source::coalesce_key_burst;
 use crate::app::lifecycle::RuntimeLifecycle;
 use crate::app::recorder::{RECORDING_FORMAT_VERSION, Recorder, SessionHeader};
 use crate::app::terminal::TerminalGuard;
-use crate::domain::{Cmd, Msg, RuntimeSignal, State, update};
 use crate::effect::EffectRunner;
 use crate::providers::ToolRegistry;
 use crate::render::{RenderCache, render};
-use crate::session::ConversationHistory;
+use mermaid_domain::Config;
+use mermaid_domain::ConversationHistory;
+use mermaid_domain::{Cmd, Msg, RuntimeSignal, State, update};
 
 /// Options for `run_interactive_with`. Added so new flags land without
 /// reshuffling positional args.
@@ -55,6 +55,10 @@ pub struct InteractiveOptions {
 /// Interactive TUI main loop with explicit options. `recorder` (if
 /// provided) appends one JSONL line per reducer input to the file for
 /// debugging / replay.
+#[expect(
+    clippy::too_many_lines,
+    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+)]
 pub async fn run_interactive_with(
     mut config: Config,
     cwd: PathBuf,
@@ -92,7 +96,12 @@ pub async fn run_interactive_with(
         // `State::seed_conversation` so both build the same starting state.
         state.seed_conversation(history);
     }
-    crate::app::stamp_session_provenance(&mut state, &cwd);
+    state
+        .ui
+        .pending_msgs
+        .push_back(Msg::SessionProvenanceResolved(
+            crate::session::probe_session_provenance(&cwd),
+        ));
     // NO_COLOR (https://no-color.org): present and non-empty disables all
     // color. Read once here — the reducer never touches the environment; the
     // render layer resolves `Theme::plain()` off this flag.
@@ -154,7 +163,7 @@ pub async fn run_interactive_with(
     // TaskBroker (tool-side truth) so the first task tool call of the new
     // process starts from the restored list instead of an empty one.
     if !state.session.conversation.tasks.tasks.is_empty() {
-        runner.dispatch(crate::domain::Cmd::SyncTaskStore(
+        runner.dispatch(mermaid_domain::Cmd::SyncTaskStore(
             state.session.conversation.tasks.clone(),
         ));
     }
@@ -166,7 +175,7 @@ pub async fn run_interactive_with(
     // `Msg` is the large variant, but this enum lives on the stack for one
     // loop iteration and `Msg` is passed by value everywhere already —
     // boxing it would add a per-event heap alloc on the hot input path.
-    #[allow(clippy::large_enum_variant)]
+    #[expect(clippy::large_enum_variant)]
     enum Sel {
         Msg(Option<Msg>),
         Term(Option<Result<crossterm::event::Event, std::io::Error>>),
@@ -280,10 +289,10 @@ pub async fn run_interactive_with(
                                 None
                             },
                             MEK::ScrollUp => Some(Msg::MouseScroll {
-                                delta: crate::constants::UI_MOUSE_SCROLL_LINES as i16,
+                                delta: mermaid_model::constants::UI_MOUSE_SCROLL_LINES as i16,
                             }),
                             MEK::ScrollDown => Some(Msg::MouseScroll {
-                                delta: -(crate::constants::UI_MOUSE_SCROLL_LINES as i16),
+                                delta: -(mermaid_model::constants::UI_MOUSE_SCROLL_LINES as i16),
                             }),
                             _ => None,
                         }
@@ -456,7 +465,7 @@ fn web_capabilities_notice(
 ) -> Option<String> {
     use crate::providers::tool::web::Egress;
 
-    if config.safety.network == crate::app::NetworkPolicy::Deny {
+    if config.safety.network == mermaid_domain::NetworkPolicy::Deny {
         return Some(format!(
             "Web egress disabled by safety.network = \"deny\" (selected fetch backend: {}; selected search backend: {}).",
             capabilities.fetch.backend, capabilities.search.backend
@@ -508,10 +517,10 @@ fn web_capabilities_notice(
         let reason = status
             .reason
             .as_deref()
-            .map(crate::utils::redact_secrets)
+            .map(mermaid_model::utils::redact_secrets)
             .unwrap_or_else(|| "backend initialization failed".to_string());
         let reason = reason.split_whitespace().collect::<Vec<_>>().join(" ");
-        let reason = crate::utils::truncate_middle_bytes(&reason, 240)
+        let reason = mermaid_model::utils::truncate_middle_bytes(&reason, 240)
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ");
@@ -549,7 +558,7 @@ mod tests {
         let mut cfg = Config::default();
         cfg.mcp_servers.insert(
             "example".to_string(),
-            crate::app::McpServerConfig {
+            mermaid_domain::McpServerConfig {
                 command: "echo".to_string(),
                 args: vec![],
                 env: std::collections::HashMap::new(),
@@ -739,7 +748,7 @@ mod tests {
     #[test]
     fn web_capability_notice_honors_global_network_denial() {
         let mut config = Config::default();
-        config.safety.network = crate::app::NetworkPolicy::Deny;
+        config.safety.network = mermaid_domain::NetworkPolicy::Deny;
         // Denial reports regardless of viability or locality — both backends
         // resolve here, and both stay on this machine.
         let capabilities = capabilities(local_fetch(), local_search());

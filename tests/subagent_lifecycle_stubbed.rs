@@ -14,14 +14,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use mermaid_cli::domain::{Msg, ToolCallId, ToolStatus, TurnId};
 use mermaid_cli::providers::ProviderFactory;
 use mermaid_cli::providers::ctx::test_exec_context_with_config;
 use mermaid_cli::providers::model::ModelProvider;
 use mermaid_cli::providers::tool::ToolExecutor;
 use mermaid_cli::providers::tool::subagent::{SubagentSpawner, SubagentTool};
 use mermaid_cli::providers::tool::web::WebCapabilities;
-use mermaid_cli::runtime::SafetyMode;
+use mermaid_domain::{Msg, ToolCallId, ToolStatus, TurnId};
+use mermaid_runtime::SafetyMode;
 
 #[path = "harness/stub_model.rs"]
 mod stub_model;
@@ -29,8 +29,8 @@ use stub_model::{ScriptedModel, Turn};
 
 const STUB: &str = "stub/scripted";
 
-fn config() -> mermaid_cli::app::Config {
-    let mut config = mermaid_cli::app::Config::default();
+fn config() -> mermaid_domain::Config {
+    let mut config = mermaid_domain::Config::default();
     config.safety.mode = SafetyMode::FullAccess;
     config.safety.checkpoint_on_mutation = false;
     config
@@ -166,7 +166,7 @@ async fn a_child_emitting_several_tool_calls_runs_them_all_and_sees_every_result
     let results = requests[1]
         .messages
         .iter()
-        .filter(|m| m.role == mermaid_cli::models::MessageRole::Tool)
+        .filter(|m| m.role == mermaid_model::models::MessageRole::Tool)
         .count();
     assert_eq!(
         results, 3,

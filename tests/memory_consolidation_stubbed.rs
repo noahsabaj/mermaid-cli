@@ -28,12 +28,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use mermaid_cli::domain::{Cmd, Msg};
 use mermaid_cli::effect::EffectRunner;
 use mermaid_cli::providers::ProviderFactory;
 use mermaid_cli::providers::model::ModelProvider;
 use mermaid_cli::providers::tool::ToolRegistry;
-use mermaid_cli::runtime::git::git;
+use mermaid_domain::{Cmd, Msg};
+use mermaid_runtime::git::git;
 
 #[path = "harness/stub_model.rs"]
 mod stub_model;
@@ -80,7 +80,7 @@ fn memory_file(project: &Path, id: &str) -> PathBuf {
 async fn consolidate(project: &Path, script: Vec<Turn>) -> (String, Arc<ScriptedModel>) {
     let model = ScriptedModel::new(script);
     let providers = Arc::new(ProviderFactory::with_seeded_providers(
-        mermaid_cli::app::Config::default(),
+        mermaid_domain::Config::default(),
         [(STUB.to_string(), model.clone() as Arc<dyn ModelProvider>)],
     ));
     let (mut runner, mut rx) = EffectRunner::pair_from(

@@ -12,7 +12,7 @@
 //! (destructive patterns are already denied by the rule engine), and any
 //! error / timeout / unparseable reply **fails safe** to "escalate to human".
 //!
-//! [`PolicyDecision::Classify`]: crate::runtime::PolicyDecision
+//! [`PolicyDecision::Classify`]: mermaid_runtime::PolicyDecision
 //! [`ExecContext`]: crate::providers::ctx::ExecContext
 
 use std::sync::Arc;
@@ -21,9 +21,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
-use crate::domain::{ChatRequest, TurnId};
-use crate::models::{ChatMessage, ReasoningLevel};
 use crate::providers::factory::ProviderFactory;
+use mermaid_domain::{ChatRequest, TurnId};
+use mermaid_model::models::{ChatMessage, ReasoningLevel};
 
 /// How long to wait for the classifier before failing safe (escalating).
 const VET_TIMEOUT: Duration = Duration::from_secs(10);
@@ -163,7 +163,7 @@ impl AutoClassifier for ModelAutoClassifier {
             let provider = providers.resolve(&model_id).await?;
             let (text, _usage) =
                 crate::providers::model::collect_text(provider, turn, request, token).await?;
-            Ok::<String, crate::models::ModelError>(text)
+            Ok::<String, mermaid_model::models::ModelError>(text)
         };
 
         match tokio::time::timeout(VET_TIMEOUT, call).await {
@@ -184,7 +184,7 @@ fn describe_action(req: &VetRequest) -> String {
         if structured {
             req.tool.clone()
         } else {
-            crate::utils::redact_secrets(&req.summary)
+            mermaid_model::utils::redact_secrets(&req.summary)
         }
     )];
     // Structured calls carry their complete data below. Do not duplicate their
@@ -194,16 +194,19 @@ fn describe_action(req: &VetRequest) -> String {
         if let Some(command) = &req.command {
             details.push(format!(
                 "Action detail: {}",
-                crate::utils::redact_secrets(command)
+                mermaid_model::utils::redact_secrets(command)
             ));
         }
         if let Some(path) = &req.path {
-            details.push(format!("Path: {}", crate::utils::redact_secrets(path)));
+            details.push(format!(
+                "Path: {}",
+                mermaid_model::utils::redact_secrets(path)
+            ));
         }
     }
     if let Some(arguments) = &req.arguments {
         let mut redacted = arguments.clone();
-        crate::utils::redact_json(&mut redacted);
+        mermaid_model::utils::redact_json(&mut redacted);
         let json = serde_json::to_string_pretty(&redacted)
             .unwrap_or_else(|_| "<arguments could not be serialized>".to_string());
         details.push(format!("Structured arguments:\n{json}"));
@@ -439,7 +442,7 @@ mod tests {
             arguments: None,
             intent: None,
             workdir: "/tmp".to_string(),
-            turn: crate::domain::TurnId(1),
+            turn: mermaid_domain::TurnId(1),
             token: tokio_util::sync::CancellationToken::new(),
         }
     }

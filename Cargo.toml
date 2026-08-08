@@ -19,6 +19,7 @@ categories = ["command-line-utilities", "development-tools"]
 [workspace]
 members = [
     ".",
+    "crates/mermaid-domain",
     "crates/mermaid-model",
     "crates/mermaid-runtime",
 ]
@@ -31,10 +32,40 @@ path = "src/main.rs"
 name = "mermaidd"
 path = "src/bin/mermaidd.rs"
 
+# Lint policy. DUPLICATED verbatim into all three manifests — `tests/lint_policy_drift.rs`
+# guards the duplication. Inheritance via `[workspace.lints]` + `lints.workspace = true`
+# is NOT usable here: the `isolated-crate-build` CI job copies `crates/.` to a directory
+# with no workspace root above it, where `lints.workspace = true` is a hard manifest-parse
+# error. That job exists because a manifest bug half-released v0.21.0; breaking it with a
+# manifest bug would be a poor trade.
+#
+# Everything is `deny`, not `warn`, and deliberately: CI runs `clippy -- -D warnings`, so
+# `warn` would be `deny` anyway. Writing `deny` makes the table say what it does, and keeps
+# it true if the `-D` is ever dropped.
+[lints.clippy]
+# Debug leftovers. All measured at zero across the workspace when this landed.
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+mem_forget = "deny"
+
+# The cap AGENTS.md names by number. `.clippy.toml` has set
+# `too-many-lines-threshold = 100` since forever while the lint itself was off, so the
+# doc's "clippy caps functions at 100 lines" was false and `update_step` reached 774.
+# Existing offenders carry `#[expect(clippy::too_many_lines, reason = ...)]`, counted in
+# `.github/baselines/expect_budget.txt`, which only goes down.
+too_many_lines = "deny"
+
+# `.clippy.toml` already sets excessive-nesting-threshold = 8.
+excessive_nesting = "deny"
+
+[lints.rust]
+# Stated here so a local `cargo clippy` without the CI flag reaches the same verdict.
+warnings = "deny"
+
 [dependencies]
 # Async runtime. 1.44 closes RUSTSEC-2025-0023 (broadcast channel unsoundness).
 tokio = { version = "1.44", features = ["full"] }
-tokio-stream = "0.1"
 # `CancellationToken` for per-turn structured concurrency in
 # `src/effect/`. The v0.7 architecture uses one token per `TurnScope`
 # so cancelling a turn aborts every child task at its next await —
@@ -67,60 +98,58 @@ anyhow = "1.0"
 thiserror = "2.0"
 async-trait = "0.1"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 chrono = { version = "0.4", features = ["serde"] }
 directories = "6.0"
 which = "8.0"  # Find executables
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls", "gzip", "brotli"] }
 encoding_rs = "0.8"
 mime = "0.3"
-bytes = "1.11"
 rusqlite = { version = "0.40", features = ["bundled"] }
 getrandom = "0.4"
 sha2 = "0.11"
+mermaid-domain = { path = "crates/mermaid-domain", version = "0.21.1" }
 mermaid-model = { path = "crates/mermaid-model", version = "0.21.1" }
 mermaid-runtime = { path = "crates/mermaid-runtime", version = "0.21.1" }
 
 # Additional utilities
-regex = "1.12"
 rustc-hash = "2.0"  # Faster non-cryptographic hash for HashMap
 base64 = "0.22"  # Base64 encoding for binary files (PDFs, images)
 rpassword = "7.4.0"
 unicode-width = "0.2"
 unicode-normalization = "0.1.25"
 caseless = "0.2.2"
-sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
 # Native `web_fetch`: readability extraction + HTML-to-markdown, so a URL fetch
 # runs in-process without Ollama Cloud.
 dom_smoothie = "0.18.0"
 htmd = "0.5.4"
 
-# @-mention file picker: ripgrep's gitignore-aware directory walker (effect
-# side) + Helix's fuzzy matcher (pure ranking in src/domain — computation
-# only, no I/O, so the domain purity guard stays satisfied).
+# @-mention file picker, effect side: ripgrep's gitignore-aware directory
+# walker. The pure ranking half moved to `mermaid-domain` with the reducer, and
+# `nucleo-matcher` moved with it — that crate is declared there now, not here.
 ignore = "0.4"
-nucleo-matcher = "0.3"
 jsonschema = "0.49.3"
 # POSIX-shell tokenization for the exec tool's scratch-containment prover
 # (`command_provably_in_scratch`): the command must be split exactly as
 # `sh -c` would. Same crate + version mermaid-runtime already uses.
 shell-words = "1.1"
-# OS credential storage for `mermaid login`. Linux uses the freedesktop
-# Secret Service over blocking dbus with a VENDORED (statically linked)
-# libdbus + pure-Rust session crypto, so neither CI nor end-user machines
-# need libdbus installed.
-keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
+# `mermaid login` stores provider keys in the OS keyring, but the code that
+# does it (`mermaid_model::utils::credentials`) lives one crate down, and so do
+# `keyring` and its companion `dbus-secret-service`. This manifest declared
+# both and imported neither: `cargo build` was green because the workspace
+# unified the features, which is precisely the failure mode `isolated-crate-build`
+# exists to catch — read from the other side.
 # Pseudo-terminal for foreground execute_command ([exec] pty = true): the
 # child sees a real console — openpty on Unix, ConPTY on Windows. Same
 # crate the exit-regression test harness uses as a dev-dependency.
 portable-pty = "0.9"
 
-[target.'cfg(target_os = "linux")'.dependencies]
-# Direct dep ONLY to turn on its `vendored` feature (static libdbus) for
-# keyring's sync-secret-service backend; nothing imports it directly.
-dbus-secret-service = { version = "4", features = ["vendored"] }
-
 [dev-dependencies]
+# Integration tests link the library plus dev-deps, NOT `[dependencies]`. Both
+# workspace crates are declared here so `tests/` can name them directly instead
+# of reaching them through `mermaid_cli`'s re-export facades.
+mermaid-domain = { path = "crates/mermaid-domain", version = "0.21.1" }
+mermaid-model = { path = "crates/mermaid-model", version = "0.21.1" }
+mermaid-runtime = { path = "crates/mermaid-runtime", version = "0.21.1" }
 # Scoped env-var guards — replaces `unsafe { std::env::set_var / remove_var }`
 # patterns in model + auth tests. Safer under `--test-threads > 1`.
 # `async_closure` feature enables `async_with_vars` for tokio-test paths.

@@ -1,0 +1,95 @@
+# Ratchet baseline: pedantic + nursery debt
+#
+# Debt that predates the guard. This file may only SHRINK.
+#
+# MEASURED ON LINUX, which is where the job runs. Unlike the other
+# baselines this one is platform-dependent: it records what the compiler
+# actually linted, and four test files plus 99 items under `src/` are
+# `#[cfg(unix)]`. Regenerating on Windows writes a different, wrong file
+# (85 keys / 5378 occurrences) -- take the numbers from the CI log, which
+# the guard prints in full on failure.
+# Regenerate with: just clippy-debt-record
+#
+# 82 keys / 5515 occurrences
+clippy::assigning_clones 31
+clippy::bool_to_int_with_if 2
+clippy::borrow_as_ptr 2
+clippy::branches_sharing_code 2
+clippy::case_sensitive_file_extension_comparisons 4
+clippy::cast_lossless 8
+clippy::cast_possible_truncation 78
+clippy::cast_possible_wrap 19
+clippy::cast_precision_loss 6
+clippy::cast_sign_loss 21
+clippy::cloned_instead_of_copied 1
+clippy::default_trait_access 6
+clippy::derive_partial_eq_without_eq 15
+clippy::doc_markdown 344
+clippy::duration_suboptimal_units 18
+clippy::elidable_lifetime_names 11
+clippy::explicit_iter_loop 3
+clippy::format_collect 2
+clippy::format_push_string 65
+clippy::if_not_else 2
+clippy::ignore_without_reason 2
+clippy::ignored_unit_patterns 60
+clippy::implicit_clone 5
+clippy::ip_constant 1
+clippy::items_after_statements 47
+clippy::iter_on_single_items 1
+clippy::large_futures 3
+clippy::large_stack_arrays 28
+clippy::large_stack_frames 1
+clippy::manual_let_else 15
+clippy::manual_string_new 3
+clippy::many_single_char_names 2
+clippy::map_unwrap_or 91
+clippy::match_same_arms 16
+clippy::match_wildcard_for_single_variants 2
+clippy::missing_const_for_fn 211
+clippy::missing_errors_doc 265
+clippy::missing_fields_in_debug 1
+clippy::missing_panics_doc 14
+clippy::must_use_candidate 395
+clippy::needless_collect 3
+clippy::needless_continue 3
+clippy::needless_pass_by_value 23
+clippy::needless_raw_string_hashes 17
+clippy::no_effect_underscore_binding 39
+clippy::option_if_let_else 69
+clippy::option_option 1
+clippy::or_fun_call 7
+clippy::panic 133
+clippy::range_plus_one 3
+clippy::redundant_clone 38
+clippy::redundant_closure_for_method_calls 159
+clippy::redundant_pub_crate 186
+clippy::ref_option 3
+clippy::return_self_not_must_use 30
+clippy::semicolon_if_nothing_returned 7
+clippy::significant_drop_in_scrutinee 2
+clippy::significant_drop_tightening 13
+clippy::similar_names 8
+clippy::single_char_pattern 3
+clippy::single_match_else 15
+clippy::string_slice 96
+clippy::struct_excessive_bools 5
+clippy::struct_field_names 3
+clippy::suboptimal_flops 1
+clippy::too_long_first_doc_paragraph 203
+clippy::too_many_lines 59
+clippy::trivially_copy_pass_by_ref 1
+clippy::uninlined_format_args 463
+clippy::unnecessary_debug_formatting 2
+clippy::unnecessary_struct_initialization 1
+clippy::unnecessary_wraps 6
+clippy::unnested_or_patterns 19
+clippy::unreadable_literal 2
+clippy::unused_async 4
+clippy::unused_self 3
+clippy::unwrap_used 1353
+clippy::use_self 508
+clippy::used_underscore_binding 16
+clippy::useless_let_if_seq 2
+clippy::wildcard_enum_match_arm 175
+clippy::wildcard_imports 28

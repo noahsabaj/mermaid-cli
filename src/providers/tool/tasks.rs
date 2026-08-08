@@ -20,8 +20,10 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 
-use crate::domain::tasks::{TaskEdit, TaskItem, TaskOrigin, TaskSpec, TaskStatus, TaskStore};
-use crate::domain::{ToolDefinition, ToolMetadata, ToolOutcome, ToolRunMetadata};
+use mermaid_domain::checklist::{
+    ChecklistEdit, ChecklistItem, ChecklistOrigin, ChecklistSpec, ChecklistStatus, ChecklistStore,
+};
+use mermaid_domain::{ToolDefinition, ToolMetadata, ToolOutcome, ToolRunMetadata};
 
 use super::super::ctx::ExecContext;
 use super::ToolExecutor;
@@ -31,14 +33,14 @@ pub struct TaskUpdateTool;
 pub struct TaskListTool;
 
 /// Tool result line for one task: `#3 [in_progress] wire the broker`.
-fn task_line(task: &TaskItem) -> String {
+fn task_line(task: &ChecklistItem) -> String {
     format!("#{} [{}] {}", task.id, task.status.as_str(), task.subject)
 }
 
 /// The checklist as the model sees it from `task_list`: numbered lines plus
 /// the progress footer, with per-task evidence indented underneath (the
 /// model's own audit trail of what actually happened while each ran).
-fn render_list(store: &TaskStore) -> String {
+fn render_list(store: &ChecklistStore) -> String {
     if store.is_empty() {
         return "No tasks.".to_string();
     }
@@ -80,7 +82,7 @@ fn no_broker(secs: f64) -> ToolOutcome {
 fn plan_mode_block(ctx: &crate::providers::ExecContext, secs: f64) -> Option<ToolOutcome> {
     // Only an explicit `allow` in the plan profile unblocks the writers —
     // `auto`/`ask` collapse to deny (ungated tools have no approval path).
-    if ctx.plan_permissions.tasks == crate::app::PlanPermLevel::Allow {
+    if ctx.plan_permissions.tasks == mermaid_domain::PlanPermLevel::Allow {
         return None;
     }
     ctx.plan_file.as_ref().map(|_| {
@@ -94,7 +96,7 @@ fn plan_mode_block(ctx: &crate::providers::ExecContext, secs: f64) -> Option<Too
     })
 }
 
-fn metadata(action: &str, store: &TaskStore) -> ToolRunMetadata {
+fn metadata(action: &str, store: &ChecklistStore) -> ToolRunMetadata {
     let (completed, total) = store.counts();
     ToolRunMetadata {
         detail: ToolMetadata::Tasks {
@@ -106,7 +108,7 @@ fn metadata(action: &str, store: &TaskStore) -> ToolRunMetadata {
     }
 }
 
-fn parse_specs(args: &serde_json::Value) -> Result<Vec<TaskSpec>, String> {
+fn parse_specs(args: &serde_json::Value) -> Result<Vec<ChecklistSpec>, String> {
     let items = args
         .get("tasks")
         .and_then(|t| t.as_array())
@@ -138,7 +140,7 @@ fn parse_specs(args: &serde_json::Value) -> Result<Vec<TaskSpec>, String> {
                     ));
                 },
             };
-            Ok(TaskSpec {
+            Ok(ChecklistSpec {
                 subject: subject.to_string(),
                 active_form: active_form.to_string(),
                 description: item
@@ -151,7 +153,7 @@ fn parse_specs(args: &serde_json::Value) -> Result<Vec<TaskSpec>, String> {
         .collect()
 }
 
-fn parse_edits(args: &serde_json::Value) -> Result<Vec<TaskEdit>, String> {
+fn parse_edits(args: &serde_json::Value) -> Result<Vec<ChecklistEdit>, String> {
     let items = args
         .get("updates")
         .and_then(|t| t.as_array())
@@ -170,11 +172,11 @@ fn parse_edits(args: &serde_json::Value) -> Result<Vec<TaskEdit>, String> {
             let status = match item.get("status").and_then(|s| s.as_str()) {
                 None => None,
                 Some(s) => Some(
-                    TaskStatus::parse(s)
+                    ChecklistStatus::parse(s)
                         .ok_or_else(|| format!("updates[{i}]: unknown status {s:?}"))?,
                 ),
             };
-            Ok(TaskEdit {
+            Ok(ChecklistEdit {
                 id: id as u32,
                 status,
                 subject: item
@@ -266,7 +268,7 @@ impl ToolExecutor for TaskCreateTool {
             Err(e) => return ToolOutcome::error(e, secs()),
         };
         let count = specs.len();
-        let (created, store) = broker.create(specs, TaskOrigin::Model).await;
+        let (created, store) = broker.create(specs, ChecklistOrigin::Model).await;
         let mut out = format!("Created {count} task(s):\n");
         for task in &created {
             out.push_str(&task_line(task));
@@ -275,7 +277,7 @@ impl ToolExecutor for TaskCreateTool {
         out.push_str(&store.progress_string());
         // Creation can violate single-in_progress too (e.g. adding an
         // in_progress task while another is active) — same advisory path.
-        for note in crate::domain::advisory_notes(&store, &[], &store) {
+        for note in mermaid_domain::advisory_notes(&store, &[], &store) {
             out.push('\n');
             out.push_str(&note);
         }
@@ -422,15 +424,15 @@ impl ToolExecutor for TaskListTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{ToolCallId, TurnId};
     use crate::providers::ctx::test_exec_context;
     use crate::providers::tasks::TaskBroker;
+    use mermaid_domain::{ToolCallId, TurnId};
     use std::path::PathBuf;
 
     fn ctx_with_broker() -> (
         ExecContext,
         TaskBroker,
-        tokio::sync::mpsc::Receiver<crate::domain::Msg>,
+        tokio::sync::mpsc::Receiver<mermaid_domain::Msg>,
     ) {
         let (mut ctx, _progress) =
             test_exec_context(TurnId(1), ToolCallId(1), PathBuf::from("/tmp"));
@@ -529,7 +531,7 @@ mod tests {
             .await;
         assert!(outcome.error.is_none());
         broker
-            .record_evidence(crate::domain::EvidenceEntry {
+            .record_evidence(mermaid_domain::EvidenceEntry {
                 tool: "edit_file".into(),
                 target: "src/x.rs".into(),
                 status: "ok".into(),

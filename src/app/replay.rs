@@ -23,8 +23,8 @@ use anyhow::Result;
 use chrono::{DateTime, Local};
 
 use crate::app::recorder::{RecordLine, Replay, SessionHeader, session_fingerprint};
-use crate::domain::{Msg, State, update};
-use crate::models::MessageRole;
+use mermaid_domain::{Msg, State, update};
+use mermaid_model::models::MessageRole;
 
 /// Everything `--replay` learned from one recording.
 pub struct ReplayReport {
@@ -167,6 +167,10 @@ pub fn run_replay(path: &Path) -> Result<bool> {
 }
 
 /// Plain-text report. Separate from `run_replay` so tests can assert on it.
+#[expect(
+    clippy::too_many_lines,
+    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+)]
 fn render_report(path: &Path, report: &ReplayReport) -> String {
     use std::fmt::Write as _;
 
@@ -278,10 +282,10 @@ fn render_report(path: &Path, report: &ReplayReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::Config;
     use crate::app::recorder::{RECORDING_FORMAT_VERSION, Recorder};
-    use crate::domain::TurnId;
-    use crate::models::{FinishReason, TokenUsage};
+    use mermaid_domain::Config;
+    use mermaid_domain::TurnId;
+    use mermaid_model::models::{FinishReason, TokenUsage};
     use std::path::PathBuf;
 
     fn tmpfile(name: &str) -> PathBuf {

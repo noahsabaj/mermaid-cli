@@ -12,14 +12,15 @@
 //! shapes — just wrapped in the new trait so future tools only have
 //! to learn this surface.
 
+use mermaid_domain::ProgressEvent;
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 
-use crate::constants::MAX_RESPONSE_CHARS as MAX_FILE_READ_BYTES;
-use crate::domain::{ToolDefinition, ToolMetadata, ToolOutcome, ToolRunMetadata};
+use mermaid_domain::{ToolDefinition, ToolMetadata, ToolOutcome, ToolRunMetadata};
+use mermaid_model::constants::MAX_RESPONSE_CHARS as MAX_FILE_READ_BYTES;
 
-use super::super::ctx::{ExecContext, ProgressEvent};
+use super::super::ctx::ExecContext;
 use super::ToolExecutor;
 use super::path_safety::{
     AllowedRoots, ResolvedInRoot, relative_within, resolve_in_roots, resolve_path_within,
@@ -41,7 +42,7 @@ fn defn(name: &str, description: &str, input_schema: serde_json::Value) -> ToolD
 /// to `MAX_BATCH_TOOL_ITEMS` files could otherwise sum to ~12.8 MB in a single
 /// tool result — far past any sane model-context budget. This bounds the
 /// combined total; single-file reads are already bounded and unaffected.
-const MAX_READ_AGGREGATE_CHARS: usize = crate::constants::MAX_RESPONSE_CHARS;
+const MAX_READ_AGGREGATE_CHARS: usize = mermaid_model::constants::MAX_RESPONSE_CHARS;
 
 /// `read_file` — read one or more files and return their contents
 /// joined with section markers.
@@ -130,7 +131,7 @@ impl ToolExecutor for ReadFileTool {
         // multi-file accumulation needs this (single-file output is already
         // bounded); truncate_middle keeps the head AND tail with an elision marker.
         if paths.len() > 1 && combined.len() > MAX_READ_AGGREGATE_CHARS {
-            combined = crate::utils::truncate_middle(&combined, MAX_READ_AGGREGATE_CHARS);
+            combined = mermaid_model::utils::truncate_middle(&combined, MAX_READ_AGGREGATE_CHARS);
             any_truncated = true;
         }
 
@@ -235,7 +236,7 @@ impl ToolExecutor for DeleteFileTool {
         // checkpointed into the project's restore history.
         if ctx.config.safety.checkpoint_on_mutation
             && !in_scratchpad
-            && let Err(e) = crate::runtime::create_checkpoint_for_task(
+            && let Err(e) = mermaid_runtime::create_checkpoint_for_task(
                 &ctx.workdir,
                 std::slice::from_ref(&abs),
                 Some(serde_json::json!({
@@ -252,7 +253,7 @@ impl ToolExecutor for DeleteFileTool {
         tokio::select! {
             biased;
             _ = ctx.token.cancelled() => ToolOutcome::cancelled(),
-            result = tokio::task::spawn_blocking(move || crate::runtime::remove_file_beneath(&root, &rel)) => {
+            result = tokio::task::spawn_blocking(move || mermaid_runtime::remove_file_beneath(&root, &rel)) => {
                 match result {
                     Ok(Ok(())) => {
                         let duration_secs = start.elapsed().as_secs_f64();
@@ -343,7 +344,7 @@ impl ToolExecutor for CreateDirectoryTool {
         // Scratchpad dirs are session-private and ephemeral — never checkpointed.
         if ctx.config.safety.checkpoint_on_mutation
             && !in_scratchpad
-            && let Err(e) = crate::runtime::create_checkpoint_for_task(
+            && let Err(e) = mermaid_runtime::create_checkpoint_for_task(
                 &ctx.workdir,
                 std::slice::from_ref(&abs),
                 Some(serde_json::json!({
@@ -360,7 +361,7 @@ impl ToolExecutor for CreateDirectoryTool {
         tokio::select! {
             biased;
             _ = ctx.token.cancelled() => ToolOutcome::cancelled(),
-            result = tokio::task::spawn_blocking(move || crate::runtime::create_dir_all_beneath(&root, &rel)) => {
+            result = tokio::task::spawn_blocking(move || mermaid_runtime::create_dir_all_beneath(&root, &rel)) => {
                 match result {
                     Ok(Ok(())) => {
                         let duration_secs = start.elapsed().as_secs_f64();
@@ -388,6 +389,10 @@ impl ToolExecutor for CreateDirectoryTool {
 /// `write_file` — write a single file, creating parent dirs as needed.
 pub struct WriteFileTool;
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+)]
 #[async_trait]
 impl ToolExecutor for WriteFileTool {
     fn name(&self) -> &'static str {
@@ -463,7 +468,7 @@ impl ToolExecutor for WriteFileTool {
         // Scratchpad files are session-private and ephemeral — never checkpointed.
         if ctx.config.safety.checkpoint_on_mutation
             && !in_scratchpad
-            && let Err(e) = crate::runtime::create_checkpoint_for_task(
+            && let Err(e) = mermaid_runtime::create_checkpoint_for_task(
                 &ctx.workdir,
                 std::slice::from_ref(&abs_path),
                 Some(serde_json::json!({
@@ -535,11 +540,11 @@ fn extract_paths(args: &serde_json::Value) -> Result<Vec<String>, String> {
         return Ok(vec![p.to_string()]);
     }
     if let Some(arr) = args.get("paths").and_then(|v| v.as_array()) {
-        if arr.len() > crate::constants::MAX_BATCH_TOOL_ITEMS {
+        if arr.len() > mermaid_model::constants::MAX_BATCH_TOOL_ITEMS {
             return Err(format!(
                 "read_file: too many paths ({}); cap is {} per call — split the request",
                 arr.len(),
-                crate::constants::MAX_BATCH_TOOL_ITEMS
+                mermaid_model::constants::MAX_BATCH_TOOL_ITEMS
             ));
         }
         let mut out = Vec::with_capacity(arr.len());
@@ -599,11 +604,11 @@ async fn read_one(roots: &AllowedRoots<'_>, raw: &str) -> std::io::Result<(Strin
         },
     };
     let result = tokio::task::spawn_blocking(move || {
-        let file = crate::runtime::open_beneath(&root, &rel, crate::runtime::OpenIntent::Read)?;
+        let file = mermaid_runtime::open_beneath(&root, &rel, mermaid_runtime::OpenIntent::Read)?;
         // Bounded read: never pull more than the cap (+1 probe byte) into RAM,
         // so a model pointing `read_file` at a multi-gigabyte file can't OOM the
         // process — a full read would have slurped the whole thing first (#15).
-        let (data, truncated) = crate::utils::read_capped(file, MAX_FILE_READ_BYTES)?;
+        let (data, truncated) = mermaid_model::utils::read_capped(file, MAX_FILE_READ_BYTES)?;
         let mut s = String::from_utf8_lossy(&data).into_owned();
         if truncated {
             // Char-boundary-safe truncation with a marker footer.
@@ -630,21 +635,21 @@ fn write_one_blocking(root: &Path, rel: &Path, content: &str) -> std::io::Result
     if let Some(parent) = rel.parent()
         && !parent.as_os_str().is_empty()
     {
-        crate::runtime::create_dir_all_beneath(root, parent)?;
+        mermaid_runtime::create_dir_all_beneath(root, parent)?;
     }
-    crate::runtime::write_atomic_beneath(root, rel, content.as_bytes())?;
+    mermaid_runtime::write_atomic_beneath(root, rel, content.as_bytes())?;
     Ok(content.lines().count())
 }
 
 struct WriteResult {
     line_count: usize,
     created: bool,
-    diff: crate::render::diff::DisplayDiff,
+    diff: mermaid_model::diff::DisplayDiff,
 }
 
 /// Write `content` and build the display diff against the prior file in ONE
 /// blocking job (#F44/RC-L). The prior content is read BOUNDED via
-/// [`crate::utils::read_file_capped`] — overwriting a multi-gigabyte file must
+/// [`mermaid_model::utils::read_file_capped`] — overwriting a multi-gigabyte file must
 /// not slurp it into RAM on the async worker just to render a diff. A prior file
 /// larger than the read cap (or otherwise unreadable) is elided from the diff
 /// rather than read whole.
@@ -655,7 +660,7 @@ fn write_with_diff_blocking(
     content: &str,
 ) -> std::io::Result<WriteResult> {
     let (old_content, created, elide_diff) =
-        match crate::utils::read_file_capped(abs_path, MAX_FILE_READ_BYTES) {
+        match mermaid_model::utils::read_file_capped(abs_path, MAX_FILE_READ_BYTES) {
             Ok((data, false)) => (String::from_utf8_lossy(&data).into_owned(), false, false),
             // Existing file is past the read cap — don't pull it all into RAM.
             Ok((_, true)) => (String::new(), false, true),
@@ -665,7 +670,7 @@ fn write_with_diff_blocking(
             Err(_) => (String::new(), false, true),
         };
     let diff = if elide_diff {
-        crate::render::diff::DisplayDiff {
+        mermaid_model::diff::DisplayDiff {
             display_diff: format!(
                 "[diff preview skipped: existing file exceeds the {}-byte cap]",
                 MAX_FILE_READ_BYTES
@@ -675,7 +680,7 @@ fn write_with_diff_blocking(
             truncated: true,
         }
     } else {
-        crate::render::diff::generate_display_diff(&old_content, content)
+        mermaid_model::diff::generate_display_diff(&old_content, content)
     };
     let line_count = write_one_blocking(root, rel, content)?;
     Ok(WriteResult {
@@ -713,9 +718,9 @@ pub(super) async fn mutation_policy_outcome(
     pending_action: serde_json::Value,
     scratch_contained: bool,
 ) -> MutationGate {
-    let mut request = crate::runtime::ActionRequest::new(
+    let mut request = mermaid_runtime::ActionRequest::new(
         tool,
-        crate::runtime::ToolCategory::Edit,
+        mermaid_runtime::ToolCategory::Edit,
         format!("{} {}", tool, path),
     );
     request.path = Some(path.to_string());
@@ -733,7 +738,7 @@ pub(super) async fn mutation_policy_outcome(
     {
         super::policy_gate::Gate::Block(outcome) => MutationGate::Blocked(Box::new(outcome)),
         super::policy_gate::Gate::Proceed { plan_write, .. } => {
-            let _ = crate::runtime::run_plugin_hooks(
+            let _ = mermaid_runtime::run_plugin_hooks(
                 "before_file_mutation",
                 &serde_json::json!({
                     "task_id": ctx.task_id.clone(),
@@ -749,7 +754,7 @@ pub(super) async fn mutation_policy_outcome(
 }
 
 pub(super) fn after_file_mutation(ctx: &ExecContext, tool: &str, path: &str) {
-    let _ = crate::runtime::run_plugin_hooks(
+    let _ = mermaid_runtime::run_plugin_hooks(
         "after_file_mutation",
         &serde_json::json!({
             "task_id": ctx.task_id.clone(),
@@ -791,8 +796,8 @@ fn format_duration_for_diff(seconds: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{ToolCallId, TurnId};
     use crate::providers::ctx::test_exec_context;
+    use mermaid_domain::{ToolCallId, TurnId};
     use std::fs;
 
     /// Memory facts live outside the project/scratchpad roots and the index
@@ -876,7 +881,7 @@ mod tests {
         let dir = temp_root("read_missing_path");
         let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), dir.clone());
         let outcome = ReadFileTool.execute(serde_json::json!({}), ctx).await;
-        assert_eq!(outcome.status, crate::domain::ToolStatus::Error);
+        assert_eq!(outcome.status, mermaid_domain::ToolStatus::Error);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -887,7 +892,7 @@ mod tests {
         let outcome = ReadFileTool
             .execute(serde_json::json!({"path": "does_not_exist.txt"}), ctx)
             .await;
-        assert_eq!(outcome.status, crate::domain::ToolStatus::Error);
+        assert_eq!(outcome.status, mermaid_domain::ToolStatus::Error);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1139,7 +1144,7 @@ mod tests {
         let outcome = WriteFileTool
             .execute(serde_json::json!({"path": "x.txt"}), ctx)
             .await;
-        assert_eq!(outcome.status, crate::domain::ToolStatus::Error);
+        assert_eq!(outcome.status, mermaid_domain::ToolStatus::Error);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1235,11 +1240,11 @@ mod tests {
     /// broker, and (optionally) a materialized scratchpad. Unlike
     /// `test_exec_context` (pinned to FullAccess) this exercises the gate.
     fn scratch_ctx(
-        mode: crate::runtime::SafetyMode,
+        mode: mermaid_runtime::SafetyMode,
         workdir: PathBuf,
         scratchpad: Option<PathBuf>,
     ) -> (ExecContext, tokio::sync::mpsc::Receiver<ProgressEvent>) {
-        let mut config = crate::app::Config::default();
+        let mut config = mermaid_domain::Config::default();
         config.safety.mode = mode;
         let (tx, rx) = tokio::sync::mpsc::channel(8);
         let mut ctx = ExecContext::new(
@@ -1283,7 +1288,7 @@ mod tests {
     /// fixture paths are unique per test+pid, so a hit can only come from
     /// the mutation under test.
     fn any_checkpoint_mentions(marker: &str) -> bool {
-        let Ok(data) = crate::runtime::data_dir() else {
+        let Ok(data) = mermaid_runtime::data_dir() else {
             return false;
         };
         let Ok(entries) = fs::read_dir(data.join("checkpoints")) else {
@@ -1305,7 +1310,7 @@ mod tests {
         // write_file into the scratchpad via absolute path.
         let file = scratch.join("notes.txt");
         let (ctx, _rx) = scratch_ctx(
-            crate::runtime::SafetyMode::Ask,
+            mermaid_runtime::SafetyMode::Ask,
             project.clone(),
             Some(scratch.clone()),
         );
@@ -1324,7 +1329,7 @@ mod tests {
         // create_directory inside the scratchpad.
         let subdir = scratch.join("work/area");
         let (ctx, _rx) = scratch_ctx(
-            crate::runtime::SafetyMode::Ask,
+            mermaid_runtime::SafetyMode::Ask,
             project.clone(),
             Some(scratch.clone()),
         );
@@ -1336,7 +1341,7 @@ mod tests {
 
         // delete_file inside the scratchpad.
         let (ctx, _rx) = scratch_ctx(
-            crate::runtime::SafetyMode::Ask,
+            mermaid_runtime::SafetyMode::Ask,
             project.clone(),
             Some(scratch.clone()),
         );
@@ -1361,7 +1366,7 @@ mod tests {
         let (project, scratch) = scratch_fixture("readonly");
         let file = scratch.join("blocked.txt");
         let (ctx, _rx) = scratch_ctx(
-            crate::runtime::SafetyMode::ReadOnly,
+            mermaid_runtime::SafetyMode::ReadOnly,
             project.clone(),
             Some(scratch.clone()),
         );
@@ -1389,7 +1394,7 @@ mod tests {
         let (project, scratch) = scratch_fixture("outside");
         let outside = project.parent().unwrap().join("elsewhere/out.txt");
         let (ctx, _rx) = scratch_ctx(
-            crate::runtime::SafetyMode::Ask,
+            mermaid_runtime::SafetyMode::Ask,
             project.clone(),
             Some(scratch.clone()),
         );
@@ -1418,7 +1423,7 @@ mod tests {
         let file = scratch.join("stash.txt");
         fs::write(&file, "stashed").unwrap();
         let (ctx, _rx) = scratch_ctx(
-            crate::runtime::SafetyMode::Ask,
+            mermaid_runtime::SafetyMode::Ask,
             project.clone(),
             Some(scratch.clone()),
         );

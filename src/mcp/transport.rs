@@ -14,8 +14,8 @@ use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, oneshot};
 use tokio::time::{Duration, timeout};
 
-use crate::constants::MAX_MCP_FRAME_BYTES;
-use crate::utils::{CappedLine, read_line_capped};
+use mermaid_model::constants::MAX_MCP_FRAME_BYTES;
+use mermaid_model::utils::{CappedLine, read_line_capped};
 
 /// Default timeout for JSON-RPC request/response round-trips (discovery,
 /// initialize, ping — all fast control calls). Shared with the HTTP transport.
@@ -94,6 +94,10 @@ impl StdioTransport {
     ///
     /// The command is executed with piped stdin/stdout. Stderr is read
     /// in a background task and forwarded to tracing.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "predates the lint; see .github/baselines/expect_budget.txt"
+    )]
     pub async fn spawn(
         command: &str,
         args: &[String],
@@ -138,7 +142,7 @@ impl StdioTransport {
             format!(
                 "Failed to spawn MCP server: {} {}",
                 command,
-                crate::utils::redact_secrets(&args.join(" "))
+                mermaid_model::utils::redact_secrets(&args.join(" "))
             )
         })?;
 
@@ -256,7 +260,10 @@ impl StdioTransport {
                     Ok(CappedLine::Line(bytes)) => {
                         // Redact — servers sometimes echo secrets on stderr (#93).
                         let line = String::from_utf8_lossy(&bytes);
-                        tracing::debug!("MCP stderr: {}", crate::utils::redact_secrets(&line));
+                        tracing::debug!(
+                            "MCP stderr: {}",
+                            mermaid_model::utils::redact_secrets(&line)
+                        );
                     },
                     Ok(CappedLine::TooLong) => continue,
                     Ok(CappedLine::Eof) | Err(_) => break,
@@ -280,7 +287,7 @@ impl StdioTransport {
             .await
     }
 
-    /// Like [`send_request`], but with an explicit response-wait budget. Used by
+    /// Like [`Self::send_request`], but with an explicit response-wait budget. Used by
     /// `tools/call`, whose work can legitimately outrun the fast-control budget.
     pub async fn send_request_with_timeout(
         &self,
@@ -411,7 +418,7 @@ impl StdioTransport {
     /// exit cleanly on stdin close; the SIGTERM/SIGKILL steps are a safety net
     /// for misbehaving servers.
     ///
-    /// On Unix, SIGTERM is delivered by [`terminate`] (shelling out to `kill`,
+    /// On Unix, SIGTERM is delivered by `terminate` (shelling out to `kill`,
     /// matching `runtime::client::kill_pid`) so a well-behaved server can run its
     /// signal handler before we escalate to SIGKILL via `start_kill`. On non-Unix
     /// there is no SIGTERM, so we go straight to `start_kill` (the platform's

@@ -1,0 +1,65 @@
+[package]
+name = "mermaid-domain"
+version = "0.21.1"
+edition = "2024"
+rust-version = "1.91"
+authors = ["Noah Sabaj <noahsabaj@gmail.com>"]
+description = "The pure Model-View-Update core for Mermaid: State, Msg, Cmd, and the reducer that folds them."
+repository = "https://github.com/noahsabaj/mermaid-cli"
+homepage = "https://github.com/noahsabaj/mermaid-cli"
+license = "MIT OR Apache-2.0"
+# Publishable, and it has to be: `mermaid-cli` is published to crates.io and
+# depends on this crate, and a published crate cannot depend on an unpublished
+# path dependency. `release.yml` publishes runtime -> model -> domain -> cli, in
+# dependency order.
+
+# Lint policy. DUPLICATED verbatim into all manifests — `tests/lint_policy_drift.rs`
+# guards the duplication. Inheritance via `[workspace.lints]` + `lints.workspace = true`
+# is NOT usable here: the `isolated-crate-build` CI job copies `crates/.` to a directory
+# with no workspace root above it, where `lints.workspace = true` is a hard manifest-parse
+# error. That job exists because a manifest bug half-released v0.21.0; breaking it with a
+# manifest bug would be a poor trade.
+#
+# Everything is `deny`, not `warn`, and deliberately: CI runs `clippy -- -D warnings`, so
+# `warn` would be `deny` anyway. Writing `deny` makes the table say what it does, and keeps
+# it true if the `-D` is ever dropped.
+[lints.clippy]
+# Debug leftovers. All measured at zero across the workspace when this landed.
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+mem_forget = "deny"
+
+# The cap AGENTS.md names by number. `.clippy.toml` has set
+# `too-many-lines-threshold = 100` since forever while the lint itself was off, so the
+# doc's "clippy caps functions at 100 lines" was false and `update_step` reached 774.
+# Existing offenders carry `#[expect(clippy::too_many_lines, reason = ...)]`, counted in
+# `.github/baselines/expect_budget.txt`, which only goes down.
+too_many_lines = "deny"
+
+# `.clippy.toml` already sets excessive-nesting-threshold = 8.
+excessive_nesting = "deny"
+
+[lints.rust]
+# Stated here so a local `cargo clippy` without the CI flag reaches the same verdict.
+warnings = "deny"
+
+# NOTE what is absent, because the absence is the enforcement: no `tokio`, no
+# `reqwest`, no `rusqlite`, no `directories`, no `crossterm`, no `clap`. Four of
+# the layering guard's forbidden patterns are now manifest-enforced; the script
+# is left responsible only for `std::fs`, `std::process`, `std::net` and the
+# wall clock.
+[dependencies]
+anyhow = "1.0"
+tracing = "0.1"
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+nucleo-matcher = "0.3"
+regex = "1.12"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.11"
+toml = "1.1"
+url = "2.5"
+mermaid-model = { path = "../mermaid-model", version = "0.21.1" }
+mermaid-runtime = { path = "../mermaid-runtime", version = "0.21.1" }

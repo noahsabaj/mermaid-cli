@@ -215,6 +215,10 @@ impl McpClient {
     }
 
     /// Call a tool on this server and return the result.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "predates the lint; see .github/baselines/expect_budget.txt"
+    )]
     pub async fn call_tool(&self, name: &str, arguments: &Value) -> Result<McpToolResult> {
         let params = json!({
             "name": name,

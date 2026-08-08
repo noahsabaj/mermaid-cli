@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
-use crate::models::ReasoningLevel;
+use mermaid_model::models::ReasoningLevel;
 
 #[derive(Parser, Debug)]
 #[command(name = "mermaid")]
@@ -118,7 +118,7 @@ impl Cli {
     /// flags (`--no-network`/`--confine-fs`/`--sandbox`, and `run`'s
     /// `--max-tokens`/`--allow-untrusted-tools`). Prompt flags and
     /// `--reasoning` stay outside the layer merge — see `apply_prompt_flags`.
-    pub fn session_flags(&self) -> crate::app::SessionFlags {
+    pub fn session_flags(&self) -> mermaid_domain::SessionFlags {
         let (max_tokens, allow_untrusted_tools) = match &self.command {
             Some(Commands::Run {
                 max_tokens,
@@ -127,7 +127,7 @@ impl Cli {
             }) => (*max_tokens, *allow_untrusted_tools),
             _ => (None, false),
         };
-        crate::app::SessionFlags {
+        mermaid_domain::SessionFlags {
             overrides: self.config_overrides.clone(),
             deny_network: self.no_network || self.sandbox,
             confine_fs: self.confine_fs || self.sandbox,
@@ -162,7 +162,7 @@ pub enum Commands {
     Models,
     /// Show static and cached capability info for a model id
     ModelInfo {
-        /// Model id, e.g. <provider>/<model>
+        /// Model id, e.g. `<provider>/<model>`
         model: String,
     },
     /// Start a chat session (default)
@@ -190,7 +190,7 @@ pub enum Commands {
     /// (names and booleans only), recent trace events, and the log tail.
     /// Nothing is uploaded — the file stays on this machine.
     Feedback {
-        /// Print to stdout instead of writing mermaid-feedback-<ts> in the
+        /// Print to stdout instead of writing `mermaid-feedback-<ts>` in the
         /// current directory
         #[arg(long)]
         stdout: bool,

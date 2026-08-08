@@ -31,12 +31,12 @@
 //! reject. Deliberate visual changes update the `.snap` files in the same PR.
 
 use super::{RenderCache, render_frame};
-use crate::app::Config;
-use crate::domain::{
+use mermaid_domain::Config;
+use mermaid_domain::{
     ActionDetails, ActionDisplay, ActionResult, ApprovalKind, GenPhase, PendingApproval,
     PendingToolCall, QueuedMessage, State, ToolCallId, TurnId, TurnState, UiMode,
 };
-use crate::models::{ChatMessage, ChatMessageKind};
+use mermaid_model::models::{ChatMessage, ChatMessageKind};
 
 /// The two frame sizes every scene is pinned at: the classic minimum and a
 /// roomy modern terminal (exercises wrapping and layout at both extremes).
@@ -170,9 +170,9 @@ fn busy_tools_with_queue() {
             started: std::time::SystemTime::from(fixed_now() - chrono::Duration::seconds(3)),
             calls: vec![PendingToolCall {
                 call_id: ToolCallId(1),
-                source: crate::models::tool_call::ToolCall {
+                source: mermaid_model::models::tool_call::ToolCall {
                     id: Some("c1".to_string()),
-                    function: crate::models::tool_call::FunctionCall {
+                    function: mermaid_model::models::tool_call::FunctionCall {
                         name: "execute_command".to_string(),
                         arguments: serde_json::json!({"command": "npm run dev"}),
                     },
@@ -192,7 +192,7 @@ fn busy_tools_with_queue() {
 /// pendings, and one user-added task. Exercises glyphs, strikethrough, the
 /// cost suffix, the `(you)` marker, and the spinner-headline takeover.
 fn task_run_state() -> State {
-    use crate::domain::tasks::{Stamp, TaskEdit, TaskSpec, TaskStatus};
+    use mermaid_domain::checklist::{ChecklistEdit, ChecklistSpec, ChecklistStatus, Stamp};
     let mut s = scene_state();
     s.session
         .append(ChatMessage::user("ship the feature"), s.now);
@@ -212,33 +212,33 @@ fn task_run_state() -> State {
     s.session.conversation.tasks.create(
         steps
             .iter()
-            .map(|(subject, active)| TaskSpec {
+            .map(|(subject, active)| ChecklistSpec {
                 subject: (*subject).to_string(),
                 active_form: (*active).to_string(),
                 description: None,
                 in_progress: false,
             })
             .collect(),
-        crate::domain::TaskOrigin::Model,
+        mermaid_domain::ChecklistOrigin::Model,
         Stamp::default(),
     );
     s.session.conversation.tasks.create(
-        vec![TaskSpec {
+        vec![ChecklistSpec {
             subject: "Double-check the docs".to_string(),
             active_form: "Double-checking the docs".to_string(),
             description: None,
             in_progress: false,
         }],
-        crate::domain::TaskOrigin::User,
+        mermaid_domain::ChecklistOrigin::User,
         Stamp::default(),
     );
-    let edit = |id, status| TaskEdit {
+    let edit = |id, status| ChecklistEdit {
         id,
         status: Some(status),
-        ..TaskEdit::default()
+        ..ChecklistEdit::default()
     };
     s.session.conversation.tasks.apply(
-        &[edit(1, TaskStatus::InProgress)],
+        &[edit(1, ChecklistStatus::InProgress)],
         Stamp {
             now_epoch: 100,
             run_tokens: 500,
@@ -246,8 +246,8 @@ fn task_run_state() -> State {
     );
     s.session.conversation.tasks.apply(
         &[
-            edit(1, TaskStatus::Completed),
-            edit(2, TaskStatus::InProgress),
+            edit(1, ChecklistStatus::Completed),
+            edit(2, ChecklistStatus::InProgress),
         ],
         Stamp {
             now_epoch: 230,
@@ -256,8 +256,8 @@ fn task_run_state() -> State {
     );
     s.session.conversation.tasks.apply(
         &[
-            edit(2, TaskStatus::Completed),
-            edit(3, TaskStatus::InProgress),
+            edit(2, ChecklistStatus::Completed),
+            edit(3, ChecklistStatus::InProgress),
         ],
         Stamp {
             now_epoch: 300,
@@ -269,9 +269,9 @@ fn task_run_state() -> State {
         started: std::time::SystemTime::from(fixed_now() - chrono::Duration::seconds(3)),
         calls: vec![PendingToolCall {
             call_id: ToolCallId(1),
-            source: crate::models::tool_call::ToolCall {
+            source: mermaid_model::models::tool_call::ToolCall {
                 id: Some("c1".to_string()),
-                function: crate::models::tool_call::FunctionCall {
+                function: mermaid_model::models::tool_call::FunctionCall {
                     name: "execute_command".to_string(),
                     arguments: serde_json::json!({"command": "cargo check"}),
                 },
@@ -299,7 +299,7 @@ fn task_checklist_collapsed() {
 #[test]
 fn task_checklist_retires_when_done_and_idle() {
     assert_scene("task_checklist_retired", || {
-        use crate::domain::tasks::{Stamp, TaskEdit, TaskStatus};
+        use mermaid_domain::checklist::{ChecklistEdit, ChecklistStatus, Stamp};
         let mut s = task_run_state();
         let ids: Vec<u32> = s
             .session
@@ -308,12 +308,12 @@ fn task_checklist_retires_when_done_and_idle() {
             .visible()
             .map(|t| t.id)
             .collect();
-        let edits: Vec<TaskEdit> = ids
+        let edits: Vec<ChecklistEdit> = ids
             .into_iter()
-            .map(|id| TaskEdit {
+            .map(|id| ChecklistEdit {
                 id,
-                status: Some(TaskStatus::Completed),
-                ..TaskEdit::default()
+                status: Some(ChecklistStatus::Completed),
+                ..ChecklistEdit::default()
             })
             .collect();
         s.session.conversation.tasks.apply(&edits, Stamp::default());
@@ -330,9 +330,9 @@ fn busy_agents_panel() {
             .append(ChatMessage::user("audit the codebase (use agents)"), s.now);
         let agent_call = |id: u64, description: &str| PendingToolCall {
             call_id: ToolCallId(id),
-            source: crate::models::tool_call::ToolCall {
+            source: mermaid_model::models::tool_call::ToolCall {
                 id: Some(format!("c{id}")),
-                function: crate::models::tool_call::FunctionCall {
+                function: mermaid_model::models::tool_call::FunctionCall {
                     name: "agent".to_string(),
                     arguments: serde_json::json!({"description": description, "type": "explore"}),
                 },
@@ -350,14 +350,14 @@ fn busy_agents_panel() {
         };
         s.ui.live_tool_status.insert(
             ToolCallId(1),
-            crate::domain::LiveToolStatus {
+            mermaid_domain::LiveToolStatus {
                 activity: "read_file…".to_string(),
                 tokens: 12_300,
             },
         );
         s.ui.live_tool_status.insert(
             ToolCallId(2),
-            crate::domain::LiveToolStatus {
+            mermaid_domain::LiveToolStatus {
                 activity: "thinking".to_string(),
                 tokens: 8_100,
             },
@@ -365,7 +365,7 @@ fn busy_agents_panel() {
         // One agent detached earlier via Ctrl+B: still on the panel, marked bg.
         s.runtime
             .background_agents
-            .push(crate::domain::runtime::BackgroundAgent {
+            .push(mermaid_domain::runtime::BackgroundAgent {
                 agent_id: "a9".to_string(),
                 description: "Audit docs and conventions".to_string(),
                 started: std::time::SystemTime::from(fixed_now() - chrono::Duration::seconds(90)),
@@ -388,9 +388,9 @@ fn mixed_exec_and_agent_turn() {
             calls: vec![
                 PendingToolCall {
                     call_id: ToolCallId(1),
-                    source: crate::models::tool_call::ToolCall {
+                    source: mermaid_model::models::tool_call::ToolCall {
                         id: Some("c1".to_string()),
-                        function: crate::models::tool_call::FunctionCall {
+                        function: mermaid_model::models::tool_call::FunctionCall {
                             name: "execute_command".to_string(),
                             arguments: serde_json::json!({"command": "cargo test"}),
                         },
@@ -398,9 +398,9 @@ fn mixed_exec_and_agent_turn() {
                 },
                 PendingToolCall {
                     call_id: ToolCallId(2),
-                    source: crate::models::tool_call::ToolCall {
+                    source: mermaid_model::models::tool_call::ToolCall {
                         id: Some("c2".to_string()),
-                        function: crate::models::tool_call::FunctionCall {
+                        function: mermaid_model::models::tool_call::FunctionCall {
                             name: "agent".to_string(),
                             arguments: serde_json::json!({"description": "Audit deps"}),
                         },
@@ -411,7 +411,7 @@ fn mixed_exec_and_agent_turn() {
         };
         s.ui.live_tool_status.insert(
             ToolCallId(2),
-            crate::domain::LiveToolStatus {
+            mermaid_domain::LiveToolStatus {
                 activity: "starting…".to_string(),
                 tokens: 0,
             },
@@ -443,7 +443,7 @@ fn approval_modal() {
 #[test]
 fn question_modal() {
     assert_scene("question_modal", || {
-        use crate::domain::question::{PendingQuestionSet, Question, QuestionOption};
+        use mermaid_model::question::{PendingQuestionSet, Question, QuestionOption};
         let mut s = scene_state();
         s.session
             .append(ChatMessage::user("set up the database"), s.now);
@@ -478,7 +478,7 @@ fn question_modal() {
 #[test]
 fn conversation_list() {
     assert_scene("conversation_list", || {
-        use crate::domain::ConversationSummary;
+        use mermaid_domain::ConversationSummary;
         let mut s = scene_state();
         s.ui.mode = UiMode::ConversationList {
             candidates: vec![
@@ -571,7 +571,7 @@ fn determinism_same_scene_twice() {
 #[test]
 fn fixture_clock_reads_the_pinned_wall_clock() {
     assert_eq!(
-        crate::utils::format_relative_timestamp(fixed_now()),
+        mermaid_model::utils::format_relative_timestamp(fixed_now()),
         "January 2nd, 2026 at 3:04am",
         "the fixture clock must be a fixed LOCAL wall clock, not a fixed instant"
     );

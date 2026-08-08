@@ -13,10 +13,12 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::app::MemoryConfig;
-use crate::app::instructions::{self, LoadedInstructions, ReloadOutcome};
-use crate::app::memory::{self, LoadedMemory, MemoryReloadOutcome};
-use crate::domain::Msg;
+use crate::app::instructions::{self, ReloadOutcome};
+use crate::app::memory::{self, MemoryReloadOutcome};
+use mermaid_domain::LoadedInstructions;
+use mermaid_domain::LoadedMemory;
+use mermaid_domain::MemoryConfig;
+use mermaid_domain::Msg;
 
 use super::MsgSender;
 

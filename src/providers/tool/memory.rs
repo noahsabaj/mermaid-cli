@@ -16,8 +16,9 @@
 
 use async_trait::async_trait;
 
-use crate::app::memory::{self, MemoryScope};
-use crate::domain::{ToolDefinition, ToolMetadata, ToolOutcome, ToolRunMetadata};
+use crate::app::memory::{self};
+use mermaid_domain::MemoryScope;
+use mermaid_domain::{ToolDefinition, ToolMetadata, ToolOutcome, ToolRunMetadata};
 
 use super::super::ctx::ExecContext;
 use super::ToolExecutor;
@@ -62,6 +63,10 @@ fn tags_arg(args: &serde_json::Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+)]
 #[async_trait]
 impl ToolExecutor for MemoryTool {
     fn name(&self) -> &'static str {
@@ -147,7 +152,7 @@ impl ToolExecutor for MemoryTool {
         if let Some(blocked) = super::policy_gate::gate_external(
             &ctx,
             "memory",
-            crate::runtime::ToolCategory::Memory,
+            mermaid_runtime::ToolCategory::Memory,
             format!("memory {action}"),
             &args,
         )

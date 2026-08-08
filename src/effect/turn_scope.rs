@@ -28,7 +28,7 @@ use std::sync::atomic::AtomicUsize;
 use tokio::task::{AbortHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 
-use crate::domain::TurnId;
+use mermaid_domain::TurnId;
 
 /// One turn's cancellable scope. Construct once per `SubmitPrompt`;
 /// abandon (drop) at the end of the turn.

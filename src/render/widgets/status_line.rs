@@ -4,8 +4,8 @@ use std::collections::VecDeque;
 use unicode_width::UnicodeWidthStr;
 
 use super::{GenerationStatus, truncate_to_cells};
-use crate::domain::QueuedMessage;
 use crate::render::theme::Theme;
+use mermaid_domain::QueuedMessage;
 
 /// How many queued-message rows to show under the spinner before stopping.
 const MAX_QUEUED_ROWS: usize = 5;
@@ -38,7 +38,11 @@ pub struct AgentPanelRow {
 /// status text) — and each row is *truncated* to `width` so nothing ever
 /// bleeds off the right edge. The fixed 1-or-2-row shape keeps the reserved
 /// height stable as the timer/token counter tick (no per-frame reflow).
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+)]
 pub fn build_status_lines(
     status: GenerationStatus,
     elapsed_secs: u64,
@@ -168,7 +172,7 @@ pub fn build_status_lines(
         if row.tokens > 0 {
             bits.push(format!(
                 "↓ ~{} tokens",
-                crate::domain::compaction::format_compact_count(row.tokens)
+                mermaid_domain::compaction::format_compact_count(row.tokens)
             ));
         }
         let desc_budget = width.min(desc.width());

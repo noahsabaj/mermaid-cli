@@ -1,0 +1,9 @@
+# Ratchet baseline: layering + purity
+#
+# Debt that predates the guard. This file may only SHRINK.
+# Regenerate with: just ratchet
+#
+# 3 keys / 6 occurrences
+impure|crates/mermaid-domain/src/state.rs|std::env 1
+impure|src/render/mod.rs|std::env 4
+impure|src/render/widgets/chat.rs|chrono now 1

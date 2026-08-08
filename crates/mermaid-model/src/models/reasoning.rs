@@ -71,6 +71,25 @@ pub enum ReasoningLevel {
 }
 
 impl ReasoningLevel {
+    /// Parse a lowercase level name. Mirrors `SafetyMode::parse`.
+    ///
+    /// Exists so callers that only need string -> level do not reach for
+    /// `clap::ValueEnum::from_str`: the slash-command parser lives in the pure
+    /// core, and the core must not take a CLI-argument dependency to read one
+    /// word.
+    #[must_use]
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "none" | "off" => Some(Self::None),
+            "minimal" => Some(Self::Minimal),
+            "low" => Some(Self::Low),
+            "medium" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            "max" | "maximum" => Some(Self::Max),
+            _ => None,
+        }
+    }
+
     /// Ordering rank, used by `nearest_effort()`. `None < Minimal < Low <
     /// Medium < High < Max`.
     fn rank(self) -> u8 {

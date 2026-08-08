@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
-use mermaid_cli::runtime::{NewApproval, NewTask, RuntimeStore, TaskStatus};
+use mermaid_runtime::{NewApproval, NewTask, RuntimeStore, TaskStatus};
 
 static SEQ: AtomicU64 = AtomicU64::new(0);
 

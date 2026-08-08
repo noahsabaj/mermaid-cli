@@ -9,10 +9,12 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
-use crate::app::Config;
-use crate::models::config::BackendConfig;
-use crate::models::{ModelError, Result, lookup_provider};
-use crate::utils::{resolve_api_key, resolve_provider_key, resolve_provider_key_with_fallback};
+use mermaid_domain::Config;
+use mermaid_model::models::config::BackendConfig;
+use mermaid_model::models::{ModelError, Result, lookup_provider};
+use mermaid_model::utils::{
+    resolve_api_key, resolve_provider_key, resolve_provider_key_with_fallback,
+};
 
 use super::model::{anthropic, gemini, meta};
 
@@ -114,6 +116,10 @@ fn is_known_provider(config: &Config, provider_lc: &str) -> bool {
 /// key, a Cloudflare account id that was never set, a custom provider with no
 /// `base_url`. The error text is the same one the user would hit on a real
 /// request, so `status` and `doctor` can print it verbatim.
+#[expect(
+    clippy::too_many_lines,
+    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+)]
 pub(crate) fn resolve_provider_endpoint(
     config: &Config,
     provider: &str,
@@ -253,7 +259,7 @@ pub(crate) fn resolve_provider_endpoint(
         // alone also works with no api_key_env at all.
         let resolved = match override_env {
             Some(env) => resolve_provider_key(&provider_lc, env, None),
-            None => crate::utils::default_store().get(&provider_lc),
+            None => mermaid_model::utils::default_store().get(&provider_lc),
         };
         let (api_key, key_env) = match resolved {
             Some(key) => {
@@ -320,7 +326,7 @@ fn base_url_is_local(base_url: &str) -> bool {
         .ok()
         .and_then(|u| {
             u.host_str()
-                .map(|h| crate::utils::classify_host(h).is_internal())
+                .map(|h| mermaid_model::utils::classify_host(h).is_internal())
         })
         .unwrap_or(false)
 }
@@ -331,8 +337,8 @@ fn base_url_is_local(base_url: &str) -> bool {
 /// restores the profile's static headers (e.g. OpenRouter analytics) that the
 /// prior registry path dropped.
 fn merged_headers(
-    profile: &crate::models::ProviderProfile,
-    user_cfg: Option<&crate::app::UserProviderConfig>,
+    profile: &mermaid_model::models::ProviderProfile,
+    user_cfg: Option<&mermaid_domain::UserProviderConfig>,
 ) -> std::collections::HashMap<String, String> {
     let mut headers: std::collections::HashMap<String, String> = profile
         .extra_headers
@@ -576,7 +582,9 @@ pub(crate) fn ollama_backend_config(config: &Config) -> BackendConfig {
 /// profile-determining inputs (see [`user_profile_to_static`]). Guarantees each
 /// distinct custom provider leaks its `&'static ProviderProfile` at most once.
 static PROFILE_CACHE: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<String, &'static crate::models::ProviderProfile>>,
+    std::sync::Mutex<
+        std::collections::HashMap<String, &'static mermaid_model::models::ProviderProfile>,
+    >,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
 /// Convert a user-defined `[providers.<name>]` entry into a `&'static
@@ -594,9 +602,9 @@ static PROFILE_CACHE: std::sync::LazyLock<
 /// provider) reuse the same `&'static`.
 fn user_profile_to_static(
     name: &str,
-    user_cfg: &crate::app::UserProviderConfig,
-) -> Option<&'static crate::models::ProviderProfile> {
-    use crate::models::{ProviderProfile, ReasoningExtraction, ReasoningStrategy};
+    user_cfg: &mermaid_domain::UserProviderConfig,
+) -> Option<&'static mermaid_model::models::ProviderProfile> {
+    use mermaid_model::models::{ProviderProfile, ReasoningExtraction, ReasoningStrategy};
 
     let compat = user_cfg.compat.as_deref().unwrap_or("openai");
     let base_url = user_cfg.base_url.clone().unwrap_or_default();
@@ -630,7 +638,7 @@ fn user_profile_to_static(
         extra_headers: &[],
         reasoning_strategy: strategy,
         reasoning_extraction: ReasoningExtraction::None,
-        max_tokens_param: crate::models::MaxTokensParam::MaxTokens,
+        max_tokens_param: mermaid_model::models::MaxTokensParam::MaxTokens,
         disable_parallel_tool_calls_for: &[],
     });
     let leaked: &'static ProviderProfile = Box::leak(profile);
@@ -657,7 +665,7 @@ fn cloudflare_base_url(account_id: &str) -> String {
 /// placeholder would just guarantee a 404); everything else uses the profile's
 /// static default.
 pub(crate) fn discovery_base_url(
-    profile: &crate::models::ProviderProfile,
+    profile: &mermaid_model::models::ProviderProfile,
     override_url: Option<String>,
 ) -> Option<String> {
     if override_url.is_some() {
@@ -704,7 +712,8 @@ fn validate_provider_base_url(url: &str) -> Result<()> {
         // cleartext. Every caller here is a key-bearing provider; keyless local
         // Ollama uses a separate path that doesn't validate.
         "http"
-            if crate::utils::classify_host(parsed.host_str().unwrap_or_default()).is_loopback() =>
+            if mermaid_model::utils::classify_host(parsed.host_str().unwrap_or_default())
+                .is_loopback() =>
         {
             Ok(())
         },
@@ -804,7 +813,7 @@ mod tests {
 
     #[test]
     fn merged_headers_keeps_static_profile_headers_and_user_overrides() {
-        let profile = crate::models::lookup_provider("openrouter").unwrap();
+        let profile = mermaid_model::models::lookup_provider("openrouter").unwrap();
         // No user config: the static profile headers survive (the latent-bug fix).
         let base = merged_headers(profile, None);
         assert_eq!(
@@ -813,7 +822,7 @@ mod tests {
         );
         assert!(base.contains_key("HTTP-Referer"));
         // User extra_headers merge on top and can override a static one.
-        let mut cfg = crate::app::UserProviderConfig::default();
+        let mut cfg = mermaid_domain::UserProviderConfig::default();
         cfg.extra_headers.insert("X-Custom".into(), "v".into());
         cfg.extra_headers
             .insert("X-OpenRouter-Title".into(), "Override".into());
@@ -828,8 +837,8 @@ mod tests {
 
     #[test]
     fn merged_headers_resolves_env_headers_and_skips_missing() {
-        let profile = crate::models::lookup_provider("openai").unwrap();
-        let mut cfg = crate::app::UserProviderConfig::default();
+        let profile = mermaid_model::models::lookup_provider("openai").unwrap();
+        let mut cfg = mermaid_domain::UserProviderConfig::default();
         cfg.env_headers
             .insert("X-Gateway-Token".into(), "MERMAID_TEST_GW_TOKEN".into());
         temp_env::with_var("MERMAID_TEST_GW_TOKEN", Some("secret123"), || {
@@ -1005,11 +1014,11 @@ mod tests {
                 assert!(capabilities.emits_provider_continuation);
                 assert_eq!(
                     capabilities.max_context_tokens,
-                    Some(crate::constants::META_MUSE_SPARK_CONTEXT_WINDOW)
+                    Some(mermaid_model::constants::META_MUSE_SPARK_CONTEXT_WINDOW)
                 );
                 assert_eq!(
                     capabilities.max_output_tokens,
-                    Some(crate::constants::META_MUSE_SPARK_MAX_OUTPUT_TOKENS)
+                    Some(mermaid_model::constants::META_MUSE_SPARK_MAX_OUTPUT_TOKENS)
                 );
             },
         )
@@ -1167,7 +1176,7 @@ mod tests {
     // growth.
     #[test]
     fn custom_profile_is_memoized_per_key() {
-        use crate::app::UserProviderConfig;
+        use mermaid_domain::UserProviderConfig;
         let cfg = UserProviderConfig {
             base_url: Some("https://api.custom.test/v1".to_string()),
             api_key_env: Some("CUSTOM_KEY".to_string()),

@@ -12,8 +12,8 @@
 use anyhow::Result;
 use std::path::Path;
 
-use crate::app::Config;
-use crate::models::PROVIDER_REGISTRY;
+use mermaid_domain::Config;
+use mermaid_model::models::PROVIDER_REGISTRY;
 
 use super::OutputFormat;
 use super::commands::DoctorReport;
@@ -83,7 +83,7 @@ pub(crate) async fn run_feedback(
     // Final defense-in-depth pass over the WHOLE rendered document: even a
     // secret that slipped into a doctor message or session title is scrubbed
     // before it can reach disk or stdout.
-    let rendered = crate::utils::redact_secrets(&rendered);
+    let rendered = mermaid_model::utils::redact_secrets(&rendered);
     if stdout {
         println!("{rendered}");
         return Ok(());
@@ -92,7 +92,7 @@ pub(crate) async fn run_feedback(
         "mermaid-feedback-{}.{extension}",
         chrono::Local::now().format("%Y%m%d_%H%M%S")
     ));
-    crate::runtime::write_atomic_with_mode(&path, rendered.as_bytes(), 0o600)?;
+    mermaid_runtime::write_atomic_with_mode(&path, rendered.as_bytes(), 0o600)?;
     println!(
         "wrote {} (local only - review before sharing)",
         path.display()
@@ -114,7 +114,7 @@ async fn build_feedback_report(
         arch: std::env::consts::ARCH.to_string(),
         config: summarize_config(config),
         doctor: super::commands::build_doctor_report(config, cwd, cli_model).await,
-        trace_ring: crate::utils::trace_ring()
+        trace_ring: mermaid_model::utils::trace_ring()
             .map(|ring| ring.snapshot())
             .unwrap_or_default(),
         log_tail: read_log_tail(),
@@ -134,7 +134,7 @@ fn summarize_config(config: &Config) -> ConfigSummary {
             .and_then(|c| c.api_key_env.as_deref());
         providers.push(ProviderKeyStatus {
             name: profile.name.to_string(),
-            key_source: crate::utils::provider_key_source(
+            key_source: mermaid_model::utils::provider_key_source(
                 profile.name,
                 profile.api_key_env,
                 override_env,
@@ -147,7 +147,7 @@ fn summarize_config(config: &Config) -> ConfigSummary {
         }
         // Custom providers: api_key_env is their default (keyring may fill).
         let key_source = match provider.api_key_env.as_deref() {
-            Some(env) => crate::utils::provider_key_source(name, env, None),
+            Some(env) => mermaid_model::utils::provider_key_source(name, env, None),
             None => "none",
         };
         providers.push(ProviderKeyStatus {
@@ -158,7 +158,7 @@ fn summarize_config(config: &Config) -> ConfigSummary {
     providers.sort_by(|a, b| a.name.cmp(&b.name));
     let mut mcp_servers: Vec<String> = config.mcp_servers.keys().cloned().collect();
     mcp_servers.sort();
-    let enabled_plugins = crate::runtime::RuntimeStore::open_default()
+    let enabled_plugins = mermaid_runtime::RuntimeStore::open_default()
         .ok()
         .and_then(|store| store.plugins().list().ok())
         .map(|plugins| plugins.iter().filter(|p| p.enabled).count())
@@ -180,7 +180,7 @@ fn summarize_config(config: &Config) -> ConfigSummary {
 
 /// Last [`LOG_TAIL_LINES`] lines of the (already-redacted-at-write) log file.
 fn read_log_tail() -> Vec<String> {
-    let Some(path) = crate::utils::log_file_path() else {
+    let Some(path) = mermaid_model::utils::log_file_path() else {
         return Vec::new();
     };
     let Ok(raw) = std::fs::read_to_string(&path) else {

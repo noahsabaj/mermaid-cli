@@ -12,13 +12,13 @@ use std::time::Duration;
 use anyhow::Result;
 use tokio::time::timeout;
 
-use crate::app::Config;
 use crate::app::lifecycle::RuntimeLifecycle;
 use crate::cli::OutputFormat;
-use crate::domain::{Msg, RUN_EVENT_PROTOCOL_VERSION, RunEvent, State, TurnState, update};
 use crate::effect::EffectRunner;
-use crate::models::MessageRole;
 use crate::providers::ToolRegistry;
+use mermaid_domain::Config;
+use mermaid_domain::{Msg, RUN_EVENT_PROTOCOL_VERSION, RunEvent, State, TurnState, update};
+use mermaid_model::models::MessageRole;
 
 /// Output shape the CLI prints.
 #[derive(Debug, Default)]
@@ -65,7 +65,7 @@ pub struct RunOptions {
     /// Saved conversation to seed the session with (`--resume <id>` /
     /// `--continue`). The run appends to the SAME session id, so repeated
     /// `--resume <id>` invocations chain naturally.
-    pub seed: Option<crate::session::ConversationHistory>,
+    pub seed: Option<mermaid_domain::ConversationHistory>,
     /// `--output-schema`: JSON Schema the final answer must conform to. The
     /// agentic loop runs normally; one extra FORMATTING turn (no tools,
     /// native constrained output where supported) reshapes the final answer,
@@ -74,7 +74,7 @@ pub struct RunOptions {
     /// Live `RunEvent` tee for daemon task subscriptions (`subscribe_task`).
     /// Every event that would print on an NDJSON stream is also broadcast
     /// here (send is sync + non-blocking; no-receiver errors are ignored).
-    pub event_tx: Option<tokio::sync::broadcast::Sender<crate::domain::RunEvent>>,
+    pub event_tx: Option<tokio::sync::broadcast::Sender<mermaid_domain::RunEvent>>,
     /// `mermaid run --plan`: enter plan mode before the prompt seeds, so the
     /// run explores read-only and delivers a plan file.
     pub plan: bool,
@@ -85,6 +85,10 @@ pub struct RunOptions {
 
 /// Drive one prompt to completion with explicit per-call options. Bounded by a
 /// generous 20-minute wall-clock so a runaway model doesn't hang a script.
+#[expect(
+    clippy::too_many_lines,
+    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+)]
 pub async fn run_non_interactive_with(
     mut config: Config,
     cwd: PathBuf,
@@ -97,7 +101,7 @@ pub async fn run_non_interactive_with(
     // approved plan into implementation.
     if opts.plan_autoaccept {
         config.plan.auto_approve = true;
-        config.plan.post_approve = Some(crate::app::PlanPostApprove::Start);
+        config.plan.post_approve = Some(mermaid_domain::PlanPostApprove::Start);
     }
 
     // Fold enabled plugins' MCP servers + agent types into the merged
@@ -136,7 +140,12 @@ pub async fn run_non_interactive_with(
     if let Some(history) = opts.seed.clone() {
         state.seed_conversation(history);
     }
-    crate::app::stamp_session_provenance(&mut state, &cwd);
+    state
+        .ui
+        .pending_msgs
+        .push_back(Msg::SessionProvenanceResolved(
+            crate::session::probe_session_provenance(&cwd),
+        ));
     let session_id = state.session.conversation.id.clone();
     let mut lifecycle = RuntimeLifecycle::new();
 
@@ -159,7 +168,7 @@ pub async fn run_non_interactive_with(
     // through the registry we just emptied, so spinning up their
     // processes is wasted work.
     if !config.mcp_servers.is_empty() && !opts.no_execute {
-        runner.dispatch(crate::domain::Cmd::InitMcpServers(
+        runner.dispatch(mermaid_domain::Cmd::InitMcpServers(
             config.mcp_servers.clone(),
         ));
     }
@@ -167,7 +176,7 @@ pub async fn run_non_interactive_with(
     // A resumed session may carry an in-flight checklist; hand it to the
     // TaskBroker so headless task tool calls continue the restored list.
     if !state.session.conversation.tasks.tasks.is_empty() {
-        runner.dispatch(crate::domain::Cmd::SyncTaskStore(
+        runner.dispatch(mermaid_domain::Cmd::SyncTaskStore(
             state.session.conversation.tasks.clone(),
         ));
     }
@@ -207,7 +216,7 @@ pub async fn run_non_interactive_with(
     // swap, prompt injection all included).
     if opts.plan {
         state.now = chrono::Local::now();
-        let (new_state, cmds) = update(state, Msg::Slash(crate::domain::SlashCmd::Plan(None)));
+        let (new_state, cmds) = update(state, Msg::Slash(mermaid_domain::SlashCmd::Plan(None)));
         state = new_state;
         for cmd in cmds {
             runner.dispatch(cmd);
@@ -401,7 +410,7 @@ conforms to the provided schema. Respond with only the JSON object - no prose, n
 /// Run the dedicated `--output-schema` formatting turn: set the schema rider
 /// on state (build_chat_request drops all tools + adapters engage native
 /// constrained output), seed the format prompt, and drive to idle.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 async fn run_formatting_turn(
     mut state: State,
     schema: serde_json::Value,
@@ -513,7 +522,7 @@ fn build_result(state: &State) -> RunResult {
 
     for msg in state.session.messages() {
         for action in &msg.actions {
-            if let crate::domain::ActionResult::Error { error } = &action.result {
+            if let mermaid_domain::ActionResult::Error { error } = &action.result {
                 out.errors
                     .push(format!("{}: {}", action.action_type, error));
             }
@@ -533,7 +542,7 @@ fn build_result(state: &State) -> RunResult {
     {
         let mut head_idx = last_idx;
         while head_idx > 0
-            && messages[head_idx].kind == crate::models::ChatMessageKind::Continuation
+            && messages[head_idx].kind == mermaid_model::models::ChatMessageKind::Continuation
             && let Some(prev_idx) = messages[..head_idx]
                 .iter()
                 .rposition(|m| m.role == MessageRole::Assistant)
@@ -541,8 +550,8 @@ fn build_result(state: &State) -> RunResult {
             // empty error-carrier is never part of the reply chain.
             && matches!(
                 messages[prev_idx].kind,
-                crate::models::ChatMessageKind::Normal
-                    | crate::models::ChatMessageKind::Continuation
+                mermaid_model::models::ChatMessageKind::Normal
+                    | mermaid_model::models::ChatMessageKind::Continuation
             )
             && messages[prev_idx].tool_calls.is_none()
         {
@@ -554,7 +563,7 @@ fn build_result(state: &State) -> RunResult {
             .iter()
             .filter(|m| m.role == MessageRole::Assistant)
         {
-            let skip = crate::utils::continuation_overlap(&response, &msg.content);
+            let skip = mermaid_model::utils::continuation_overlap(&response, &msg.content);
             response.push_str(&msg.content[skip..]);
             if let Some(t) = &msg.thinking {
                 match &mut reasoning {
@@ -629,9 +638,9 @@ mod tests {
 
     #[test]
     fn build_result_joins_an_auto_continued_reply() {
-        use crate::models::{ChatMessage, ChatMessageKind};
-        let mut state = crate::domain::State::new(
-            crate::app::Config::default(),
+        use mermaid_model::models::{ChatMessage, ChatMessageKind};
+        let mut state = mermaid_domain::State::new(
+            mermaid_domain::Config::default(),
             std::path::PathBuf::from("/tmp/p"),
             "ollama/test".to_string(),
             chrono::Local::now(),
@@ -658,9 +667,9 @@ mod tests {
 
     #[test]
     fn build_result_without_chain_takes_the_last_reply() {
-        use crate::models::ChatMessage;
-        let mut state = crate::domain::State::new(
-            crate::app::Config::default(),
+        use mermaid_model::models::ChatMessage;
+        let mut state = mermaid_domain::State::new(
+            mermaid_domain::Config::default(),
             std::path::PathBuf::from("/tmp/p"),
             "ollama/test".to_string(),
             chrono::Local::now(),
@@ -691,10 +700,10 @@ mod tests {
         assert_eq!(strip_code_fences("  {\"a\":1}  "), "{\"a\":1}");
     }
 
-    fn schema_state(reply: &str) -> crate::domain::State {
-        use crate::models::ChatMessage;
-        let mut state = crate::domain::State::new(
-            crate::app::Config::default(),
+    fn schema_state(reply: &str) -> mermaid_domain::State {
+        use mermaid_model::models::ChatMessage;
+        let mut state = mermaid_domain::State::new(
+            mermaid_domain::Config::default(),
             std::path::PathBuf::from("/tmp/p"),
             "ollama/test".to_string(),
             chrono::Local::now(),
@@ -775,9 +784,9 @@ mod tests {
         // The formatting turn produced nothing new (same last assistant
         // message) -> keep the agent's answer, record the failure.
         let schema = serde_json::json!({"type": "object"});
-        use crate::models::ChatMessage;
-        let mut state = crate::domain::State::new(
-            crate::app::Config::default(),
+        use mermaid_model::models::ChatMessage;
+        let mut state = mermaid_domain::State::new(
+            mermaid_domain::Config::default(),
             std::path::PathBuf::from("/tmp/p"),
             "ollama/test".to_string(),
             chrono::Local::now(),
@@ -805,7 +814,7 @@ mod tests {
         // The broadcast tee is exercised end-to-end by the daemon integration
         // test; here pin the terminal event SHAPE subscribers rely on (a
         // `result` type ends the stream).
-        let event = crate::domain::RunEvent::Result {
+        let event = mermaid_domain::RunEvent::Result {
             response: "done".to_string(),
             reasoning: None,
             total_tokens: 3,
@@ -815,7 +824,7 @@ mod tests {
         };
         let wire = serde_json::to_string(&event).unwrap();
         assert!(wire.contains("\"type\":\"result\""), "{wire}");
-        let (tx, mut rx) = tokio::sync::broadcast::channel::<crate::domain::RunEvent>(4);
+        let (tx, mut rx) = tokio::sync::broadcast::channel::<mermaid_domain::RunEvent>(4);
         tx.send(event.clone()).unwrap();
         assert_eq!(rx.try_recv().unwrap(), event);
     }

@@ -12,13 +12,13 @@
 
 use async_trait::async_trait;
 
-use crate::domain::ChatRequest;
-use crate::models::adapters::anthropic::AnthropicAdapter;
-use crate::models::{Model, ModelConfig, ModelError, Result};
+use mermaid_domain::ChatRequest;
+use mermaid_model::models::adapters::anthropic::AnthropicAdapter;
+use mermaid_model::models::{Model, ModelConfig, ModelError, Result};
 
-use super::super::capabilities::Capabilities;
 use super::super::ctx::{FinalResponse, StreamContext, StreamEvent};
 use super::{ContextSizing, ModelProvider, resolve_limits_cached};
+use mermaid_model::models::ModelCapabilities;
 
 /// Anthropic's Messages-API root, and the env var its key lives in.
 ///
@@ -31,14 +31,13 @@ pub const DEFAULT_API_KEY_ENV: &str = "ANTHROPIC_API_KEY";
 /// Anthropic adapter fronted by `ModelProvider`.
 pub struct AnthropicProvider {
     adapter: AnthropicAdapter,
-    capabilities: Capabilities,
+    capabilities: ModelCapabilities,
 }
 
 impl AnthropicProvider {
     pub fn new(api_key: String, model_name: String, base_url: String) -> Result<Self> {
         let adapter = AnthropicAdapter::new(api_key, model_name, base_url)?;
-        let capabilities =
-            Capabilities::from_legacy(adapter.capabilities()).with_provider_continuation();
+        let capabilities = adapter.capabilities().clone().with_provider_continuation();
         Ok(Self {
             adapter,
             capabilities,
@@ -48,7 +47,7 @@ impl AnthropicProvider {
 
 #[async_trait]
 impl ModelProvider for AnthropicProvider {
-    fn capabilities(&self) -> &Capabilities {
+    fn capabilities(&self) -> &ModelCapabilities {
         &self.capabilities
     }
 
@@ -97,7 +96,7 @@ impl ModelProvider for AnthropicProvider {
             stop_reason: stop_reason.clone(),
         });
         drop(relay_tx);
-        crate::utils::join_logged(relay_handle.take(), "stream_relay").await;
+        mermaid_model::utils::join_logged(relay_handle.take(), "stream_relay").await;
 
         Ok(FinalResponse {
             usage,
@@ -137,7 +136,7 @@ mod tests {
             messages: vec![],
             system_prompt: "sys".to_string(),
             instructions: Some("MERMAID.md content".to_string()),
-            reasoning: crate::models::ReasoningLevel::XHigh,
+            reasoning: mermaid_model::models::ReasoningLevel::XHigh,
             temperature: 0.7,
             max_tokens: 8192,
             tools: vec![],
@@ -151,7 +150,7 @@ mod tests {
             suppressed_builtin_tools: Vec::new(),
         };
         let cfg = build_model_config(&req);
-        assert_eq!(cfg.reasoning, crate::models::ReasoningLevel::XHigh);
+        assert_eq!(cfg.reasoning, mermaid_model::models::ReasoningLevel::XHigh);
         assert_eq!(cfg.max_tokens, 8192);
         assert_eq!(
             cfg.dynamic_system_suffix.as_deref(),

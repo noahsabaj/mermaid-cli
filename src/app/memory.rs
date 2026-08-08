@@ -16,12 +16,13 @@
 //! load/refresh, and the write/delete primitives the memory tool and slash
 //! commands build on.
 
+use mermaid_domain::{LoadedMemory, MemoryEntry, MemoryScope};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
-use crate::app::MemoryConfig;
-use crate::constants::MEMORY_INDEX_TRUNCATION_MARKER;
+use mermaid_domain::MemoryConfig;
+use mermaid_model::constants::MEMORY_INDEX_TRUNCATION_MARKER;
 
 /// Hard cap on directory levels `find_git_root` walks up (symlink-loop guard).
 const MAX_WALK_DEPTH: usize = 32;
@@ -30,68 +31,6 @@ const MAX_WALK_DEPTH: usize = 32;
 /// refresh. A single fact is tiny; this only bounds a pathological/huge file so
 /// `refresh()` can't be made to slurp unbounded bytes every turn (F47).
 const MAX_MEMORY_FILE_BYTES: usize = 64_000;
-
-/// Where a memory lives. The *directory* is authoritative; the frontmatter
-/// `scope` field is advisory/portable metadata so a hand-moved file is still
-/// classified by its location.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum MemoryScope {
-    Global,
-    ProjectPrivate,
-    ProjectShared,
-}
-
-impl MemoryScope {
-    /// Kebab token used in frontmatter and the `scope` tool argument.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            MemoryScope::Global => "global",
-            MemoryScope::ProjectPrivate => "project-private",
-            MemoryScope::ProjectShared => "project-shared",
-        }
-    }
-
-    /// Human label for the index section header.
-    fn label(self) -> &'static str {
-        match self {
-            MemoryScope::Global => "Global (all projects)",
-            MemoryScope::ProjectPrivate => "Project (private)",
-            MemoryScope::ProjectShared => "Project (shared)",
-        }
-    }
-}
-
-/// One memory file's index entry. Deliberately holds no body — the full fact
-/// is read on demand via `read_file` on `path`, keeping the always-loaded
-/// snapshot small.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct MemoryEntry {
-    pub name: String,
-    pub description: String,
-    pub path: PathBuf,
-    pub scope: MemoryScope,
-    pub mtime: SystemTime,
-}
-
-/// Snapshot of all loaded memory across scopes plus the rendered index block.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct LoadedMemory {
-    pub entries: Vec<MemoryEntry>,
-    /// Pre-rendered `# Memory` block injected into the prompt (capped).
-    pub index: String,
-    /// True when the index exceeded the cap and was clipped.
-    pub truncated: bool,
-}
-
-impl LoadedMemory {
-    pub fn approx_tokens(&self) -> usize {
-        self.index.len() / 4
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-}
 
 /// Outcome of a per-turn `refresh()`, for optional status reporting.
 #[derive(Debug, PartialEq, Eq)]
@@ -122,7 +61,7 @@ pub fn find_git_root(start: &Path) -> Option<PathBuf> {
 /// Shared is omitted when `cwd` isn't in a git repo. Returns an empty vec only
 /// if the machine data dir can't be resolved.
 pub fn memory_roots(cwd: &Path) -> Vec<(PathBuf, MemoryScope)> {
-    let Ok(data) = crate::runtime::data_dir() else {
+    let Ok(data) = mermaid_runtime::data_dir() else {
         return Vec::new();
     };
     let mut roots = vec![(data.join("memory"), MemoryScope::Global)];
@@ -269,7 +208,7 @@ fn load_root(dir: &Path, scope: MemoryScope) -> Vec<MemoryEntry> {
         // Bounded read: this dir is re-scanned every turn by `refresh()`, so
         // never slurp a pathologically large `.md` whole — and surface (not
         // silently swallow) a read error instead of indexing an empty stub (F47).
-        let raw = match crate::utils::read_file_capped(&path, MAX_MEMORY_FILE_BYTES) {
+        let raw = match mermaid_model::utils::read_file_capped(&path, MAX_MEMORY_FILE_BYTES) {
             Ok((bytes, _truncated)) => String::from_utf8_lossy(&bytes).into_owned(),
             Err(e) => {
                 tracing::warn!(path = %path.display(), error = %e, "memory: skipping unreadable file");
@@ -431,13 +370,13 @@ pub fn write_to_dir(
     // and `tags` ride along in frontmatter, so redacting only description+body
     // would still leak a secret pasted into the name/tags (F9). Redact the name
     // BEFORE slugifying so a credential can't survive in the on-disk filename.
-    let name = crate::utils::redact_secrets(name);
-    let description = crate::utils::redact_secrets(description);
+    let name = mermaid_model::utils::redact_secrets(name);
+    let description = mermaid_model::utils::redact_secrets(description);
     let tags: Vec<String> = tags
         .iter()
-        .map(|t| crate::utils::redact_secrets(t))
+        .map(|t| mermaid_model::utils::redact_secrets(t))
         .collect();
-    let body = crate::utils::redact_secrets(body);
+    let body = mermaid_model::utils::redact_secrets(body);
     let path = dir.join(format!("{}.md", slugify(&name)));
     std::fs::write(&path, render_file(&name, &description, scope, &tags, &body))?;
     Ok(path)
@@ -559,9 +498,10 @@ fn clip_chars(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::constants::MAX_MEMORY_INDEX_BYTES;
+    use mermaid_model::constants::MAX_MEMORY_INDEX_BYTES;
     use std::fs;
     use std::sync::Mutex;
+    use std::time::SystemTime;
 
     static FS_LOCK: Mutex<()> = Mutex::new(());
 

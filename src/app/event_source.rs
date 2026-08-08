@@ -18,7 +18,7 @@ use crossterm::event::{
     MouseEventKind as CtMouseKind,
 };
 
-use crate::domain::{Key, KeyCode, KeyMods, Msg, Paste};
+use mermaid_domain::{Key, KeyCode, KeyMods, Msg, Paste};
 
 /// Translate one crossterm event into `Msg`. Returns `None` for
 /// events the reducer doesn't care about (focus gained/lost, unknown
@@ -49,10 +49,10 @@ pub fn event_to_msg(event: CtEvent) -> Option<Msg> {
             // sets the delta per wheel tick to match the READMEs
             // "mouse wheel scrolls the chat" contract.
             CtMouseKind::ScrollUp => Some(Msg::MouseScroll {
-                delta: crate::constants::UI_MOUSE_SCROLL_LINES as i16,
+                delta: mermaid_model::constants::UI_MOUSE_SCROLL_LINES as i16,
             }),
             CtMouseKind::ScrollDown => Some(Msg::MouseScroll {
-                delta: -(crate::constants::UI_MOUSE_SCROLL_LINES as i16),
+                delta: -(mermaid_model::constants::UI_MOUSE_SCROLL_LINES as i16),
             }),
             _ => None,
         },
@@ -179,136 +179,39 @@ fn translate_mods(mods: CtMods) -> KeyMods {
     }
 }
 
-/// Parse a slash-command input line (without the leading `/`) into a
-/// `SlashCmd`. Returns `SlashCmd::Unknown` if the command isn't in
-/// the registry. Shared between the TUI dispatcher (C8) and any
-/// non-interactive command dispatch.
-pub fn parse_slash_command(raw: &str) -> crate::domain::SlashCmd {
-    use crate::domain::SlashCmd;
-    let trimmed = raw.trim();
-    let (name, arg) = match trimmed.split_once(' ') {
-        Some((n, a)) => (n.to_lowercase(), Some(a.trim().to_string())),
-        None => (trimmed.to_lowercase(), None),
-    };
-
-    // Route through the registry so command aliases (/q → /quit) work.
-    use crate::domain::slash_commands::COMMAND_REGISTRY;
-    let canonical = COMMAND_REGISTRY
-        .iter()
-        .find(|c| c.name == name.as_str() || c.aliases.contains(&name.as_str()))
-        .map(|c| c.name);
-
-    match canonical {
-        Some("model") => SlashCmd::Model(arg),
-        Some("reasoning") => match arg.as_deref() {
-            None => SlashCmd::Reasoning(None),
-            Some(level) => {
-                use clap::ValueEnum;
-                SlashCmd::Reasoning(
-                    crate::models::ReasoningLevel::from_str(&level.to_lowercase(), true).ok(),
-                )
-            },
-        },
-        Some("visible-reasoning") => SlashCmd::VisibleReasoning(arg),
-        Some("safety") => match arg.as_deref() {
-            None => SlashCmd::Safety(None),
-            // Invalid value ⇒ `None` ⇒ the reducer shows current + options.
-            Some(mode) => SlashCmd::Safety(crate::runtime::SafetyMode::parse(&mode.to_lowercase())),
-        },
-        Some("plan") => SlashCmd::Plan(arg),
-        Some("config") => SlashCmd::Config,
-        Some("clear") => SlashCmd::Clear,
-        Some("save") => SlashCmd::Save(arg),
-        Some("load") => SlashCmd::Load(arg),
-        Some("list") => SlashCmd::List,
-        Some("usage") => SlashCmd::Usage,
-        Some("todos") => SlashCmd::Todos(arg),
-        Some("scratchpad") => SlashCmd::Scratchpad,
-        Some("context") => {
-            use crate::domain::ContextCmd;
-            let a = arg.as_deref().map(str::trim);
-            SlashCmd::Context(match a {
-                None | Some("") => ContextCmd::Show,
-                Some("auto") => ContextCmd::Auto,
-                Some("max") | Some("full") => ContextCmd::Max,
-                Some(s) => {
-                    if let Some(rest) = s.strip_prefix("offload") {
-                        match rest.trim() {
-                            "on" | "true" | "enable" | "yes" => ContextCmd::Offload(true),
-                            "off" | "false" | "disable" | "no" | "" => ContextCmd::Offload(false),
-                            // "offload garbage" → just show.
-                            _ => ContextCmd::Show,
-                        }
-                    } else if let Ok(n) = s.parse::<u32>() {
-                        ContextCmd::Set(n)
-                    } else {
-                        // Unrecognized arg → show (self-documenting report).
-                        ContextCmd::Show
-                    }
-                },
-            })
-        },
-        Some("compact") => SlashCmd::Compact(arg),
-        Some("memory") => SlashCmd::Memory,
-        Some("remember") => SlashCmd::Remember(arg),
-        Some("forget") => SlashCmd::Forget(arg),
-        Some("consolidate-memory") => SlashCmd::ConsolidateMemory,
-        Some("doctor") => SlashCmd::Doctor,
-        Some("tasks") => SlashCmd::Tasks,
-        Some("task") => SlashCmd::Task(arg),
-        Some("pause") => SlashCmd::Pause(arg),
-        Some("resume") => SlashCmd::Resume(arg),
-        Some("cancel") => SlashCmd::Cancel(arg),
-        Some("handoff") => SlashCmd::Handoff(arg),
-        Some("report") => SlashCmd::Report(arg),
-        Some("agents") => SlashCmd::Agents(arg),
-        Some("processes") => SlashCmd::Processes,
-        Some("logs") => SlashCmd::Logs(arg),
-        Some("stop") => SlashCmd::Stop(arg),
-        Some("restart") => SlashCmd::Restart(arg),
-        Some("open") => SlashCmd::Open(arg),
-        Some("ports") => SlashCmd::Ports,
-        Some("approvals") => SlashCmd::Approvals,
-        Some("approve") => SlashCmd::Approve(arg),
-        Some("deny") => SlashCmd::Deny(arg),
-        Some("checkpoint") => SlashCmd::Checkpoint(arg),
-        Some("checkpoints") => SlashCmd::Checkpoints,
-        Some("restore") => SlashCmd::Restore(arg),
-        Some("plugins") => SlashCmd::Plugins,
-        Some("model-info") => SlashCmd::ModelInfo(arg),
-        Some("cloud-setup") => SlashCmd::CloudSetup,
-        Some("theme") => SlashCmd::Theme(arg),
-        Some("editor") => SlashCmd::Editor,
-        Some("help") => SlashCmd::Help,
-        Some("quit") => SlashCmd::Quit,
-        _ => SlashCmd::Unknown(name),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::SlashCmd;
+    use mermaid_domain::SlashCmd;
 
     #[test]
     fn parses_theme_and_editor_commands() {
-        assert_eq!(parse_slash_command("theme"), SlashCmd::Theme(None));
         assert_eq!(
-            parse_slash_command("theme light"),
+            mermaid_domain::parse_slash_command("theme"),
+            SlashCmd::Theme(None)
+        );
+        assert_eq!(
+            mermaid_domain::parse_slash_command("theme light"),
             SlashCmd::Theme(Some("light".to_string()))
         );
-        assert_eq!(parse_slash_command("editor"), SlashCmd::Editor);
+        assert_eq!(
+            mermaid_domain::parse_slash_command("editor"),
+            SlashCmd::Editor
+        );
     }
 
     #[test]
     fn parses_agents_command_with_kill_tail() {
-        assert_eq!(parse_slash_command("agents"), SlashCmd::Agents(None));
         assert_eq!(
-            parse_slash_command("agents kill a1"),
+            mermaid_domain::parse_slash_command("agents"),
+            SlashCmd::Agents(None)
+        );
+        assert_eq!(
+            mermaid_domain::parse_slash_command("agents kill a1"),
             SlashCmd::Agents(Some("kill a1".to_string()))
         );
         assert_eq!(
-            parse_slash_command("agents kill all"),
+            mermaid_domain::parse_slash_command("agents kill all"),
             SlashCmd::Agents(Some("kill all".to_string()))
         );
     }
@@ -533,152 +436,203 @@ mod tests {
 
     #[test]
     fn parse_slash_model_no_arg() {
-        assert_eq!(parse_slash_command("model"), SlashCmd::Model(None));
+        assert_eq!(
+            mermaid_domain::parse_slash_command("model"),
+            SlashCmd::Model(None)
+        );
     }
 
     #[test]
     fn parse_slash_model_with_arg() {
         assert_eq!(
-            parse_slash_command("model anthropic/opus"),
+            mermaid_domain::parse_slash_command("model anthropic/opus"),
             SlashCmd::Model(Some("anthropic/opus".to_string())),
         );
     }
 
     #[test]
     fn parse_slash_quit_alias_q() {
-        assert_eq!(parse_slash_command("q"), SlashCmd::Quit);
+        assert_eq!(mermaid_domain::parse_slash_command("q"), SlashCmd::Quit);
     }
 
     #[test]
     fn parse_slash_usage_and_context() {
-        use crate::domain::ContextCmd;
-        assert_eq!(parse_slash_command("usage"), SlashCmd::Usage);
+        use mermaid_domain::ContextCmd;
         assert_eq!(
-            parse_slash_command("context"),
+            mermaid_domain::parse_slash_command("usage"),
+            SlashCmd::Usage
+        );
+        assert_eq!(
+            mermaid_domain::parse_slash_command("context"),
             SlashCmd::Context(ContextCmd::Show)
         );
         assert_eq!(
-            parse_slash_command("context 65536"),
+            mermaid_domain::parse_slash_command("context 65536"),
             SlashCmd::Context(ContextCmd::Set(65536))
         );
         assert_eq!(
-            parse_slash_command("context auto"),
+            mermaid_domain::parse_slash_command("context auto"),
             SlashCmd::Context(ContextCmd::Auto)
         );
         assert_eq!(
-            parse_slash_command("context max"),
+            mermaid_domain::parse_slash_command("context max"),
             SlashCmd::Context(ContextCmd::Max)
         );
         assert_eq!(
-            parse_slash_command("context offload on"),
+            mermaid_domain::parse_slash_command("context offload on"),
             SlashCmd::Context(ContextCmd::Offload(true))
         );
         assert_eq!(
-            parse_slash_command("context offload off"),
+            mermaid_domain::parse_slash_command("context offload off"),
             SlashCmd::Context(ContextCmd::Offload(false))
         );
         // Unrecognized arg falls back to the (self-documenting) report.
         assert_eq!(
-            parse_slash_command("context wat"),
+            mermaid_domain::parse_slash_command("context wat"),
             SlashCmd::Context(ContextCmd::Show)
         );
-        assert_eq!(parse_slash_command("doctor"), SlashCmd::Doctor);
+        assert_eq!(
+            mermaid_domain::parse_slash_command("doctor"),
+            SlashCmd::Doctor
+        );
     }
 
     #[test]
     fn parse_slash_compact_and_aliases() {
-        assert_eq!(parse_slash_command("compact"), SlashCmd::Compact(None));
         assert_eq!(
-            parse_slash_command("compact focus on tests"),
+            mermaid_domain::parse_slash_command("compact"),
+            SlashCmd::Compact(None)
+        );
+        assert_eq!(
+            mermaid_domain::parse_slash_command("compact focus on tests"),
             SlashCmd::Compact(Some("focus on tests".to_string()))
         );
-        assert_eq!(parse_slash_command("compress"), SlashCmd::Compact(None));
-        assert_eq!(parse_slash_command("summarize"), SlashCmd::Compact(None));
+        assert_eq!(
+            mermaid_domain::parse_slash_command("compress"),
+            SlashCmd::Compact(None)
+        );
+        assert_eq!(
+            mermaid_domain::parse_slash_command("summarize"),
+            SlashCmd::Compact(None)
+        );
     }
 
     #[test]
     fn parse_memory_commands() {
-        assert_eq!(parse_slash_command("memory"), SlashCmd::Memory);
-        assert_eq!(parse_slash_command("memories"), SlashCmd::Memory); // alias
         assert_eq!(
-            parse_slash_command("remember prefer ripgrep"),
+            mermaid_domain::parse_slash_command("memory"),
+            SlashCmd::Memory
+        );
+        assert_eq!(
+            mermaid_domain::parse_slash_command("memories"),
+            SlashCmd::Memory
+        ); // alias
+        assert_eq!(
+            mermaid_domain::parse_slash_command("remember prefer ripgrep"),
             SlashCmd::Remember(Some("prefer ripgrep".to_string()))
         );
-        assert_eq!(parse_slash_command("remember"), SlashCmd::Remember(None));
         assert_eq!(
-            parse_slash_command("forget prefer-ripgrep"),
+            mermaid_domain::parse_slash_command("remember"),
+            SlashCmd::Remember(None)
+        );
+        assert_eq!(
+            mermaid_domain::parse_slash_command("forget prefer-ripgrep"),
             SlashCmd::Forget(Some("prefer-ripgrep".to_string()))
         );
-        assert_eq!(parse_slash_command("forget"), SlashCmd::Forget(None));
         assert_eq!(
-            parse_slash_command("consolidate-memory"),
+            mermaid_domain::parse_slash_command("forget"),
+            SlashCmd::Forget(None)
+        );
+        assert_eq!(
+            mermaid_domain::parse_slash_command("consolidate-memory"),
             SlashCmd::ConsolidateMemory
         );
         assert_eq!(
-            parse_slash_command("prune-memory"),
+            mermaid_domain::parse_slash_command("prune-memory"),
             SlashCmd::ConsolidateMemory
         ); // alias
     }
 
     #[test]
     fn parse_runtime_task_commands() {
-        assert_eq!(parse_slash_command("tasks"), SlashCmd::Tasks);
         assert_eq!(
-            parse_slash_command("task task-123"),
+            mermaid_domain::parse_slash_command("tasks"),
+            SlashCmd::Tasks
+        );
+        assert_eq!(
+            mermaid_domain::parse_slash_command("task task-123"),
             SlashCmd::Task(Some("task-123".to_string()))
         );
         assert_eq!(
-            parse_slash_command("pause task-123"),
+            mermaid_domain::parse_slash_command("pause task-123"),
             SlashCmd::Pause(Some("task-123".to_string()))
         );
         assert_eq!(
-            parse_slash_command("resume task-123"),
+            mermaid_domain::parse_slash_command("resume task-123"),
             SlashCmd::Resume(Some("task-123".to_string()))
         );
-        assert_eq!(parse_slash_command("cancel"), SlashCmd::Cancel(None));
         assert_eq!(
-            parse_slash_command("handoff task-123"),
+            mermaid_domain::parse_slash_command("cancel"),
+            SlashCmd::Cancel(None)
+        );
+        assert_eq!(
+            mermaid_domain::parse_slash_command("handoff task-123"),
             SlashCmd::Handoff(Some("task-123".to_string()))
         );
-        assert_eq!(parse_slash_command("report"), SlashCmd::Report(None));
-        assert_eq!(parse_slash_command("procs"), SlashCmd::Processes);
-        assert_eq!(parse_slash_command("approvals"), SlashCmd::Approvals);
         assert_eq!(
-            parse_slash_command("approve approval-1"),
+            mermaid_domain::parse_slash_command("report"),
+            SlashCmd::Report(None)
+        );
+        assert_eq!(
+            mermaid_domain::parse_slash_command("procs"),
+            SlashCmd::Processes
+        );
+        assert_eq!(
+            mermaid_domain::parse_slash_command("approvals"),
+            SlashCmd::Approvals
+        );
+        assert_eq!(
+            mermaid_domain::parse_slash_command("approve approval-1"),
             SlashCmd::Approve(Some("approval-1".to_string()))
         );
         assert_eq!(
-            parse_slash_command("deny approval-1"),
+            mermaid_domain::parse_slash_command("deny approval-1"),
             SlashCmd::Deny(Some("approval-1".to_string()))
         );
         assert_eq!(
-            parse_slash_command("checkpoint src/lib.rs"),
+            mermaid_domain::parse_slash_command("checkpoint src/lib.rs"),
             SlashCmd::Checkpoint(Some("src/lib.rs".to_string()))
         );
-        assert_eq!(parse_slash_command("checkpoints"), SlashCmd::Checkpoints);
         assert_eq!(
-            parse_slash_command("restore checkpoint-1"),
+            mermaid_domain::parse_slash_command("checkpoints"),
+            SlashCmd::Checkpoints
+        );
+        assert_eq!(
+            mermaid_domain::parse_slash_command("restore checkpoint-1"),
             SlashCmd::Restore(Some("checkpoint-1".to_string()))
         );
-        assert_eq!(parse_slash_command("plugins"), SlashCmd::Plugins);
+        assert_eq!(
+            mermaid_domain::parse_slash_command("plugins"),
+            SlashCmd::Plugins
+        );
     }
 
     #[test]
     fn parse_slash_reasoning_valid_level() {
         assert_eq!(
-            parse_slash_command("reasoning high"),
-            SlashCmd::Reasoning(Some(crate::models::ReasoningLevel::High)),
+            mermaid_domain::parse_slash_command("reasoning high"),
+            SlashCmd::Reasoning(Some(mermaid_model::models::ReasoningLevel::High)),
         );
     }
 
     #[test]
     fn parse_slash_visible_reasoning_and_alias() {
         assert_eq!(
-            parse_slash_command("visible-reasoning on"),
+            mermaid_domain::parse_slash_command("visible-reasoning on"),
             SlashCmd::VisibleReasoning(Some("on".to_string())),
         );
         assert_eq!(
-            parse_slash_command("visiblereasoning"),
+            mermaid_domain::parse_slash_command("visiblereasoning"),
             SlashCmd::VisibleReasoning(None),
         );
     }
@@ -688,7 +642,7 @@ mod tests {
         // Argument exists but can't be parsed to a level — degrades
         // to showing current (None arg) rather than erroring.
         assert_eq!(
-            parse_slash_command("reasoning bogus"),
+            mermaid_domain::parse_slash_command("reasoning bogus"),
             SlashCmd::Reasoning(None),
         );
     }
@@ -696,22 +650,28 @@ mod tests {
     #[test]
     fn parse_safety_command() {
         assert_eq!(
-            parse_slash_command("safety auto"),
-            SlashCmd::Safety(Some(crate::runtime::SafetyMode::Auto)),
+            mermaid_domain::parse_slash_command("safety auto"),
+            SlashCmd::Safety(Some(mermaid_runtime::SafetyMode::Auto)),
         );
         // `/permission` is an alias that routes to the same command.
         assert_eq!(
-            parse_slash_command("permission read_only"),
-            SlashCmd::Safety(Some(crate::runtime::SafetyMode::ReadOnly)),
+            mermaid_domain::parse_slash_command("permission read_only"),
+            SlashCmd::Safety(Some(mermaid_runtime::SafetyMode::ReadOnly)),
         );
         // No arg → show current; bogus value → None (show current + options).
-        assert_eq!(parse_slash_command("safety"), SlashCmd::Safety(None));
-        assert_eq!(parse_slash_command("safety bogus"), SlashCmd::Safety(None));
+        assert_eq!(
+            mermaid_domain::parse_slash_command("safety"),
+            SlashCmd::Safety(None)
+        );
+        assert_eq!(
+            mermaid_domain::parse_slash_command("safety bogus"),
+            SlashCmd::Safety(None)
+        );
     }
 
     #[test]
     fn parse_slash_unknown_command() {
-        match parse_slash_command("nope") {
+        match mermaid_domain::parse_slash_command("nope") {
             SlashCmd::Unknown(name) => assert_eq!(name, "nope"),
             other => panic!("expected Unknown, got {:?}", other),
         }

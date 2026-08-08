@@ -12,16 +12,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Background process status tracked by Mermaid after launching a
-/// command in `execute_command(mode="background")`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ManagedProcessStatus {
-    Running,
-    Exited,
-    Unknown,
-}
-
 /// Registry record for a background process Mermaid started.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManagedProcess {
@@ -31,7 +21,7 @@ pub struct ManagedProcess {
     pub cwd: Option<String>,
     pub log_path: String,
     pub detected_url: Option<String>,
-    pub status: ManagedProcessStatus,
+    pub status: mermaid_runtime::ProcessStatus,
 }
 
 /// Structured metadata extracted from a completed tool run.

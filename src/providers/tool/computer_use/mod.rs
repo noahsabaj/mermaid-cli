@@ -31,12 +31,13 @@ pub mod screenshot;
 pub mod scroll;
 pub mod type_text;
 
+use mermaid_domain::ProgressEvent;
 use std::process::Command;
 
 use serde_json::Value;
 
-use crate::domain::{ToolMetadata, ToolOutcome, ToolRunMetadata};
-use crate::providers::ctx::{ExecContext, ProgressEvent};
+use crate::providers::ctx::ExecContext;
+use mermaid_domain::{ToolMetadata, ToolOutcome, ToolRunMetadata};
 
 pub use click::ClickTool;
 pub use driver::ComputerUseDriver;
@@ -258,8 +259,8 @@ mod tests {
 
     #[tokio::test]
     async fn auto_screenshot_is_noop_when_disabled() {
-        use crate::domain::{ToolCallId, TurnId};
-        let mut cfg = crate::app::Config::default();
+        use mermaid_domain::{ToolCallId, TurnId};
+        let mut cfg = mermaid_domain::Config::default();
         cfg.computer_use.auto_screenshot = false;
         let (tx, mut rx) = tokio::sync::mpsc::channel::<ProgressEvent>(8);
         let ctx = ExecContext::new(
@@ -273,7 +274,7 @@ mod tests {
             None,
             None,
             None,
-            crate::runtime::SafetyMode::FullAccess,
+            mermaid_runtime::SafetyMode::FullAccess,
             None,
             None,
             None,

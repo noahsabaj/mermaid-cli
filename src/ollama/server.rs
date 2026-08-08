@@ -28,7 +28,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
-use crate::utils::classify_host;
+use mermaid_model::utils::classify_host;
 
 /// How long a failed start attempt suppresses new attempts. Long enough that
 /// the retry storm of a single turn (chat + probes) collapses into one
@@ -56,7 +56,7 @@ pub enum AutostartError {
     Unhealthy(String),
 }
 
-/// The [`LocalServerRecovery`] the model layer is handed when the user's config
+/// The [`mermaid_model::models::adapters::ollama::LocalServerRecovery`] the model layer is handed when the user's config
 /// allows autostart.
 ///
 /// This is the whole inversion: `ensure_running` — process discovery, spawning,
@@ -68,7 +68,7 @@ pub enum AutostartError {
 pub struct OllamaAutostart;
 
 #[async_trait::async_trait]
-impl crate::models::adapters::ollama::LocalServerRecovery for OllamaAutostart {
+impl mermaid_model::models::adapters::ollama::LocalServerRecovery for OllamaAutostart {
     async fn ensure_running(
         &self,
         base_url: &str,
@@ -276,7 +276,9 @@ fn spawn_serve(binary: &std::path::Path, authority: &str) -> std::io::Result<std
         use std::os::windows::process::CommandExt;
         // CREATE_NO_WINDOW, never DETACHED_PROCESS: the latter leaves a
         // visible console window on Windows 11 (see utils::proc).
-        cmd.creation_flags(crate::utils::CREATE_NO_WINDOW | crate::utils::CREATE_NEW_PROCESS_GROUP);
+        cmd.creation_flags(
+            mermaid_model::utils::CREATE_NO_WINDOW | mermaid_model::utils::CREATE_NEW_PROCESS_GROUP,
+        );
     }
     cmd.spawn()
 }

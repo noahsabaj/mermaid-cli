@@ -11,31 +11,31 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::domain::ChatRequest;
-use crate::models::adapters::ollama::{OllamaAdapter, OllamaModelInfo};
-use crate::models::adapters::ollama_sizing::{
+use mermaid_domain::ChatRequest;
+use mermaid_model::models::adapters::ollama::{OllamaAdapter, OllamaModelInfo};
+use mermaid_model::models::adapters::ollama_sizing::{
     NumCtxInputs, converge_num_ctx, default_ollama_num_predict, kv_bytes_per_token,
     resolve_ollama_num_ctx,
 };
-use crate::models::{BackendConfig, Model, ModelConfig, ModelError, Result};
-use crate::runtime::{NewProviderProbe, RuntimeStore};
+use mermaid_model::models::{BackendConfig, Model, ModelConfig, ModelError, Result};
+use mermaid_runtime::{NewProviderProbe, RuntimeStore};
 
-use super::super::capabilities::Capabilities;
 use super::super::ctx::{FinalResponse, StreamContext, StreamEvent};
 use super::{
     ContextSizing, ModelPlacement, ModelProvider, learn_output_cap, load_limits_from_db,
     output_cap_from_error, probe_is_stale, retry_cap,
 };
+use mermaid_model::models::ModelCapabilities;
 
 /// Ollama adapter fronted by `ModelProvider`.
 pub struct OllamaProvider {
     adapter: OllamaAdapter,
-    capabilities: Capabilities,
+    capabilities: ModelCapabilities,
     /// Shared app `Config` so `build_model_config` can read Ollama
     /// hardware options (`num_ctx`, `num_gpu`, `num_thread`, `numa`) at
     /// call time. Before F11 these were silently dropped because the
     /// wrapper built `ModelConfig` only from `ChatRequest` fields.
-    config: Arc<crate::app::Config>,
+    config: Arc<mermaid_domain::Config>,
     /// Cached `/api/show` probe (context window + dims + weight). Filled once per
     /// process per model — the provider itself is cached by `ProviderFactory`, so
     /// this fires a single network probe per model. Backed by the cross-session
@@ -49,17 +49,22 @@ impl OllamaProvider {
     /// Call `with_app_config` instead when you have one available so
     /// Ollama hardware options actually reach the adapter.
     pub async fn new(model_name: &str, backend: Arc<BackendConfig>) -> Result<Self> {
-        Self::with_app_config(model_name, backend, Arc::new(crate::app::Config::default())).await
+        Self::with_app_config(
+            model_name,
+            backend,
+            Arc::new(mermaid_domain::Config::default()),
+        )
+        .await
     }
 
-    /// Construct with an explicit `app::Config` reference. Used by
+    /// Construct with an explicit `domain::Config` reference. Used by
     /// `ProviderFactory::build_provider` so `config.ollama.{num_gpu,
     /// num_ctx, num_thread, numa}` make it into the Ollama request's
     /// `options` block.
     pub async fn with_app_config(
         model_name: &str,
         backend: Arc<BackendConfig>,
-        config: Arc<crate::app::Config>,
+        config: Arc<mermaid_domain::Config>,
     ) -> Result<Self> {
         let autostart = backend.ollama_autostart;
         let adapter = OllamaAdapter::new(model_name, backend).await?;
@@ -72,7 +77,7 @@ impl OllamaProvider {
         } else {
             adapter
         };
-        let capabilities = Capabilities::from_legacy(adapter.capabilities());
+        let capabilities = adapter.capabilities().clone();
         Ok(Self {
             adapter,
             capabilities,
@@ -118,9 +123,9 @@ impl OllamaProvider {
         // Only fetch the budget we'll actually use: VRAM when keeping the model
         // on the GPU (default), system RAM when offload is allowed.
         let (vram_bytes, system_ram_bytes) = if allow_ram_offload {
-            (None, crate::utils::system_ram_bytes())
+            (None, mermaid_model::utils::system_ram_bytes())
         } else {
-            (crate::utils::gpu_vram_bytes().await, None)
+            (mermaid_model::utils::gpu_vram_bytes().await, None)
         };
         NumCtxInputs {
             model_max: info.context_length,
@@ -139,7 +144,7 @@ impl OllamaProvider {
 
 #[async_trait]
 impl ModelProvider for OllamaProvider {
-    fn capabilities(&self) -> &Capabilities {
+    fn capabilities(&self) -> &ModelCapabilities {
         &self.capabilities
     }
 
@@ -296,7 +301,7 @@ impl ModelProvider for OllamaProvider {
             stop_reason: stop_reason.clone(),
         });
         drop(relay_tx);
-        crate::utils::join_logged(relay_handle.take(), "stream_relay").await;
+        mermaid_model::utils::join_logged(relay_handle.take(), "stream_relay").await;
 
         Ok(FinalResponse {
             usage,
@@ -316,7 +321,7 @@ impl ModelProvider for OllamaProvider {
 /// Ollama Cloud 400), bounding the derived `num_predict`.
 fn build_model_config(
     request: &ChatRequest,
-    app_config: &crate::app::Config,
+    app_config: &mermaid_domain::Config,
     num_ctx: Option<usize>,
     provider_max_output: Option<usize>,
 ) -> ModelConfig {
@@ -432,7 +437,7 @@ mod tests {
             messages: vec![],
             system_prompt: "sys".to_string(),
             instructions: Some("instructions text".to_string()),
-            reasoning: crate::models::ReasoningLevel::High,
+            reasoning: mermaid_model::models::ReasoningLevel::High,
             temperature: 0.3,
             max_tokens: 2048,
             tools: vec![],
@@ -445,12 +450,12 @@ mod tests {
             suppress_auto_compact: false,
             suppressed_builtin_tools: Vec::new(),
         };
-        let app_cfg = crate::app::Config::default();
+        let app_cfg = mermaid_domain::Config::default();
         let cfg = build_model_config(&req, &app_cfg, None, None);
         assert_eq!(cfg.model, "ollama/test");
         assert_eq!(cfg.temperature, 0.3);
         assert_eq!(cfg.max_tokens, 2048);
-        assert_eq!(cfg.reasoning, crate::models::ReasoningLevel::High);
+        assert_eq!(cfg.reasoning, mermaid_model::models::ReasoningLevel::High);
         assert_eq!(cfg.system_prompt.as_deref(), Some("sys"));
         assert_eq!(
             cfg.dynamic_system_suffix.as_deref(),
@@ -470,7 +475,7 @@ mod tests {
             messages: vec![],
             system_prompt: "sys".to_string(),
             instructions: None,
-            reasoning: crate::models::ReasoningLevel::Medium,
+            reasoning: mermaid_model::models::ReasoningLevel::Medium,
             temperature: 0.7,
             max_tokens: 4096,
             tools: vec![],
@@ -483,7 +488,7 @@ mod tests {
             suppress_auto_compact: false,
             suppressed_builtin_tools: Vec::new(),
         };
-        let mut app_cfg = crate::app::Config::default();
+        let mut app_cfg = mermaid_domain::Config::default();
         app_cfg.ollama.num_gpu = Some(10);
         app_cfg.ollama.num_thread = Some(8);
         app_cfg.ollama.numa = Some(true);
@@ -507,7 +512,7 @@ mod tests {
             messages: vec![],
             system_prompt: String::new(),
             instructions: None,
-            reasoning: crate::models::ReasoningLevel::Max,
+            reasoning: mermaid_model::models::ReasoningLevel::Max,
             temperature: 0.7,
             max_tokens: 4096,
             tools: vec![],
@@ -520,7 +525,12 @@ mod tests {
             suppress_auto_compact: false,
             suppressed_builtin_tools: Vec::new(),
         };
-        let cfg = build_model_config(&req, &crate::app::Config::default(), Some(131_072), None);
+        let cfg = build_model_config(
+            &req,
+            &mermaid_domain::Config::default(),
+            Some(131_072),
+            None,
+        );
         // Exactly the 4096 cap; plenty of room in a 131072 window.
         assert_eq!(cfg.ollama_options().num_predict, Some(4_096));
     }
@@ -535,7 +545,7 @@ mod tests {
             messages: vec![],
             system_prompt: String::new(),
             instructions: None,
-            reasoning: crate::models::ReasoningLevel::Medium,
+            reasoning: mermaid_model::models::ReasoningLevel::Medium,
             temperature: 0.7,
             max_tokens: 0, // AUTO — the incident's configuration
             tools: vec![],
@@ -548,7 +558,7 @@ mod tests {
             suppress_auto_compact: false,
             suppressed_builtin_tools: Vec::new(),
         };
-        let app_cfg = crate::app::Config::default();
+        let app_cfg = mermaid_domain::Config::default();
         // Without a learned cap, AUTO hands over the full window room —
         // 524_288 minus margin — which Ollama Cloud 400s for minimax-m3.
         let uncapped = build_model_config(&req, &app_cfg, Some(524_288), None);
