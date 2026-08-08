@@ -654,21 +654,21 @@ impl Msg {
     /// short-circuit stale events.
     pub fn turn_id(&self) -> Option<TurnId> {
         match self {
-            Msg::StreamText { turn, .. }
-            | Msg::StreamReasoning { turn, .. }
-            | Msg::StreamToolCall { turn, .. }
-            | Msg::ContextUsageEstimated { turn, .. }
-            | Msg::CompactionFinished { turn, .. }
-            | Msg::CompactionFailed { turn, .. }
-            | Msg::StreamDone { turn, .. }
-            | Msg::UpstreamError { turn, .. }
-            | Msg::ToolStarted { turn, .. }
-            | Msg::ToolProgress { turn, .. }
-            | Msg::ToolFinished { turn, .. }
-            | Msg::ApprovalRequested { turn, .. }
-            | Msg::QuestionAsked { turn, .. }
-            | Msg::HookContext { turn, .. } => Some(*turn),
-            Msg::TurnCancelled(turn) => Some(*turn),
+            Self::StreamText { turn, .. }
+            | Self::StreamReasoning { turn, .. }
+            | Self::StreamToolCall { turn, .. }
+            | Self::ContextUsageEstimated { turn, .. }
+            | Self::CompactionFinished { turn, .. }
+            | Self::CompactionFailed { turn, .. }
+            | Self::StreamDone { turn, .. }
+            | Self::UpstreamError { turn, .. }
+            | Self::ToolStarted { turn, .. }
+            | Self::ToolProgress { turn, .. }
+            | Self::ToolFinished { turn, .. }
+            | Self::ApprovalRequested { turn, .. }
+            | Self::QuestionAsked { turn, .. }
+            | Self::HookContext { turn, .. } => Some(*turn),
+            Self::TurnCancelled(turn) => Some(*turn),
             _ => None,
         }
     }
@@ -677,70 +677,70 @@ impl Msg {
     /// full `Debug` string and stable across refactors.
     pub fn kind(&self) -> MsgKind {
         match self {
-            Msg::Key(_) => MsgKind::Key,
-            Msg::Paste(_) => MsgKind::Paste,
-            Msg::ClipboardRead(_) => MsgKind::ClipboardRead,
-            Msg::SubmitPrompt { .. } => MsgKind::SubmitPrompt,
-            Msg::Slash(_) => MsgKind::Slash,
-            Msg::CancelTurn => MsgKind::CancelTurn,
-            Msg::ConfirmAccepted | Msg::ConfirmDeclined => MsgKind::Confirm,
-            Msg::Quit => MsgKind::Quit,
-            Msg::RuntimeSignal(_) => MsgKind::RuntimeSignal,
-            Msg::StreamText { .. } => MsgKind::StreamText,
-            Msg::StreamReasoning { .. } => MsgKind::StreamReasoning,
-            Msg::StreamToolCall { .. } => MsgKind::StreamToolCall,
-            Msg::ContextUsageEstimated { .. } => MsgKind::ContextUsageEstimated,
-            Msg::ProviderContextResolved { .. } => MsgKind::ProviderContextResolved,
-            Msg::OllamaPlacementResolved { .. } => MsgKind::OllamaPlacementResolved,
-            Msg::ProviderVisionResolved { .. } => MsgKind::ProviderVisionResolved,
-            Msg::BuiltinToolSchemaTokens(_) => MsgKind::BuiltinToolSchemaTokens,
-            Msg::CompactionFinished { .. } => MsgKind::CompactionFinished,
-            Msg::CompactionFailed { .. } => MsgKind::CompactionFailed,
-            Msg::StreamDone { .. } => MsgKind::StreamDone,
-            Msg::UpstreamError { .. } => MsgKind::UpstreamError,
-            Msg::ToolStarted { .. } => MsgKind::ToolStarted,
-            Msg::ToolProgress { .. } => MsgKind::ToolProgress,
-            Msg::ToolFinished { .. } => MsgKind::ToolFinished,
-            Msg::ApprovalRequested { .. } => MsgKind::ApprovalRequested,
-            Msg::QuestionAsked { .. } => MsgKind::QuestionAsked,
-            Msg::TasksUpdated { .. } => MsgKind::TasksUpdated,
-            Msg::TaskNotice { .. } => MsgKind::TaskNotice,
-            Msg::TurnCancelled(_) => MsgKind::TurnCancelled,
-            Msg::McpServerReady { .. }
-            | Msg::McpServerErrored { .. }
-            | Msg::McpServerStopped { .. } => MsgKind::Mcp,
-            Msg::HookContext { .. } => MsgKind::HookContext,
-            Msg::InstructionsChanged(_) => MsgKind::InstructionsChanged,
-            Msg::MemoryChanged(_) => MsgKind::MemoryChanged,
-            Msg::SessionProvenanceResolved(_) => MsgKind::SessionProvenanceResolved,
-            Msg::SessionSaved => MsgKind::SessionSaved,
-            Msg::ConversationLoaded(_) => MsgKind::ConversationLoaded,
-            Msg::ConversationsListed(_) => MsgKind::ConversationsListed,
-            Msg::AvailableModelsListed(_) => MsgKind::AvailableModelsListed,
-            Msg::ProjectFilesListed(_) => MsgKind::ProjectFilesListed,
-            Msg::ScratchpadReady { .. } => MsgKind::ScratchpadReady,
-            Msg::RuntimeTasksListed(_)
-            | Msg::RuntimeTaskLoaded { .. }
-            | Msg::RuntimeProcessesListed(_)
-            | Msg::RuntimeText(_)
-            | Msg::RuntimeApprovalsListed(_)
-            | Msg::RuntimeCheckpointsListed(_)
-            | Msg::ForkCheckpointsFound(_)
-            | Msg::RuntimePluginsListed(_) => MsgKind::RuntimeStore,
-            Msg::ModelPullFinished { .. } => MsgKind::ModelPullFinished,
-            Msg::ModelPullProgress(_) => MsgKind::ModelPullProgress,
-            Msg::Tick => MsgKind::Tick,
-            Msg::Resize { .. } => MsgKind::Resize,
-            Msg::MouseScroll { .. } => MsgKind::MouseScroll,
-            Msg::FocusChanged(_) => MsgKind::FocusChanged,
-            Msg::OpenImageAt { .. } => MsgKind::OpenImageAt,
-            Msg::TransientStatus { .. } => MsgKind::TransientStatus,
-            Msg::Toast { .. } => MsgKind::Toast,
-            Msg::EditorReturned { .. } => MsgKind::EditorReturned,
-            Msg::BackgroundAgentStarted { .. }
-            | Msg::BackgroundAgentProgress { .. }
-            | Msg::BackgroundAgentFinished { .. } => MsgKind::BackgroundAgent,
-            Msg::CopySelection(_) => MsgKind::CopySelection,
+            Self::Key(_) => MsgKind::Key,
+            Self::Paste(_) => MsgKind::Paste,
+            Self::ClipboardRead(_) => MsgKind::ClipboardRead,
+            Self::SubmitPrompt { .. } => MsgKind::SubmitPrompt,
+            Self::Slash(_) => MsgKind::Slash,
+            Self::CancelTurn => MsgKind::CancelTurn,
+            Self::ConfirmAccepted | Self::ConfirmDeclined => MsgKind::Confirm,
+            Self::Quit => MsgKind::Quit,
+            Self::RuntimeSignal(_) => MsgKind::RuntimeSignal,
+            Self::StreamText { .. } => MsgKind::StreamText,
+            Self::StreamReasoning { .. } => MsgKind::StreamReasoning,
+            Self::StreamToolCall { .. } => MsgKind::StreamToolCall,
+            Self::ContextUsageEstimated { .. } => MsgKind::ContextUsageEstimated,
+            Self::ProviderContextResolved { .. } => MsgKind::ProviderContextResolved,
+            Self::OllamaPlacementResolved { .. } => MsgKind::OllamaPlacementResolved,
+            Self::ProviderVisionResolved { .. } => MsgKind::ProviderVisionResolved,
+            Self::BuiltinToolSchemaTokens(_) => MsgKind::BuiltinToolSchemaTokens,
+            Self::CompactionFinished { .. } => MsgKind::CompactionFinished,
+            Self::CompactionFailed { .. } => MsgKind::CompactionFailed,
+            Self::StreamDone { .. } => MsgKind::StreamDone,
+            Self::UpstreamError { .. } => MsgKind::UpstreamError,
+            Self::ToolStarted { .. } => MsgKind::ToolStarted,
+            Self::ToolProgress { .. } => MsgKind::ToolProgress,
+            Self::ToolFinished { .. } => MsgKind::ToolFinished,
+            Self::ApprovalRequested { .. } => MsgKind::ApprovalRequested,
+            Self::QuestionAsked { .. } => MsgKind::QuestionAsked,
+            Self::TasksUpdated { .. } => MsgKind::TasksUpdated,
+            Self::TaskNotice { .. } => MsgKind::TaskNotice,
+            Self::TurnCancelled(_) => MsgKind::TurnCancelled,
+            Self::McpServerReady { .. }
+            | Self::McpServerErrored { .. }
+            | Self::McpServerStopped { .. } => MsgKind::Mcp,
+            Self::HookContext { .. } => MsgKind::HookContext,
+            Self::InstructionsChanged(_) => MsgKind::InstructionsChanged,
+            Self::MemoryChanged(_) => MsgKind::MemoryChanged,
+            Self::SessionProvenanceResolved(_) => MsgKind::SessionProvenanceResolved,
+            Self::SessionSaved => MsgKind::SessionSaved,
+            Self::ConversationLoaded(_) => MsgKind::ConversationLoaded,
+            Self::ConversationsListed(_) => MsgKind::ConversationsListed,
+            Self::AvailableModelsListed(_) => MsgKind::AvailableModelsListed,
+            Self::ProjectFilesListed(_) => MsgKind::ProjectFilesListed,
+            Self::ScratchpadReady { .. } => MsgKind::ScratchpadReady,
+            Self::RuntimeTasksListed(_)
+            | Self::RuntimeTaskLoaded { .. }
+            | Self::RuntimeProcessesListed(_)
+            | Self::RuntimeText(_)
+            | Self::RuntimeApprovalsListed(_)
+            | Self::RuntimeCheckpointsListed(_)
+            | Self::ForkCheckpointsFound(_)
+            | Self::RuntimePluginsListed(_) => MsgKind::RuntimeStore,
+            Self::ModelPullFinished { .. } => MsgKind::ModelPullFinished,
+            Self::ModelPullProgress(_) => MsgKind::ModelPullProgress,
+            Self::Tick => MsgKind::Tick,
+            Self::Resize { .. } => MsgKind::Resize,
+            Self::MouseScroll { .. } => MsgKind::MouseScroll,
+            Self::FocusChanged(_) => MsgKind::FocusChanged,
+            Self::OpenImageAt { .. } => MsgKind::OpenImageAt,
+            Self::TransientStatus { .. } => MsgKind::TransientStatus,
+            Self::Toast { .. } => MsgKind::Toast,
+            Self::EditorReturned { .. } => MsgKind::EditorReturned,
+            Self::BackgroundAgentStarted { .. }
+            | Self::BackgroundAgentProgress { .. }
+            | Self::BackgroundAgentFinished { .. } => MsgKind::BackgroundAgent,
+            Self::CopySelection(_) => MsgKind::CopySelection,
         }
     }
 }

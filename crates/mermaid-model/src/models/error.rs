@@ -100,9 +100,9 @@ pub enum ModelError {
 impl fmt::Display for ModelError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ModelError::Backend(e) => write!(f, "Backend error: {e}"),
-            ModelError::Config(e) => write!(f, "Configuration error: {e}"),
-            ModelError::ModelNotFound { model, searched } => {
+            Self::Backend(e) => write!(f, "Backend error: {e}"),
+            Self::Config(e) => write!(f, "Configuration error: {e}"),
+            Self::ModelNotFound { model, searched } => {
                 write!(
                     f,
                     "Model '{}' not found. Searched: {}",
@@ -110,7 +110,7 @@ impl fmt::Display for ModelError {
                     searched.join(", ")
                 )
             },
-            ModelError::Timeout {
+            Self::Timeout {
                 operation,
                 duration_secs,
             } => {
@@ -123,7 +123,7 @@ impl fmt::Display for ModelError {
                     )
                 }
             },
-            ModelError::RateLimit {
+            Self::RateLimit {
                 retry_after,
                 message,
             } => {
@@ -136,20 +136,20 @@ impl fmt::Display for ModelError {
                 }
                 Ok(())
             },
-            ModelError::InvalidRequest(msg) => write!(f, "Invalid request: {msg}"),
-            ModelError::ParseError { message, raw } => {
+            Self::InvalidRequest(msg) => write!(f, "Invalid request: {msg}"),
+            Self::ParseError { message, raw } => {
                 if let Some(r) = raw {
                     write!(f, "Parse error: {message} (raw: {r})")
                 } else {
                     write!(f, "Parse error: {message}")
                 }
             },
-            ModelError::StreamError(msg) => write!(f, "Stream error: {msg}"),
-            ModelError::Authentication(msg) => write!(f, "Authentication error: {msg}"),
-            ModelError::Unsupported { feature } => {
+            Self::StreamError(msg) => write!(f, "Stream error: {msg}"),
+            Self::Authentication(msg) => write!(f, "Authentication error: {msg}"),
+            Self::Unsupported { feature } => {
                 write!(f, "Feature not supported by this adapter: {feature}")
             },
-            ModelError::Cancelled => write!(f, "Cancelled by user"),
+            Self::Cancelled => write!(f, "Cancelled by user"),
         }
     }
 }
@@ -164,33 +164,30 @@ impl ModelError {
     )]
     pub fn to_user_facing(&self) -> UserFacingError {
         match self {
-            ModelError::Backend(BackendError::ConnectionFailed { backend, url, .. }) => {
-                UserFacingError {
-                    summary: format!("{backend} connection failed"),
-                    message: format!("Could not connect to {backend} at {url}"),
-                    suggestion: if backend == "ollama" {
-                        "Run 'ollama serve' to start Ollama, or check if it's running on the correct port".to_string()
-                    } else {
-                        format!("Check if {backend} is running and accessible")
-                    },
-                    category: ErrorCategory::Connection,
-                    recoverable: true,
-                }
+            Self::Backend(BackendError::ConnectionFailed { backend, url, .. }) => UserFacingError {
+                summary: format!("{backend} connection failed"),
+                message: format!("Could not connect to {backend} at {url}"),
+                suggestion: if backend == "ollama" {
+                    "Run 'ollama serve' to start Ollama, or check if it's running on the correct port".to_string()
+                } else {
+                    format!("Check if {backend} is running and accessible")
+                },
+                category: ErrorCategory::Connection,
+                recoverable: true,
             },
-            ModelError::Backend(BackendError::NotAvailable { backend, reason }) => {
-                UserFacingError {
-                    summary: format!("{backend} unavailable"),
-                    message: format!("{backend} is not available: {reason}"),
-                    suggestion: if backend == "ollama" {
-                        "Start Ollama with 'ollama serve' or pull the model with 'ollama pull <model>'".to_string()
-                    } else {
-                        format!("Ensure {backend} service is running and healthy")
-                    },
-                    category: ErrorCategory::Connection,
-                    recoverable: true,
-                }
+            Self::Backend(BackendError::NotAvailable { backend, reason }) => UserFacingError {
+                summary: format!("{backend} unavailable"),
+                message: format!("{backend} is not available: {reason}"),
+                suggestion: if backend == "ollama" {
+                    "Start Ollama with 'ollama serve' or pull the model with 'ollama pull <model>'"
+                        .to_string()
+                } else {
+                    format!("Ensure {backend} service is running and healthy")
+                },
+                category: ErrorCategory::Connection,
+                recoverable: true,
             },
-            ModelError::Backend(BackendError::HttpError {
+            Self::Backend(BackendError::HttpError {
                 status,
                 message,
                 debug,
@@ -244,7 +241,7 @@ impl ModelError {
                     recoverable: *status == 429 || *status >= 500,
                 }
             },
-            ModelError::Backend(BackendError::UnexpectedResponse { backend, message }) => {
+            Self::Backend(BackendError::UnexpectedResponse { backend, message }) => {
                 UserFacingError {
                     summary: "Unexpected response".to_string(),
                     message: format!("Received unexpected response from {backend}: {message}"),
@@ -254,7 +251,7 @@ impl ModelError {
                     recoverable: false,
                 }
             },
-            ModelError::Backend(BackendError::ProviderError {
+            Self::Backend(BackendError::ProviderError {
                 provider,
                 code,
                 message,
@@ -270,14 +267,14 @@ impl ModelError {
                     recoverable: false,
                 }
             },
-            ModelError::Config(ConfigError::MissingRequired(field)) => UserFacingError {
+            Self::Config(ConfigError::MissingRequired(field)) => UserFacingError {
                 summary: "Missing configuration".to_string(),
                 message: format!("Required configuration '{field}' is missing"),
                 suggestion: format!("Add '{field}' to ~/.config/mermaid/config.toml"),
                 category: ErrorCategory::Config,
                 recoverable: false,
             },
-            ModelError::Config(ConfigError::InvalidValue {
+            Self::Config(ConfigError::InvalidValue {
                 field,
                 value,
                 reason,
@@ -288,14 +285,14 @@ impl ModelError {
                 category: ErrorCategory::Config,
                 recoverable: false,
             },
-            ModelError::Config(ConfigError::FileError { path, reason }) => UserFacingError {
+            Self::Config(ConfigError::FileError { path, reason }) => UserFacingError {
                 summary: "Config file error".to_string(),
                 message: format!("Cannot read config file '{path}': {reason}"),
                 suggestion: "Check file permissions and syntax".to_string(),
                 category: ErrorCategory::Config,
                 recoverable: false,
             },
-            ModelError::ModelNotFound { model, searched } => UserFacingError {
+            Self::ModelNotFound { model, searched } => UserFacingError {
                 summary: "Model not found".to_string(),
                 message: format!("Model '{}' not found in: {}", model, searched.join(", ")),
                 suggestion: format!(
@@ -304,7 +301,7 @@ impl ModelError {
                 category: ErrorCategory::NotFound,
                 recoverable: false,
             },
-            ModelError::Timeout {
+            Self::Timeout {
                 operation,
                 duration_secs,
             } => UserFacingError {
@@ -319,7 +316,7 @@ impl ModelError {
                 category: ErrorCategory::Temporary,
                 recoverable: true,
             },
-            ModelError::RateLimit {
+            Self::RateLimit {
                 retry_after,
                 message,
             } => {
@@ -342,14 +339,14 @@ impl ModelError {
                     recoverable: true,
                 }
             },
-            ModelError::InvalidRequest(msg) => UserFacingError {
+            Self::InvalidRequest(msg) => UserFacingError {
                 summary: "Invalid request".to_string(),
                 message: format!("The request was invalid: {msg}"),
                 suggestion: "Check your message format or try rephrasing".to_string(),
                 category: ErrorCategory::Internal,
                 recoverable: false,
             },
-            ModelError::ParseError { message, .. } => UserFacingError {
+            Self::ParseError { message, .. } => UserFacingError {
                 summary: "Parse error".to_string(),
                 message: format!("Failed to parse response: {message}"),
                 suggestion:
@@ -358,14 +355,14 @@ impl ModelError {
                 category: ErrorCategory::Internal,
                 recoverable: true,
             },
-            ModelError::StreamError(msg) => UserFacingError {
+            Self::StreamError(msg) => UserFacingError {
                 summary: "Stream interrupted".to_string(),
                 message: format!("Connection lost during streaming: {msg}"),
                 suggestion: "Check your network connection and try again".to_string(),
                 category: ErrorCategory::Connection,
                 recoverable: true,
             },
-            ModelError::Authentication(msg) => UserFacingError {
+            Self::Authentication(msg) => UserFacingError {
                 summary: "Authentication failed".to_string(),
                 message: format!("Authentication error: {msg}"),
                 suggestion:
@@ -374,7 +371,7 @@ impl ModelError {
                 category: ErrorCategory::Auth,
                 recoverable: false,
             },
-            ModelError::Unsupported { feature } => UserFacingError {
+            Self::Unsupported { feature } => UserFacingError {
                 summary: "Unsupported feature".to_string(),
                 message: format!("The current model adapter does not support '{feature}'."),
                 suggestion: format!(
@@ -383,7 +380,7 @@ impl ModelError {
                 category: ErrorCategory::Internal,
                 recoverable: false,
             },
-            ModelError::Cancelled => UserFacingError {
+            Self::Cancelled => UserFacingError {
                 summary: "Cancelled".to_string(),
                 message: "The request was cancelled.".to_string(),
                 suggestion: String::new(),
@@ -507,28 +504,28 @@ pub enum BackendError {
 impl fmt::Display for BackendError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            BackendError::ConnectionFailed {
+            Self::ConnectionFailed {
                 backend,
                 url,
                 reason,
             } => {
                 write!(f, "Failed to connect to {backend} at {url}: {reason}")
             },
-            BackendError::NotAvailable { backend, reason } => {
+            Self::NotAvailable { backend, reason } => {
                 write!(f, "Backend '{backend}' not available: {reason}")
             },
             // `debug` ids are deliberately NOT printed here: Display feeds
             // logs and try_extract_error_message; the ids surface once, in
             // to_user_facing.
-            BackendError::HttpError {
+            Self::HttpError {
                 status, message, ..
             } => {
                 write!(f, "HTTP error {status}: {message}")
             },
-            BackendError::UnexpectedResponse { backend, message } => {
+            Self::UnexpectedResponse { backend, message } => {
                 write!(f, "Unexpected response from {backend}: {message}")
             },
-            BackendError::ProviderError {
+            Self::ProviderError {
                 provider,
                 code,
                 message,
@@ -566,17 +563,17 @@ pub enum ConfigError {
 impl fmt::Display for ConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ConfigError::MissingRequired(field) => {
+            Self::MissingRequired(field) => {
                 write!(f, "Missing required configuration: {field}")
             },
-            ConfigError::InvalidValue {
+            Self::InvalidValue {
                 field,
                 value,
                 reason,
             } => {
                 write!(f, "Invalid value for '{field}': '{value}' ({reason})")
             },
-            ConfigError::FileError { path, reason } => {
+            Self::FileError { path, reason } => {
                 write!(f, "Error reading config file '{path}': {reason}")
             },
         }
@@ -591,7 +588,7 @@ pub type Result<T> = std::result::Result<T, ModelError>;
 /// Conversion from `anyhow::Error` (for gradual migration)
 impl From<anyhow::Error> for ModelError {
     fn from(err: anyhow::Error) -> Self {
-        ModelError::InvalidRequest(err.to_string())
+        Self::InvalidRequest(err.to_string())
     }
 }
 
@@ -605,12 +602,12 @@ impl From<reqwest::Error> for ModelError {
             // 0 is a sentinel meaning "unknown" — the Display and
             // to_user_facing impls for ModelError::Timeout omit the
             // "after N seconds" suffix when duration_secs == 0.
-            ModelError::Timeout {
+            Self::Timeout {
                 operation: "HTTP request".to_string(),
                 duration_secs: 0,
             }
         } else if err.is_connect() {
-            ModelError::Backend(BackendError::ConnectionFailed {
+            Self::Backend(BackendError::ConnectionFailed {
                 backend: "unknown".to_string(),
                 url: err
                     .url()
@@ -620,13 +617,13 @@ impl From<reqwest::Error> for ModelError {
             })
         } else if err.is_status() {
             let status = err.status().map(|s| s.as_u16()).unwrap_or(500);
-            ModelError::Backend(BackendError::HttpError {
+            Self::Backend(BackendError::HttpError {
                 status,
                 message: err.to_string(),
                 debug: ResponseDebugContext::default(),
             })
         } else {
-            ModelError::Backend(BackendError::UnexpectedResponse {
+            Self::Backend(BackendError::UnexpectedResponse {
                 backend: "unknown".to_string(),
                 message: err.to_string(),
             })
@@ -637,7 +634,7 @@ impl From<reqwest::Error> for ModelError {
 /// Conversion from `serde_json::Error`
 impl From<serde_json::Error> for ModelError {
     fn from(err: serde_json::Error) -> Self {
-        ModelError::ParseError {
+        Self::ParseError {
             message: err.to_string(),
             raw: None,
         }

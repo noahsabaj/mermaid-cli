@@ -216,8 +216,8 @@ impl ThemeChoice {
     /// The lowercase config-file spelling (`/theme` echo + persistence).
     pub fn as_str(self) -> &'static str {
         match self {
-            ThemeChoice::Dark => "dark",
-            ThemeChoice::Light => "light",
+            Self::Dark => "dark",
+            Self::Light => "light",
         }
     }
 }
@@ -430,10 +430,10 @@ pub enum PlanPermLevel {
 impl PlanPermLevel {
     pub fn as_str(self) -> &'static str {
         match self {
-            PlanPermLevel::Allow => "allow",
-            PlanPermLevel::Auto => "auto",
-            PlanPermLevel::Ask => "ask",
-            PlanPermLevel::Deny => "deny",
+            Self::Allow => "allow",
+            Self::Auto => "auto",
+            Self::Ask => "ask",
+            Self::Deny => "deny",
         }
     }
 }
@@ -1156,11 +1156,11 @@ impl ConfigLayer {
     /// Human name used in unknown-key warnings ("in user config (…)").
     pub fn name(self) -> &'static str {
         match self {
-            ConfigLayer::Defaults => "defaults",
-            ConfigLayer::User => "user config",
-            ConfigLayer::Profile => "config profile",
-            ConfigLayer::Project => "project config",
-            ConfigLayer::Session => "session flags",
+            Self::Defaults => "defaults",
+            Self::User => "user config",
+            Self::Profile => "config profile",
+            Self::Project => "project config",
+            Self::Session => "session flags",
         }
     }
 }

@@ -30,8 +30,8 @@ impl MatchRule {
     /// Whether this rule matches the (lowercased) full id / bare name pair.
     fn matches(&self, full: &str, bare: &str) -> bool {
         match self {
-            MatchRule::Prefix(p) => bare.starts_with(p),
-            MatchRule::Substring(s) => full.contains(s),
+            Self::Prefix(p) => bare.starts_with(p),
+            Self::Substring(s) => full.contains(s),
         }
     }
 }

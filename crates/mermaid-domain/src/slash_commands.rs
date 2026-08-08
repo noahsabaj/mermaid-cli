@@ -36,11 +36,11 @@ pub enum SlashCommandGroup {
 impl SlashCommandGroup {
     pub fn title(self) -> &'static str {
         match self {
-            SlashCommandGroup::Everyday => "Everyday",
-            SlashCommandGroup::ModelContext => "Model and context",
-            SlashCommandGroup::SafetyRecovery => "Safety and recovery",
-            SlashCommandGroup::Integrations => "Integrations",
-            SlashCommandGroup::AdvancedRuntime => "Advanced runtime",
+            Self::Everyday => "Everyday",
+            Self::ModelContext => "Model and context",
+            Self::SafetyRecovery => "Safety and recovery",
+            Self::Integrations => "Integrations",
+            Self::AdvancedRuntime => "Advanced runtime",
         }
     }
 }

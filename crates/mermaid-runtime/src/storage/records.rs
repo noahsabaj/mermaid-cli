@@ -46,25 +46,25 @@ pub enum TaskStatus {
 impl TaskStatus {
     pub fn as_str(self) -> &'static str {
         match self {
-            TaskStatus::Queued => "queued",
-            TaskStatus::Running => "running",
-            TaskStatus::WaitingForApproval => "waiting_for_approval",
-            TaskStatus::Blocked => "blocked",
-            TaskStatus::Completed => "completed",
-            TaskStatus::Failed => "failed",
-            TaskStatus::Cancelled => "cancelled",
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::WaitingForApproval => "waiting_for_approval",
+            Self::Blocked => "blocked",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
         }
     }
 
     pub(crate) fn from_db(value: &str) -> std::result::Result<Self, UnknownRuntimeEnum> {
         match value {
-            "queued" => Ok(TaskStatus::Queued),
-            "running" => Ok(TaskStatus::Running),
-            "waiting_for_approval" => Ok(TaskStatus::WaitingForApproval),
-            "blocked" => Ok(TaskStatus::Blocked),
-            "completed" => Ok(TaskStatus::Completed),
-            "failed" => Ok(TaskStatus::Failed),
-            "cancelled" => Ok(TaskStatus::Cancelled),
+            "queued" => Ok(Self::Queued),
+            "running" => Ok(Self::Running),
+            "waiting_for_approval" => Ok(Self::WaitingForApproval),
+            "blocked" => Ok(Self::Blocked),
+            "completed" => Ok(Self::Completed),
+            "failed" => Ok(Self::Failed),
+            "cancelled" => Ok(Self::Cancelled),
             other => Err(UnknownRuntimeEnum::new("task status", other)),
         }
     }
@@ -87,17 +87,17 @@ pub enum TaskPriority {
 impl TaskPriority {
     pub fn as_str(self) -> &'static str {
         match self {
-            TaskPriority::Low => "low",
-            TaskPriority::Normal => "normal",
-            TaskPriority::High => "high",
+            Self::Low => "low",
+            Self::Normal => "normal",
+            Self::High => "high",
         }
     }
 
     pub(crate) fn from_db(value: &str) -> std::result::Result<Self, UnknownRuntimeEnum> {
         match value {
-            "low" => Ok(TaskPriority::Low),
-            "normal" => Ok(TaskPriority::Normal),
-            "high" => Ok(TaskPriority::High),
+            "low" => Ok(Self::Low),
+            "normal" => Ok(Self::Normal),
+            "high" => Ok(Self::High),
             other => Err(UnknownRuntimeEnum::new("task priority", other)),
         }
     }
@@ -120,17 +120,17 @@ pub enum ProcessStatus {
 impl ProcessStatus {
     pub fn as_str(self) -> &'static str {
         match self {
-            ProcessStatus::Running => "running",
-            ProcessStatus::Exited => "exited",
-            ProcessStatus::Unknown => "unknown",
+            Self::Running => "running",
+            Self::Exited => "exited",
+            Self::Unknown => "unknown",
         }
     }
 
     pub(crate) fn from_db(value: &str) -> std::result::Result<Self, UnknownRuntimeEnum> {
         match value {
-            "running" => Ok(ProcessStatus::Running),
-            "exited" => Ok(ProcessStatus::Exited),
-            "unknown" => Ok(ProcessStatus::Unknown),
+            "running" => Ok(Self::Running),
+            "exited" => Ok(Self::Exited),
+            "unknown" => Ok(Self::Unknown),
             other => Err(UnknownRuntimeEnum::new("process status", other)),
         }
     }

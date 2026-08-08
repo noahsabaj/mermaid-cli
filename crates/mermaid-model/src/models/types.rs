@@ -302,16 +302,16 @@ impl<'de> Deserialize<'de> for MessageRole {
     {
         let raw = String::deserialize(deserializer)?;
         Ok(match raw.as_str() {
-            "User" => MessageRole::User,
-            "Assistant" => MessageRole::Assistant,
-            "System" => MessageRole::System,
-            "Tool" => MessageRole::Tool,
+            "User" => Self::User,
+            "Assistant" => Self::Assistant,
+            "System" => Self::System,
+            "Tool" => Self::Tool,
             other => {
                 tracing::warn!(
                     role = %other,
                     "unknown message role in saved conversation; treating as System (version skew?)"
                 );
-                MessageRole::System
+                Self::System
             },
         })
     }
@@ -384,14 +384,12 @@ impl ChatMessageKind {
         match self {
             // Injected to steer the model — the whole point is that it reads
             // them. Hidden from the transcript, never from the model.
-            ChatMessageKind::RecoveryNudge | ChatMessageKind::ContextMarker => {
-                MessageAudience::ModelDirected
-            },
-            ChatMessageKind::Normal
-            | ChatMessageKind::ContextCheckpoint
-            | ChatMessageKind::RunSummary
-            | ChatMessageKind::Continuation
-            | ChatMessageKind::Unknown => MessageAudience::Conversation,
+            Self::RecoveryNudge | Self::ContextMarker => MessageAudience::ModelDirected,
+            Self::Normal
+            | Self::ContextCheckpoint
+            | Self::RunSummary
+            | Self::Continuation
+            | Self::Unknown => MessageAudience::Conversation,
         }
     }
 }

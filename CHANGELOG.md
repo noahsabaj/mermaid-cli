@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`clippy::use_self` paid off entirely: 508 occurrences down to zero, and
+  the key is gone from `clippy_pedantic.txt`.** The second-largest entry in the
+  file, and the first tracked lint to be eliminated rather than reduced —
+  81 keys become 80, and tracked debt falls from 4,717 occurrences to 4,209.
+
+  Inside `impl Cmd`, `Cmd::CallModel` becomes `Self::CallModel`. The path
+  already resolved to the impl's own type, so the rewrite cannot change what it
+  refers to; the diff is 497 lines replaced by 497 lines, pure substitution
+  with no structural change. The weight sits where the big enums are: `cmd.rs`
+  124, `msg.rs` 80, `runtime_client/protocol.rs` 35.
+
 - **`clippy::uninlined_format_args` paid off: 463 occurrences down to 6.** The
   third-largest entry in `clippy_pedantic.txt`, and the cheapest of the three
   above it — `format!("{}", x)` becomes `format!("{x}")`, machine-applicable,

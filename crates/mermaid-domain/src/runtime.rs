@@ -21,9 +21,9 @@ pub enum RuntimeSignal {
 impl RuntimeSignal {
     pub fn as_str(self) -> &'static str {
         match self {
-            RuntimeSignal::Interrupt => "interrupt",
-            RuntimeSignal::Terminate => "terminate",
-            RuntimeSignal::Hangup => "hangup",
+            Self::Interrupt => "interrupt",
+            Self::Terminate => "terminate",
+            Self::Hangup => "hangup",
         }
     }
 }

@@ -42,18 +42,18 @@ impl NumCtxSource {
     /// Human label for `/context` and hints.
     pub fn label(self) -> &'static str {
         match self {
-            NumCtxSource::Override => "override",
-            NumCtxSource::GlobalConfig => "config",
-            NumCtxSource::Auto => "auto",
-            NumCtxSource::AutoFallback => "auto (fallback)",
-            NumCtxSource::Cloud => "cloud (full window)",
+            Self::Override => "override",
+            Self::GlobalConfig => "config",
+            Self::Auto => "auto",
+            Self::AutoFallback => "auto (fallback)",
+            Self::Cloud => "cloud (full window)",
         }
     }
 
     /// Whether the window was auto-fitted (vs an explicit user/config value) —
     /// drives whether the quick-fix offers to raise it.
     pub fn is_auto(self) -> bool {
-        matches!(self, NumCtxSource::Auto | NumCtxSource::AutoFallback)
+        matches!(self, Self::Auto | Self::AutoFallback)
     }
 }
 

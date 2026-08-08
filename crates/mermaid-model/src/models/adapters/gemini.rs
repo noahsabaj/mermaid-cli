@@ -1044,7 +1044,7 @@ struct GeminiModelInfo {
 
 impl From<GeminiModelInfo> for ModelLimits {
     fn from(info: GeminiModelInfo) -> Self {
-        ModelLimits {
+        Self {
             max_context_tokens: info.input_token_limit,
             max_output_tokens: info.output_token_limit,
         }

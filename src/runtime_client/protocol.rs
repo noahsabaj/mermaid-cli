@@ -143,43 +143,43 @@ impl DaemonRequest {
     /// `SubscribeTask`, so it is gated like `session_messages`.
     pub fn requires_auth(&self) -> bool {
         match self {
-            DaemonRequest::Health => false,
-            DaemonRequest::CreateTask { .. }
-            | DaemonRequest::Run { .. }
-            | DaemonRequest::CancelTask { .. }
-            | DaemonRequest::UpdateTask { .. }
-            | DaemonRequest::RestoreCheckpoint { .. }
-            | DaemonRequest::Approve { .. }
-            | DaemonRequest::Deny { .. }
-            | DaemonRequest::StopProcess { .. }
-            | DaemonRequest::RestartProcess { .. }
-            | DaemonRequest::OpenProcess { .. }
-            | DaemonRequest::PluginPreview { .. }
-            | DaemonRequest::PluginInstall { .. }
-            | DaemonRequest::SetPluginEnabled { .. }
-            | DaemonRequest::SetSafetyMode { .. }
-            | DaemonRequest::RuntimeHygieneArchive
-            | DaemonRequest::Pair { .. }
-            | DaemonRequest::Logs { .. }
-            | DaemonRequest::SessionMessages { .. }
-            | DaemonRequest::Snapshot
-            | DaemonRequest::RuntimeDashboard
-            | DaemonRequest::RuntimeDiagnostics
-            | DaemonRequest::RuntimeHygienePreview
-            | DaemonRequest::RuntimeTaskDetail { .. }
-            | DaemonRequest::RuntimeApprovalDetail { .. }
-            | DaemonRequest::RuntimeCheckpointDetail { .. }
-            | DaemonRequest::RuntimeTasks { .. }
-            | DaemonRequest::RuntimeProcesses { .. }
-            | DaemonRequest::RuntimeApprovals
-            | DaemonRequest::RuntimeToolRuns { .. }
-            | DaemonRequest::RuntimeCheckpoints { .. }
-            | DaemonRequest::RuntimePlugins
-            | DaemonRequest::ModelInfo { .. }
-            | DaemonRequest::SubscribeTask { .. } => true,
+            Self::Health => false,
+            Self::CreateTask { .. }
+            | Self::Run { .. }
+            | Self::CancelTask { .. }
+            | Self::UpdateTask { .. }
+            | Self::RestoreCheckpoint { .. }
+            | Self::Approve { .. }
+            | Self::Deny { .. }
+            | Self::StopProcess { .. }
+            | Self::RestartProcess { .. }
+            | Self::OpenProcess { .. }
+            | Self::PluginPreview { .. }
+            | Self::PluginInstall { .. }
+            | Self::SetPluginEnabled { .. }
+            | Self::SetSafetyMode { .. }
+            | Self::RuntimeHygieneArchive
+            | Self::Pair { .. }
+            | Self::Logs { .. }
+            | Self::SessionMessages { .. }
+            | Self::Snapshot
+            | Self::RuntimeDashboard
+            | Self::RuntimeDiagnostics
+            | Self::RuntimeHygienePreview
+            | Self::RuntimeTaskDetail { .. }
+            | Self::RuntimeApprovalDetail { .. }
+            | Self::RuntimeCheckpointDetail { .. }
+            | Self::RuntimeTasks { .. }
+            | Self::RuntimeProcesses { .. }
+            | Self::RuntimeApprovals
+            | Self::RuntimeToolRuns { .. }
+            | Self::RuntimeCheckpoints { .. }
+            | Self::RuntimePlugins
+            | Self::ModelInfo { .. }
+            | Self::SubscribeTask { .. } => true,
             // Liveness/discovery stay unauthenticated on the local socket:
             // no project or credential content, and used before pairing.
-            DaemonRequest::Ports => false,
+            Self::Ports => false,
         }
     }
 

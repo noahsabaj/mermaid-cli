@@ -36,9 +36,9 @@ pub enum ApprovalDecision {
 impl From<ApprovalChoice> for ApprovalDecision {
     fn from(choice: ApprovalChoice) -> Self {
         match choice {
-            ApprovalChoice::Approve => ApprovalDecision::Approve,
-            ApprovalChoice::ApproveAlways => ApprovalDecision::ApproveAlways,
-            ApprovalChoice::Deny => ApprovalDecision::Deny,
+            ApprovalChoice::Approve => Self::Approve,
+            ApprovalChoice::ApproveAlways => Self::ApproveAlways,
+            ApprovalChoice::Deny => Self::Deny,
         }
     }
 }

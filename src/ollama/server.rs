@@ -85,13 +85,13 @@ impl AutostartError {
     /// the error should pass through untouched (`NotLocal` / `Disabled`).
     pub fn hint(&self) -> Option<String> {
         match self {
-            AutostartError::NotLocal | AutostartError::Disabled => None,
-            AutostartError::NotInstalled => Some(
+            Self::NotLocal | Self::Disabled => None,
+            Self::NotInstalled => Some(
                 "Ollama doesn't appear to be installed (not on PATH or in the default \
                  install locations) — install it from https://ollama.com/download"
                     .to_string(),
             ),
-            AutostartError::Unhealthy(detail) => Some(format!("auto-start failed: {detail}")),
+            Self::Unhealthy(detail) => Some(format!("auto-start failed: {detail}")),
         }
     }
 }

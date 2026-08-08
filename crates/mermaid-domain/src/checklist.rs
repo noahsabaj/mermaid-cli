@@ -319,7 +319,7 @@ impl ChecklistStore {
 
     /// Tasks that flipped to `Completed` relative to `before` — drives the
     /// `task_completed` hook.
-    pub fn newly_completed<'a>(&'a self, before: &ChecklistStore) -> Vec<&'a ChecklistItem> {
+    pub fn newly_completed<'a>(&'a self, before: &Self) -> Vec<&'a ChecklistItem> {
         self.visible()
             .filter(|t| {
                 t.status == ChecklistStatus::Completed

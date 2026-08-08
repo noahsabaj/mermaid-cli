@@ -88,8 +88,8 @@ impl ReasoningStrategy {
     /// `None` for a provider that signals via field omission).
     pub fn render(&self, level: ReasoningLevel) -> Option<Value> {
         match self {
-            ReasoningStrategy::None => None,
-            ReasoningStrategy::Effort => match level {
+            Self::None => None,
+            Self::Effort => match level {
                 // `none` is the explicit off-tier on GPT-5.1+. Providers
                 // that don't understand it either silently ignore or 400 —
                 // which is a clearer failure than omitting the field when
@@ -113,7 +113,7 @@ impl ReasoningStrategy {
                 // their own strategy, not this one.
                 ReasoningLevel::Max => Some(json!({"reasoning_effort": "high"})),
             },
-            ReasoningStrategy::OpenRouterShape => match level {
+            Self::OpenRouterShape => match level {
                 ReasoningLevel::None => Some(json!({"reasoning": {"exclude": true}})),
                 ReasoningLevel::Minimal => Some(json!({"reasoning": {"effort": "low"}})),
                 ReasoningLevel::Low => Some(json!({"reasoning": {"effort": "low"}})),
@@ -155,8 +155,8 @@ impl ReasoningExtraction {
     /// in the adapter; this method returns `None` for it.
     pub fn parse_delta(&self, delta: &Value) -> Option<ReasoningChunk> {
         match self {
-            ReasoningExtraction::None | ReasoningExtraction::InlineThinkTags => None,
-            ReasoningExtraction::DeltaContentField(field) => {
+            Self::None | Self::InlineThinkTags => None,
+            Self::DeltaContentField(field) => {
                 let text = delta.get(field).and_then(|v| v.as_str())?;
                 if text.is_empty() {
                     None
@@ -188,9 +188,9 @@ pub enum CompatStyle {
 impl CompatStyle {
     pub fn reasoning_strategy(self) -> ReasoningStrategy {
         match self {
-            CompatStyle::Openai => ReasoningStrategy::None,
-            CompatStyle::OpenaiEffort => ReasoningStrategy::Effort,
-            CompatStyle::Openrouter => ReasoningStrategy::OpenRouterShape,
+            Self::Openai => ReasoningStrategy::None,
+            Self::OpenaiEffort => ReasoningStrategy::Effort,
+            Self::Openrouter => ReasoningStrategy::OpenRouterShape,
         }
     }
 }

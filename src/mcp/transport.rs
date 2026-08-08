@@ -488,13 +488,13 @@ pub(super) enum Transport {
 
 impl From<StdioTransport> for Transport {
     fn from(t: StdioTransport) -> Self {
-        Transport::Stdio(t)
+        Self::Stdio(t)
     }
 }
 
 impl From<super::transport_http::HttpTransport> for Transport {
     fn from(t: super::transport_http::HttpTransport) -> Self {
-        Transport::Http(Box::new(t))
+        Self::Http(Box::new(t))
     }
 }
 
@@ -510,8 +510,8 @@ impl Transport {
     /// control-call timeout.
     pub async fn send_request(&self, method: &str, params: Value) -> Result<Value> {
         match self {
-            Transport::Stdio(t) => t.send_request(method, params).await,
-            Transport::Http(t) => t.send_request(method, params).await,
+            Self::Stdio(t) => t.send_request(method, params).await,
+            Self::Http(t) => t.send_request(method, params).await,
         }
     }
 
@@ -523,11 +523,11 @@ impl Transport {
         response_timeout_secs: u64,
     ) -> Result<Value> {
         match self {
-            Transport::Stdio(t) => {
+            Self::Stdio(t) => {
                 t.send_request_with_timeout(method, params, response_timeout_secs)
                     .await
             },
-            Transport::Http(t) => {
+            Self::Http(t) => {
                 t.send_request_with_timeout(method, params, response_timeout_secs)
                     .await
             },
@@ -537,8 +537,8 @@ impl Transport {
     /// Send a JSON-RPC notification (no response expected).
     pub async fn send_notification(&self, method: &str, params: Value) -> Result<()> {
         match self {
-            Transport::Stdio(t) => t.send_notification(method, params).await,
-            Transport::Http(t) => t.send_notification(method, params).await,
+            Self::Stdio(t) => t.send_notification(method, params).await,
+            Self::Http(t) => t.send_notification(method, params).await,
         }
     }
 
@@ -547,16 +547,16 @@ impl Transport {
     /// stdio has no per-message headers, so this is a no-op there.
     pub fn set_protocol_version(&self, version: &str) {
         match self {
-            Transport::Stdio(_) => {},
-            Transport::Http(t) => t.set_protocol_version(version),
+            Self::Stdio(_) => {},
+            Self::Http(t) => t.set_protocol_version(version),
         }
     }
 
     /// Gracefully shut the transport down (kill the child / end the session).
     pub async fn shutdown(&self) {
         match self {
-            Transport::Stdio(t) => t.shutdown().await,
-            Transport::Http(t) => t.shutdown().await,
+            Self::Stdio(t) => t.shutdown().await,
+            Self::Http(t) => t.shutdown().await,
         }
     }
 }

@@ -776,11 +776,11 @@ pub enum TurnState {
 impl TurnState {
     pub fn id(&self) -> Option<TurnId> {
         match self {
-            TurnState::Idle => None,
-            TurnState::Generating { id, .. }
-            | TurnState::ExecutingTools { id, .. }
-            | TurnState::Compacting { id, .. }
-            | TurnState::Cancelling { id, .. } => Some(*id),
+            Self::Idle => None,
+            Self::Generating { id, .. }
+            | Self::ExecutingTools { id, .. }
+            | Self::Compacting { id, .. }
+            | Self::Cancelling { id, .. } => Some(*id),
         }
     }
 
@@ -1413,17 +1413,17 @@ impl From<mermaid_runtime::ToolCategory> for ApprovalKind {
     fn from(category: mermaid_runtime::ToolCategory) -> Self {
         use mermaid_runtime::ToolCategory as C;
         match category {
-            C::Edit => ApprovalKind::FileMutation,
-            C::Shell | C::Git | C::Process => ApprovalKind::Shell,
-            C::Web | C::Network | C::ExternalDirectory => ApprovalKind::Web,
-            C::Mcp => ApprovalKind::Mcp,
-            C::Subagent => ApprovalKind::Subagent,
-            C::ComputerUse => ApprovalKind::ComputerUse,
+            C::Edit => Self::FileMutation,
+            C::Shell | C::Git | C::Process => Self::Shell,
+            C::Web | C::Network | C::ExternalDirectory => Self::Web,
+            C::Mcp => Self::Mcp,
+            C::Subagent => Self::Subagent,
+            C::ComputerUse => Self::ComputerUse,
             // `Read` and `Memory` resolve to Allow/Deny in `decide`, so neither
             // reaches an approval prompt; the arm exists to keep the match
             // total. The label is a poor fit and would read wrong if one ever
             // did reach a prompt -- worth revisiting, but not in a move.
-            C::Read | C::Memory => ApprovalKind::Shell,
+            C::Read | C::Memory => Self::Shell,
         }
     }
 }

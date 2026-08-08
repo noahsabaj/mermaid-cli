@@ -446,65 +446,65 @@ impl Cmd {
     /// refactors (tests assert against it).
     pub fn tag(&self) -> &'static str {
         match self {
-            Cmd::CallModel { .. } => "call_model",
-            Cmd::CompactConversation { .. } => "compact_conversation",
-            Cmd::ExecuteTool { .. } => "execute_tool",
-            Cmd::CancelScope(_) => "cancel_scope",
-            Cmd::BackgroundScope(_) => "background_scope",
-            Cmd::ResolveApproval { .. } => "resolve_approval",
-            Cmd::ResolveQuestion { .. } => "resolve_question",
-            Cmd::SyncTaskStore(_) => "sync_task_store",
-            Cmd::PersistPlanConfig(_) => "persist_plan_config",
-            Cmd::UserTaskEdit(_) => "user_task_edit",
-            Cmd::NotifyTaskCompleted { .. } => "notify_task_completed",
-            Cmd::EnsureScratchpad { .. } => "ensure_scratchpad",
-            Cmd::ListScratchpad { .. } => "list_scratchpad",
-            Cmd::SaveConversation(_) => "save_conversation",
-            Cmd::SaveCompactionArchive { .. } => "save_compaction_archive",
-            Cmd::SaveProcess(_) => "save_process",
-            Cmd::PersistLastModel(_) => "persist_last_model",
-            Cmd::PersistReasoningFor { .. } => "persist_reasoning_for",
-            Cmd::PersistOllamaNumCtxFor { .. } => "persist_ollama_num_ctx_for",
-            Cmd::PersistOllamaOffload(_) => "persist_ollama_offload",
-            Cmd::PersistUiTheme(_) => "persist_ui_theme",
-            Cmd::ListMemory => "list_memory",
-            Cmd::RememberMemory { .. } => "remember_memory",
-            Cmd::ForgetMemory { .. } => "forget_memory",
-            Cmd::ConsolidateMemory { .. } => "consolidate_memory",
-            Cmd::LoadConversation(_) => "load_conversation",
-            Cmd::ListConversations => "list_conversations",
-            Cmd::ListAvailableModels => "list_available_models",
-            Cmd::ListProjectFiles => "list_project_files",
-            Cmd::ListRuntimeTasks { .. } => "list_runtime_tasks",
-            Cmd::LoadRuntimeTask { .. } => "load_runtime_task",
-            Cmd::ListRuntimeProcesses { .. } => "list_runtime_processes",
-            Cmd::ShowRuntimeProcessLogs { .. } => "show_runtime_process_logs",
-            Cmd::StopRuntimeProcess { .. } => "stop_runtime_process",
-            Cmd::KillBackgroundAgent { .. } => "kill_background_agent",
-            Cmd::RestartRuntimeProcess { .. } => "restart_runtime_process",
-            Cmd::OpenRuntimeTarget { .. } => "open_runtime_target",
-            Cmd::ShowRuntimePorts => "show_runtime_ports",
-            Cmd::ListRuntimeApprovals => "list_runtime_approvals",
-            Cmd::DecideRuntimeApproval { .. } => "decide_runtime_approval",
-            Cmd::ListRuntimeCheckpoints { .. } => "list_runtime_checkpoints",
-            Cmd::ListForkCheckpoints { .. } => "list_fork_checkpoints",
-            Cmd::ListRuntimePlugins => "list_runtime_plugins",
-            Cmd::UpdateRuntimeTaskStatus { .. } => "update_runtime_task_status",
-            Cmd::CreateRuntimeCheckpoint { .. } => "create_runtime_checkpoint",
-            Cmd::RestoreRuntimeCheckpoint { .. } => "restore_runtime_checkpoint",
-            Cmd::ShowRuntimeModelInfo { .. } => "show_runtime_model_info",
-            Cmd::InitMcpServers(_) => "init_mcp_servers",
-            Cmd::StopMcpServer { .. } => "stop_mcp_server",
-            Cmd::PullOllamaModel { .. } => "pull_ollama_model",
-            Cmd::ProbeVision { .. } => "probe_vision",
-            Cmd::OpenInSystem(_) => "open_in_system",
-            Cmd::WriteImageToTemp { .. } => "write_image_to_temp",
-            Cmd::ReadClipboard => "read_clipboard",
-            Cmd::CopyToClipboard(_) => "copy_to_clipboard",
-            Cmd::ComposeInEditor { .. } => "compose_in_editor",
-            Cmd::Exit => "exit",
-            Cmd::SetTerminalTitle(_) => "set_terminal_title",
-            Cmd::AlertUser => "alert_user",
+            Self::CallModel { .. } => "call_model",
+            Self::CompactConversation { .. } => "compact_conversation",
+            Self::ExecuteTool { .. } => "execute_tool",
+            Self::CancelScope(_) => "cancel_scope",
+            Self::BackgroundScope(_) => "background_scope",
+            Self::ResolveApproval { .. } => "resolve_approval",
+            Self::ResolveQuestion { .. } => "resolve_question",
+            Self::SyncTaskStore(_) => "sync_task_store",
+            Self::PersistPlanConfig(_) => "persist_plan_config",
+            Self::UserTaskEdit(_) => "user_task_edit",
+            Self::NotifyTaskCompleted { .. } => "notify_task_completed",
+            Self::EnsureScratchpad { .. } => "ensure_scratchpad",
+            Self::ListScratchpad { .. } => "list_scratchpad",
+            Self::SaveConversation(_) => "save_conversation",
+            Self::SaveCompactionArchive { .. } => "save_compaction_archive",
+            Self::SaveProcess(_) => "save_process",
+            Self::PersistLastModel(_) => "persist_last_model",
+            Self::PersistReasoningFor { .. } => "persist_reasoning_for",
+            Self::PersistOllamaNumCtxFor { .. } => "persist_ollama_num_ctx_for",
+            Self::PersistOllamaOffload(_) => "persist_ollama_offload",
+            Self::PersistUiTheme(_) => "persist_ui_theme",
+            Self::ListMemory => "list_memory",
+            Self::RememberMemory { .. } => "remember_memory",
+            Self::ForgetMemory { .. } => "forget_memory",
+            Self::ConsolidateMemory { .. } => "consolidate_memory",
+            Self::LoadConversation(_) => "load_conversation",
+            Self::ListConversations => "list_conversations",
+            Self::ListAvailableModels => "list_available_models",
+            Self::ListProjectFiles => "list_project_files",
+            Self::ListRuntimeTasks { .. } => "list_runtime_tasks",
+            Self::LoadRuntimeTask { .. } => "load_runtime_task",
+            Self::ListRuntimeProcesses { .. } => "list_runtime_processes",
+            Self::ShowRuntimeProcessLogs { .. } => "show_runtime_process_logs",
+            Self::StopRuntimeProcess { .. } => "stop_runtime_process",
+            Self::KillBackgroundAgent { .. } => "kill_background_agent",
+            Self::RestartRuntimeProcess { .. } => "restart_runtime_process",
+            Self::OpenRuntimeTarget { .. } => "open_runtime_target",
+            Self::ShowRuntimePorts => "show_runtime_ports",
+            Self::ListRuntimeApprovals => "list_runtime_approvals",
+            Self::DecideRuntimeApproval { .. } => "decide_runtime_approval",
+            Self::ListRuntimeCheckpoints { .. } => "list_runtime_checkpoints",
+            Self::ListForkCheckpoints { .. } => "list_fork_checkpoints",
+            Self::ListRuntimePlugins => "list_runtime_plugins",
+            Self::UpdateRuntimeTaskStatus { .. } => "update_runtime_task_status",
+            Self::CreateRuntimeCheckpoint { .. } => "create_runtime_checkpoint",
+            Self::RestoreRuntimeCheckpoint { .. } => "restore_runtime_checkpoint",
+            Self::ShowRuntimeModelInfo { .. } => "show_runtime_model_info",
+            Self::InitMcpServers(_) => "init_mcp_servers",
+            Self::StopMcpServer { .. } => "stop_mcp_server",
+            Self::PullOllamaModel { .. } => "pull_ollama_model",
+            Self::ProbeVision { .. } => "probe_vision",
+            Self::OpenInSystem(_) => "open_in_system",
+            Self::WriteImageToTemp { .. } => "write_image_to_temp",
+            Self::ReadClipboard => "read_clipboard",
+            Self::CopyToClipboard(_) => "copy_to_clipboard",
+            Self::ComposeInEditor { .. } => "compose_in_editor",
+            Self::Exit => "exit",
+            Self::SetTerminalTitle(_) => "set_terminal_title",
+            Self::AlertUser => "alert_user",
         }
     }
 
@@ -514,7 +514,7 @@ impl Cmd {
     pub fn is_turn_scoped(&self) -> bool {
         matches!(
             self,
-            Cmd::CallModel { .. } | Cmd::CompactConversation { .. } | Cmd::ExecuteTool { .. }
+            Self::CallModel { .. } | Self::CompactConversation { .. } | Self::ExecuteTool { .. }
         )
     }
 
@@ -532,9 +532,9 @@ impl Cmd {
     /// is exactly why it is excluded here.
     pub fn scope_turn(&self) -> Option<TurnId> {
         match self {
-            Cmd::CallModel { turn, .. }
-            | Cmd::CompactConversation { turn, .. }
-            | Cmd::ExecuteTool { turn, .. } => Some(*turn),
+            Self::CallModel { turn, .. }
+            | Self::CompactConversation { turn, .. }
+            | Self::ExecuteTool { turn, .. } => Some(*turn),
             _ => None,
         }
     }
@@ -548,20 +548,20 @@ impl Cmd {
     )]
     pub fn summary(&self) -> String {
         match self {
-            Cmd::CallModel { turn, request } => format!(
+            Self::CallModel { turn, request } => format!(
                 "call_model(turn={}, model={}, msgs={})",
                 turn,
                 request.model_id,
                 request.messages.len()
             ),
-            Cmd::CompactConversation { turn, request } => format!(
+            Self::CompactConversation { turn, request } => format!(
                 "compact_conversation(turn={}, model={}, trigger={}, msgs={})",
                 turn,
                 request.chat.model_id,
                 request.trigger.as_str(),
                 request.chat.messages.len()
             ),
-            Cmd::ExecuteTool {
+            Self::ExecuteTool {
                 turn,
                 call_id,
                 source,
@@ -570,12 +570,12 @@ impl Cmd {
                 "execute_tool(turn={}, call={}, fn={})",
                 turn, call_id, source.function.name
             ),
-            Cmd::CancelScope(turn) => format!("cancel_scope(turn={turn})"),
-            Cmd::BackgroundScope(turn) => format!("background_scope(turn={turn})"),
-            Cmd::ResolveApproval { call_id, decision } => {
+            Self::CancelScope(turn) => format!("cancel_scope(turn={turn})"),
+            Self::BackgroundScope(turn) => format!("background_scope(turn={turn})"),
+            Self::ResolveApproval { call_id, decision } => {
                 format!("resolve_approval(call={call_id}, {decision:?})")
             },
-            Cmd::ResolveQuestion {
+            Self::ResolveQuestion {
                 call_id,
                 resolution,
             } => {
@@ -588,12 +588,12 @@ impl Cmd {
                 };
                 format!("resolve_question(call={call_id}, {kind})")
             },
-            Cmd::PersistPlanConfig(_) => "persist_plan_config".to_string(),
-            Cmd::SyncTaskStore(store) => {
+            Self::PersistPlanConfig(_) => "persist_plan_config".to_string(),
+            Self::SyncTaskStore(store) => {
                 format!("sync_task_store(tasks={})", store.tasks.len())
             },
-            Cmd::UserTaskEdit(edit) => format!("user_task_edit({edit:?})"),
-            Cmd::NotifyTaskCompleted {
+            Self::UserTaskEdit(edit) => format!("user_task_edit({edit:?})"),
+            Self::NotifyTaskCompleted {
                 task,
                 completed,
                 total,
@@ -601,81 +601,83 @@ impl Cmd {
                 "notify_task_completed(id={}, {}/{})",
                 task.id, completed, total
             ),
-            Cmd::EnsureScratchpad { session_id } => {
+            Self::EnsureScratchpad { session_id } => {
                 format!("ensure_scratchpad(session={session_id})")
             },
-            Cmd::ListScratchpad { path } => {
+            Self::ListScratchpad { path } => {
                 format!("list_scratchpad({})", path.display())
             },
-            Cmd::SaveConversation(c) => format!("save_conversation(id={})", c.id),
-            Cmd::SaveCompactionArchive {
+            Self::SaveConversation(c) => format!("save_conversation(id={})", c.id),
+            Self::SaveCompactionArchive {
                 archive, record, ..
             } => format!(
                 "save_compaction_archive(conversation={}, id={})",
                 archive.conversation_id, record.id
             ),
-            Cmd::SaveProcess(p) => format!("save_process(id={}, pid={})", p.id, p.pid),
-            Cmd::PersistLastModel(m) => format!("persist_last_model({m})"),
-            Cmd::PersistReasoningFor { model_id, level } => {
+            Self::SaveProcess(p) => format!("save_process(id={}, pid={})", p.id, p.pid),
+            Self::PersistLastModel(m) => format!("persist_last_model({m})"),
+            Self::PersistReasoningFor { model_id, level } => {
                 format!("persist_reasoning_for({model_id}, {level:?})")
             },
-            Cmd::PersistOllamaNumCtxFor { model_id, num_ctx } => {
+            Self::PersistOllamaNumCtxFor { model_id, num_ctx } => {
                 format!("persist_ollama_num_ctx_for({model_id}, {num_ctx:?})")
             },
-            Cmd::PersistOllamaOffload(enabled) => {
+            Self::PersistOllamaOffload(enabled) => {
                 format!("persist_ollama_offload({enabled})")
             },
-            Cmd::PersistUiTheme(theme) => format!("persist_ui_theme({})", theme.as_str()),
-            Cmd::ListMemory => "list_memory".to_string(),
-            Cmd::RememberMemory { .. } => "remember_memory".to_string(),
-            Cmd::ForgetMemory { .. } => "forget_memory".to_string(),
-            Cmd::ConsolidateMemory { .. } => "consolidate_memory".to_string(),
-            Cmd::LoadConversation(id) => format!("load_conversation({id})"),
-            Cmd::ListConversations => "list_conversations".to_string(),
-            Cmd::ListAvailableModels => "list_available_models".to_string(),
-            Cmd::ListProjectFiles => "list_project_files".to_string(),
-            Cmd::ListRuntimeTasks { limit } => format!("list_runtime_tasks(limit={limit})"),
-            Cmd::LoadRuntimeTask { id } => format!("load_runtime_task({id})"),
-            Cmd::ListRuntimeProcesses { limit } => {
+            Self::PersistUiTheme(theme) => format!("persist_ui_theme({})", theme.as_str()),
+            Self::ListMemory => "list_memory".to_string(),
+            Self::RememberMemory { .. } => "remember_memory".to_string(),
+            Self::ForgetMemory { .. } => "forget_memory".to_string(),
+            Self::ConsolidateMemory { .. } => "consolidate_memory".to_string(),
+            Self::LoadConversation(id) => format!("load_conversation({id})"),
+            Self::ListConversations => "list_conversations".to_string(),
+            Self::ListAvailableModels => "list_available_models".to_string(),
+            Self::ListProjectFiles => "list_project_files".to_string(),
+            Self::ListRuntimeTasks { limit } => format!("list_runtime_tasks(limit={limit})"),
+            Self::LoadRuntimeTask { id } => format!("load_runtime_task({id})"),
+            Self::ListRuntimeProcesses { limit } => {
                 format!("list_runtime_processes(limit={limit})")
             },
-            Cmd::ShowRuntimeProcessLogs { id } => format!("show_runtime_process_logs({id})"),
-            Cmd::StopRuntimeProcess { id } => format!("stop_runtime_process({id})"),
-            Cmd::KillBackgroundAgent { agent_id } => format!(
+            Self::ShowRuntimeProcessLogs { id } => format!("show_runtime_process_logs({id})"),
+            Self::StopRuntimeProcess { id } => format!("stop_runtime_process({id})"),
+            Self::KillBackgroundAgent { agent_id } => format!(
                 "kill_background_agent({})",
                 agent_id.as_deref().unwrap_or("all")
             ),
-            Cmd::RestartRuntimeProcess { id } => format!("restart_runtime_process({id})"),
-            Cmd::OpenRuntimeTarget { target } => format!("open_runtime_target({target})"),
-            Cmd::ShowRuntimePorts => "show_runtime_ports".to_string(),
-            Cmd::ListRuntimeApprovals => "list_runtime_approvals".to_string(),
-            Cmd::DecideRuntimeApproval { id, decision } => {
+            Self::RestartRuntimeProcess { id } => format!("restart_runtime_process({id})"),
+            Self::OpenRuntimeTarget { target } => format!("open_runtime_target({target})"),
+            Self::ShowRuntimePorts => "show_runtime_ports".to_string(),
+            Self::ListRuntimeApprovals => "list_runtime_approvals".to_string(),
+            Self::DecideRuntimeApproval { id, decision } => {
                 format!("decide_runtime_approval({id}, {decision})")
             },
-            Cmd::ListForkCheckpoints {
+            Self::ListForkCheckpoints {
                 session_id,
                 message_index,
             } => {
                 format!("list_fork_checkpoints({session_id} > {message_index})")
             },
-            Cmd::ListRuntimeCheckpoints { limit } => {
+            Self::ListRuntimeCheckpoints { limit } => {
                 format!("list_runtime_checkpoints(limit={limit})")
             },
-            Cmd::ListRuntimePlugins => "list_runtime_plugins".to_string(),
-            Cmd::UpdateRuntimeTaskStatus { id, status, .. } => {
+            Self::ListRuntimePlugins => "list_runtime_plugins".to_string(),
+            Self::UpdateRuntimeTaskStatus { id, status, .. } => {
                 format!("update_runtime_task_status({id}, {status})")
             },
-            Cmd::CreateRuntimeCheckpoint { paths } => {
+            Self::CreateRuntimeCheckpoint { paths } => {
                 format!("create_runtime_checkpoint(n={})", paths.len())
             },
-            Cmd::RestoreRuntimeCheckpoint { id } => format!("restore_runtime_checkpoint({id})"),
-            Cmd::ShowRuntimeModelInfo { model } => format!("show_runtime_model_info({model})"),
-            Cmd::InitMcpServers(m) => format!("init_mcp_servers(n={})", m.len()),
-            Cmd::StopMcpServer { name } => format!("stop_mcp_server({name})"),
-            Cmd::PullOllamaModel { model } => format!("pull_ollama_model({model})"),
-            Cmd::ProbeVision { model_id, warn } => format!("probe_vision({model_id}, warn={warn})"),
-            Cmd::OpenInSystem(p) => format!("open_in_system({})", p.display()),
-            Cmd::WriteImageToTemp {
+            Self::RestoreRuntimeCheckpoint { id } => format!("restore_runtime_checkpoint({id})"),
+            Self::ShowRuntimeModelInfo { model } => format!("show_runtime_model_info({model})"),
+            Self::InitMcpServers(m) => format!("init_mcp_servers(n={})", m.len()),
+            Self::StopMcpServer { name } => format!("stop_mcp_server({name})"),
+            Self::PullOllamaModel { model } => format!("pull_ollama_model({model})"),
+            Self::ProbeVision { model_id, warn } => {
+                format!("probe_vision({model_id}, warn={warn})")
+            },
+            Self::OpenInSystem(p) => format!("open_in_system({})", p.display()),
+            Self::WriteImageToTemp {
                 path,
                 format,
                 bytes,
@@ -685,14 +687,14 @@ impl Cmd {
                 format,
                 bytes.len()
             ),
-            Cmd::ReadClipboard => "read_clipboard".to_string(),
-            Cmd::CopyToClipboard(t) => format!("copy_to_clipboard(n={})", t.chars().count()),
-            Cmd::ComposeInEditor { text } => {
+            Self::ReadClipboard => "read_clipboard".to_string(),
+            Self::CopyToClipboard(t) => format!("copy_to_clipboard(n={})", t.chars().count()),
+            Self::ComposeInEditor { text } => {
                 format!("compose_in_editor(n={})", text.chars().count())
             },
-            Cmd::Exit => "exit".to_string(),
-            Cmd::SetTerminalTitle(t) => format!("set_terminal_title({t})"),
-            Cmd::AlertUser => "alert_user".to_string(),
+            Self::Exit => "exit".to_string(),
+            Self::SetTerminalTitle(t) => format!("set_terminal_title({t})"),
+            Self::AlertUser => "alert_user".to_string(),
         }
     }
 }

@@ -129,8 +129,8 @@ pub enum ColorValue {
 impl ColorValue {
     pub fn to_color(&self) -> Color {
         match self {
-            ColorValue::Rgb { r, g, b } => Color::Rgb(*r, *g, *b),
-            ColorValue::Named(name) => match name.as_str() {
+            Self::Rgb { r, g, b } => Color::Rgb(*r, *g, *b),
+            Self::Named(name) => match name.as_str() {
                 // The terminal's own default fg/bg — what `Theme::plain()`
                 // (NO_COLOR) is built from.
                 "default" => Color::Reset,

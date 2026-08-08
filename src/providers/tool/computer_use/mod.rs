@@ -61,7 +61,7 @@ pub enum Backend {
 impl Backend {
     /// Whether the driver has any tools it can run on this backend.
     pub fn is_usable(self) -> bool {
-        !matches!(self, Backend::Unsupported)
+        !matches!(self, Self::Unsupported)
     }
 
     /// Whether this backend can inject pointer + keyboard events (click,
@@ -70,14 +70,14 @@ impl Backend {
     /// input verbs are unimplemented and `bail!` in the driver, so they must
     /// not be advertised there (#35). Windows is a stub.
     pub fn supports_input_injection(self) -> bool {
-        matches!(self, Backend::X11 | Backend::Wayland)
+        matches!(self, Self::X11 | Self::Wayland)
     }
 
     /// Whether this backend can enumerate windows (`list_windows`). X11 only —
     /// via `xdotool search`; Wayland has no portable primitive and the driver
     /// `bail!`s (#35).
     pub fn supports_window_listing(self) -> bool {
-        matches!(self, Backend::X11)
+        matches!(self, Self::X11)
     }
 }
 

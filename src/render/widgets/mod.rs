@@ -78,13 +78,13 @@ pub enum GenerationStatus {
 impl GenerationStatus {
     pub fn display_text(&self) -> &str {
         match self {
-            GenerationStatus::Idle => "Idle",
-            GenerationStatus::Sending => "Sending",
-            GenerationStatus::Thinking => "Thinking",
-            GenerationStatus::Streaming => "Streaming",
-            GenerationStatus::RunningTools => "Running tools",
-            GenerationStatus::Compacting => "Compacting",
-            GenerationStatus::Cancelling => "Cancelling",
+            Self::Idle => "Idle",
+            Self::Sending => "Sending",
+            Self::Thinking => "Thinking",
+            Self::Streaming => "Streaming",
+            Self::RunningTools => "Running tools",
+            Self::Compacting => "Compacting",
+            Self::Cancelling => "Cancelling",
         }
     }
 
@@ -96,15 +96,15 @@ impl GenerationStatus {
     pub fn from_turn(turn: &mermaid_domain::TurnState) -> Self {
         use mermaid_domain::{GenPhase, TurnState};
         match turn {
-            TurnState::Idle => GenerationStatus::Idle,
+            TurnState::Idle => Self::Idle,
             TurnState::Generating { phase, .. } => match phase {
-                GenPhase::Sending => GenerationStatus::Sending,
-                GenPhase::Thinking => GenerationStatus::Thinking,
-                GenPhase::Streaming => GenerationStatus::Streaming,
+                GenPhase::Sending => Self::Sending,
+                GenPhase::Thinking => Self::Thinking,
+                GenPhase::Streaming => Self::Streaming,
             },
-            TurnState::ExecutingTools { .. } => GenerationStatus::RunningTools,
-            TurnState::Compacting { .. } => GenerationStatus::Compacting,
-            TurnState::Cancelling { .. } => GenerationStatus::Cancelling,
+            TurnState::ExecutingTools { .. } => Self::RunningTools,
+            TurnState::Compacting { .. } => Self::Compacting,
+            TurnState::Cancelling { .. } => Self::Cancelling,
         }
     }
 }

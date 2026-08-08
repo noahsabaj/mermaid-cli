@@ -35,8 +35,8 @@ pub enum ParseError {
 impl std::fmt::Display for ParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ParseError::Invalid(m) => write!(f, "invalid patch: {m}"),
-            ParseError::InvalidHunk {
+            Self::Invalid(m) => write!(f, "invalid patch: {m}"),
+            Self::InvalidHunk {
                 message,
                 line_number,
             } => write!(f, "invalid hunk at patch line {line_number}: {message}"),
@@ -308,8 +308,8 @@ pub enum ApplyError {
 impl std::fmt::Display for ApplyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ApplyError::ContextNotFound(c) => write!(f, "could not find context line '{c}'"),
-            ApplyError::LinesNotFound(l) => write!(f, "could not find the lines to replace:\n{l}"),
+            Self::ContextNotFound(c) => write!(f, "could not find context line '{c}'"),
+            Self::LinesNotFound(l) => write!(f, "could not find the lines to replace:\n{l}"),
         }
     }
 }

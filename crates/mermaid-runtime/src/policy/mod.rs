@@ -31,11 +31,11 @@ impl SafetyMode {
     /// Canonical serialized name — matches the serde `snake_case` rename.
     pub fn as_str(self) -> &'static str {
         match self {
-            SafetyMode::Plan => "plan",
-            SafetyMode::ReadOnly => "read_only",
-            SafetyMode::Ask => "ask",
-            SafetyMode::Auto => "auto",
-            SafetyMode::FullAccess => "full_access",
+            Self::Plan => "plan",
+            Self::ReadOnly => "read_only",
+            Self::Ask => "ask",
+            Self::Auto => "auto",
+            Self::FullAccess => "full_access",
         }
     }
 
@@ -43,11 +43,11 @@ impl SafetyMode {
     /// names — no legacy aliases (the old `"auto_review"` is gone).
     pub fn parse(s: &str) -> Option<Self> {
         match s {
-            "plan" => Some(SafetyMode::Plan),
-            "read_only" => Some(SafetyMode::ReadOnly),
-            "ask" => Some(SafetyMode::Ask),
-            "auto" => Some(SafetyMode::Auto),
-            "full_access" => Some(SafetyMode::FullAccess),
+            "plan" => Some(Self::Plan),
+            "read_only" => Some(Self::ReadOnly),
+            "ask" => Some(Self::Ask),
+            "auto" => Some(Self::Auto),
+            "full_access" => Some(Self::FullAccess),
             _ => None,
         }
     }
@@ -55,7 +55,7 @@ impl SafetyMode {
     /// Is a plan being drafted? The single source of truth — never infer this
     /// from `Session.plan`, which is the plan's DATA and outlives nothing.
     pub fn is_planning(self) -> bool {
-        matches!(self, SafetyMode::Plan)
+        matches!(self, Self::Plan)
     }
 
     /// Permissiveness rank for combining modes: `plan/read_only` are strictest,
@@ -64,18 +64,18 @@ impl SafetyMode {
     /// inherit "planning" as a ceiling (children explore, they don't plan).
     pub fn permissiveness(self) -> u8 {
         match self {
-            SafetyMode::Plan => 0,
-            SafetyMode::ReadOnly => 1,
-            SafetyMode::Ask => 2,
-            SafetyMode::Auto => 3,
-            SafetyMode::FullAccess => 4,
+            Self::Plan => 0,
+            Self::ReadOnly => 1,
+            Self::Ask => 2,
+            Self::Auto => 3,
+            Self::FullAccess => 4,
         }
     }
 
     /// The stricter of two modes. Used to apply an agent type's safety
     /// ceiling to a session's live mode — a ceiling can only tighten what
     /// the parent already allows, never loosen it.
-    pub fn least_permissive(a: SafetyMode, b: SafetyMode) -> SafetyMode {
+    pub fn least_permissive(a: Self, b: Self) -> Self {
         if a.permissiveness() <= b.permissiveness() {
             a
         } else {
@@ -107,18 +107,18 @@ pub enum ToolCategory {
 impl ToolCategory {
     pub fn as_str(self) -> &'static str {
         match self {
-            ToolCategory::Read => "read",
-            ToolCategory::Memory => "memory",
-            ToolCategory::Edit => "edit",
-            ToolCategory::Shell => "shell",
-            ToolCategory::Web => "web",
-            ToolCategory::ExternalDirectory => "external_directory",
-            ToolCategory::ComputerUse => "computer_use",
-            ToolCategory::Mcp => "mcp",
-            ToolCategory::Subagent => "subagent",
-            ToolCategory::Network => "network",
-            ToolCategory::Git => "git",
-            ToolCategory::Process => "process",
+            Self::Read => "read",
+            Self::Memory => "memory",
+            Self::Edit => "edit",
+            Self::Shell => "shell",
+            Self::Web => "web",
+            Self::ExternalDirectory => "external_directory",
+            Self::ComputerUse => "computer_use",
+            Self::Mcp => "mcp",
+            Self::Subagent => "subagent",
+            Self::Network => "network",
+            Self::Git => "git",
+            Self::Process => "process",
         }
     }
 }
@@ -146,15 +146,15 @@ pub enum RiskClass {
 impl RiskClass {
     pub fn as_str(self) -> &'static str {
         match self {
-            RiskClass::ReadOnly => "read_only",
-            RiskClass::LowMutation => "low_mutation",
-            RiskClass::FileMutation => "file_mutation",
-            RiskClass::ShellMutation => "shell_mutation",
-            RiskClass::Network => "network",
-            RiskClass::Process => "process",
-            RiskClass::ExternalAccess => "external_access",
-            RiskClass::SystemMutation => "system_mutation",
-            RiskClass::Destructive => "destructive",
+            Self::ReadOnly => "read_only",
+            Self::LowMutation => "low_mutation",
+            Self::FileMutation => "file_mutation",
+            Self::ShellMutation => "shell_mutation",
+            Self::Network => "network",
+            Self::Process => "process",
+            Self::ExternalAccess => "external_access",
+            Self::SystemMutation => "system_mutation",
+            Self::Destructive => "destructive",
         }
     }
 }
@@ -275,19 +275,19 @@ impl Default for PolicyOverride {
 impl PolicyDecision {
     pub fn risk(&self) -> RiskClass {
         match self {
-            PolicyDecision::Allow { risk, .. }
-            | PolicyDecision::Ask { risk, .. }
-            | PolicyDecision::Classify { risk, .. }
-            | PolicyDecision::Deny { risk, .. } => *risk,
+            Self::Allow { risk, .. }
+            | Self::Ask { risk, .. }
+            | Self::Classify { risk, .. }
+            | Self::Deny { risk, .. } => *risk,
         }
     }
 
     pub fn label(&self) -> &'static str {
         match self {
-            PolicyDecision::Allow { .. } => "allow",
-            PolicyDecision::Ask { .. } => "ask",
-            PolicyDecision::Classify { .. } => "classify",
-            PolicyDecision::Deny { .. } => "deny",
+            Self::Allow { .. } => "allow",
+            Self::Ask { .. } => "ask",
+            Self::Classify { .. } => "classify",
+            Self::Deny { .. } => "deny",
         }
     }
 }
