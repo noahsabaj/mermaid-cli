@@ -107,19 +107,20 @@ fn config_doc_schema_parses() {
 /// nothing looked.
 #[test]
 fn readme_doc_links_resolve() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let mut checked = 0;
-    let mut rest = README;
-    while let Some(pos) = rest.find("](docs/") {
-        let tail = &rest[pos + 2..];
-        let link = tail.split(')').next().unwrap_or("");
-        let path = link.split('#').next().unwrap_or("");
+    let docs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs");
+    // Splitting on the opening delimiter drops the `docs/` prefix, so each
+    // fragment starts at the file name; anchors ride along after a `#`.
+    let targets: Vec<&str> = README
+        .split("](docs/")
+        .skip(1)
+        .filter_map(|tail| tail.split(')').next())
+        .filter_map(|link| link.split('#').next())
+        .collect();
+    assert!(!targets.is_empty(), "expected the README to link into docs/");
+    for name in targets {
         assert!(
-            root.join(path).exists(),
-            "README links to {path}, which does not exist"
+            docs.join(name).exists(),
+            "README links to docs/{name}, which does not exist"
         );
-        checked += 1;
-        rest = tail;
     }
-    assert!(checked > 0, "expected the README to link into docs/");
 }
