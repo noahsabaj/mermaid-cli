@@ -2336,7 +2336,7 @@ dependencies = [
 
 [[package]]
 name = "mermaid-cli"
-version = "0.21.0"
+version = "0.21.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2394,13 +2394,14 @@ dependencies = [
 
 [[package]]
 name = "mermaid-model"
-version = "0.21.0"
+version = "0.21.1"
 dependencies = [
  "anyhow",
  "async-trait",
  "base64",
  "chrono",
  "clap",
+ "dbus-secret-service",
  "futures",
  "getrandom 0.4.3",
  "keyring",
@@ -2419,7 +2420,7 @@ dependencies = [
 
 [[package]]
 name = "mermaid-runtime"
-version = "0.21.0"
+version = "0.21.1"
 dependencies = [
  "anyhow",
  "base64",

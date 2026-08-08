@@ -179,6 +179,48 @@ jobs:
       - name: Audit dependencies
         run: cargo audit
 
+  # Every publishable crate must build ALONE, on Linux.
+  #
+  # `cargo build --workspace` unifies features across members, so the root
+  # enabling `dbus-secret-service/vendored` made every crate's keyring build —
+  # including one whose own manifest never declared it. Nothing caught that
+  # until `cargo publish` verified the packaged tarball in isolation, mid-release,
+  # after `mermaid-runtime` had already gone to crates.io and could not be taken
+  # back (v0.21.0). A local `--dry-run` could not have caught it either: on
+  # Windows keyring uses `windows-native` and never touches dbus.
+  #
+  # `cargo package` + building the extracted tarball reproduces exactly what
+  # publish verifies, without needing the version to exist on the index — so
+  # this runs on every PR instead of once per release.
+  isolated-crate-build:
+    name: Crates build standalone (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: isolated-crate-build
+      - name: Build each workspace crate from its packaged tarball
+        run: |
+          set -euo pipefail
+          for crate in mermaid-runtime mermaid-model; do
+            echo "::group::$crate"
+            # `--no-verify` packages without building; we build the extraction
+            # ourselves so the failure points at the crate, not at cargo.
+            cargo package -p "$crate" --no-verify --allow-dirty
+            ver=$(cargo metadata --no-deps --format-version 1 \
+                  | python3 -c "import sys,json;print(next(p['version'] for p in json.load(sys.stdin)['packages'] if p['name']=='$crate'))")
+            tar xzf "target/package/$crate-$ver.crate" -C target/package
+            # Build with the crate as its own workspace root — no unification
+            # with the parent, which is the whole point.
+            ( cd "target/package/$crate-$ver" \
+              && cargo build --offline 2>/dev/null || cargo build )
+            echo "::endgroup::"
+          done
+
   # Dependency-free source guards: no emoji in user-facing output, and the pure
   # `src/domain` MVU core stays free of I/O + the wall clock.
   guards:

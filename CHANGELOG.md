@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.1] - 2026-08-07
+
+### Fixed
+
+- **`mermaid-model` could not be published, which left v0.21.0 half-released.**
+  The crate uses `keyring`, whose Linux `sync-secret-service` backend needs
+  libdbus. The root crate has carried a Linux-only dep on
+  `dbus-secret-service` with its `vendored` feature for exactly that reason —
+  static libdbus, no system headers — and the new crate's manifest never got a
+  copy of it.
+
+  Nothing caught it, because `cargo build --workspace` unifies features across
+  members: the root turned `vendored` on for everybody, so the workspace built
+  green while `mermaid-model`'s own manifest was incomplete. `cargo publish`
+  builds a crate ALONE, and that is where it surfaced — after `mermaid-runtime`
+  0.21.0 had already gone to crates.io, and after the GitHub release, the
+  binaries, Homebrew, Scoop and WinGet had all shipped. The local
+  `--dry-run` could not have caught it either: on Windows keyring uses
+  `windows-native` and never touches dbus.
+
+  Two changes so it cannot repeat. A `Crates build standalone (Linux)` job
+  packages each crate and builds the extracted tarball on every PR, which is
+  what publish does and what feature unification hides. And the publish step
+  now skips versions already on crates.io instead of aborting on them, so a
+  partial failure can be resumed rather than stranding the release.
+
 ## [0.21.0] - 2026-08-07
 
 ### Added
