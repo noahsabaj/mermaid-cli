@@ -27,15 +27,15 @@
 //!     queued-message auto-submit) without self-invoking the
 //!     reducer.
 
-use crate::prompts::get_system_prompt;
+use super::reports::*;
+use super::request::*;
 use crate::{ProgressEvent, SubagentPhase};
 use mermaid_model::models::{ChatMessage, MessageRole, ProviderContinuation, TokenUsage};
 use mermaid_runtime::TaskStatus;
 
-use super::cmd::{ChatRequest, Cmd};
+use super::cmd::Cmd;
 use super::compaction::{
-    CompactionArchive, CompactionRequest, CompactionResult, CompactionTrigger,
-    context_exceeds_hard_limit, format_compact_count, should_auto_compact,
+    CompactionArchive, CompactionRequest, CompactionResult, CompactionTrigger, format_compact_count,
 };
 use super::msg::{ClipboardRead, KeyCode, KeyMods, Msg, Paste, SlashCmd};
 use super::state::{
@@ -46,7 +46,6 @@ use super::transition::{
     action_display_for, commit_assistant_message, fill_outcome, start_generating,
     tool_result_messages, try_complete_outcomes,
 };
-use super::{COMMAND_GROUPS, COMMAND_REGISTRY};
 use mermaid_model::ids::TurnId;
 
 /// Cap on how many queued follow-up messages get drained per
@@ -909,7 +908,7 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
 /// `state.session.conversation.title` (SubmitPrompt, ConversationLoaded,
 /// ConfirmAccepted → ClearConversation) — never at the tail of every
 /// update() so `Tick`/resize/etc. stay free.
-fn emit_title_if_changed(state: &mut State, cmds: &mut Vec<Cmd>) {
+pub(crate) fn emit_title_if_changed(state: &mut State, cmds: &mut Vec<Cmd>) {
     let title = desired_title(state);
     if state.ui.last_title_dispatched.as_deref() != Some(title.as_str()) {
         cmds.push(Cmd::SetTerminalTitle(title.clone()));
@@ -920,7 +919,7 @@ fn emit_title_if_changed(state: &mut State, cmds: &mut Vec<Cmd>) {
 /// The terminal title, reflecting run state: `mermaid · working` while a turn is
 /// in flight, else `mermaid · <conversation title>` (or just `mermaid`). Plain
 /// text with a middot separator — no emoji.
-fn desired_title(state: &State) -> String {
+pub(crate) fn desired_title(state: &State) -> String {
     if !matches!(state.turn, TurnState::Idle) {
         return "mermaid · working".to_string();
     }
@@ -936,7 +935,7 @@ fn desired_title(state: &State) -> String {
 
 /// Outcome of one keypress against a question modal: keep showing it, or
 /// resolve the whole set one way or the other.
-enum QuestionKeyAction {
+pub(crate) enum QuestionKeyAction {
     Stay,
     Submit,
     Dismiss,
@@ -946,7 +945,9 @@ enum QuestionKeyAction {
 /// Advance past the current question: resolve immediately for the atomic
 /// single-select-single-question case, step to the next question, or land on
 /// the review screen.
-fn advance_question(set: &mut mermaid_model::question::PendingQuestionSet) -> QuestionKeyAction {
+pub(crate) fn advance_question(
+    set: &mut mermaid_model::question::PendingQuestionSet,
+) -> QuestionKeyAction {
     let nq = set.questions.len();
     if set.skips_review() {
         return QuestionKeyAction::Submit;
@@ -961,7 +962,7 @@ fn advance_question(set: &mut mermaid_model::question::PendingQuestionSet) -> Qu
 
 /// Act on an option row: toggle it (multi-select) or choose it and advance
 /// (single-select, which also drops any typed "Other" text).
-fn act_on_option(
+pub(crate) fn act_on_option(
     set: &mut mermaid_model::question::PendingQuestionSet,
     q_idx: usize,
     opt_idx: usize,
@@ -984,7 +985,7 @@ fn act_on_option(
 
 /// Act on the row under the cursor: an option, the "Other" free-text row, or
 /// the multi-select Submit row.
-fn act_on_row(
+pub(crate) fn act_on_row(
     set: &mut mermaid_model::question::PendingQuestionSet,
     q_idx: usize,
     row: usize,
@@ -1014,7 +1015,7 @@ fn act_on_row(
     clippy::too_many_lines,
     reason = "predates the lint; see .github/baselines/expect_budget.txt"
 )]
-fn apply_question_key(
+pub(crate) fn apply_question_key(
     set: &mut mermaid_model::question::PendingQuestionSet,
     code: KeyCode,
     mods: KeyMods,
@@ -1171,7 +1172,7 @@ fn apply_question_key(
 
 /// Key handling for an input-kind question (Text/Number/Date/Path): typing
 /// edits the value, Number steps with Up/Down, Enter submits when valid.
-fn apply_input_key(
+pub(crate) fn apply_input_key(
     set: &mut mermaid_model::question::PendingQuestionSet,
     q_idx: usize,
     code: KeyCode,
@@ -1211,7 +1212,11 @@ fn apply_input_key(
 }
 
 /// Step a Number question's value by `dir * step`, clamped to min/max.
-fn step_number(set: &mut mermaid_model::question::PendingQuestionSet, q_idx: usize, dir: f64) {
+pub(crate) fn step_number(
+    set: &mut mermaid_model::question::PendingQuestionSet,
+    q_idx: usize,
+    dir: f64,
+) {
     let (min, max, step) = match &set.questions[q_idx].kind {
         crate::QuestionKind::Number { min, max, step, .. } => (*min, *max, *step),
         _ => return,
@@ -1233,7 +1238,7 @@ fn step_number(set: &mut mermaid_model::question::PendingQuestionSet, q_idx: usi
 }
 
 /// Format a number without a trailing `.0` for whole values.
-fn format_number(n: f64) -> String {
+pub(crate) fn format_number(n: f64) -> String {
     if n.fract() == 0.0 && n.abs() < 1e15 {
         format!("{}", n as i64)
     } else {
@@ -1243,7 +1248,7 @@ fn format_number(n: f64) -> String {
 
 /// Key handling for a Rank question: Up/Down move the cursor; Space grabs the
 /// item under the cursor so Up/Down then moves it; Enter submits the order.
-fn apply_rank_key(
+pub(crate) fn apply_rank_key(
     set: &mut mermaid_model::question::PendingQuestionSet,
     q_idx: usize,
     code: KeyCode,
@@ -1285,7 +1290,12 @@ fn apply_rank_key(
 /// Route a keypress to the front question modal, resolving it into
 /// `Cmd::ResolveQuestion` when the user submits or dismisses. Exclusive while a
 /// question set is pending.
-fn handle_question_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMods) {
+pub(crate) fn handle_question_key(
+    state: &mut State,
+    cmds: &mut Vec<Cmd>,
+    code: KeyCode,
+    mods: KeyMods,
+) {
     let action = {
         let Some(set) = state.pending_question.front_mut() else {
             return;
@@ -1320,7 +1330,7 @@ fn handle_question_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mo
     clippy::too_many_lines,
     reason = "predates the lint; see .github/baselines/expect_budget.txt"
 )]
-fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMods) {
+pub(crate) fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMods) {
     // Ctrl+C: press twice to exit. The first press does the useful thing —
     // interrupts a running turn (like Esc) or clears typed input — and arms a
     // short confirm window; a second press inside the window exits. This also
@@ -1882,7 +1892,7 @@ const ESC_REWIND_WINDOW_MS: i64 = 1000;
 /// Idle-Esc arming: first press arms, a second within the window fires the
 /// rewind picker; past the window the press re-arms. Compared against the
 /// injected `state.now` (pure; replay-exact).
-fn handle_rewind_esc(state: &mut State) {
+pub(crate) fn handle_rewind_esc(state: &mut State) {
     let fired = state.ui.esc_armed_at.is_some_and(|armed| {
         (state.now - armed) <= chrono::Duration::milliseconds(ESC_REWIND_WINDOW_MS)
     });
@@ -1905,7 +1915,7 @@ fn handle_rewind_esc(state: &mut State) {
 /// The rewind targets: user-role `Normal` messages, NEWEST FIRST (the most
 /// recent exchange is the most likely rewind point). Excerpts are the first
 /// non-empty line, clipped.
-fn rewind_candidates(messages: &[ChatMessage]) -> Vec<crate::RewindCandidate> {
+pub(crate) fn rewind_candidates(messages: &[ChatMessage]) -> Vec<crate::RewindCandidate> {
     const EXCERPT_MAX_CHARS: usize = 80;
     messages
         .iter()
@@ -1940,7 +1950,7 @@ fn rewind_candidates(messages: &[ChatMessage]) -> Vec<crate::RewindCandidate> {
 /// Handle keyboard input while the rewind picker is open. Up/Down walk the
 /// candidate list; Enter forks the session at the highlighted user message;
 /// Esc dismisses without touching the conversation.
-fn handle_rewind_picker_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode) {
+pub(crate) fn handle_rewind_picker_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode) {
     let UiMode::RewindPicker {
         ref candidates,
         ref mut cursor,
@@ -1982,7 +1992,11 @@ fn handle_rewind_picker_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCod
 /// snapshot, firing `Cmd::NotifyTaskCompleted` for each task that flipped to
 /// completed relative to the previous copy (a re-sent identical snapshot
 /// fires nothing — the diff is the dedupe).
-fn handle_tasks_updated(state: &mut State, cmds: &mut Vec<Cmd>, store: crate::ChecklistStore) {
+pub(crate) fn handle_tasks_updated(
+    state: &mut State,
+    cmds: &mut Vec<Cmd>,
+    store: crate::ChecklistStore,
+) {
     let (completed, total) = store.counts();
     let fresh: Vec<crate::ChecklistItem> = store
         .newly_completed(&state.session.conversation.tasks)
@@ -2003,7 +2017,7 @@ fn handle_tasks_updated(state: &mut State, cmds: &mut Vec<Cmd>, store: crate::Ch
 /// `/todos` — the user's side of the checklist. Bare `/todos` prints the
 /// list; edits route through `Cmd::UserTaskEdit` to the TaskBroker (single
 /// writer), whose publish updates the band and whose notice tells the model.
-fn handle_todos_command(state: &mut State, cmds: &mut Vec<Cmd>, arg: Option<&str>) {
+pub(crate) fn handle_todos_command(state: &mut State, cmds: &mut Vec<Cmd>, arg: Option<&str>) {
     use crate::UserChecklistEdit;
     let arg = arg.unwrap_or("").trim();
     if arg.is_empty() {
@@ -2038,7 +2052,7 @@ fn handle_todos_command(state: &mut State, cmds: &mut Vec<Cmd>, arg: Option<&str
 
 /// The `/todos` listing: the full checklist with descriptions, cost stamps,
 /// and recent evidence — the detail view the compact band doesn't show.
-fn todos_text(state: &State) -> String {
+pub(crate) fn todos_text(state: &State) -> String {
     let store = &state.session.conversation.tasks;
     if store.is_empty() {
         return "No tasks. The model creates them for multi-step work, or add your own: \
@@ -2089,7 +2103,7 @@ const MAX_TASK_NOTICES: usize = 8;
 /// Buffer a checklist notice for the model's next request. NOT turn-gated:
 /// `/todos` edits and vetoed completions arrive between turns and must
 /// survive until the next real dispatch.
-fn push_task_notice(state: &mut State, text: String) {
+pub(crate) fn push_task_notice(state: &mut State, text: String) {
     if state.pending_task_notices.len() >= MAX_TASK_NOTICES {
         tracing::warn!("dropping task notice over the {MAX_TASK_NOTICES}-entry cap");
         return;
@@ -2101,7 +2115,7 @@ fn push_task_notice(state: &mut State, text: String) {
 /// the reducer injects a staleness nudge (then re-arms for another window).
 const TASK_STALENESS_CALLS: u32 = 5;
 
-fn fork_conversation_at(state: &mut State, cmds: &mut Vec<Cmd>, message_index: usize) {
+pub(crate) fn fork_conversation_at(state: &mut State, cmds: &mut Vec<Cmd>, message_index: usize) {
     // 1. Persist the original FIRST — different id, different file, so this
     //    can never clobber the fork's save below.
     cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
@@ -2211,7 +2225,12 @@ fn fork_conversation_at(state: &mut State, cmds: &mut Vec<Cmd>, message_index: u
 /// skips the attachment — the token degrades to literal text, matching how
 /// orphan tokens behave today. The stored format isn't recorded per-image;
 /// "png" is the decode-side fallback (viewers sniff the real magic bytes).
-fn restage_image(state: &mut State, cmds: &mut Vec<Cmd>, base64_data: &str, number: u64) {
+pub(crate) fn restage_image(
+    state: &mut State,
+    cmds: &mut Vec<Cmd>,
+    base64_data: &str,
+    number: u64,
+) {
     let Ok(bytes) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, base64_data)
     else {
         return;
@@ -2239,7 +2258,7 @@ fn restage_image(state: &mut State, cmds: &mut Vec<Cmd>, base64_data: &str, numb
 /// materialize one for the new id. Pure — the directory creation happens in
 /// the `EnsureScratchpad` handler, and `Msg::ScratchpadReady` stamps the
 /// path back onto the session.
-fn refresh_scratchpad(state: &mut State, cmds: &mut Vec<Cmd>) {
+pub(crate) fn refresh_scratchpad(state: &mut State, cmds: &mut Vec<Cmd>) {
     state.session.scratchpad = None;
     cmds.push(Cmd::EnsureScratchpad {
         session_id: state.session.conversation.id.clone(),
@@ -2249,7 +2268,7 @@ fn refresh_scratchpad(state: &mut State, cmds: &mut Vec<Cmd>) {
 /// Switch the session model. The one path — `/model <id>` and the `/model`
 /// picker both land here, so a model chosen from the list gets the same
 /// vision re-probe, persistence, and Ollama pull as one typed by hand.
-fn switch_model(state: &mut State, cmds: &mut Vec<Cmd>, new_model: String) {
+pub(crate) fn switch_model(state: &mut State, cmds: &mut Vec<Cmd>, new_model: String) {
     let pull_target = ollama_pull_target(&new_model);
     state.session.model_id = new_model.clone();
     state.runtime.set_model(&new_model);
@@ -2287,7 +2306,7 @@ pub fn filter_model_choices<'a>(
 
 /// Are `needle`'s chars present in `haystack`, in order (not necessarily
 /// adjacent)? Both are expected lowercase.
-fn is_subsequence(needle: &str, haystack: &str) -> bool {
+pub(crate) fn is_subsequence(needle: &str, haystack: &str) -> bool {
     let mut chars = haystack.chars();
     needle.chars().all(|n| chars.any(|h| h == n))
 }
@@ -2296,7 +2315,7 @@ fn is_subsequence(needle: &str, haystack: &str) -> bool {
 /// filtered rows, Enter switches, Esc dismisses, and printable characters
 /// (plus Backspace) edit the filter — the input buffer is untouched, so
 /// dismissing restores whatever draft was there.
-fn handle_model_picker_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode) {
+pub(crate) fn handle_model_picker_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode) {
     let UiMode::ModelPicker {
         ref candidates,
         ref mut query,
@@ -2342,7 +2361,7 @@ fn handle_model_picker_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode
 /// Handle keyboard input while the conversation-list picker is open.
 /// Up/Down walk the cursor within the candidate list; Enter loads the
 /// highlighted session; Esc dismisses.
-fn handle_conversation_list_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode) {
+pub(crate) fn handle_conversation_list_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode) {
     let UiMode::ConversationList {
         ref candidates,
         ref mut cursor,
@@ -2380,7 +2399,7 @@ const FILE_PICKER_MAX_MATCHES: usize = 50;
 
 /// Re-rank `file_picker_matches` for the active @-token against the cached
 /// project file list. Pure recompute — never fires a walk.
-fn recompute_file_matches(state: &mut State) {
+pub(crate) fn recompute_file_matches(state: &mut State) {
     let Some(token) = state.ui.active_file_token() else {
         state.ui.file_picker_matches.clear();
         state.ui.file_picker_cursor = None;
@@ -2401,7 +2420,7 @@ fn recompute_file_matches(state: &mut State) {
 /// (stale-while-revalidate — the user filters the cached list instantly and
 /// the fresh list swaps in via `Msg::ProjectFilesListed`). The in-flight
 /// flag dedupes: reopening while a walk runs never spawns a second one.
-fn refresh_file_picker(state: &mut State, cmds: &mut Vec<Cmd>) {
+pub(crate) fn refresh_file_picker(state: &mut State, cmds: &mut Vec<Cmd>) {
     let was_open = state.ui.file_picker_cursor.is_some();
     recompute_file_matches(state);
     let is_open = state.ui.file_picker_cursor.is_some();
@@ -2414,7 +2433,7 @@ fn refresh_file_picker(state: &mut State, cmds: &mut Vec<Cmd>) {
 /// Complete the active @-token with the highlighted match: splice
 /// `@<path> ` over `@<query>` and land the cursor after the space. The
 /// trailing space closes the token, so the picker drops on its own.
-fn complete_file_mention(state: &mut State) {
+pub(crate) fn complete_file_mention(state: &mut State) {
     let Some(token) = state.ui.active_file_token() else {
         return;
     };
@@ -2435,7 +2454,7 @@ fn complete_file_mention(state: &mut State) {
 /// Clamp a raw byte offset onto the nearest preceding char boundary
 /// in `s`. Callers that trust their cursor is already valid can skip
 /// this; paste + multi-step transformations should use it.
-fn clamp_cursor(s: &str, pos: usize) -> usize {
+pub(crate) fn clamp_cursor(s: &str, pos: usize) -> usize {
     let capped = pos.min(s.len());
     s.floor_char_boundary(capped)
 }
@@ -2443,7 +2462,7 @@ fn clamp_cursor(s: &str, pos: usize) -> usize {
 /// Step BACK through input history (Up arrow). The first press saves
 /// the user's in-progress draft and replaces the buffer with the
 /// newest history entry; subsequent presses step older.
-fn history_nav_back(state: &mut State) {
+pub(crate) fn history_nav_back(state: &mut State) {
     let history = &state.session.conversation.input_history;
     if history.is_empty() {
         return;
@@ -2471,7 +2490,7 @@ fn history_nav_back(state: &mut State) {
 
 /// Step FORWARD through input history (Down arrow). Stepping past
 /// the newest entry restores the user's original draft.
-fn history_nav_forward(state: &mut State) {
+pub(crate) fn history_nav_forward(state: &mut State) {
     let Some(cursor) = state.ui.input_history_cursor else {
         return;
     };
@@ -2500,7 +2519,7 @@ fn history_nav_forward(state: &mut State) {
 /// Cycle ReasoningLevel through every variant, wrapping around. Used
 /// by Alt+T. Order matches the `Ord` impl so the cycle walks from
 /// lowest to highest and back to None.
-fn cycle_reasoning(
+pub(crate) fn cycle_reasoning(
     current: mermaid_model::models::ReasoningLevel,
 ) -> mermaid_model::models::ReasoningLevel {
     use mermaid_model::models::ReasoningLevel as R;
@@ -2522,7 +2541,7 @@ fn cycle_reasoning(
 /// one (`permissiveness() == 0`), so the walk starts there. Entering it still
 /// allocates a plan path and may swap the model; that side of the transition
 /// lives in [`apply_safety_mode`], which every mode switch routes through.
-fn cycle_safety(current: mermaid_runtime::SafetyMode) -> mermaid_runtime::SafetyMode {
+pub(crate) fn cycle_safety(current: mermaid_runtime::SafetyMode) -> mermaid_runtime::SafetyMode {
     use mermaid_runtime::SafetyMode as S;
     match current {
         S::Plan => S::ReadOnly,
@@ -2538,7 +2557,7 @@ fn cycle_safety(current: mermaid_runtime::SafetyMode) -> mermaid_runtime::Safety
 /// the Enter handler so the paste-race guard can replay it verbatim once a
 /// deferred clipboard read drains, re-deriving text + attachments (and thus
 /// picking up a freshly-pasted image). No-op on empty/whitespace input.
-fn submit_current_input(state: &mut State) {
+pub(crate) fn submit_current_input(state: &mut State) {
     let buf = state.ui.input_buffer.trim().to_string();
     if buf.is_empty() {
         return;
@@ -2588,7 +2607,7 @@ fn submit_current_input(state: &mut State) {
 /// and opening the slash palette if the buffer now starts with `/`. Shared by
 /// terminal bracketed paste (`handle_paste`) and Ctrl+V text
 /// (`handle_clipboard_read`) so the two agree on cursor handling.
-fn insert_text_at_cursor(state: &mut State, text: &str) {
+pub(crate) fn insert_text_at_cursor(state: &mut State, text: &str) {
     // Insert at the cursor (not the end): on the Windows console a paste arrives
     // as a mix of coalesced `Paste` chunks and stray `Char` key events, and
     // appending here while keys insert at the cursor scrambled the result
@@ -2603,7 +2622,7 @@ fn insert_text_at_cursor(state: &mut State, text: &str) {
     }
 }
 
-fn handle_paste(state: &mut State, paste: Paste) {
+pub(crate) fn handle_paste(state: &mut State, paste: Paste) {
     // Terminal bracketed paste (and the Windows key-burst coalescer) is always
     // text; Ctrl+V clipboard reads — which can be images — arrive separately as
     // `Msg::ClipboardRead`.
@@ -2627,7 +2646,7 @@ fn handle_paste(state: &mut State, paste: Paste) {
 /// counter first — even on empty/error, so a submit held by the paste-race
 /// guard is never wedged — then apply the outcome, and finally fire any held
 /// submit once the last in-flight read has drained.
-fn handle_clipboard_read(state: &mut State, cmds: &mut Vec<Cmd>, read: ClipboardRead) {
+pub(crate) fn handle_clipboard_read(state: &mut State, cmds: &mut Vec<Cmd>, read: ClipboardRead) {
     state.ui.clipboard_reads_pending = state.ui.clipboard_reads_pending.saturating_sub(1);
     match read {
         ClipboardRead::Image { bytes, format } => {
@@ -2693,7 +2712,7 @@ fn handle_clipboard_read(state: &mut State, cmds: &mut Vec<Cmd>, read: Clipboard
 /// staging area, append the `ChatMessage`, and record input history. Shared
 /// by the idle submit path and the mid-run steering drain (tool-boundary
 /// delivery of queued messages) so both commit with identical semantics.
-fn commit_user_message(state: &mut State, text: String, attachment_ids: &[u64]) {
+pub(crate) fn commit_user_message(state: &mut State, text: String, attachment_ids: &[u64]) {
     if text.trim().is_empty() {
         return;
     }
@@ -2736,7 +2755,7 @@ fn commit_user_message(state: &mut State, text: String, attachment_ids: &[u64]) 
     state.session.conversation.add_to_input_history(text);
 }
 
-fn handle_submit_prompt(
+pub(crate) fn handle_submit_prompt(
     state: &mut State,
     cmds: &mut Vec<Cmd>,
     text: String,
@@ -2805,7 +2824,7 @@ fn handle_submit_prompt(
     clippy::too_many_lines,
     reason = "predates the lint; see .github/baselines/expect_budget.txt"
 )]
-fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
+pub(crate) fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
     match cmd {
         SlashCmd::Model(None) => {
             // Open the picker immediately and fill it when discovery lands, so
@@ -3312,7 +3331,7 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
 /// the actual token fire to the effect layer via `Cmd::KillBackgroundAgent`;
 /// the dying child's `Msg::BackgroundAgentFinished { cancelled: true, .. }`
 /// posts the closing note and clears the row.
-fn handle_slash_agents(state: &mut State, cmds: &mut Vec<Cmd>, arg: Option<&str>) {
+pub(crate) fn handle_slash_agents(state: &mut State, cmds: &mut Vec<Cmd>, arg: Option<&str>) {
     let arg = arg.map(str::trim).filter(|s| !s.is_empty());
     match arg {
         None => {
@@ -3389,7 +3408,10 @@ fn handle_slash_agents(state: &mut State, cmds: &mut Vec<Cmd>, arg: Option<&str>
     }
 }
 
-fn visible_reasoning_value(arg: Option<&str>, current: bool) -> Result<bool, &'static str> {
+pub(crate) fn visible_reasoning_value(
+    arg: Option<&str>,
+    current: bool,
+) -> Result<bool, &'static str> {
     match arg.map(str::trim).filter(|s| !s.is_empty()) {
         None | Some("toggle") => Ok(!current),
         Some("on") | Some("true") | Some("yes") | Some("show") => Ok(true),
@@ -3404,7 +3426,7 @@ fn visible_reasoning_value(arg: Option<&str>, current: bool) -> Result<bool, &'s
 /// transient status banner above the input is gone — they live in the
 /// scrollable transcript instead of flashing in the spinner's row. The zone
 /// above the input is reserved for the generation spinner alone.
-fn push_system(state: &mut State, cmds: &mut Vec<Cmd>, text: impl Into<String>) {
+pub(crate) fn push_system(state: &mut State, cmds: &mut Vec<Cmd>, text: impl Into<String>) {
     push_system_kind(
         state,
         cmds,
@@ -3416,7 +3438,7 @@ fn push_system(state: &mut State, cmds: &mut Vec<Cmd>, text: impl Into<String>) 
 /// `push_system` with an explicit message kind. The recovery tails use it to
 /// stamp their one-shot nudges `RecoveryNudge` so the transcript hides them
 /// and `sweep_spent_nudges` retires them at the next turn-end.
-fn push_system_kind(
+pub(crate) fn push_system_kind(
     state: &mut State,
     cmds: &mut Vec<Cmd>,
     text: impl Into<String>,
@@ -3467,14 +3489,14 @@ fn push_system_kind(
 /// worse, if it lingered it would keep instructing the model on the user's
 /// *next, unrelated* turn while the transcript hides it. Returns whether
 /// anything was removed so callers on paths without a save can persist.
-fn sweep_spent_nudges(state: &mut State) -> bool {
+pub(crate) fn sweep_spent_nudges(state: &mut State) -> bool {
     let messages = state.session.conversation.messages_mut();
     let before = messages.len();
     messages.retain(|m| m.kind != mermaid_model::models::ChatMessageKind::RecoveryNudge);
     messages.len() != before
 }
 
-fn ollama_pull_target(model_id: &str) -> Option<String> {
+pub(crate) fn ollama_pull_target(model_id: &str) -> Option<String> {
     let model_id = model_id.trim();
     if model_id.is_empty() {
         return None;
@@ -3494,7 +3516,11 @@ fn ollama_pull_target(model_id: &str) -> Option<String> {
     }
 }
 
-fn handle_manual_compact(state: &mut State, cmds: &mut Vec<Cmd>, instructions: Option<String>) {
+pub(crate) fn handle_manual_compact(
+    state: &mut State,
+    cmds: &mut Vec<Cmd>,
+    instructions: Option<String>,
+) {
     if !matches!(state.turn, TurnState::Idle) {
         push_system(state, cmds, "Cannot compact while a turn is active.");
         return;
@@ -3530,645 +3556,6 @@ fn handle_manual_compact(state: &mut State, cmds: &mut Vec<Cmd>, instructions: O
     });
 }
 
-fn help_text(plugin_commands: &[crate::PluginCommand]) -> String {
-    let mut lines = Vec::with_capacity(COMMAND_REGISTRY.len() + COMMAND_GROUPS.len() + 2);
-    lines.push("Mermaid commands".to_string());
-    lines.push(
-        "Everyday commands are first; daemon/task/process commands are advanced runtime."
-            .to_string(),
-    );
-    for group in COMMAND_GROUPS {
-        lines.push(String::new());
-        lines.push(format!("{}:", group.title()));
-        for command in COMMAND_REGISTRY
-            .iter()
-            .filter(|command| command.group == *group)
-        {
-            let hint = command.arg_hint.unwrap_or("");
-            let aliases = if command.aliases.is_empty() {
-                String::new()
-            } else {
-                format!(" ({})", command.aliases.join(", "))
-            };
-            let suffix = if hint.is_empty() {
-                String::new()
-            } else {
-                format!(" {}", hint)
-            };
-            lines.push(format!(
-                "  /{}{}{} - {}",
-                command.name, suffix, aliases, command.description
-            ));
-        }
-    }
-    if !plugin_commands.is_empty() {
-        lines.push(String::new());
-        lines.push("Plugin commands:".to_string());
-        for cmd in plugin_commands {
-            lines.push(format!(
-                "  /{} - {} (plugin:{})",
-                cmd.name,
-                if cmd.description.is_empty() {
-                    "prompt"
-                } else {
-                    &cmd.description
-                },
-                cmd.plugin
-            ));
-        }
-    }
-    lines.push(String::new());
-    lines.push("Keyboard shortcuts:".to_string());
-    for (keys, desc) in crate::slash_commands::KEYBINDINGS {
-        lines.push(format!("  {keys} - {desc}"));
-    }
-    lines.join("\n")
-}
-
-fn doctor_text(state: &State) -> String {
-    let mut lines = Vec::new();
-    lines.push("Mermaid Doctor".to_string());
-    lines.push(format!("Project: {}", state.cwd.display()));
-    lines.push(format!("Active model: {}", state.session.model_id));
-    lines.push(format!("Reasoning: {}", state.session.reasoning.as_str()));
-    lines.push(format!(
-        "Provider: {} / {}",
-        state.runtime.provider_capabilities.provider, state.runtime.provider_capabilities.model
-    ));
-    lines.push(format!(
-        "Model capabilities: tools={}, vision={}, reasoning={}, context={}",
-        state.runtime.provider_capabilities.supports_tools,
-        state.runtime.provider_capabilities.supports_vision,
-        state.runtime.provider_capabilities.reasoning,
-        state
-            .runtime
-            .provider_capabilities
-            .max_context_tokens
-            .map(|n| n.to_string())
-            .unwrap_or_else(|| "unknown".to_string())
-    ));
-    lines.push(format!(
-        "Safety: mode={}, checkpoint_on_mutation={}",
-        state.settings.safety.mode.as_str(),
-        state.settings.safety.checkpoint_on_mutation
-    ));
-    lines.push(format!(
-        "Scratchpad: {}",
-        state
-            .session
-            .scratchpad
-            .as_ref()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "not ready".to_string())
-    ));
-    lines.push(format!(
-        "Prompt: {}",
-        if state.settings.prompt.is_customized() {
-            "customized for this invocation"
-        } else {
-            "default"
-        }
-    ));
-    match &state.instructions {
-        Some(instructions) => lines.push(format!(
-            "Project instructions: {} bytes from {} source(s){}",
-            instructions.byte_len,
-            instructions.sources.len(),
-            if instructions.truncated {
-                " (truncated)"
-            } else {
-                ""
-            }
-        )),
-        None => lines.push("Project instructions: none loaded (AGENTS.md, MERMAID.md)".to_string()),
-    }
-    lines.push(format!(
-        "MCP servers: {} configured, {} ready",
-        state.mcp.servers.len(),
-        state
-            .mcp
-            .servers
-            .values()
-            .filter(|entry| matches!(entry.status, crate::McpServerStatus::Ready))
-            .count()
-    ));
-    lines.push(
-        "Useful next commands: /help, /context, /model-info <model>, /compact [focus]".to_string(),
-    );
-    lines.join("\n")
-}
-
-/// The most recent user message, trimmed and length-capped — used as the
-/// Auto-mode classifier's "what is the user trying to do" context. `None`
-/// when the session has no user message yet.
-fn latest_user_intent(session: &super::state::Session) -> Option<String> {
-    const MAX: usize = 2000;
-    session
-        .messages()
-        .iter()
-        .rev()
-        .find(|m| matches!(m.role, mermaid_model::models::MessageRole::User))
-        .map(|m| {
-            let c = m.content.trim();
-            if c.len() > MAX {
-                format!("{}…", &c[..c.floor_char_boundary(MAX)])
-            } else {
-                c.to_string()
-            }
-        })
-}
-
-fn usage_text(state: &State) -> String {
-    let mut lines = Vec::new();
-    lines.push("Usage".to_string());
-    lines.push(format!("Model: {}", state.session.model_id));
-    lines.push(String::new());
-
-    match &state.session.context_usage {
-        Some(context) => {
-            let source = if context.is_estimate() {
-                "estimated"
-            } else {
-                "provider-reported"
-            };
-            lines.push(format!(
-                "Current context: {}{}{}",
-                format_compact_count(context.used_tokens),
-                context
-                    .max_tokens
-                    .map(|max| format!(" / {}", format_compact_count(max)))
-                    .unwrap_or_else(|| " / unknown".to_string()),
-                context
-                    .used_percent
-                    .map(|p| format!(" ({}%, {})", p, source))
-                    .unwrap_or_else(|| format!(" ({})", source))
-            ));
-        },
-        None => lines.push("Current context: n/a".to_string()),
-    }
-
-    match state.session.last_token_usage {
-        Some(last) => lines.push(format!("Last API request: {}", usage_totals_line(last))),
-        None => lines.push("Last API request: n/a".to_string()),
-    }
-    // Cumulative is a cost-accounting sum: every API call re-sends the
-    // growing conversation, so input dwarfs output and the total grows much
-    // faster than the context gauge — label it so that reads as intended.
-    lines.push(format!(
-        "Session cumulative (all API calls, subagents included): {}",
-        usage_totals_line(state.session.cumulative_token_usage)
-    ));
-
-    lines.join("\n")
-}
-
-/// Estimate the context the NEXT dispatch would carry, from the conversation
-/// as it stands. Same computation `/context` shows, so the footer gauge and
-/// `/context` never disagree.
-///
-/// Used wherever the transcript is rewritten out from under a
-/// provider-reported figure (a rewind fork): the old number described messages
-/// that no longer exist, but the new one is computable — so recompute it
-/// rather than blanking the gauge.
-fn estimate_current_context(state: &State) -> super::state::ContextUsageSnapshot {
-    let request = build_chat_request(state);
-    let max_context = state
-        .session
-        .context_usage
-        .as_ref()
-        .and_then(|snapshot| snapshot.max_tokens)
-        .or(state.runtime.provider_capabilities.max_context_tokens);
-    // The request carries MCP tools only; the effect runner appends the
-    // built-in schemas at dispatch. Fold them in so the gauge matches what the
-    // next call actually sends (the `/context` precedent).
-    super::state::estimate_context_usage_for_request(&request, max_context)
-        .with_additional_tokens(state.runtime.builtin_tool_schema_tokens)
-}
-
-#[expect(
-    clippy::too_many_lines,
-    reason = "predates the lint; see .github/baselines/expect_budget.txt"
-)]
-fn context_text(state: &State) -> String {
-    let mut lines = Vec::new();
-    lines.push("Context".to_string());
-    lines.push(format!("Model: {}", state.session.model_id));
-    lines.push(format!(
-        "Provider: {}",
-        state.runtime.provider_capabilities.provider
-    ));
-    lines.push(String::new());
-
-    let request = build_chat_request(state);
-    let max_context = state
-        .session
-        .context_usage
-        .as_ref()
-        .and_then(|snapshot| snapshot.max_tokens)
-        .or(state.runtime.provider_capabilities.max_context_tokens);
-    // The request here carries MCP tools only; the effect runner appends the
-    // built-in tool schemas during dispatch. Fold their estimated cost in so
-    // the verdict/hard-limit lines agree with what dispatch actually decides.
-    let next_snapshot = super::state::estimate_context_usage_for_request(&request, max_context)
-        .with_additional_tokens(state.runtime.builtin_tool_schema_tokens);
-
-    // Ollama auto-sizing detail (probed on the first turn; `source` is `Some`
-    // only for Ollama). Shows the real window, what we send as num_ctx, the
-    // output budget, and the offload mode — so users can see + tune sizing.
-    if let Some(ctx) = state
-        .runtime
-        .ollama_context
-        .as_ref()
-        .filter(|c| c.source.is_some())
-    {
-        if let Some(model_max) = ctx.model_max {
-            lines.push(format!(
-                "Model max window: {}",
-                format_compact_count(model_max)
-            ));
-        }
-        if let Some(eff) = ctx.effective {
-            // An auto-converged value rides the override path internally, but it's
-            // Mermaid's choice (not the user's) — label it honestly.
-            let model = &state.session.model_id;
-            let src = if state.runtime.ollama_converged_num_ctx.contains_key(model)
-                && !state.settings.ollama_num_ctx_per_model.contains_key(model)
-            {
-                "auto (GPU-fit)"
-            } else {
-                ctx.source.map(|s| s.label()).unwrap_or("auto")
-            };
-            lines.push(format!(
-                "Active num_ctx: {} ({src})",
-                format_compact_count(eff)
-            ));
-        }
-        let num_predict =
-            mermaid_model::models::adapters::ollama_sizing::default_ollama_num_predict(
-                request.max_tokens,
-                ctx.effective,
-                next_snapshot.used_tokens,
-                state.runtime.provider_capabilities.max_output_tokens,
-            );
-        lines.push(format!(
-            "Output budget (num_predict): {}",
-            match num_predict {
-                Some(n) => format_compact_count(n as usize),
-                None => "auto (provider default)".to_string(),
-            }
-        ));
-        lines.push(format!(
-            "RAM offload: {} (toggle with /context offload on|off)",
-            if state.settings.ollama.allow_ram_offload {
-                "on"
-            } else {
-                "off"
-            }
-        ));
-        // If auto-fit capped well below the model's max, point to the override.
-        if let (Some(model_max), Some(eff), Some(src)) = (ctx.model_max, ctx.effective, ctx.source)
-            && src.is_auto()
-            && model_max > eff
-        {
-            lines.push(format!(
-                "Tip: this model supports up to {} — `/context max` for the full window, or `/context <n>`.",
-                format_compact_count(model_max)
-            ));
-        }
-        // Real memory placement once a turn has probed `/api/ps`.
-        if let Some(p) = state.runtime.ollama_placement.as_ref() {
-            if p.offloaded() {
-                lines.push(format!(
-                    "GPU placement: ~{}% on CPU/RAM (slower) — `/context <n>` to shrink or `/context offload on` to accept",
-                    p.percent_on_cpu()
-                ));
-            } else {
-                lines.push("GPU placement: fully on GPU".to_string());
-            }
-        }
-        lines.push(String::new());
-    }
-
-    let policy = state.settings.compaction.policy();
-    let response_reserve = policy.response_reserve(&request);
-    let usage_summary = match (next_snapshot.used_percent, next_snapshot.max_tokens) {
-        (Some(percent), Some(_)) if percent >= policy.auto_threshold_percent => {
-            format!("high ({percent}% used)")
-        },
-        (Some(percent), Some(_)) if percent >= 70 => format!("getting full ({percent}% used)"),
-        (Some(percent), Some(_)) => format!("comfortable ({percent}% used)"),
-        _ => "unknown because provider context limit is unknown".to_string(),
-    };
-
-    lines.push(format!("Context fullness: {usage_summary}"));
-    lines.push(format!(
-        "Next request: {}{} (estimated)",
-        format_compact_count(next_snapshot.used_tokens),
-        next_snapshot
-            .max_tokens
-            .map(|max| format!(" / {}", format_compact_count(max)))
-            .unwrap_or_else(|| " / unknown".to_string())
-    ));
-    if let Some(remaining) = next_snapshot.remaining_tokens {
-        lines.push(format!(
-            "Remaining after request: {}",
-            format_compact_count(remaining)
-        ));
-    }
-    lines.push(format!(
-        "Response reserve: {}",
-        format_compact_count(response_reserve)
-    ));
-    lines.push(format!(
-        "Auto compact threshold: {}%",
-        policy.auto_threshold_percent
-    ));
-    let auto_skip = should_auto_compact(&next_snapshot, &request, policy);
-    let auto_status = match &auto_skip {
-        Ok(()) => "would run before the next model call".to_string(),
-        // Paused is not "not needed" — the threshold may well be exceeded;
-        // the pause is the reason it won't run.
-        Err(reason @ crate::compaction::CompactionSkip::Suppressed) => reason.to_string(),
-        Err(reason) => format!("not needed ({reason})"),
-    };
-    lines.push(format!("Auto compact: {auto_status}"));
-    match &auto_skip {
-        Ok(()) => lines.push(
-            "Suggested action: continue normally; Mermaid will compact before the next model call."
-                .to_string(),
-        ),
-        Err(crate::compaction::CompactionSkip::Suppressed) => lines.push(
-            "Suggested action: run /compact to checkpoint now and re-enable automatic compaction."
-                .to_string(),
-        ),
-        Err(_) => lines.push("Suggested action: no manual compaction needed unless you want a handoff checkpoint now.".to_string()),
-    }
-    lines.push(format!(
-        "Hard limit risk: {}",
-        if context_exceeds_hard_limit(&next_snapshot, &request, policy) {
-            "yes"
-        } else {
-            "no"
-        }
-    ));
-
-    if let Some(context) = &state.session.context_usage {
-        let source = if context.is_estimate() {
-            "estimated"
-        } else {
-            "provider-reported"
-        };
-        lines.push(format!(
-            "Last reported context: {}{} ({})",
-            format_compact_count(context.used_tokens),
-            context
-                .max_tokens
-                .map(|max| format!(" / {}", format_compact_count(max)))
-                .unwrap_or_else(|| " / unknown".to_string()),
-            source
-        ));
-    }
-
-    if let Some(breakdown) = &next_snapshot.breakdown {
-        lines.push(String::new());
-        lines.push("Prompt budget estimate:".to_string());
-        lines.push(format!(
-            "- system prompt: {}",
-            format_compact_count(breakdown.system_tokens)
-        ));
-        lines.push(format!(
-            "- instructions: {}",
-            format_compact_count(breakdown.instructions_tokens)
-        ));
-        lines.push(format!(
-            "- messages ({}): {}",
-            breakdown.message_count,
-            format_compact_count(breakdown.message_tokens)
-        ));
-        lines.push(format!(
-            "- MCP tool schemas ({}): {}",
-            breakdown.tool_count,
-            format_compact_count(breakdown.tool_schema_tokens)
-        ));
-        if state.runtime.builtin_tool_schema_tokens > 0 {
-            lines.push(format!(
-                "- built-in tool schemas: {}",
-                format_compact_count(state.runtime.builtin_tool_schema_tokens)
-            ));
-        } else {
-            lines.push("- built-in tool schemas: measured on the first model call".to_string());
-        }
-        if breakdown.image_count > 0 {
-            lines.push(format!("- images: {}", breakdown.image_count));
-        }
-    }
-
-    if let Some(last) = state.session.conversation.compactions.last() {
-        lines.push(String::new());
-        lines.push("Last compaction:".to_string());
-        lines.push(format!("- trigger: {}", last.trigger.label()));
-        lines.push(format!(
-            "- context: {} -> {} tokens",
-            format_compact_count(last.before_tokens),
-            format_compact_count(last.after_tokens)
-        ));
-        lines.push(format!(
-            "- archived: {} messages",
-            last.archived_message_count
-        ));
-        lines.push(format!(
-            "- preserved: {} messages",
-            last.preserved_message_count
-        ));
-        lines.push(format!(
-            "- review: {}",
-            match last.review_status {
-                crate::CompactionReviewStatus::Reviewed => "reviewed".to_string(),
-                crate::CompactionReviewStatus::DraftValidated => last
-                    .review_error
-                    .as_ref()
-                    .map(|err| format!("validated draft ({err})"))
-                    .unwrap_or_else(|| "validated draft".to_string()),
-            }
-        ));
-        if let Some(path) = &last.archive_path {
-            lines.push(format!("- archive: {}", path));
-        }
-        lines.push("- inspect: use the archive path above to review the raw messages Mermaid removed from context.".to_string());
-    } else {
-        lines.push(String::new());
-        lines.push("Last compaction: none yet.".to_string());
-    }
-
-    lines.join("\n")
-}
-
-fn tasks_text(tasks: &[mermaid_runtime::TaskRecord]) -> String {
-    let mut lines = vec!["Tasks".to_string()];
-    if tasks.is_empty() {
-        lines.push("No tasks recorded yet.".to_string());
-        return lines.join("\n");
-    }
-    for task in tasks {
-        lines.push(format!(
-            "- {} [{}] {} - {}",
-            task.id, task.status, task.priority, task.title
-        ));
-        lines.push(format!("  project: {}", task.project_path));
-        lines.push(format!("  updated: {}", task.updated_at));
-    }
-    lines.join("\n")
-}
-
-fn task_detail_text(
-    task: Option<&mermaid_runtime::TaskRecord>,
-    events: &[mermaid_runtime::TaskTimelineEvent],
-) -> String {
-    let Some(task) = task else {
-        return "Task not found.".to_string();
-    };
-    let mut lines = vec![
-        format!("Task {}", task.id),
-        format!("Title: {}", task.title),
-        format!("Status: {}", task.status),
-        format!("Priority: {}", task.priority),
-        format!("Project: {}", task.project_path),
-        format!("Model: {}", task.model_id),
-        format!("Created: {}", task.created_at),
-        format!("Updated: {}", task.updated_at),
-    ];
-    if let Some(report) = &task.final_report {
-        lines.push(String::new());
-        lines.push("Final report:".to_string());
-        lines.push(report.clone());
-    }
-    if !events.is_empty() {
-        lines.push(String::new());
-        lines.push("Timeline:".to_string());
-        for event in events {
-            lines.push(format!(
-                "- {} {}: {}",
-                event.created_at, event.kind, event.message
-            ));
-        }
-    }
-    lines.join("\n")
-}
-
-fn processes_text(processes: &[mermaid_runtime::ProcessRecord]) -> String {
-    let mut lines = vec!["Processes".to_string()];
-    if processes.is_empty() {
-        lines.push("No processes recorded yet.".to_string());
-        return lines.join("\n");
-    }
-    for process in processes {
-        lines.push(format!(
-            "- {} pid={} [{}] {}",
-            process.id,
-            process.pid,
-            process.status.as_str(),
-            process.command
-        ));
-        if let Some(task_id) = &process.task_id {
-            lines.push(format!("  task: {}", task_id));
-        }
-        if let Some(url) = &process.detected_url {
-            lines.push(format!("  url: {}", url));
-        }
-        if let Some(log_path) = &process.log_path {
-            lines.push(format!("  log: {}", log_path));
-        }
-    }
-    lines.join("\n")
-}
-
-fn approvals_text(approvals: &[mermaid_runtime::ApprovalRecord]) -> String {
-    let mut lines = vec!["Approvals".to_string()];
-    if approvals.is_empty() {
-        lines.push("No pending approvals.".to_string());
-        return lines.join("\n");
-    }
-    for approval in approvals {
-        lines.push(format!(
-            "- {} [{}] {}",
-            approval.id, approval.risk_classification, approval.proposed_action
-        ));
-        if let Some(checkpoint_id) = &approval.checkpoint_id {
-            lines.push(format!("  checkpoint: {}", checkpoint_id));
-        }
-        if approval.pending_action_json.is_some() {
-            lines.push("  pending action: recorded".to_string());
-        }
-    }
-    lines.join("\n")
-}
-
-fn checkpoints_text(checkpoints: &[mermaid_runtime::CheckpointRecord]) -> String {
-    let mut lines = vec!["Checkpoints".to_string()];
-    if checkpoints.is_empty() {
-        lines.push("No checkpoints recorded yet.".to_string());
-        return lines.join("\n");
-    }
-    for checkpoint in checkpoints {
-        lines.push(format!(
-            "- {} {} {}",
-            checkpoint.id, checkpoint.created_at, checkpoint.project_path
-        ));
-    }
-    lines.join("\n")
-}
-
-fn plugins_text(plugins: &[mermaid_runtime::PluginInstallRecord]) -> String {
-    let mut lines = vec!["Plugins".to_string()];
-    if plugins.is_empty() {
-        lines.push("No plugins installed.".to_string());
-        return lines.join("\n");
-    }
-    for plugin in plugins {
-        lines.push(format!(
-            "- {} [{}] {}",
-            plugin.id,
-            if plugin.enabled {
-                "enabled"
-            } else {
-                "disabled"
-            },
-            plugin.source
-        ));
-    }
-    lines.join("\n")
-}
-
-fn usage_totals_line(usage: TokenUsageTotals) -> String {
-    let mut parts = vec![
-        format!("total {}", format_compact_count(usage.total_tokens())),
-        format!("input {}", format_compact_count(usage.input_total_tokens())),
-        format!(
-            "output {}",
-            format_compact_count(usage.output_total_tokens())
-        ),
-    ];
-    if usage.cached_input_tokens > 0 {
-        parts.push(format!(
-            "cache read {}",
-            format_compact_count(usage.cached_input_tokens)
-        ));
-    }
-    if usage.cache_creation_input_tokens > 0 {
-        parts.push(format!(
-            "cache write {}",
-            format_compact_count(usage.cache_creation_input_tokens)
-        ));
-    }
-    if usage.reasoning_output_tokens > 0 {
-        parts.push(format!(
-            "reasoning {}",
-            format_compact_count(usage.reasoning_output_tokens)
-        ));
-    }
-    parts.join(", ")
-}
-
 /// When a turn is aborted while its tools are mid-flight, the `assistant`
 /// message carrying the `tool_calls` is already committed to history but the
 /// matching `tool` result messages never will be. Left as-is, the next request
@@ -4178,7 +3565,7 @@ fn usage_totals_line(usage: TokenUsageTotals) -> String {
 /// compaction performs for orphaned tool calls (#71), applied to the live
 /// cancel/quit paths. Leaves `state.turn` untouched for any non-`ExecutingTools`
 /// state; the caller sets the real target state afterwards.
-fn seal_orphaned_tool_calls(state: &mut State) {
+pub(crate) fn seal_orphaned_tool_calls(state: &mut State) {
     match std::mem::replace(&mut state.turn, TurnState::Idle) {
         TurnState::ExecutingTools {
             calls, outcomes, ..
@@ -4205,12 +3592,12 @@ fn seal_orphaned_tool_calls(state: &mut State) {
 /// task, so those replies can never come. Left behind, a stale approval or
 /// question modal survives `/load`, `/clear`, Ctrl+C, and quit with nothing to
 /// answer it (D2/D3/D4). Every turn-cancel/reset site clears both through here.
-fn clear_parked_tool_requests(state: &mut State) {
+pub(crate) fn clear_parked_tool_requests(state: &mut State) {
     state.pending_approval.clear();
     state.pending_question.clear();
 }
 
-fn handle_cancel_turn(state: &mut State, cmds: &mut Vec<Cmd>) {
+pub(crate) fn handle_cancel_turn(state: &mut State, cmds: &mut Vec<Cmd>) {
     let Some(id) = state.turn.id() else {
         return;
     };
@@ -4231,7 +3618,7 @@ fn handle_cancel_turn(state: &mut State, cmds: &mut Vec<Cmd>) {
     };
 }
 
-fn request_exit(state: &mut State, cmds: &mut Vec<Cmd>) {
+pub(crate) fn request_exit(state: &mut State, cmds: &mut Vec<Cmd>) {
     if state.should_exit {
         return;
     }
@@ -4279,7 +3666,7 @@ fn request_exit(state: &mut State, cmds: &mut Vec<Cmd>) {
     cmds.push(Cmd::Exit);
 }
 
-fn handle_confirm_accepted(state: &mut State, cmds: &mut Vec<Cmd>) {
+pub(crate) fn handle_confirm_accepted(state: &mut State, cmds: &mut Vec<Cmd>) {
     let Some(confirm) = state.confirm.take() else {
         return;
     };
@@ -4341,7 +3728,7 @@ fn handle_confirm_accepted(state: &mut State, cmds: &mut Vec<Cmd>) {
 }
 
 /// How one API request's usage folds into the session/run counters.
-enum UsageFold {
+pub(crate) enum UsageFold {
     /// The session's own model request: also becomes `last_token_usage`
     /// (which feeds the context gauge) and banks its output into the run
     /// counter.
@@ -4366,7 +3753,7 @@ enum UsageFold {
 /// that bills tokens goes through here so the meters cannot drift apart.
 /// Takes the two sub-states it touches (not `&mut State`) so callers
 /// holding a `&mut state.turn` borrow can still fold.
-fn fold_token_usage(
+pub(crate) fn fold_token_usage(
     session: &mut super::state::Session,
     runtime: &mut super::runtime::RuntimeState,
     usage: &TokenUsage,
@@ -4395,7 +3782,7 @@ fn fold_token_usage(
     clippy::too_many_lines,
     reason = "predates the lint; see .github/baselines/expect_budget.txt"
 )]
-fn handle_compaction_finished(
+pub(crate) fn handle_compaction_finished(
     state: &mut State,
     cmds: &mut Vec<Cmd>,
     turn: TurnId,
@@ -4566,7 +3953,7 @@ fn handle_compaction_finished(
     });
 }
 
-fn compaction_intervening_messages(
+pub(crate) fn compaction_intervening_messages(
     current: &[ChatMessage],
     source: &[crate::CompactionBoundary],
 ) -> Vec<ChatMessage> {
@@ -4594,7 +3981,7 @@ fn compaction_intervening_messages(
     intervening
 }
 
-fn handle_compaction_failed(
+pub(crate) fn handle_compaction_failed(
     state: &mut State,
     turn: TurnId,
     trigger: CompactionTrigger,
@@ -4658,7 +4045,7 @@ fn handle_compaction_failed(
     );
 }
 
-fn handle_stream_tool_call(
+pub(crate) fn handle_stream_tool_call(
     state: &mut State,
     turn: TurnId,
     call: mermaid_model::models::tool_call::ToolCall,
@@ -4689,7 +4076,7 @@ fn handle_stream_tool_call(
 /// length-truncation can't be (or has stopped being) auto-recovered. Shared by
 /// `handle_stream_done` (cap reached / nothing to compact) and
 /// `handle_compaction_failed` (recovery compaction couldn't reduce the context).
-fn truncation_hint(state: &State) -> String {
+pub(crate) fn truncation_hint(state: &State) -> String {
     let mut msg = "Response truncated — reached the model's max output-token limit.".to_string();
     // Ollama quick-fix: if auto-fit capped the window below the model's max, tell
     // the user exactly how to raise it.
@@ -4712,7 +4099,7 @@ fn truncation_hint(state: &State) -> String {
 /// budgeting mermaid no longer imposes its own cap, so the stop was either the
 /// user's explicit `max_tokens` hard cap or the model/provider's own
 /// per-response ceiling.
-fn output_cap_hint(state: &State) -> String {
+pub(crate) fn output_cap_hint(state: &State) -> String {
     let cap = state.settings.default_model.max_tokens;
     if cap > 0 {
         format!(
@@ -4737,7 +4124,7 @@ const MAX_EMPTY_CONTINUATIONS: u32 = 1;
     clippy::too_many_lines,
     reason = "predates the lint; see .github/baselines/expect_budget.txt"
 )]
-fn handle_stream_done(
+pub(crate) fn handle_stream_done(
     state: &mut State,
     cmds: &mut Vec<Cmd>,
     turn: TurnId,
@@ -5229,7 +4616,7 @@ fn handle_stream_done(
 /// committed history (hidden nudges, merged bubbles). The positional pair is
 /// the fallback for images without a number (pre-numbering sessions — which
 /// predate stitching, so their indices still align).
-fn handle_open_image_at(
+pub(crate) fn handle_open_image_at(
     state: &mut State,
     cmds: &mut Vec<Cmd>,
     message_index: usize,
@@ -5281,7 +4668,7 @@ fn handle_open_image_at(
 ///
 /// Stale filter at the top of `update_step` catches mismatched turn ids
 /// before we get here, so this handler is branch-light.
-fn handle_turn_cancelled(state: &mut State, cmds: &mut Vec<Cmd>, turn: TurnId) {
+pub(crate) fn handle_turn_cancelled(state: &mut State, cmds: &mut Vec<Cmd>, turn: TurnId) {
     match state.turn {
         TurnState::Cancelling { id, .. } if id == turn => {
             state.turn = TurnState::Idle;
@@ -5309,7 +4696,7 @@ fn handle_turn_cancelled(state: &mut State, cmds: &mut Vec<Cmd>, turn: TurnId) {
 /// re-enters cleanly (preserving stale-filter semantics) rather than
 /// inline-invoking a new turn. Shared by the stream-done, cancelled, and
 /// upstream-error turn-end paths so a queued message is never stranded.
-fn drain_next_queued_message(state: &mut State) {
+pub(crate) fn drain_next_queued_message(state: &mut State) {
     if let Some(next) = state.ui.queued_messages.pop_front() {
         state.ui.pending_msgs.push_back(Msg::SubmitPrompt {
             text: next.text,
@@ -5318,7 +4705,7 @@ fn drain_next_queued_message(state: &mut State) {
     }
 }
 
-fn handle_upstream_error(
+pub(crate) fn handle_upstream_error(
     state: &mut State,
     cmds: &mut Vec<Cmd>,
     turn: TurnId,
@@ -5401,7 +4788,7 @@ fn handle_upstream_error(
 /// tool, and a tool's full output lands in the chat transcript when it
 /// finishes. Only image artifacts are handled here — they attach to the
 /// in-flight assistant message for inline display.
-fn handle_tool_progress(
+pub(crate) fn handle_tool_progress(
     state: &mut State,
     _cmds: &mut Vec<Cmd>,
     turn: TurnId,
@@ -5464,7 +4851,7 @@ fn handle_tool_progress(
     }
 }
 
-fn handle_tool_finished(
+pub(crate) fn handle_tool_finished(
     state: &mut State,
     cmds: &mut Vec<Cmd>,
     turn: TurnId,
@@ -5606,7 +4993,7 @@ const MAX_HOOK_CONTEXT_BYTES: usize = 16 * 1024;
 /// next dispatched model request. Turn-gated (the stale filter already drops
 /// mismatched turns; re-check here for defense in depth, like
 /// `handle_upstream_error`).
-fn handle_hook_context(state: &mut State, turn: TurnId, texts: Vec<String>) {
+pub(crate) fn handle_hook_context(state: &mut State, turn: TurnId, texts: Vec<String>) {
     if state.turn.id() != Some(turn) {
         return;
     }
@@ -5656,7 +5043,7 @@ const PLAN_MUTATING_TOOLS: &[&str] = &["write_file", "apply_patch", "execute_com
 /// redirect the escalated corrective itself recommends, which the old
 /// tool-name check missed, leaving the breaker armed forever and re-injecting
 /// "the plan file does not exist" at a model that had just written it.
-fn note_plan_tool_outcome(
+pub(crate) fn note_plan_tool_outcome(
     runtime: &mut super::runtime::RuntimeState,
     planning: bool,
     tool: &str,
@@ -5690,7 +5077,7 @@ fn note_plan_tool_outcome(
 /// system prompt already states current modes; only CHANGES need a timeline
 /// event. Subagents re-stamp silently too — children don't plan and their
 /// modes are fixed by the parent.
-fn advertise_context_changes(state: &mut State, cmds: &mut Vec<Cmd>) {
+pub(crate) fn advertise_context_changes(state: &mut State, cmds: &mut Vec<Cmd>) {
     let live = super::state::AdvertisedContext::observe(&state.session);
     let prev = match state
         .session
@@ -5717,7 +5104,7 @@ fn advertise_context_changes(state: &mut State, cmds: &mut Vec<Cmd>) {
 /// contexts. Plan entry with a `[plan]` model override yields ONE message
 /// covering both; plan exit already names the live safety mode, so a safety
 /// sentence is added only when the mode changed without a plan flip.
-fn context_delta_text(
+pub(crate) fn context_delta_text(
     prev: &super::state::AdvertisedContext,
     live: &super::state::AdvertisedContext,
     messages: &[ChatMessage],
@@ -5790,7 +5177,7 @@ fn context_delta_text(
 /// the transcript and swept at every turn-end for free. Byte-stable per plan
 /// session (the path is fixed at entry), so prompt-cache churn stays confined
 /// to the already-churning tail region.
-fn push_plan_reminder(state: &mut State, cmds: &mut Vec<Cmd>) {
+pub(crate) fn push_plan_reminder(state: &mut State, cmds: &mut Vec<Cmd>) {
     let Some(plan) = &state.session.plan else {
         return;
     };
@@ -5847,12 +5234,12 @@ fn push_plan_reminder(state: &mut State, cmds: &mut Vec<Cmd>) {
 /// since only a successful update resets the counter, the contradiction
 /// re-injected itself every `TASK_STALENESS_CALLS` dispatches for the whole
 /// planning session.
-fn checklist_writers_suppressed(state: &State) -> bool {
+pub(crate) fn checklist_writers_suppressed(state: &State) -> bool {
     state.session.safety_mode.is_planning()
         && state.settings.plan.permissions.tasks != crate::PlanPermLevel::Allow
 }
 
-fn push_call_model(state: &mut State, cmds: &mut Vec<Cmd>, turn: TurnId) {
+pub(crate) fn push_call_model(state: &mut State, cmds: &mut Vec<Cmd>, turn: TurnId) {
     // Mode changes become history events BEFORE anything else rides this
     // request — the marker must precede the tail reminder.
     advertise_context_changes(state, cmds);
@@ -5887,378 +5274,6 @@ fn push_call_model(state: &mut State, cmds: &mut Vec<Cmd>, turn: TurnId) {
     cmds.push(Cmd::CallModel { turn, request });
 }
 
-pub fn build_chat_request(state: &State) -> ChatRequest {
-    // Project instructions + the always-loaded memory index + any pending
-    // hook context compose into the single dynamic suffix. Each block carries
-    // its own header (`# Memory`, `# Hook Context`), so the parts stay clearly
-    // separated from AGENTS.md/MERMAID.md and the model adapters need no
-    // changes.
-    let mut instruction_parts: Vec<String> = Vec::new();
-    if let Some(i) = state.instructions.as_ref() {
-        instruction_parts.push(i.content.clone());
-    }
-    if let Some(m) = state.memory.as_ref() {
-        instruction_parts.push(m.index.clone());
-    }
-    if let Some(s) = state.skills.as_ref() {
-        instruction_parts.push(s.index.clone());
-    }
-    if !state.pending_hook_context.is_empty() {
-        instruction_parts.push(format!(
-            "# Hook Context\n\n{}",
-            state.pending_hook_context.join("\n\n")
-        ));
-    }
-    if !state.pending_task_notices.is_empty() {
-        instruction_parts.push(format!(
-            "# Task Checklist Notices\n\n{}",
-            state.pending_task_notices.join("\n")
-        ));
-    }
-    let instructions = if instruction_parts.is_empty() {
-        None
-    } else {
-        Some(instruction_parts.join("\n\n"))
-    };
-
-    // Pass the user's temperature verbatim — including an explicit `0.0`
-    // (deterministic / greedy decoding). `ModelSettings::default()` supplies
-    // `DEFAULT_TEMPERATURE`, so a `0.0` reaching here is always a deliberate
-    // choice, never "unset"; the old `> 0.0` guard silently clobbered it to
-    // `0.7`.
-    let settings = &state.settings.default_model;
-    let temperature = settings.temperature;
-    // `max_tokens == 0` is AUTO: pass it through so each adapter applies the
-    // model-scaled output budget — OpenAI-compat/Gemini omit the field (the
-    // provider uses its own per-response max), Ollama sizes to `num_ctx`, and
-    // Anthropic resolves its documented per-model ceiling. A positive value is
-    // the user's explicit hard cap.
-    let max_tokens = settings.max_tokens;
-
-    // MCP tools the model should see — advertised names arrive pre-sanitized
-    // (`mcp__<server>__<tool>`) from ingestion. With deferral on (the
-    // default), most MCP tools are replaced by one `tool_search` definition;
-    // see `domain::tool_search`. The effect runner prepends built-in tools
-    // before dispatching, so this vector is the MCP-only portion. Ordering
-    // is byte-stable across runs for prompt-cache warmth (#F68).
-    let mut mcp_tools = super::tool_search::mcp_tool_definitions(state);
-    // Plan-mode tools are registered `is_internal` (never in the effect
-    // layer's `describe_all`), so which one the model sees is decided HERE,
-    // where the plan state lives: `exit_plan_mode` only while planning,
-    // `enter_plan_mode` only while not (and never for subagents — children
-    // explore, they don't plan).
-    if state.session.plan.is_some() {
-        mcp_tools.push(super::plan::exit_plan_mode_definition());
-    } else if !state.session.is_subagent {
-        mcp_tools.push(super::plan::enter_plan_mode_definition());
-    }
-
-    // Run-summary lines ("Worked for …") are display-only UI — never send them
-    // to the model. Then repair tool_use/tool_result pairing as the FINAL pass
-    // over the CLONED request messages (never state.session): a session persisted
-    // or hand-edited mid-tool would otherwise send a dangling tool_use and hit an
-    // unrecoverable 400.
-    let mut messages = evict_stale_screenshots(
-        state
-            .session
-            .messages()
-            .iter()
-            .filter(|m| m.kind != mermaid_model::models::ChatMessageKind::RunSummary)
-            .cloned()
-            .collect(),
-    );
-    // The user loosening the safety mode (read_only → …) leaves the model's own
-    // earlier read-only denials in history, contradicting the now-current mode;
-    // rewrite them so the wire history matches the live mode (else the model
-    // keeps refusing edits / claims "still read-only" after a switch up).
-    // While a plan is being drafted the EFFECTIVE mode is the read-only floor,
-    // so pre-plan read-only denials still describe reality — pass the floor,
-    // not the (possibly looser) restore target, so they stay untouched.
-    // `Plan` IS the read-only floor, so the live mode already describes
-    // reality — there is no separate floor to substitute.
-    neutralize_superseded_policy_denials(&mut messages, state.session.safety_mode);
-    // Same contract for plan-mode denials: they stop applying the moment plan
-    // mode ends (approve or cancel).
-    neutralize_superseded_plan_denials(&mut messages, state.session.safety_mode.is_planning());
-    super::compaction::normalize_history(&mut messages);
-
-    ChatRequest {
-        model_id: state.session.model_id.clone(),
-        messages,
-        system_prompt: system_prompt_for_state(state),
-        instructions,
-        reasoning: state.session.reasoning,
-        temperature,
-        max_tokens,
-        // A formatting turn (`--output-schema`) advertises NO tools: several
-        // providers reject or degrade schema-constrained output when tools
-        // are present, and the turn's only job is reshaping the final answer.
-        tools: if state.output_schema.is_some() {
-            Vec::new()
-        } else {
-            mcp_tools
-        },
-        // Per-model `/context` override (set via /context <n>/max) wins; else the
-        // auto-converged value the `/api/ps` check found fits; else None = auto-fit.
-        ollama_num_ctx: state
-            .settings
-            .ollama_num_ctx_per_model
-            .get(&state.session.model_id)
-            .copied()
-            .or_else(|| {
-                state
-                    .runtime
-                    .ollama_converged_num_ctx
-                    .get(&state.session.model_id)
-                    .copied()
-            }),
-        // Live offload toggle — carry the current setting so `/context offload`
-        // applies next turn without rebuilding the (startup-frozen) provider.
-        ollama_allow_ram_offload: Some(state.settings.ollama.allow_ram_offload),
-        // Filled by the effect layer from cache-first live discovery just
-        // before dispatch — the reducer never awaits a probe.
-        resolved_context_window: None,
-        resolved_max_output: None,
-        output_schema: state.output_schema.clone(),
-        // Pause auto-compaction after a failed attempt (cleared by a successful
-        // compaction, manual /compact, or a conversation switch). Rides on the
-        // request because the effect preflight never sees RuntimeState.
-        suppress_auto_compact: state.runtime.auto_compact_suppressed,
-        // Plan mode hides the checklist WRITERS (their descriptions actively
-        // recommend the call the gate then hard-errors); `task_list` stays
-        // (post-compaction re-anchoring is legitimate while planning), and
-        // the policy-gated tools (write_file, execute_command, …) stay too —
-        // their teaching denials are part of the plan-mode surface. An
-        // explicit `tasks = allow` in the plan profile restores the writers,
-        // matching the runtime backstop in `tasks::plan_mode_block`.
-        suppressed_builtin_tools: if checklist_writers_suppressed(state) {
-            vec!["task_create", "task_update"]
-        } else {
-            Vec::new()
-        },
-    }
-}
-
-fn system_prompt_for_state(state: &State) -> String {
-    // While planning, the base prompt's execution imperatives ("task_create
-    // the FULL initial plan", "do not stop at a proposal") contradict the
-    // plan appendix; swap them for plan-shaped stubs so the model never has
-    // to resolve the conflict.
-    //
-    // The adaptation runs on the BASE prompt, BEFORE `append_system_prompt`
-    // extras are appended. Running it on the rendered string let the section
-    // splice — which extends to the next `\n## ` heading, or to end-of-string
-    // when there is none — delete the user's appended instructions along with
-    // the section. A base prompt whose last section is `## Task Planning` was
-    // enough to silently drop every `append_system_prompt` entry while
-    // planning. A fully custom base prompt misses the anchors and passes
-    // through untouched, which is the intended behavior for user-owned text.
-    let default_prompt = get_system_prompt();
-    let chosen = state.settings.prompt.base_prompt(&default_prompt);
-    let planning = state.session.safety_mode.is_planning();
-    let base = if planning {
-        state
-            .settings
-            .prompt
-            .append_extras(&crate::prompts::adapt_prompt_for_plan_mode(chosen))
-    } else {
-        state.settings.prompt.append_extras(chosen)
-    };
-    // While a plan is being drafted the live-mode line would mislead ("attempt
-    // gated actions") — the effective policy is the plan-mode read-only floor.
-    // There is no restore target to name: plan is one position in the same
-    // Shift+Tab cycle, and the user leaves it by picking another mode.
-    let safety_line = if planning {
-        "Safety mode: plan (the strictest mode: a plan is being drafted and the plan-mode \
-         read-only floor is in effect; the user leaves it with Shift+Tab or /safety like any \
-         other mode)."
-            .to_string()
-    } else {
-        format!(
-            "Safety mode: {} (live — the user can switch it anytime with Shift+Tab or /safety; \
-             trust this over any earlier tool error, and attempt gated actions rather than \
-             assuming they will fail).",
-            state.session.safety_mode.as_str()
-        )
-    };
-    let mut prompt = format!(
-        "{}\n\n## Current Session\nCurrent working directory: {}\n{}\nTreat this as the project root unless the user specifies a different path.",
-        base,
-        state.cwd.display(),
-        safety_line
-    );
-    // The concrete path (the static prompt only describes the mechanism);
-    // absent before `Msg::ScratchpadReady` lands or when creation failed.
-    if let Some(scratch) = &state.session.scratchpad {
-        prompt.push_str(&format!(
-            "\nScratchpad directory: {}\nUse it for ALL temporary files instead of /tmp or the system temp dir.",
-            scratch.display()
-        ));
-    }
-    if state.session.is_subagent {
-        prompt.push_str("\n\n");
-        prompt.push_str(crate::prompts::SUBAGENT_CONTRACT);
-    }
-    if let Some(preamble) = &state.session.agent_preamble {
-        prompt.push_str("\n\n");
-        prompt.push_str(preamble);
-    }
-    if let Some(plan) = &state.session.plan {
-        prompt.push_str("\n\n");
-        prompt.push_str(
-            &crate::prompts::PLAN_MODE_PROMPT
-                .replace("{plan_path}", &plan.plan_path.display().to_string())
-                .replace(
-                    "{plan_capabilities}",
-                    &plan_capabilities_line(&state.settings.plan.permissions),
-                ),
-        );
-    }
-    prompt
-}
-
-/// Compose the "what runs while planning" sentence from the LIVE permission
-/// profile, so the prompt never promises a capability the gate will deny
-/// (`/plan config` can retune the profile mid-session).
-fn plan_capabilities_line(perms: &crate::PlanPermissions) -> String {
-    use crate::PlanPermLevel as L;
-    // Read-only subagent fan-out is always allowed under the plan-mode floor
-    // (policy_gate leaves the Subagent Allow untouched) — without naming it,
-    // "everything else is blocked" suppresses legitimate parallel exploration.
-    let mut parts =
-        vec!["reads and inspection (including spawning read-only subagents)".to_string()];
-    let mut push = |label: &str, level: L| match level {
-        L::Allow => parts.push(label.to_string()),
-        L::Auto | L::Ask => parts.push(format!("{label} (each use is reviewed first)")),
-        L::Deny => {},
-    };
-    push(
-        "known-safe build and test commands (cargo check/build/test/clippy, go build/test/vet, npm test, make test, and similar)",
-        perms.builds,
-    );
-    push("web search/fetch", perms.web);
-    push("memory writes", perms.memory);
-    let mut line = parts.join(", ");
-    line.push_str(", and authoring the plan file (write_file or apply_patch on the plan path — the ONLY writable path).");
-    line
-}
-
-/// Walk the message log and retain only the `MAX_RETAINED_SCREENSHOTS`
-/// most recent images across the whole conversation. Older messages
-/// that had images get `images: None` AND an appended
-/// `[Image elided — superseded by newer screenshot]` marker in
-/// `content`, so the model still knows something visual was there.
-///
-/// Why: an agentic GUI loop can generate 10+ screenshots in a single
-/// session. At 2MB/PNG that's 20MB uncompressed in every outgoing
-/// request body — request bloat compounds across turns and slows the
-/// model. The on-screen chat history still shows all images (this
-/// transformation is on the CLONED Vec passed to the provider); only
-/// the wire payload is slimmed.
-fn evict_stale_screenshots(mut messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
-    use mermaid_model::constants::MAX_RETAINED_SCREENSHOTS;
-    let mut seen = 0usize;
-    for msg in messages.iter_mut().rev() {
-        let Some(imgs) = msg.images.as_ref() else {
-            continue;
-        };
-        if imgs.is_empty() {
-            continue;
-        }
-        if seen < MAX_RETAINED_SCREENSHOTS {
-            seen += imgs.len();
-            continue;
-        }
-        // Beyond the cap — elide.
-        let elided_count = imgs.len();
-        msg.images = None;
-        let marker = if elided_count == 1 {
-            "\n[Image elided — superseded by newer screenshot]"
-        } else {
-            "\n[Images elided — superseded by newer screenshots]"
-        };
-        if !msg.content.ends_with(marker) {
-            msg.content.push_str(marker);
-        }
-    }
-    messages
-}
-
-/// The user loosening the safety mode (e.g. read_only → full_access) leaves the
-/// *old* read-only denials sitting in the conversation history, still asserting
-/// verbatim that mutations are blocked. A model trusts those concrete
-/// tool-results over the (correct, live) system-prompt line and so refuses to
-/// act or claims the runtime "is still read-only". Rewrite each superseded
-/// read-only denial to a past-tense, mode-aware note so the wire history stops
-/// contradicting the current mode.
-///
-/// Scope guards keep this surgical:
-/// - only tool-result messages (`MessageRole::Tool`) are considered, so a user
-///   message or model turn that merely quotes the phrase is untouched;
-/// - the match is the *contiguous* denial signature (`blocked by policy:` +
-///   [`mermaid_runtime::READ_ONLY_DENIAL_MARKER`]), so a `grep` hit that happens
-///   to contain the marker text is not rewritten;
-/// - it is a no-op in read_only (the denials still apply) and self-corrects if
-///   the user toggles back down.
-///
-/// Runs on the CLONED request vec (like [`evict_stale_screenshots`]); the
-/// on-screen transcript is untouched, and only `content` changes so the
-/// tool_use/tool_result pairing is preserved.
-fn neutralize_superseded_policy_denials(
-    messages: &mut [ChatMessage],
-    mode: mermaid_runtime::SafetyMode,
-) {
-    use mermaid_runtime::SafetyMode;
-    // `Plan` carries the same read-only floor, so a read-only denial recorded
-    // earlier still describes reality and must NOT be retired.
-    if matches!(mode, SafetyMode::ReadOnly | SafetyMode::Plan) {
-        return;
-    }
-    let signature = readonly_denial_signature();
-    for msg in messages.iter_mut() {
-        if msg.role != MessageRole::Tool || !msg.content.contains(&signature) {
-            continue;
-        }
-        // Keep the action summary (everything before " blocked by policy: ") so
-        // the model still knows WHAT was blocked; drop the standing-rule reason.
-        let summary = msg
-            .content
-            .split_once(" blocked by policy: ")
-            .map(|(head, _)| head.trim_end())
-            .filter(|head| !head.is_empty())
-            .unwrap_or("The action");
-        msg.content = format!(
-            "{summary} was blocked earlier while safety mode was read_only. \
-             Safety mode is now {} — that restriction no longer applies; \
-             re-run it if it is still needed.",
-            mode.as_str()
-        );
-    }
-}
-
-/// The `content` infix that marks a persisted **read-only** policy denial: the
-/// gate wraps a `PolicyDecision::Deny` as `"{summary} blocked by policy:
-/// {reason}"`, and every read-only reason starts with
-/// [`mermaid_runtime::READ_ONLY_DENIAL_MARKER`]. Matching the *contiguous* phrase
-/// (not the bare marker) avoids rewriting a `grep` hit that merely contains the
-/// marker text.
-fn readonly_denial_signature() -> String {
-    format!(
-        "blocked by policy: {}",
-        mermaid_runtime::READ_ONLY_DENIAL_MARKER
-    )
-}
-
-/// True if the conversation still carries a read-only policy denial (a tool
-/// result matching [`readonly_denial_signature`]) — used to decide whether a
-/// loosening mode-switch is worth announcing.
-fn history_has_readonly_denial(messages: &[ChatMessage]) -> bool {
-    let signature = readonly_denial_signature();
-    messages
-        .iter()
-        .any(|m| m.role == MessageRole::Tool && m.content.contains(&signature))
-}
-
 /// Content prefix of a [`safety_loosened_note`] — how
 /// [`note_safety_mode_change`] recognizes its own pending nudge to retract it.
 const SAFETY_NUDGE_PREFIX: &str = "Safety mode is now ";
@@ -6270,7 +5285,7 @@ const SAFETY_NUDGE_PREFIX: &str = "Safety mode is now ";
 /// request it steers has gone out. Pairs with
 /// `neutralize_superseded_policy_denials`, which rewrites the denials
 /// themselves on every request.
-fn safety_loosened_note(mode: mermaid_runtime::SafetyMode) -> String {
+pub(crate) fn safety_loosened_note(mode: mermaid_runtime::SafetyMode) -> String {
     format!(
         "{SAFETY_NUDGE_PREFIX}{}; earlier read-only policy blocks no longer apply. \
          Re-attempt gated actions instead of assuming they'll fail.",
@@ -6290,7 +5305,7 @@ fn safety_loosened_note(mode: mermaid_runtime::SafetyMode) -> String {
 /// A loosening long after read_only (no pending nudge) stays silent — the
 /// per-request denial rewrite already covers it, and re-announcing on every
 /// loosening step was the old bug.
-fn note_safety_mode_change(
+pub(crate) fn note_safety_mode_change(
     state: &mut State,
     cmds: &mut Vec<Cmd>,
     previous: mermaid_runtime::SafetyMode,
@@ -6335,7 +5350,7 @@ const PLAN_SLUG_NOUNS: &[&str] = &[
 
 /// FNV-1a — tiny, dependency-free, deterministic across runs (unlike
 /// `DefaultHasher`, whose seed is unspecified).
-fn fnv1a(bytes: &[u8]) -> u64 {
+pub(crate) fn fnv1a(bytes: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in bytes {
         h ^= u64::from(*b);
@@ -6348,7 +5363,7 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 /// <noun>.md` under the project root. The topic comes from the latest user
 /// message (what the plan is about); the word-pair suffix keeps concurrent
 /// sessions in one repo from colliding.
-fn plan_path_for(state: &State) -> std::path::PathBuf {
+pub(crate) fn plan_path_for(state: &State) -> std::path::PathBuf {
     let topic_src = latest_user_intent(&state.session).unwrap_or_default();
     let words: Vec<String> = topic_src
         .split_whitespace()
@@ -6385,7 +5400,7 @@ fn plan_path_for(state: &State) -> std::path::PathBuf {
 
 /// The plan-file path shown to the user: relative to the project root when it
 /// is inside it (it always is today), absolute otherwise.
-fn plan_path_display(state: &State, path: &std::path::Path) -> String {
+pub(crate) fn plan_path_display(state: &State, path: &std::path::Path) -> String {
     path.strip_prefix(&state.cwd)
         .unwrap_or(path)
         .display()
@@ -6398,7 +5413,7 @@ const PLAN_CONFIG_ROW_COUNT: usize = 9;
 
 /// `/plan config` picker keys: ↑/↓ navigate, Enter/←/→ cycle the highlighted
 /// value (persisting the `[plan]` table on every change), Esc closes.
-fn handle_plan_config_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode) {
+pub(crate) fn handle_plan_config_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode) {
     let UiMode::PlanConfig { ref mut cursor } = state.ui.mode else {
         return;
     };
@@ -6429,7 +5444,7 @@ fn handle_plan_config_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode)
 /// Advance one picker row's value. Every change takes effect immediately —
 /// the permission profile rides each tool dispatch, and the model/reasoning
 /// overrides are read at the next plan-mode entry.
-fn cycle_plan_config_row(state: &mut State, row: usize, forward: bool) {
+pub(crate) fn cycle_plan_config_row(state: &mut State, row: usize, forward: bool) {
     use crate::{PlanPermLevel as L, PlanPermissions, PlanPostApprove};
     fn cycle<T: Copy + PartialEq>(order: &[T], current: T, forward: bool) -> T {
         let idx = order.iter().position(|v| *v == current).unwrap_or(0);
@@ -6516,7 +5531,11 @@ fn cycle_plan_config_row(state: &mut State, row: usize, forward: bool) {
 /// model/reasoning overrides, leaving tears them back down. Routing every
 /// switch through here is what lets plan sit in the flat Shift+Tab cycle
 /// without a separate "am I planning?" flag to contradict it.
-fn apply_safety_mode(state: &mut State, cmds: &mut Vec<Cmd>, next: mermaid_runtime::SafetyMode) {
+pub(crate) fn apply_safety_mode(
+    state: &mut State,
+    cmds: &mut Vec<Cmd>,
+    next: mermaid_runtime::SafetyMode,
+) {
     let previous = state.session.safety_mode;
     if previous == next {
         return;
@@ -6551,7 +5570,7 @@ fn apply_safety_mode(state: &mut State, cmds: &mut Vec<Cmd>, next: mermaid_runti
 ///
 /// There is deliberately no remembered per-session restore target: plan is a
 /// safety mode like the others, and a mode does not carry the mode before it.
-fn mode_after_plan(state: &State) -> mermaid_runtime::SafetyMode {
+pub(crate) fn mode_after_plan(state: &State) -> mermaid_runtime::SafetyMode {
     let configured = state.settings.safety.mode;
     if configured.is_planning() {
         mermaid_runtime::SafetyMode::Ask
@@ -6567,7 +5586,10 @@ fn mode_after_plan(state: &State) -> mermaid_runtime::SafetyMode {
 /// system message would interleave between an assistant `tool_use` and its
 /// tool results, so THIS helper never touches the message log. Returns the
 /// allocated path; `None` when already planning or a subagent.
-fn enter_plan_mode_state(state: &mut State, cmds: &mut Vec<Cmd>) -> Option<std::path::PathBuf> {
+pub(crate) fn enter_plan_mode_state(
+    state: &mut State,
+    cmds: &mut Vec<Cmd>,
+) -> Option<std::path::PathBuf> {
     // Children explore, they don't plan (and have no user to approve).
     if state.session.is_subagent || state.session.plan.is_some() {
         return None;
@@ -6624,7 +5646,7 @@ fn enter_plan_mode_state(state: &mut State, cmds: &mut Vec<Cmd>) -> Option<std::
 /// from the context-delta marker the injector appends at the next dispatch
 /// (`advertise_context_changes`), the per-dispatch tail reminder, and the
 /// system-prompt appendix.
-fn enter_plan_mode(state: &mut State, cmds: &mut Vec<Cmd>) {
+pub(crate) fn enter_plan_mode(state: &mut State, cmds: &mut Vec<Cmd>) {
     if let Some(plan) = &state.session.plan {
         let path = plan_path_display(state, &plan.plan_path.clone());
         push_system(
@@ -6641,7 +5663,7 @@ fn enter_plan_mode(state: &mut State, cmds: &mut Vec<Cmd>) {
 /// `Plan` mode for [`mode_after_plan`] if the caller has not already picked a
 /// destination. Callers that DO pick one (`apply_safety_mode`) overwrite
 /// `safety_mode` right after this returns.
-fn restore_plan_overrides(state: &mut State, plan: &super::state::PlanState) {
+pub(crate) fn restore_plan_overrides(state: &mut State, plan: &super::state::PlanState) {
     if let Some(prev) = &plan.prev_model_id {
         state.session.model_id = prev.clone();
         state.runtime.set_model(prev);
@@ -6658,7 +5680,7 @@ fn restore_plan_overrides(state: &mut State, plan: &super::state::PlanState) {
 /// [`mode_after_plan`] — the level the session would have been in had it never
 /// planned. Shift+Tab out of plan goes through [`apply_safety_mode`] instead,
 /// which lands on the next mode in the cycle.
-fn exit_plan_mode(state: &mut State, cmds: &mut Vec<Cmd>) {
+pub(crate) fn exit_plan_mode(state: &mut State, cmds: &mut Vec<Cmd>) {
     let Some(plan) = state.session.plan.take() else {
         push_system(
             state,
@@ -6679,7 +5701,7 @@ fn exit_plan_mode(state: &mut State, cmds: &mut Vec<Cmd>) {
 /// every `session.plan -> None` transition must call this, or an exit mid-run
 /// leaves "plan mode is active" riding the next boundary dispatch (and a
 /// stale thrash counter waiting for the next plan).
-fn retract_plan_reminder(state: &mut State) {
+pub(crate) fn retract_plan_reminder(state: &mut State) {
     state.session.conversation.messages_mut().retain(|m| {
         m.kind != mermaid_model::models::ChatMessageKind::RecoveryNudge
             || !m.content.starts_with(PLAN_REMINDER_PREFIX)
@@ -6691,12 +5713,12 @@ fn retract_plan_reminder(state: &mut State) {
 /// The `content` infix that marks a persisted **plan-mode** policy denial.
 /// Sibling of [`readonly_denial_signature`], keyed on
 /// [`mermaid_runtime::PLAN_DENIAL_MARKER`].
-fn plan_denial_signature() -> String {
+pub(crate) fn plan_denial_signature() -> String {
     format!("blocked by policy: {}", mermaid_runtime::PLAN_DENIAL_MARKER)
 }
 
 /// True if the conversation still carries a plan-mode policy denial.
-fn history_has_plan_denial(messages: &[ChatMessage]) -> bool {
+pub(crate) fn history_has_plan_denial(messages: &[ChatMessage]) -> bool {
     let signature = plan_denial_signature();
     messages
         .iter()
@@ -6707,7 +5729,7 @@ fn history_has_plan_denial(messages: &[ChatMessage]) -> bool {
 /// mode ends, its denials stop describing the live policy — rewrite them to a
 /// past-tense note so the wire history stops contradicting the current mode.
 /// No-op while planning (the denials still apply).
-fn neutralize_superseded_plan_denials(messages: &mut [ChatMessage], plan_active: bool) {
+pub(crate) fn neutralize_superseded_plan_denials(messages: &mut [ChatMessage], plan_active: bool) {
     if plan_active {
         return;
     }
@@ -6736,7 +5758,7 @@ fn neutralize_superseded_plan_denials(messages: &mut [ChatMessage], plan_active:
 /// it replay-deterministic; the wholesale `SyncTaskStore` mirrors the
 /// fork/clear reset path (the broker's `seed` doesn't publish — the reducer
 /// already holds the truth).
-fn seed_plan_tasks(state: &mut State, cmds: &mut Vec<Cmd>, body: &str) {
+pub(crate) fn seed_plan_tasks(state: &mut State, cmds: &mut Vec<Cmd>, body: &str) {
     let specs = super::plan::parse_plan_tasks(body);
     if specs.is_empty() {
         return;
@@ -6778,7 +5800,7 @@ fn seed_plan_tasks(state: &mut State, cmds: &mut Vec<Cmd>, body: &str) {
 /// mint the next conversation (fork carries the transcript + checklist;
 /// fresh starts from the plan alone), optionally switch models, seed the
 /// checklist, and drive the kickoff turn.
-fn handoff_plan_mode(
+pub(crate) fn handoff_plan_mode(
     state: &mut State,
     cmds: &mut Vec<Cmd>,
     body: &str,
@@ -6867,7 +5889,7 @@ fn handoff_plan_mode(
 /// Returns `true` when the outcome triggered a conversation handoff (fresh
 /// or fork) — the caller must then abandon the executing turn instead of
 /// appending its tool results into the NEW conversation.
-fn plan_tool_transition(
+pub(crate) fn plan_tool_transition(
     state: &mut State,
     cmds: &mut Vec<Cmd>,
     call_id: mermaid_model::ids::ToolCallId,
@@ -6914,7 +5936,7 @@ fn plan_tool_transition(
 /// The user approved the plan (`exit_plan_mode` returned `ToolMetadata::
 /// Plan`): leave plan mode, seed the checklist from the plan's Tasks section,
 /// and optionally queue the implementation kickoff.
-fn finish_plan_mode(state: &mut State, cmds: &mut Vec<Cmd>, body: &str, start: bool) {
+pub(crate) fn finish_plan_mode(state: &mut State, cmds: &mut Vec<Cmd>, body: &str, start: bool) {
     let Some(plan) = state.session.plan.take() else {
         // Stale or duplicate approval — nothing to transition.
         return;
@@ -6945,6 +5967,7 @@ fn finish_plan_mode(state: &mut State, cmds: &mut Vec<Cmd>, body: &str, start: b
 mod tests {
     use super::*;
     use crate::Config;
+    use crate::cmd::ChatRequest;
     use crate::msg::{Key, KeyCode, KeyMods};
     use crate::state::{McpServerEntry, McpState, PendingToolCall, UiState};
     use crate::transition::start_executing_tools;

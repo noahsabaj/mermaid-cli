@@ -40,6 +40,8 @@ pub mod plan;
 pub mod progress;
 pub mod prompts;
 pub mod reducer;
+pub mod reports;
+pub mod request;
 pub mod run_event;
 pub mod runtime;
 pub mod slash_commands;
@@ -83,7 +85,8 @@ pub use msg::{
     ClipboardRead, ContextCmd, Key, KeyCode, KeyMods, Msg, MsgKind, Paste, SlashCmd, StartupConfig,
 };
 pub use progress::{ProgressEvent, SubagentPhase};
-pub use reducer::{build_chat_request, update};
+pub use reducer::update;
+pub use request::build_chat_request;
 pub use run_event::{RUN_EVENT_PROTOCOL_VERSION, RunEvent};
 pub use runtime::{
     ProviderCapabilitySnapshot, RuntimeSignal, RuntimeState, RuntimeTimelineEvent,
