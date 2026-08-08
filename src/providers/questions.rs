@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use crate::domain::{Msg, Question, QuestionResolution, ToolCallId, TurnId};
+use mermaid_domain::{Msg, Question, QuestionResolution, ToolCallId, TurnId};
 
 /// Owned by the interactive `EffectRunner`, cloned into each `ExecContext`.
 /// Absent (`None`) in headless runs — the tool then proceeds without a human.
@@ -102,13 +102,13 @@ impl QuestionBroker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{QuestionAnswer, QuestionOption};
+    use mermaid_domain::{QuestionAnswer, QuestionOption};
 
     fn sample_questions() -> Vec<Question> {
         vec![Question {
             header: "Database".to_string(),
             question: "Which database?".to_string(),
-            kind: crate::domain::QuestionKind::Select,
+            kind: mermaid_domain::QuestionKind::Select,
             options: vec![QuestionOption {
                 label: "PostgreSQL".to_string(),
                 description: None,

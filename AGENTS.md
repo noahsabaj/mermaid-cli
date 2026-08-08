@@ -5,7 +5,8 @@ tests hold the detail; this is what's easy to get wrong.
 
 ## Architecture: pure MVU core, effects as data
 
-- `src/domain/` is a **pure** Model-View-Update core. The reducer is
+- `crates/mermaid-domain/` is a **pure** Model-View-Update core, and it is a
+  crate so the compiler enforces that rather than a reviewer. The reducer is
   `fn update(State, Msg) -> (State, Vec<Cmd>)`: synchronous, no `.await`, no
   wildcard `_ =>` arms that hide new `Msg`s (`update_step` carries
   `#[deny(clippy::wildcard_enum_match_arm, clippy::match_wildcard_for_single_variants)]`
@@ -14,9 +15,9 @@ tests hold the detail; this is what's easy to get wrong.
   `state.now`, injected, so `--replay` is deterministic). Effects are **data**
   (`Cmd`); the impure shell (`src/effect/`) executes them. `render(&State)` is
   pure too — a function of domain state and nothing else.
-  `.github/scripts/check_layering.py` enforces both properties for
-  `src/domain`, `src/render`, and `src/prompts.rs`: they may only reach
-  *downward*, and none of them may touch the filesystem, the network, a
+  The crate boundary owns DIRECTION;
+  `.github/scripts/check_layering.py` owns the half no manifest can express —
+  purity — for `mermaid-domain` and `src/render`: neither and none of them may touch the filesystem, the network, a
   process, an async runtime, or the wall clock. Dependency **direction** is the
   half the old guard could not see — `use crate::app::Config` contains no
   forbidden token — and it is how the "pure" core came to hold 34 upward edges,

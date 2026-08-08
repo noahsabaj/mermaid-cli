@@ -33,38 +33,30 @@ class Layer(NamedTuple):
 
 LAYERS: dict[str, Layer] = {
     # -- rank 1: the pure MVU core -----------------------------------------
-    "src/domain": Layer(
-        may_use=frozenset({"models", "constants", "utils", "runtime", "prompts"}),
+    "crates/mermaid-domain/src": Layer(
+        may_use=frozenset({"models", "constants", "utils", "runtime"}),
         pure=True,
         why=(
-            "`src/domain` is the pure MVU core: `fn update(State, Msg) -> "
+            "`mermaid-domain` is the pure MVU core: `fn update(State, Msg) -> "
             "(State, Vec<Cmd>)`. Effects are DATA — if the reducer needs the "
             "shell, emit a `Cmd` and handle it in `src/effect`. If it needs a "
             "TYPE that lives above it (a config struct, a conversation "
             "record), move the type DOWN; do not reach up for it. "
-            "`crate::runtime` is allowed because the names domain uses from it "
+            "Direction is enforced by the crate boundary now; this guard covers "
+            "the purity half, which no manifest can express. "
             "(`SafetyMode`, `TaskStatus`, the storage record structs) are plain "
             "value types."
         ),
     ),
     # -- rank 2: the pure view ---------------------------------------------
     "src/render": Layer(
-        may_use=frozenset({"domain", "models", "constants", "utils", "runtime"}),
+        may_use=frozenset({"domain", "mermaid_domain", "models", "constants", "utils", "runtime"}),
         pure=True,
         why=(
             "`render(&State) -> Frame` is a pure function of domain state. "
             "Everything the frame shows must arrive through `State` or "
             "`RenderCache` — resolved once at startup by the shell, not read "
             "from the environment or the clock per frame."
-        ),
-    ),
-    # -- rank 0: leaf ------------------------------------------------------
-    "src/prompts.rs": Layer(
-        may_use=frozenset({"models", "constants", "utils"}),
-        pure=True,
-        why=(
-            "`src/prompts.rs` is a leaf string table. `src/domain` imports "
-            "`get_system_prompt` from it, so it must stay below domain."
         ),
     ),
 }
@@ -80,7 +72,7 @@ IMPURE = [
     (r"\bstd::io\b", "std::io"),
     (r"\bstd::thread\b", "std::thread"),
     # `std::env::consts::{OS,ARCH}` are compile-time `&'static str`s, not a
-    # runtime environment read — `src/prompts.rs` uses them to name the host
+    # runtime environment read — `domain::prompts` uses them to name the host
     # platform in the system prompt, which is deterministic. Everything else
     # under `std::env` reads the live process environment.
     (r"\bstd::env\b(?!::consts\b)", "std::env"),
@@ -371,10 +363,16 @@ def main(argv: list[str]) -> int:
 
         # -- import edges ---------------------------------------------------
         me = own_module(prefix)
+        is_crate_root = prefix.startswith("crates/")
         seen: set[tuple[str, int]] = set()
 
         def note_edge(target: str, offset: int) -> None:
             target = ALIASES.get(target, target)
+            # Inside a crate root, `crate::X` names one of that crate's OWN
+            # modules — the boundary itself is enforced by `Cargo.toml`, so
+            # this guard only owes the purity half there.
+            if is_crate_root and target not in ALIASES.values():
+                return
             if target == me or target in layer.may_use:
                 return
             line = line_of(code, offset)

@@ -64,10 +64,7 @@ struct Scheduler {
     /// the subscriber holds a receiver on the sender the executor later uses.
     /// Entries are removed by a drop guard after the terminal status persists.
     streams: std::sync::Mutex<
-        std::collections::HashMap<
-            String,
-            tokio::sync::broadcast::Sender<mermaid_cli::domain::RunEvent>,
-        >,
+        std::collections::HashMap<String, tokio::sync::broadcast::Sender<mermaid_domain::RunEvent>>,
     >,
 }
 
@@ -79,7 +76,7 @@ impl Scheduler {
     fn stream_for(
         &self,
         task_id: &str,
-    ) -> tokio::sync::broadcast::Sender<mermaid_cli::domain::RunEvent> {
+    ) -> tokio::sync::broadcast::Sender<mermaid_domain::RunEvent> {
         self.streams
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -818,7 +815,7 @@ where
             "ok": true,
             "subscribed": task_id,
             "status": task.status.to_string(),
-            "protocol_version": mermaid_cli::domain::RUN_EVENT_PROTOCOL_VERSION,
+            "protocol_version": mermaid_domain::RUN_EVENT_PROTOCOL_VERSION,
         })
         .to_string(),
     )
@@ -836,7 +833,7 @@ where
             mermaid_runtime::TaskStatus::Completed => Vec::new(),
             status => vec![format!("task ended {status}")],
         };
-        let event = mermaid_cli::domain::RunEvent::Result {
+        let event = mermaid_domain::RunEvent::Result {
             response: task.final_report.clone().unwrap_or_default(),
             reasoning: None,
             total_tokens: 0,
@@ -851,7 +848,7 @@ where
     loop {
         match rx.recv().await {
             Ok(event) => {
-                let terminal = matches!(event, mermaid_cli::domain::RunEvent::Result { .. });
+                let terminal = matches!(event, mermaid_domain::RunEvent::Result { .. });
                 write_line(&mut stream, &serde_json::to_string(&event)?).await?;
                 if terminal {
                     break;
@@ -859,7 +856,7 @@ where
             },
             // Lagged: stay inside the RunEvent contract with an error event.
             Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                let event = mermaid_cli::domain::RunEvent::Error {
+                let event = mermaid_domain::RunEvent::Error {
                     message: format!("subscriber lagged; {n} events dropped"),
                 };
                 write_line(&mut stream, &serde_json::to_string(&event)?).await?;
@@ -1699,12 +1696,12 @@ mod tests {
         let mut rx = early.subscribe();
         let executor_side = sched.stream_for("t1");
         executor_side
-            .send(mermaid_cli::domain::RunEvent::Error {
+            .send(mermaid_domain::RunEvent::Error {
                 message: "hello".to_string(),
             })
             .expect("subscriber attached");
         match rx.try_recv().expect("event delivered") {
-            mermaid_cli::domain::RunEvent::Error { message } => assert_eq!(message, "hello"),
+            mermaid_domain::RunEvent::Error { message } => assert_eq!(message, "hello"),
             other => panic!("wrong event: {other:?}"),
         }
         // Drop guard cleans the entry; the next stream_for is a fresh channel.

@@ -10,11 +10,11 @@ use ratatui::{
 use rustc_hash::FxHashMap;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::domain::{
-    ActionDetails, ActionDisplay, ActionResult, QuestionAnswer, ToolMetadata, format_compact_count,
-};
 use crate::render::markdown::parse_markdown;
 use crate::render::theme::Theme;
+use mermaid_domain::{
+    ActionDetails, ActionDisplay, ActionResult, QuestionAnswer, ToolMetadata, format_compact_count,
+};
 use mermaid_model::diff::{DiffLineKind, parse_diff_line};
 use mermaid_model::models::ChatMessageKind;
 use mermaid_model::models::{ChatMessage, MessageRole};
@@ -2102,7 +2102,7 @@ mod tests {
 
     #[test]
     fn question_answers_render_as_question_arrow_answer_block() {
-        use crate::domain::{QuestionAnswer, ToolMetadata, ToolRunMetadata};
+        use mermaid_domain::{QuestionAnswer, ToolMetadata, ToolRunMetadata};
 
         let theme = Theme::dark();
         let answers = vec![

@@ -21,8 +21,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
-use crate::domain::{ChatRequest, TurnId};
 use crate::providers::factory::ProviderFactory;
+use mermaid_domain::{ChatRequest, TurnId};
 use mermaid_model::models::{ChatMessage, ReasoningLevel};
 
 /// How long to wait for the classifier before failing safe (escalating).
@@ -442,7 +442,7 @@ mod tests {
             arguments: None,
             intent: None,
             workdir: "/tmp".to_string(),
-            turn: crate::domain::TurnId(1),
+            turn: mermaid_domain::TurnId(1),
             token: tokio_util::sync::CancellationToken::new(),
         }
     }

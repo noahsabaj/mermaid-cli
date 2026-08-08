@@ -10,8 +10,8 @@ use std::time::Instant;
 use async_trait::async_trait;
 use serde_json::Value;
 
-use crate::domain::{ToolDefinition, ToolOutcome};
 use crate::providers::ctx::ExecContext;
+use mermaid_domain::{ToolDefinition, ToolOutcome};
 use mermaid_model::constants::POST_KEY_DELAY_MS;
 
 use super::super::ToolExecutor;

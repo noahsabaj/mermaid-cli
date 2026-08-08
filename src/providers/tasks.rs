@@ -27,8 +27,8 @@ use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc;
 
-use crate::domain::Msg;
-use crate::domain::checklist::{
+use mermaid_domain::Msg;
+use mermaid_domain::checklist::{
     ApplyReport, ChecklistEdit, ChecklistItem, ChecklistOrigin, ChecklistSpec, ChecklistStatus,
     ChecklistStore, EvidenceEntry, Stamp, UserChecklistEdit,
 };

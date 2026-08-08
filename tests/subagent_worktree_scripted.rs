@@ -15,13 +15,13 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use mermaid_cli::domain::{ToolCallId, ToolStatus, TurnId};
 use mermaid_cli::providers::ProviderFactory;
 use mermaid_cli::providers::ctx::test_exec_context_with_config;
 use mermaid_cli::providers::model::ModelProvider;
 use mermaid_cli::providers::tool::ToolExecutor;
 use mermaid_cli::providers::tool::subagent::{SubagentSpawner, SubagentTool};
 use mermaid_cli::providers::tool::web::WebCapabilities;
+use mermaid_domain::{ToolCallId, ToolStatus, TurnId};
 use mermaid_runtime::SafetyMode;
 use mermaid_runtime::git::git;
 
@@ -46,8 +46,8 @@ fn project(tag: &str) -> Option<PathBuf> {
     Some(dir)
 }
 
-fn config() -> mermaid_cli::domain::Config {
-    let mut config = mermaid_cli::domain::Config::default();
+fn config() -> mermaid_domain::Config {
+    let mut config = mermaid_domain::Config::default();
     // The child must write without an approval UI; the gate has its own tests.
     config.safety.mode = SafetyMode::FullAccess;
     // Never write checkpoints into the developer's real data dir.

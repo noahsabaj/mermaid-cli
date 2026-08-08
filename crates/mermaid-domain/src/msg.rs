@@ -21,8 +21,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::domain::LoadedInstructions;
-use crate::domain::McpServerConfig;
+use crate::LoadedInstructions;
+use crate::McpServerConfig;
 use mermaid_model::models::tool_call::ToolCall as ModelToolCall;
 use mermaid_model::models::{
     FinishReason, ProviderContinuation, ReasoningChunk, ReasoningLevel, TokenUsage, UserFacingError,
@@ -212,7 +212,7 @@ pub enum Msg {
     ToolProgress {
         turn: TurnId,
         call_id: ToolCallId,
-        event: crate::domain::ProgressEvent,
+        event: crate::ProgressEvent,
     },
     /// Tool finished (one of Finished / Error / Cancelled).
     ToolFinished {
@@ -251,7 +251,7 @@ pub enum Msg {
     /// turn-scoped: `/tasks` edits arrive outside any turn, and gating would
     /// only let the render copy drift from the broker's truth.
     TasksUpdated {
-        store: crate::domain::checklist::ChecklistStore,
+        store: crate::checklist::ChecklistStore,
     },
     /// A one-line checklist notice for the model's next request (user
     /// `/todos` edit, vetoed completion). Buffered on
@@ -291,18 +291,18 @@ pub enum Msg {
     /// Memory files loaded / changed / removed since last check.
     /// Git branch/SHA/CLI version probed once at startup by the shell.
     /// Fill-blanks-only: a resumed session keeps what it was saved with.
-    SessionProvenanceResolved(crate::domain::SessionProvenance),
-    MemoryChanged(Option<crate::domain::LoadedMemory>),
+    SessionProvenanceResolved(crate::SessionProvenance),
+    MemoryChanged(Option<crate::LoadedMemory>),
     /// `save_conversation` finished.
     SessionSaved,
     /// `/load <id>` — a saved conversation has been read off disk.
-    ConversationLoaded(crate::domain::ConversationHistory),
+    ConversationLoaded(crate::ConversationHistory),
     /// Response to `Cmd::ListConversations`. Populates the `/load`
     /// picker's candidate list.
     ConversationsListed(Vec<ConversationSummary>),
     /// Discovery for the `/model` picker finished. Carries every model the
     /// user can switch to, already grouped and sorted by the effect layer.
-    AvailableModelsListed(Vec<crate::domain::state::ModelChoice>),
+    AvailableModelsListed(Vec<crate::state::ModelChoice>),
     /// Response to `Cmd::ListProjectFiles`: relative project paths for the
     /// @-mention picker (gitignore-aware walk, capped, sorted; directories
     /// carry a trailing `/`).
@@ -364,7 +364,7 @@ pub enum Msg {
     },
 
     /// Ephemeral confirmation of a manual action (clipboard copy), shown just
-    /// above the input for [`crate::domain::state::TOAST_TTL`] and then gone. The
+    /// above the input for [`crate::state::TOAST_TTL`] and then gone. The
     /// sibling of `TransientStatus` for feedback that must NOT become a
     /// permanent transcript row.
     Toast {

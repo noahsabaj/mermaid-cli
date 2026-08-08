@@ -7,7 +7,7 @@
 
 use async_trait::async_trait;
 
-use crate::domain::ChatRequest;
+use mermaid_domain::ChatRequest;
 use mermaid_model::models::adapters::gemini::GeminiAdapter;
 use mermaid_model::models::{Model, ModelConfig, ModelError, Result};
 

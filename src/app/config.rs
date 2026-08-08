@@ -1,4 +1,4 @@
-//! Loading, layering, merging and persisting [`crate::domain::Config`].
+//! Loading, layering, merging and persisting [`mermaid_domain::Config`].
 //!
 //! The types themselves live in `src/domain/config.rs` — see that module for
 //! why. This half is the impure one: it reads files, walks the layer cascade
@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use mermaid_model::constants::LEGACY_DEFAULT_MAX_TOKENS;
 use mermaid_model::models::ReasoningLevel;
 
-use crate::domain::config::*;
+use mermaid_domain::config::*;
 
 /// Remove the `profiles` table from a raw user-config table and return it
 /// (empty when absent). `[profiles.<name>]` overlays must NEVER reach
@@ -137,7 +137,7 @@ pub fn load_layered_config(
     layers.push(LayerSource {
         layer: ConfigLayer::Session,
         origin: "command line".to_string(),
-        table: flags.to_table()?,
+        table: session_flags_table(flags)?,
     });
     let (mut config, unknown_key_warnings) = merge_layers(layers)?;
     config.active_profile = flags.profile.clone();
@@ -414,8 +414,7 @@ pub fn load_layered_config_or_warn(cwd: Option<&std::path::Path>, flags: &Sessio
                 "mermaid: {}",
                 mermaid_model::utils::redact_secrets(&format!("{e:#}"))
             );
-            flags
-                .to_table()
+            session_flags_table(flags)
                 .ok()
                 .and_then(|table| finalize_config(table).ok())
                 .map(|(config, _)| config)
@@ -734,43 +733,47 @@ fn resolve_model_alias(requested: &str, config: &Config) -> anyhow::Result<Optio
     Ok(None)
 }
 
-impl SessionFlags {
-    /// Render the flags as the `Session` layer's raw table. `-c` overrides go
-    /// in first; the dedicated flags deep-set on top of them, preserving the
-    /// historical ordering where `--no-network` beats `-c safety.network=allow`.
-    pub(crate) fn to_table(&self) -> Result<toml::Table> {
-        let mut table = toml::Table::new();
-        apply_cli_overrides(&mut table, &self.overrides)?;
-        if self.deny_network {
-            deep_set_segments(
-                &mut table,
-                &["safety", "network"],
-                toml::Value::String("deny".into()),
-            )?;
-        }
-        if self.confine_fs {
-            deep_set_segments(
-                &mut table,
-                &["safety", "filesystem"],
-                toml::Value::String("project".into()),
-            )?;
-        }
-        if let Some(n) = self.max_tokens {
-            deep_set_segments(
-                &mut table,
-                &["default_model", "max_tokens"],
-                toml::Value::Integer(n as i64),
-            )?;
-        }
-        if self.allow_untrusted_tools {
-            deep_set_segments(
-                &mut table,
-                &["safety", "allow_untrusted_headless_tools"],
-                toml::Value::Boolean(true),
-            )?;
-        }
-        Ok(table)
+/// Render `SessionFlags` as the `Session` layer's raw table.
+///
+/// A free function, not an inherent method: `SessionFlags` is defined in
+/// `mermaid-domain` and this needs the merge helpers, which are behavior and
+/// live here. The orphan rule makes that split explicit rather than optional.
+///
+/// `-c` overrides go in first; the dedicated flags deep-set on top of them,
+/// preserving the ordering where `--no-network` beats
+/// `-c safety.network=allow`.
+pub(crate) fn session_flags_table(flags: &SessionFlags) -> Result<toml::Table> {
+    let mut table = toml::Table::new();
+    apply_cli_overrides(&mut table, &flags.overrides)?;
+    if flags.deny_network {
+        deep_set_segments(
+            &mut table,
+            &["safety", "network"],
+            toml::Value::String("deny".into()),
+        )?;
     }
+    if flags.confine_fs {
+        deep_set_segments(
+            &mut table,
+            &["safety", "filesystem"],
+            toml::Value::String("project".into()),
+        )?;
+    }
+    if let Some(n) = flags.max_tokens {
+        deep_set_segments(
+            &mut table,
+            &["default_model", "max_tokens"],
+            toml::Value::Integer(n as i64),
+        )?;
+    }
+    if flags.allow_untrusted_tools {
+        deep_set_segments(
+            &mut table,
+            &["safety", "allow_untrusted_headless_tools"],
+            toml::Value::Boolean(true),
+        )?;
+    }
+    Ok(table)
 }
 
 #[cfg(test)]
@@ -1097,7 +1100,7 @@ mod tests {
             allow_untrusted_tools: true,
             profile: None,
         };
-        let (config, _) = finalize_config(flags.to_table().unwrap()).unwrap();
+        let (config, _) = finalize_config(session_flags_table(&flags).unwrap()).unwrap();
         assert_eq!(config.safety.network, NetworkPolicy::Deny);
         assert_eq!(config.safety.filesystem, FilesystemPolicy::Project);
         assert_eq!(config.default_model.max_tokens, 512);
@@ -1114,7 +1117,7 @@ mod tests {
             deny_network: true,
             ..Default::default()
         };
-        let (config, _) = finalize_config(flags.to_table().unwrap()).unwrap();
+        let (config, _) = finalize_config(session_flags_table(&flags).unwrap()).unwrap();
         assert_eq!(config.safety.network, NetworkPolicy::Deny);
     }
 
@@ -1200,8 +1203,7 @@ mod tests {
             deny_network: true,
             ..Default::default()
         };
-        let config = flags
-            .to_table()
+        let config = session_flags_table(&flags)
             .ok()
             .and_then(|table| finalize_config(table).ok())
             .map(|(config, _)| config)
@@ -1680,7 +1682,7 @@ port = 11434
         let c: Config = toml::from_str("").expect("empty config parses");
         assert_eq!(
             c.compaction.policy(),
-            crate::domain::CompactionPolicy::default(),
+            mermaid_domain::CompactionPolicy::default(),
         );
     }
 
@@ -1702,7 +1704,7 @@ port = 11434
         assert_eq!(policy.tail_token_budget, 12_000);
         assert_eq!(policy.summary_max_tokens, 3_000);
         // Unset keys keep their defaults rather than zeroing out.
-        let defaults = crate::domain::CompactionPolicy::default();
+        let defaults = mermaid_domain::CompactionPolicy::default();
         assert_eq!(policy.tool_output_max_chars, defaults.tool_output_max_chars);
     }
 
@@ -1723,7 +1725,7 @@ port = 11434
         )
         .expect("config parses");
         let policy = c.compaction.policy();
-        let defaults = crate::domain::CompactionPolicy::default();
+        let defaults = mermaid_domain::CompactionPolicy::default();
 
         assert_eq!(policy.auto_threshold_percent, 100, "percent clamps to 100");
         assert_eq!(

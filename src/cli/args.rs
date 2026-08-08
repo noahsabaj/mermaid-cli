@@ -118,7 +118,7 @@ impl Cli {
     /// flags (`--no-network`/`--confine-fs`/`--sandbox`, and `run`'s
     /// `--max-tokens`/`--allow-untrusted-tools`). Prompt flags and
     /// `--reasoning` stay outside the layer merge — see `apply_prompt_flags`.
-    pub fn session_flags(&self) -> crate::domain::SessionFlags {
+    pub fn session_flags(&self) -> mermaid_domain::SessionFlags {
         let (max_tokens, allow_untrusted_tools) = match &self.command {
             Some(Commands::Run {
                 max_tokens,
@@ -127,7 +127,7 @@ impl Cli {
             }) => (*max_tokens, *allow_untrusted_tools),
             _ => (None, false),
         };
-        crate::domain::SessionFlags {
+        mermaid_domain::SessionFlags {
             overrides: self.config_overrides.clone(),
             deny_network: self.no_network || self.sandbox,
             confine_fs: self.confine_fs || self.sandbox,

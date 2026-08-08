@@ -31,8 +31,8 @@
 //! reject. Deliberate visual changes update the `.snap` files in the same PR.
 
 use super::{RenderCache, render_frame};
-use crate::domain::Config;
-use crate::domain::{
+use mermaid_domain::Config;
+use mermaid_domain::{
     ActionDetails, ActionDisplay, ActionResult, ApprovalKind, GenPhase, PendingApproval,
     PendingToolCall, QueuedMessage, State, ToolCallId, TurnId, TurnState, UiMode,
 };
@@ -192,7 +192,7 @@ fn busy_tools_with_queue() {
 /// pendings, and one user-added task. Exercises glyphs, strikethrough, the
 /// cost suffix, the `(you)` marker, and the spinner-headline takeover.
 fn task_run_state() -> State {
-    use crate::domain::checklist::{ChecklistEdit, ChecklistSpec, ChecklistStatus, Stamp};
+    use mermaid_domain::checklist::{ChecklistEdit, ChecklistSpec, ChecklistStatus, Stamp};
     let mut s = scene_state();
     s.session
         .append(ChatMessage::user("ship the feature"), s.now);
@@ -219,7 +219,7 @@ fn task_run_state() -> State {
                 in_progress: false,
             })
             .collect(),
-        crate::domain::ChecklistOrigin::Model,
+        mermaid_domain::ChecklistOrigin::Model,
         Stamp::default(),
     );
     s.session.conversation.tasks.create(
@@ -229,7 +229,7 @@ fn task_run_state() -> State {
             description: None,
             in_progress: false,
         }],
-        crate::domain::ChecklistOrigin::User,
+        mermaid_domain::ChecklistOrigin::User,
         Stamp::default(),
     );
     let edit = |id, status| ChecklistEdit {
@@ -299,7 +299,7 @@ fn task_checklist_collapsed() {
 #[test]
 fn task_checklist_retires_when_done_and_idle() {
     assert_scene("task_checklist_retired", || {
-        use crate::domain::checklist::{ChecklistEdit, ChecklistStatus, Stamp};
+        use mermaid_domain::checklist::{ChecklistEdit, ChecklistStatus, Stamp};
         let mut s = task_run_state();
         let ids: Vec<u32> = s
             .session
@@ -350,14 +350,14 @@ fn busy_agents_panel() {
         };
         s.ui.live_tool_status.insert(
             ToolCallId(1),
-            crate::domain::LiveToolStatus {
+            mermaid_domain::LiveToolStatus {
                 activity: "read_file…".to_string(),
                 tokens: 12_300,
             },
         );
         s.ui.live_tool_status.insert(
             ToolCallId(2),
-            crate::domain::LiveToolStatus {
+            mermaid_domain::LiveToolStatus {
                 activity: "thinking".to_string(),
                 tokens: 8_100,
             },
@@ -365,7 +365,7 @@ fn busy_agents_panel() {
         // One agent detached earlier via Ctrl+B: still on the panel, marked bg.
         s.runtime
             .background_agents
-            .push(crate::domain::runtime::BackgroundAgent {
+            .push(mermaid_domain::runtime::BackgroundAgent {
                 agent_id: "a9".to_string(),
                 description: "Audit docs and conventions".to_string(),
                 started: std::time::SystemTime::from(fixed_now() - chrono::Duration::seconds(90)),
@@ -411,7 +411,7 @@ fn mixed_exec_and_agent_turn() {
         };
         s.ui.live_tool_status.insert(
             ToolCallId(2),
-            crate::domain::LiveToolStatus {
+            mermaid_domain::LiveToolStatus {
                 activity: "starting…".to_string(),
                 tokens: 0,
             },
@@ -478,7 +478,7 @@ fn question_modal() {
 #[test]
 fn conversation_list() {
     assert_scene("conversation_list", || {
-        use crate::domain::ConversationSummary;
+        use mermaid_domain::ConversationSummary;
         let mut s = scene_state();
         s.ui.mode = UiMode::ConversationList {
             candidates: vec![

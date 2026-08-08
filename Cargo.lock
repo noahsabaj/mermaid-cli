@@ -2357,6 +2357,7 @@ dependencies = [
  "insta",
  "jsonschema",
  "keyring",
+ "mermaid-domain",
  "mermaid-model",
  "mermaid-runtime",
  "mime",
@@ -2388,6 +2389,25 @@ dependencies = [
  "url",
  "vt100",
  "which",
+]
+
+[[package]]
+name = "mermaid-domain"
+version = "0.21.1"
+dependencies = [
+ "anyhow",
+ "base64",
+ "chrono",
+ "mermaid-model",
+ "mermaid-runtime",
+ "nucleo-matcher",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "toml",
+ "tracing",
+ "url",
 ]
 
 [[package]]

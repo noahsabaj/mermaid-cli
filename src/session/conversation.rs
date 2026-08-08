@@ -1,6 +1,6 @@
-use crate::domain::{CompactionArchive, ConversationHistory};
 use anyhow::Result;
 use chrono::{DateTime, Local};
+use mermaid_domain::{CompactionArchive, ConversationHistory};
 use mermaid_model::models::{ChatMessage, MessageRole};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -513,8 +513,8 @@ impl ConversationManager {
 /// Probe the session's provenance. Impure — spawns `git` twice — so it is a
 /// value the shell resolves once at startup and delivers as
 /// `Msg::SessionProvenanceResolved`.
-pub fn probe_session_provenance(cwd: &Path) -> crate::domain::SessionProvenance {
-    crate::domain::SessionProvenance {
+pub fn probe_session_provenance(cwd: &Path) -> mermaid_domain::SessionProvenance {
+    mermaid_domain::SessionProvenance {
         git_branch: detect_git_branch(cwd),
         git_sha: detect_git_sha(cwd),
         cli_version: Some(env!("CARGO_PKG_VERSION").to_string()),
@@ -579,7 +579,7 @@ mod tests {
         assert_eq!(conv.safety_mode, None);
         assert_eq!(
             conv.cumulative_token_usage,
-            crate::domain::TokenUsageTotals::default()
+            mermaid_domain::TokenUsageTotals::default()
         );
         assert!(conv.last_token_usage.is_none());
         assert!(conv.context_usage.is_none());
@@ -594,7 +594,7 @@ mod tests {
     #[test]
     fn advertised_context_round_trips_through_conversation_json() {
         let mut fresh = touched("/tmp/proj");
-        fresh.advertised_context = Some(crate::domain::AdvertisedContext {
+        fresh.advertised_context = Some(mermaid_domain::AdvertisedContext {
             plan_path: Some(std::path::PathBuf::from("/tmp/proj/.mermaid/plans/x.md")),
             safety_mode: mermaid_runtime::SafetyMode::Ask,
             model_id: "ollama/test".to_string(),
@@ -613,14 +613,14 @@ mod tests {
     fn tasks_round_trip_through_conversation_json() {
         let mut fresh = touched("/tmp/proj");
         fresh.tasks.create(
-            vec![crate::domain::ChecklistSpec {
+            vec![mermaid_domain::ChecklistSpec {
                 subject: "wire broker".into(),
                 active_form: "wiring broker".into(),
                 description: Some("through ExecContext".into()),
                 in_progress: true,
             }],
-            crate::domain::ChecklistOrigin::Model,
-            crate::domain::Stamp {
+            mermaid_domain::ChecklistOrigin::Model,
+            mermaid_domain::Stamp {
                 now_epoch: 42,
                 run_tokens: 7,
             },
@@ -635,7 +635,7 @@ mod tests {
     fn session_state_round_trips_through_json() {
         let mut conv = ConversationHistory::new("/tmp/p".into(), "m".into(), Local::now());
         conv.safety_mode = Some(mermaid_runtime::SafetyMode::FullAccess);
-        conv.cumulative_token_usage = crate::domain::TokenUsageTotals {
+        conv.cumulative_token_usage = mermaid_domain::TokenUsageTotals {
             prompt_tokens: 777,
             ..Default::default()
         };

@@ -12,7 +12,7 @@
 //! file is gone, drop the instructions. One stat per turn is
 //! microseconds — no need for a filesystem watcher.
 
-use crate::domain::{InstructionSource, LoadedInstructions};
+use mermaid_domain::{InstructionSource, LoadedInstructions};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -27,14 +27,6 @@ pub const INSTRUCTION_FILENAMES: &[&str] = &["AGENTS.md", "MERMAID.md"];
 /// Hard cap on how many directory levels `find_instruction_files` walks up
 /// before giving up. Guards against pathological symlink loops.
 const MAX_WALK_DEPTH: usize = 32;
-
-impl LoadedInstructions {
-    /// Approximate token count for status messages. ~4 chars/token is
-    /// the rule of thumb that's correct enough for user-facing display.
-    pub fn approx_tokens(&self) -> usize {
-        self.content.len() / 4
-    }
-}
 
 /// Outcome of a `refresh()` call. Used to decide whether to emit a
 /// status line so the user knows their context shifted.
@@ -298,11 +290,11 @@ pub fn refresh(
 /// reports as loaded.
 pub fn load_project_context(
     cwd: &Path,
-    mem_cfg: &crate::domain::MemoryConfig,
+    mem_cfg: &mermaid_domain::MemoryConfig,
 ) -> (
     Option<LoadedInstructions>,
-    Option<crate::domain::LoadedMemory>,
-    Option<crate::domain::LoadedSkills>,
+    Option<mermaid_domain::LoadedMemory>,
+    Option<mermaid_domain::LoadedSkills>,
 ) {
     let (instructions, _) = refresh(None, cwd);
     let (memory, _) = crate::app::memory::refresh(None, cwd, mem_cfg);
@@ -631,7 +623,7 @@ mod tests {
         fs::create_dir(dir.join(".git")).unwrap();
         fs::write(dir.join("MERMAID.md"), "sync-loaded instructions").unwrap();
         let (instructions, _memory, _skills) =
-            load_project_context(&dir, &crate::domain::MemoryConfig::default());
+            load_project_context(&dir, &mermaid_domain::MemoryConfig::default());
         let content = instructions
             .expect("instructions must load synchronously")
             .content;

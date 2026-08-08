@@ -7,8 +7,8 @@ use std::time::Instant;
 use async_trait::async_trait;
 use serde_json::Value;
 
-use crate::domain::{ToolDefinition, ToolOutcome};
 use crate::providers::ctx::ExecContext;
+use mermaid_domain::{ToolDefinition, ToolOutcome};
 
 use super::super::ToolExecutor;
 use super::computer_use_success;

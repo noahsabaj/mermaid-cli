@@ -8,15 +8,15 @@ use mermaid_model::models::{
     BackendConfig, ChatMessage, Model, PROVIDER_REGISTRY, lookup_provider,
 };
 
-use crate::domain::Config;
+use mermaid_domain::Config;
+
+use mermaid_domain::{
+    ChatRequest, Cmd, CompactionEvent, CompactionResult, CompactionTrigger, Msg, SlashCmd, State,
+    build_replacement_messages, estimate_context_usage_for_request, prepare_compaction, update,
+};
 
 use crate::{
     app::{get_config_dir, init_config, load_config_or_warn},
-    domain::{
-        ChatRequest, Cmd, CompactionEvent, CompactionResult, CompactionTrigger, Msg, SlashCmd,
-        State, build_replacement_messages, estimate_context_usage_for_request, prepare_compaction,
-        update,
-    },
     ollama::is_installed as is_ollama_installed,
     providers::discovery::{configured_remote_provider_names, configured_remote_providers},
     runtime_client::{RuntimeClient, record_static_provider_probes},
@@ -300,7 +300,7 @@ fn web_doctor_entries(config: &Config) -> (Vec<String>, Vec<String>) {
         ("web_fetch", capabilities.fetch),
         ("web_search", capabilities.search),
     ] {
-        if config.safety.network == crate::domain::NetworkPolicy::Deny {
+        if config.safety.network == mermaid_domain::NetworkPolicy::Deny {
             next_steps.push(format!(
                 "{name} is disabled by safety.network = \"deny\" (selected backend '{}'; {}).",
                 status.backend, status.trust_destination
@@ -348,7 +348,7 @@ pub(crate) async fn build_doctor_report(
     let active_model_result = crate::app::resolve_model_id(cli_model, config).await;
     let (active_model, model_error, model_capabilities) = match active_model_result {
         Ok(model) => {
-            let snapshot = crate::domain::ProviderCapabilitySnapshot::from_model_id(&model);
+            let snapshot = mermaid_domain::ProviderCapabilitySnapshot::from_model_id(&model);
             (
                 Some(model),
                 None,
@@ -1007,7 +1007,7 @@ fn run_qa_compact_smoke(
             .count(),
         summary_tokens: summary.len().div_ceil(4),
         duration_secs: 0.0,
-        review_status: crate::domain::CompactionReviewStatus::DraftValidated,
+        review_status: mermaid_domain::CompactionReviewStatus::DraftValidated,
         review_error: None,
         focus: Some("qa compact smoke".to_string()),
         archive_path: None,
@@ -1206,7 +1206,7 @@ fn synthetic_compaction_messages(turns: usize) -> Vec<ChatMessage> {
 }
 
 fn deterministic_compaction_summary(
-    prepared: &crate::domain::PreparedCompaction,
+    prepared: &mermaid_domain::PreparedCompaction,
     turns: usize,
 ) -> String {
     format!(
@@ -1335,7 +1335,7 @@ async fn show_models(config: &Config) -> Result<()> {
 }
 
 async fn show_model_info(model: &str, config: &Config) -> Result<()> {
-    let snapshot = crate::domain::ProviderCapabilitySnapshot::from_model_id(model);
+    let snapshot = mermaid_domain::ProviderCapabilitySnapshot::from_model_id(model);
     let store = RuntimeStore::open_default()?;
     let provider = snapshot.provider.clone();
 
@@ -2754,9 +2754,9 @@ mod tests {
     #[test]
     fn doctor_uses_resolved_keyless_web_capabilities() {
         let config = Config {
-            web: crate::domain::WebConfig {
-                fetch_backend: crate::domain::FetchBackend::Native,
-                search_backend: crate::domain::SearchBackend::Searxng,
+            web: mermaid_domain::WebConfig {
+                fetch_backend: mermaid_domain::FetchBackend::Native,
+                search_backend: mermaid_domain::SearchBackend::Searxng,
                 searxng_url: "http://127.0.0.1:8080".to_string(),
             },
             ..Config::default()
@@ -2782,9 +2782,9 @@ mod tests {
     #[test]
     fn doctor_reports_global_network_deny_instead_of_advertising_web() {
         let mut config = Config::default();
-        config.web.search_backend = crate::domain::SearchBackend::Searxng;
+        config.web.search_backend = mermaid_domain::SearchBackend::Searxng;
         config.web.searxng_url = "http://127.0.0.1:8080".to_string();
-        config.safety.network = crate::domain::NetworkPolicy::Deny;
+        config.safety.network = mermaid_domain::NetworkPolicy::Deny;
 
         let (tools, next_steps) = web_doctor_entries(&config);
         assert!(

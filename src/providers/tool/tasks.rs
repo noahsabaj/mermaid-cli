@@ -20,10 +20,10 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 
-use crate::domain::checklist::{
+use mermaid_domain::checklist::{
     ChecklistEdit, ChecklistItem, ChecklistOrigin, ChecklistSpec, ChecklistStatus, ChecklistStore,
 };
-use crate::domain::{ToolDefinition, ToolMetadata, ToolOutcome, ToolRunMetadata};
+use mermaid_domain::{ToolDefinition, ToolMetadata, ToolOutcome, ToolRunMetadata};
 
 use super::super::ctx::ExecContext;
 use super::ToolExecutor;
@@ -82,7 +82,7 @@ fn no_broker(secs: f64) -> ToolOutcome {
 fn plan_mode_block(ctx: &crate::providers::ExecContext, secs: f64) -> Option<ToolOutcome> {
     // Only an explicit `allow` in the plan profile unblocks the writers —
     // `auto`/`ask` collapse to deny (ungated tools have no approval path).
-    if ctx.plan_permissions.tasks == crate::domain::PlanPermLevel::Allow {
+    if ctx.plan_permissions.tasks == mermaid_domain::PlanPermLevel::Allow {
         return None;
     }
     ctx.plan_file.as_ref().map(|_| {
@@ -277,7 +277,7 @@ impl ToolExecutor for TaskCreateTool {
         out.push_str(&store.progress_string());
         // Creation can violate single-in_progress too (e.g. adding an
         // in_progress task while another is active) — same advisory path.
-        for note in crate::domain::advisory_notes(&store, &[], &store) {
+        for note in mermaid_domain::advisory_notes(&store, &[], &store) {
             out.push('\n');
             out.push_str(&note);
         }
@@ -424,15 +424,15 @@ impl ToolExecutor for TaskListTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{ToolCallId, TurnId};
     use crate::providers::ctx::test_exec_context;
     use crate::providers::tasks::TaskBroker;
+    use mermaid_domain::{ToolCallId, TurnId};
     use std::path::PathBuf;
 
     fn ctx_with_broker() -> (
         ExecContext,
         TaskBroker,
-        tokio::sync::mpsc::Receiver<crate::domain::Msg>,
+        tokio::sync::mpsc::Receiver<mermaid_domain::Msg>,
     ) {
         let (mut ctx, _progress) =
             test_exec_context(TurnId(1), ToolCallId(1), PathBuf::from("/tmp"));
@@ -531,7 +531,7 @@ mod tests {
             .await;
         assert!(outcome.error.is_none());
         broker
-            .record_evidence(crate::domain::EvidenceEntry {
+            .record_evidence(mermaid_domain::EvidenceEntry {
                 tool: "edit_file".into(),
                 target: "src/x.rs".into(),
                 status: "ok".into(),

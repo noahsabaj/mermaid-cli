@@ -23,7 +23,7 @@ use anyhow::Result;
 use chrono::{DateTime, Local};
 
 use crate::app::recorder::{RecordLine, Replay, SessionHeader, session_fingerprint};
-use crate::domain::{Msg, State, update};
+use mermaid_domain::{Msg, State, update};
 use mermaid_model::models::MessageRole;
 
 /// Everything `--replay` learned from one recording.
@@ -283,8 +283,8 @@ fn render_report(path: &Path, report: &ReplayReport) -> String {
 mod tests {
     use super::*;
     use crate::app::recorder::{RECORDING_FORMAT_VERSION, Recorder};
-    use crate::domain::Config;
-    use crate::domain::TurnId;
+    use mermaid_domain::Config;
+    use mermaid_domain::TurnId;
     use mermaid_model::models::{FinishReason, TokenUsage};
     use std::path::PathBuf;
 

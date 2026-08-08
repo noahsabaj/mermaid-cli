@@ -24,13 +24,13 @@
 
 use std::path::{Path, PathBuf};
 
-use mermaid_cli::domain::{ToolCallId, ToolStatus, TurnId};
 use mermaid_cli::providers::ExecContext;
 use mermaid_cli::providers::ProviderFactory;
 use mermaid_cli::providers::ctx::test_exec_context_with_config;
 use mermaid_cli::providers::tool::ToolExecutor;
 use mermaid_cli::providers::tool::subagent::{SubagentSpawner, SubagentTool};
 use mermaid_cli::providers::tool::web::WebCapabilities;
+use mermaid_domain::{ToolCallId, ToolStatus, TurnId};
 use mermaid_runtime::SafetyMode;
 use mermaid_runtime::git::git;
 use std::sync::Arc;
@@ -58,7 +58,7 @@ fn project(tag: &str) -> Option<PathBuf> {
 }
 
 fn tool_and_ctx(workdir: &Path) -> (SubagentTool, ExecContext) {
-    let mut config = mermaid_cli::domain::Config::default();
+    let mut config = mermaid_domain::Config::default();
     // The child must be able to write without an approval UI; the gate is
     // covered by its own tests.
     config.safety.mode = SafetyMode::FullAccess;
@@ -193,7 +193,7 @@ async fn parallel_isolated_children_do_not_collide() {
     // model response go through the session's spawner, so the children get
     // distinct ids. Building a spawner per task would restart ids at `a1`
     // and test a shape that never occurs.
-    let mut config = mermaid_cli::domain::Config::default();
+    let mut config = mermaid_domain::Config::default();
     config.safety.mode = SafetyMode::FullAccess;
     config.safety.checkpoint_on_mutation = false;
     let providers = Arc::new(ProviderFactory::new(config.clone()));

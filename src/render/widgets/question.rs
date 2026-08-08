@@ -77,11 +77,11 @@ fn option_window(cursor: usize, n: usize, max: usize) -> (usize, usize) {
     (start, start + max)
 }
 
-fn input_placeholder(kind: &crate::domain::QuestionKind) -> &'static str {
+fn input_placeholder(kind: &mermaid_domain::QuestionKind) -> &'static str {
     match kind {
-        crate::domain::QuestionKind::Number { .. } => "a number",
-        crate::domain::QuestionKind::Date => "YYYY-MM-DD",
-        crate::domain::QuestionKind::Path { .. } => "a path",
+        mermaid_domain::QuestionKind::Number { .. } => "a number",
+        mermaid_domain::QuestionKind::Date => "YYYY-MM-DD",
+        mermaid_domain::QuestionKind::Path { .. } => "a path",
         _ => "type a value",
     }
 }
@@ -225,7 +225,7 @@ fn push_input_lines(
     field.push(Span::styled("_", Style::default().fg(brand)));
     push_wrapped(lines, Line::from(field), max_width, 2);
 
-    if let crate::domain::QuestionKind::Number {
+    if let mermaid_domain::QuestionKind::Number {
         min: Some(lo),
         max: Some(hi),
         slider: true,
@@ -244,7 +244,7 @@ fn push_input_lines(
         )));
     }
 
-    match crate::domain::validate_input(&q.kind, value) {
+    match mermaid_domain::validate_input(&q.kind, value) {
         Err(e) => push_wrapped(
             lines,
             Line::from(Span::styled(
@@ -272,7 +272,7 @@ fn push_rank_lines(
     let brand = theme.colors.brand.to_color();
     let dim = theme.colors.text_disabled.to_color();
     let white = theme.colors.text_primary.to_color();
-    for (pos, &opt_idx) in crate::domain::rank_order(q, sel).iter().enumerate() {
+    for (pos, &opt_idx) in mermaid_domain::rank_order(q, sel).iter().enumerate() {
         let focused = sel.cursor == pos;
         let grabbed = focused && sel.grabbed;
         let prefix = if grabbed {
@@ -495,7 +495,7 @@ pub fn build_question_lines(
     lines.push(Line::from(""));
     let mut hint = if q.is_input() {
         let mut h = String::from("Type to edit");
-        if matches!(q.kind, crate::domain::QuestionKind::Number { .. }) {
+        if matches!(q.kind, mermaid_domain::QuestionKind::Number { .. }) {
             h.push_str(" | Up/Down to step");
         }
         h.push_str(" | Enter to submit");
@@ -645,7 +645,7 @@ impl<'a> Widget for QuestionModalWidget<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{Question, QuestionOption, ToolCallId, TurnId};
+    use mermaid_domain::{Question, QuestionOption, ToolCallId, TurnId};
 
     fn opt_with_preview(label: &str, preview: Option<OptionPreview>) -> QuestionOption {
         QuestionOption {
@@ -688,7 +688,7 @@ mod tests {
         let q = Question {
             header: "H".to_string(),
             question: "Q?".to_string(),
-            kind: crate::domain::QuestionKind::Select,
+            kind: mermaid_domain::QuestionKind::Select,
             options: vec![
                 opt_with_preview(
                     "A",
@@ -715,7 +715,7 @@ mod tests {
         Question {
             header: header.to_string(),
             question: format!("Which {}?", header),
-            kind: crate::domain::QuestionKind::Select,
+            kind: mermaid_domain::QuestionKind::Select,
             options: vec![opt_with_preview("A", None), opt_with_preview("B", None)],
             memory_key: None,
         }
@@ -767,7 +767,7 @@ mod tests {
             question: "I'm in read_only mode and can't run diagnostics or patch the clipboard \
                        code. How should I proceed?"
                 .to_string(),
-            kind: crate::domain::QuestionKind::Select,
+            kind: mermaid_domain::QuestionKind::Select,
             options: vec![QuestionOption {
                 label: "Switch to ask/full_access (Recommended)".to_string(),
                 description: Some(desc.to_string()),

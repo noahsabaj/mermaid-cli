@@ -43,11 +43,11 @@ use std::time::Instant;
 
 use tokio::sync::mpsc;
 
-use crate::domain::{Cmd, CompactionRequest, CompactionResult, CompactionTrigger, Msg, TurnId};
-use crate::domain::{Config, MemoryConfig};
 use crate::providers::ctx::{ExecContext, StreamContext};
 use crate::providers::model::ModelProvider;
 use crate::providers::{ProviderFactory, StreamEvent, ToolRegistry};
+use mermaid_domain::{Cmd, CompactionRequest, CompactionResult, CompactionTrigger, Msg, TurnId};
+use mermaid_domain::{Config, MemoryConfig};
 use mermaid_model::models::{ModelError, TokenUsage};
 use mermaid_model::utils::{join_logged, spawn_guarded};
 
@@ -91,7 +91,7 @@ pub const MSG_CHANNEL_CAPACITY: usize = 512;
 /// precisely what this layer is for, and the orphan rule permitting it
 /// elsewhere is not a reason to put row-shaped knowledge in the reducer.
 fn compaction_row(
-    record: &crate::domain::CompactionEvent,
+    record: &mermaid_domain::CompactionEvent,
     archive_path: &std::path::Path,
     task_id: Option<String>,
     session_id: String,
@@ -110,15 +110,15 @@ fn compaction_row(
 
 #[derive(Clone)]
 enum PersistenceJob {
-    Conversation(Box<crate::domain::ConversationHistory>),
+    Conversation(Box<mermaid_domain::ConversationHistory>),
     Compaction(Box<PendingCompactionSave>),
 }
 
 #[derive(Clone)]
 struct PendingCompactionSave {
-    archive: crate::domain::CompactionArchive,
-    record: crate::domain::CompactionEvent,
-    conversation: crate::domain::ConversationHistory,
+    archive: mermaid_domain::CompactionArchive,
+    record: mermaid_domain::CompactionEvent,
+    conversation: mermaid_domain::ConversationHistory,
     task_id: Option<String>,
 }
 
@@ -659,7 +659,7 @@ impl EffectRunner {
                     // reducer's /context preview can fold it into its MCP-only
                     // estimate and agree with what the model actually sees.
                     // Runs AFTER suppression so the estimate matches reality.
-                    let builtin_tokens = crate::domain::estimate_tool_schema_tokens(&enriched);
+                    let builtin_tokens = mermaid_domain::estimate_tool_schema_tokens(&enriched);
                     // Best-effort and cosmetic (the /context preview). This is the
                     // synchronous dispatch path so we can't await; if the bounded
                     // channel is momentarily full under heavy streaming, log the
@@ -758,7 +758,7 @@ impl EffectRunner {
                                 turn,
                                 trigger,
                                 message: "the compaction task panicked unexpectedly".to_string(),
-                                kind: crate::domain::StatusKind::Error,
+                                kind: mermaid_domain::StatusKind::Error,
                             })
                             .await;
                     }
@@ -789,7 +789,7 @@ impl EffectRunner {
                     .providers
                     .as_ref()
                     .map(|p| Arc::new(p.config().clone()))
-                    .unwrap_or_else(|| Arc::new(crate::domain::Config::default()));
+                    .unwrap_or_else(|| Arc::new(mermaid_domain::Config::default()));
                 // Auto mode: build an LLM classifier to vet borderline
                 // actions. Only when a provider is bound (real wiring); the
                 // gate fails safe to "escalate" when it's `None`. The vet
@@ -865,7 +865,7 @@ impl EffectRunner {
                             .send(Msg::ToolFinished {
                                 turn,
                                 call_id,
-                                outcome: crate::domain::ToolOutcome::error(
+                                outcome: mermaid_domain::ToolOutcome::error(
                                     "internal error: the tool execution task panicked".to_string(),
                                     0.0,
                                 ),
@@ -986,10 +986,10 @@ impl EffectRunner {
                     };
                     let reason = mermaid_model::utils::redact_secrets(&reason);
                     let _ = broker
-                        .update(vec![crate::domain::ChecklistEdit {
+                        .update(vec![mermaid_domain::ChecklistEdit {
                             id: task.id,
-                            status: Some(crate::domain::ChecklistStatus::InProgress),
-                            ..crate::domain::ChecklistEdit::default()
+                            status: Some(mermaid_domain::ChecklistStatus::InProgress),
+                            ..mermaid_domain::ChecklistEdit::default()
                         }])
                         .await;
                     let _ = tx
@@ -1127,7 +1127,7 @@ impl EffectRunner {
                     let name = memory_title_from_text(&text);
                     let status = match crate::app::memory::write_memory(
                         &workdir,
-                        crate::domain::MemoryScope::ProjectPrivate,
+                        mermaid_domain::MemoryScope::ProjectPrivate,
                         &name,
                         &text,
                         &[],
@@ -1192,7 +1192,7 @@ impl EffectRunner {
                             .list_conversation_metas()
                             .unwrap_or_default()
                             .into_iter()
-                            .map(|m| crate::domain::ConversationSummary {
+                            .map(|m| mermaid_domain::ConversationSummary {
                                 id: m.id,
                                 title: m.title,
                                 message_count: m.message_count,
@@ -1766,9 +1766,9 @@ fn note_stream_usage(
 /// (`ChatRequest::suppressed_builtin_tools` — e.g. the task-checklist writers
 /// while a plan is being drafted). Pure so it unit-tests without the runner.
 fn filter_suppressed(
-    tools: Vec<crate::domain::ToolDefinition>,
+    tools: Vec<mermaid_domain::ToolDefinition>,
     suppressed: &[&'static str],
-) -> Vec<crate::domain::ToolDefinition> {
+) -> Vec<mermaid_domain::ToolDefinition> {
     if suppressed.is_empty() {
         return tools;
     }
@@ -1786,7 +1786,7 @@ async fn dispatch_call_model(
     msg_tx: MsgSender,
     providers: Option<Arc<ProviderFactory>>,
     turn: TurnId,
-    mut request: crate::domain::ChatRequest,
+    mut request: mermaid_domain::ChatRequest,
     token: tokio_util::sync::CancellationToken,
     tasks: crate::providers::TaskBroker,
 ) {
@@ -1851,7 +1851,7 @@ async fn dispatch_call_model(
     // `NoKnownContextLimit`) and gives the status bar real numbers.
     let sizing = provider.resolve_context_window(&request).await;
     let max_context_tokens = sizing.effective.or_else(|| {
-        crate::domain::runtime::infer_static_context_window_for_model_id(&request.model_id)
+        mermaid_domain::runtime::infer_static_context_window_for_model_id(&request.model_id)
     });
     // Ride the discovered limits on the request itself so adapters size
     // `max_tokens` against the model's REAL window/ceiling (Anthropic
@@ -1892,7 +1892,7 @@ async fn dispatch_call_model(
             .await;
     }
     let context_snapshot =
-        crate::domain::estimate_context_usage_for_request(&request, max_context_tokens);
+        mermaid_domain::estimate_context_usage_for_request(&request, max_context_tokens);
     let _ = msg_tx
         .send(Msg::ContextUsageEstimated {
             turn,
@@ -1905,12 +1905,12 @@ async fn dispatch_call_model(
     // to honor their settings.
     let policy = factory.config().compaction.policy();
     let mut compacted_before_stream = false;
-    if crate::domain::should_auto_compact(&context_snapshot, &request, policy).is_ok() {
+    if mermaid_domain::should_auto_compact(&context_snapshot, &request, policy).is_ok() {
         let compaction =
             CompactionRequest::auto(request.clone(), CompactionTrigger::AutoThreshold, policy);
         // Best-effort preflight: if there's nothing to compact, proceed
         // un-compacted (the provider's own context limit is the real gate).
-        if let Ok(prepared) = crate::domain::prepare_compaction(&compaction, max_context_tokens) {
+        if let Ok(prepared) = mermaid_domain::prepare_compaction(&compaction, max_context_tokens) {
             match run_compaction(
                 Arc::clone(&provider),
                 turn,
@@ -1948,7 +1948,7 @@ async fn dispatch_call_model(
                             turn,
                             trigger: CompactionTrigger::AutoThreshold,
                             message: err.to_string(),
-                            kind: crate::domain::StatusKind::Warn,
+                            kind: mermaid_domain::StatusKind::Warn,
                         })
                         .await;
                 },
@@ -2053,8 +2053,10 @@ async fn dispatch_call_model(
         Err(e) => {
             let retry_context_limit = !compacted_before_stream && is_context_limit_error(&e);
             if retry_context_limit {
-                let latest_snapshot =
-                    crate::domain::estimate_context_usage_for_request(&request, max_context_tokens);
+                let latest_snapshot = mermaid_domain::estimate_context_usage_for_request(
+                    &request,
+                    max_context_tokens,
+                );
                 let compaction = CompactionRequest::auto(
                     request.clone(),
                     CompactionTrigger::ContextLimitRetry,
@@ -2063,7 +2065,7 @@ async fn dispatch_call_model(
                 // Only retry if there's something to compact; otherwise fall
                 // through to surface the original context-limit error.
                 if let Ok(prepared) =
-                    crate::domain::prepare_compaction(&compaction, max_context_tokens)
+                    mermaid_domain::prepare_compaction(&compaction, max_context_tokens)
                 {
                     match run_compaction(
                         Arc::clone(&provider),
@@ -2098,7 +2100,7 @@ async fn dispatch_call_model(
                                     turn,
                                     trigger: CompactionTrigger::ContextLimitRetry,
                                     message: compact_err.to_string(),
-                                    kind: crate::domain::StatusKind::Error,
+                                    kind: mermaid_domain::StatusKind::Error,
                                 })
                                 .await;
                         },
@@ -2163,7 +2165,7 @@ async fn dispatch_provider_stream(
     msg_tx: MsgSender,
     provider: Arc<dyn ModelProvider>,
     turn: TurnId,
-    request: crate::domain::ChatRequest,
+    request: mermaid_domain::ChatRequest,
     token: tokio_util::sync::CancellationToken,
     tasks: crate::providers::TaskBroker,
 ) {
@@ -2401,7 +2403,7 @@ async fn consolidate_memory(
         items.len(),
         listing
     );
-    let request = crate::domain::ChatRequest {
+    let request = mermaid_domain::ChatRequest {
         model_id: model_id.clone(),
         messages: vec![mermaid_model::models::ChatMessage::user(user)],
         system_prompt: CONSOLIDATE_SYSTEM_PROMPT.to_string(),
@@ -2537,7 +2539,7 @@ async fn dispatch_compact_conversation(
                 turn,
                 trigger: request.trigger,
                 message: "EffectRunner has no ProviderFactory bound".to_string(),
-                kind: crate::domain::StatusKind::Error,
+                kind: mermaid_domain::StatusKind::Error,
             })
             .await;
         return;
@@ -2551,7 +2553,7 @@ async fn dispatch_compact_conversation(
                     turn,
                     trigger: request.trigger,
                     message: err.to_string(),
-                    kind: crate::domain::StatusKind::Error,
+                    kind: mermaid_domain::StatusKind::Error,
                 })
                 .await;
             return;
@@ -2566,17 +2568,17 @@ async fn dispatch_compact_conversation(
     request.chat.resolved_context_window = sizing.effective.or(sizing.model_max);
     request.chat.resolved_max_output = sizing.max_output;
     let max_context_tokens = request.chat.resolved_context_window.or_else(|| {
-        crate::domain::runtime::infer_static_context_window_for_model_id(&request.chat.model_id)
+        mermaid_domain::runtime::infer_static_context_window_for_model_id(&request.chat.model_id)
     });
     let before_snapshot =
-        crate::domain::estimate_context_usage_for_request(&request.chat, max_context_tokens);
+        mermaid_domain::estimate_context_usage_for_request(&request.chat, max_context_tokens);
 
     let trigger = request.trigger;
     // A benign precondition (e.g. too little history to summarize) is a no-op, not
     // a failure — surface it as `Info` so the reducer shows a calm note instead of
     // a "Compaction failed: Invalid request" error. Real failures (model errors,
     // an empty/non-reducing summary) still flow through `run_compaction` as errors.
-    let prepared = match crate::domain::prepare_compaction(&request, max_context_tokens) {
+    let prepared = match mermaid_domain::prepare_compaction(&request, max_context_tokens) {
         Ok(prepared) => prepared,
         Err(skip) => {
             let _ = msg_tx
@@ -2584,7 +2586,7 @@ async fn dispatch_compact_conversation(
                     turn,
                     trigger,
                     message: skip.to_string(),
-                    kind: crate::domain::StatusKind::Info,
+                    kind: mermaid_domain::StatusKind::Info,
                 })
                 .await;
             return;
@@ -2610,7 +2612,7 @@ async fn dispatch_compact_conversation(
                     turn,
                     trigger,
                     message: err.to_string(),
-                    kind: crate::domain::StatusKind::Error,
+                    kind: mermaid_domain::StatusKind::Error,
                 })
                 .await;
         },
@@ -2625,14 +2627,14 @@ async fn run_compaction(
     provider: Arc<dyn ModelProvider>,
     turn: TurnId,
     request: CompactionRequest,
-    prepared: crate::domain::PreparedCompaction,
-    before_snapshot: crate::domain::ContextUsageSnapshot,
+    prepared: mermaid_domain::PreparedCompaction,
+    before_snapshot: mermaid_domain::ContextUsageSnapshot,
     max_context_tokens: Option<usize>,
     token: tokio_util::sync::CancellationToken,
 ) -> Result<CompactionResult, ModelError> {
     let started = Instant::now();
 
-    let summary_request = crate::domain::build_summary_request(
+    let summary_request = mermaid_domain::build_summary_request(
         &request.chat,
         &prepared,
         request.instructions.as_deref(),
@@ -2643,10 +2645,10 @@ async fn run_compaction(
     let (draft, draft_usage) =
         collect_compaction_text(Arc::clone(&provider), turn, summary_request, token.clone())
             .await?;
-    let draft_summary = crate::domain::normalize_summary(&draft);
-    let draft_validation = crate::domain::validate_summary_structure(&draft_summary);
+    let draft_summary = mermaid_domain::normalize_summary(&draft);
+    let draft_validation = mermaid_domain::validate_summary_structure(&draft_summary);
 
-    let verify_request = crate::domain::build_verification_request(
+    let verify_request = mermaid_domain::build_verification_request(
         &request.chat,
         &prepared,
         &draft_summary,
@@ -2658,19 +2660,19 @@ async fn run_compaction(
     let (final_summary, verify_usage, review_status, review_error) = if review_fits {
         match collect_compaction_text(Arc::clone(&provider), turn, verify_request, token).await {
             Ok((verified_text, verify_usage)) => {
-                let verified_summary = crate::domain::normalize_summary(&verified_text);
-                match crate::domain::validate_summary_structure(&verified_summary) {
+                let verified_summary = mermaid_domain::normalize_summary(&verified_text);
+                match mermaid_domain::validate_summary_structure(&verified_summary) {
                     Ok(()) => (
                         verified_summary,
                         verify_usage,
-                        crate::domain::CompactionReviewStatus::Reviewed,
+                        mermaid_domain::CompactionReviewStatus::Reviewed,
                         None,
                     ),
                     Err(error) => match draft_validation {
                         Ok(()) => (
                             draft_summary,
                             verify_usage,
-                            crate::domain::CompactionReviewStatus::DraftValidated,
+                            mermaid_domain::CompactionReviewStatus::DraftValidated,
                             Some(format!("review returned an invalid checkpoint: {error}")),
                         ),
                         Err(draft_error) => {
@@ -2686,7 +2688,7 @@ async fn run_compaction(
                 Ok(()) => (
                     draft_summary,
                     None,
-                    crate::domain::CompactionReviewStatus::DraftValidated,
+                    mermaid_domain::CompactionReviewStatus::DraftValidated,
                     Some(format!("review failed: {err}")),
                 ),
                 Err(draft_error) => {
@@ -2701,7 +2703,7 @@ async fn run_compaction(
             Ok(()) => (
                 draft_summary,
                 None,
-                crate::domain::CompactionReviewStatus::DraftValidated,
+                mermaid_domain::CompactionReviewStatus::DraftValidated,
                 Some(
                     "review skipped because the complete request would exceed the context window"
                         .to_string(),
@@ -2719,7 +2721,7 @@ async fn run_compaction(
         "compact_{}",
         chrono::Local::now().format("%Y%m%d_%H%M%S_%3f")
     );
-    let mut record = crate::domain::CompactionEvent {
+    let mut record = mermaid_domain::CompactionEvent {
         id,
         trigger: request.trigger,
         created_at: chrono::Local::now(),
@@ -2753,10 +2755,10 @@ async fn run_compaction(
     const AFTER_TOKENS_PASSES: usize = 4;
     let mut compacted_request = request.chat.clone();
     let mut replacement =
-        crate::domain::build_replacement_messages(&final_summary, &prepared, &record);
+        mermaid_domain::build_replacement_messages(&final_summary, &prepared, &record);
     for _ in 0..AFTER_TOKENS_PASSES {
         compacted_request.messages = replacement.clone();
-        let measured = crate::domain::estimate_context_usage_for_request(
+        let measured = mermaid_domain::estimate_context_usage_for_request(
             &compacted_request,
             max_context_tokens,
         );
@@ -2764,14 +2766,15 @@ async fn run_compaction(
             break;
         }
         record.after_tokens = measured.used_tokens;
-        replacement = crate::domain::build_replacement_messages(&final_summary, &prepared, &record);
+        replacement =
+            mermaid_domain::build_replacement_messages(&final_summary, &prepared, &record);
     }
     // Whatever happened above, `replacement` was built from `record` — so the
     // snapshot is measured on the messages actually kept, and the receipt text
     // quotes the same `after_tokens` the record carries.
     compacted_request.messages = replacement.clone();
     let after_snapshot =
-        crate::domain::estimate_context_usage_for_request(&compacted_request, max_context_tokens);
+        mermaid_domain::estimate_context_usage_for_request(&compacted_request, max_context_tokens);
 
     if after_snapshot.used_tokens >= before_snapshot.used_tokens {
         return Err(ModelError::InvalidRequest(format!(
@@ -2780,7 +2783,7 @@ async fn run_compaction(
         )));
     }
 
-    if crate::domain::context_exceeds_hard_limit(
+    if mermaid_domain::context_exceeds_hard_limit(
         &after_snapshot,
         &compacted_request,
         request.policy,
@@ -2797,29 +2800,29 @@ async fn run_compaction(
         archived_messages: prepared.archived_messages,
         before_snapshot,
         after_snapshot,
-        usage: crate::domain::combine_usage(draft_usage, verify_usage),
+        usage: mermaid_domain::combine_usage(draft_usage, verify_usage),
         source_boundaries: request
             .chat
             .messages
             .iter()
-            .map(crate::domain::CompactionBoundary::from_message)
+            .map(mermaid_domain::CompactionBoundary::from_message)
             .collect(),
     })
 }
 
 fn compaction_request_fits(
-    request: &crate::domain::ChatRequest,
+    request: &mermaid_domain::ChatRequest,
     max_context_tokens: Option<usize>,
 ) -> bool {
     let Some(max_tokens) = max_context_tokens else {
         return true;
     };
-    let used = crate::domain::estimate_context_usage_for_request(request, Some(max_tokens));
+    let used = mermaid_domain::estimate_context_usage_for_request(request, Some(max_tokens));
     used.used_tokens.saturating_add(request.max_tokens) <= max_tokens
 }
 
 fn ensure_compaction_request_fits(
-    request: &crate::domain::ChatRequest,
+    request: &mermaid_domain::ChatRequest,
     max_context_tokens: Option<usize>,
 ) -> Result<(), ModelError> {
     if compaction_request_fits(request, max_context_tokens) {
@@ -2834,7 +2837,7 @@ fn ensure_compaction_request_fits(
 async fn collect_compaction_text(
     provider: Arc<dyn ModelProvider>,
     turn: TurnId,
-    request: crate::domain::ChatRequest,
+    request: mermaid_domain::ChatRequest,
     token: tokio_util::sync::CancellationToken,
 ) -> Result<(String, Option<TokenUsage>), ModelError> {
     // Shared with the Auto-mode safety classifier — see
@@ -2951,12 +2954,12 @@ async fn dispatch_execute_tool(
     tools: Option<Arc<ToolRegistry>>,
     workdir: PathBuf,
     turn: TurnId,
-    call_id: crate::domain::ToolCallId,
+    call_id: mermaid_domain::ToolCallId,
     source: mermaid_model::models::tool_call::ToolCall,
     token: tokio_util::sync::CancellationToken,
     background: tokio_util::sync::CancellationToken,
     web_bytes: Arc<std::sync::atomic::AtomicUsize>,
-    config: Arc<crate::domain::Config>,
+    config: Arc<mermaid_domain::Config>,
     model_id: String,
     task_id: Option<String>,
     session_id: String,
@@ -2964,7 +2967,7 @@ async fn dispatch_execute_tool(
     scratchpad: Option<PathBuf>,
     safety_mode: mermaid_runtime::SafetyMode,
     plan_file: Option<PathBuf>,
-    plan_permissions: crate::domain::PlanPermissions,
+    plan_permissions: mermaid_domain::PlanPermissions,
     context_percent: Option<u8>,
     intent: Option<String>,
     classifier: Option<Arc<dyn crate::providers::AutoClassifier>>,
@@ -2979,7 +2982,7 @@ async fn dispatch_execute_tool(
             .send(Msg::ToolFinished {
                 turn,
                 call_id,
-                outcome: crate::domain::ToolOutcome::error(
+                outcome: mermaid_domain::ToolOutcome::error(
                     "EffectRunner has no ToolRegistry bound",
                     0.0,
                 ),
@@ -3007,7 +3010,7 @@ async fn dispatch_execute_tool(
                 .send(Msg::ToolFinished {
                     turn,
                     call_id,
-                    outcome: crate::domain::ToolOutcome::error(
+                    outcome: mermaid_domain::ToolOutcome::error(
                         format!("invalid MCP tool name: {}", source.function.name),
                         0.0,
                     ),
@@ -3025,7 +3028,8 @@ async fn dispatch_execute_tool(
         start_runtime_tool_run(task_id.as_deref(), turn, call_id, tool_key, &args).await;
 
     let Some(tool) = registry.get(tool_key) else {
-        let outcome = crate::domain::ToolOutcome::error(format!("unknown tool: {}", tool_key), 0.0);
+        let outcome =
+            mermaid_domain::ToolOutcome::error(format!("unknown tool: {}", tool_key), 0.0);
         finish_runtime_tool_run(tool_run_id.as_deref(), &outcome);
         let _ = msg_tx
             .send(Msg::ToolFinished {
@@ -3123,7 +3127,7 @@ async fn dispatch_execute_tool(
         // before the join below.
         drop(ctx);
         let reason = mermaid_model::utils::redact_secrets(&reason);
-        let outcome = crate::domain::ToolOutcome::error(
+        let outcome = mermaid_domain::ToolOutcome::error(
             format!("Denied by plugin hook ({plugin}): {reason}"),
             0.0,
         );
@@ -3149,12 +3153,12 @@ async fn dispatch_execute_tool(
     // edit is not evidence of work on the task. `display_info_for` gives the
     // same human target the transcript row shows (path, command head, query).
     if !source.function.name.starts_with("task_") {
-        let (action, target) = crate::domain::display_info_for(&crate::domain::PendingToolCall {
+        let (action, target) = mermaid_domain::display_info_for(&mermaid_domain::PendingToolCall {
             call_id,
             source: source.clone(),
         });
         tasks
-            .record_evidence(crate::domain::EvidenceEntry {
+            .record_evidence(mermaid_domain::EvidenceEntry {
                 tool: action,
                 target,
                 status: tool_status_label(outcome.status).to_string(),
@@ -3183,7 +3187,7 @@ async fn dispatch_execute_tool(
 async fn start_runtime_tool_run(
     task_id: Option<&str>,
     turn: TurnId,
-    call_id: crate::domain::ToolCallId,
+    call_id: mermaid_domain::ToolCallId,
     tool_name: &str,
     args: &serde_json::Value,
 ) -> Option<String> {
@@ -3213,7 +3217,7 @@ async fn start_runtime_tool_run(
     .flatten()
 }
 
-fn finish_runtime_tool_run(tool_run_id: Option<&str>, outcome: &crate::domain::ToolOutcome) {
+fn finish_runtime_tool_run(tool_run_id: Option<&str>, outcome: &mermaid_domain::ToolOutcome) {
     let Some(tool_run_id) = tool_run_id else {
         return;
     };
@@ -3249,16 +3253,16 @@ fn redacted_json_string(value: &serde_json::Value) -> Option<String> {
     serde_json::to_string(&redacted).ok()
 }
 
-fn tool_status_label(status: crate::domain::ToolStatus) -> &'static str {
+fn tool_status_label(status: mermaid_domain::ToolStatus) -> &'static str {
     match status {
-        crate::domain::ToolStatus::Success => "success",
-        crate::domain::ToolStatus::Error => "error",
-        crate::domain::ToolStatus::Cancelled => "cancelled",
+        mermaid_domain::ToolStatus::Success => "success",
+        mermaid_domain::ToolStatus::Error => "error",
+        mermaid_domain::ToolStatus::Cancelled => "cancelled",
     }
 }
 
 fn runtime_model_info_text(model: &str) -> String {
-    let snapshot = crate::domain::runtime::ProviderCapabilitySnapshot::from_model_id(model);
+    let snapshot = mermaid_domain::runtime::ProviderCapabilitySnapshot::from_model_id(model);
     let mut lines = vec![
         format!("Model info: {}", model),
         format!("- provider: {}", snapshot.provider),
@@ -3372,7 +3376,7 @@ async fn dispatch_pull_ollama_model(tx: MsgSender, model: String) {
 /// `mcp__` call waits, bounded, for the full fleet). A zero-tool server that
 /// started successfully is still Ready with an empty tool list.
 async fn dispatch_init_mcp_servers(
-    configs: std::collections::HashMap<String, crate::domain::McpServerConfig>,
+    configs: std::collections::HashMap<String, mermaid_domain::McpServerConfig>,
     tx: tokio::sync::mpsc::Sender<Msg>,
 ) {
     if configs.is_empty() {
@@ -3413,7 +3417,7 @@ async fn dispatch_init_mcp_servers(
 /// deadline, so a hung helper returns an error here instead of pinning
 /// this blocking thread forever.
 async fn dispatch_read_clipboard(tx: MsgSender) {
-    use crate::domain::ClipboardRead;
+    use mermaid_domain::ClipboardRead;
 
     enum Outcome {
         Image { bytes: Vec<u8>, format: String },
@@ -3492,8 +3496,8 @@ async fn dispatch_probe_vision(
 /// list was registry-only once, and every `meta/muse-spark-*` was missing.
 async fn discover_available_models(
     providers: Option<Arc<ProviderFactory>>,
-) -> Vec<crate::domain::state::ModelChoice> {
-    use crate::domain::state::ModelChoice;
+) -> Vec<mermaid_domain::state::ModelChoice> {
+    use mermaid_domain::state::ModelChoice;
     let Some(factory) = providers else {
         return Vec::new();
     };
@@ -3548,7 +3552,7 @@ async fn discover_available_models(
 ///
 /// Autostart is hard-off: enumerating must never mutate. Same contract as the
 /// CLI's `list_ollama_models`.
-async fn list_ollama_models_readonly(config: &crate::domain::Config) -> Option<Vec<String>> {
+async fn list_ollama_models_readonly(config: &mermaid_domain::Config) -> Option<Vec<String>> {
     use mermaid_model::models::adapters::ollama::OllamaAdapter;
     use mermaid_model::models::{BackendConfig, Model};
     let backend = BackendConfig {
@@ -3646,7 +3650,7 @@ mod tests {
     /// of `compaction_row` is a decision nothing else records.
     #[test]
     fn compaction_row_maps_every_field_it_claims_to() {
-        use crate::domain::{CompactionEvent, CompactionReviewStatus, CompactionTrigger};
+        use mermaid_domain::{CompactionEvent, CompactionReviewStatus, CompactionTrigger};
         let record = CompactionEvent {
             id: "cmp-1".to_string(),
             trigger: CompactionTrigger::Manual,
@@ -3683,7 +3687,7 @@ mod tests {
     }
 
     use super::*;
-    use crate::domain::ToolCallId;
+    use mermaid_domain::ToolCallId;
     use std::time::Duration;
 
     fn runner() -> (EffectRunner, mpsc::Receiver<Msg>) {
@@ -3694,7 +3698,7 @@ mod tests {
     /// out of the advertised set, everything else passes through in order.
     #[test]
     fn filter_suppressed_drops_only_the_named_tools() {
-        let def = |name: &str| crate::domain::ToolDefinition {
+        let def = |name: &str| mermaid_domain::ToolDefinition {
             name: name.to_string(),
             description: String::new(),
             input_schema: serde_json::json!({}),
@@ -3780,7 +3784,7 @@ mod tests {
         // otherwise they leak into a headless parent's stdout and corrupt
         // `--format json`/`text` output (caught during live headless testing).
         let (tx, _rx) = mpsc::channel::<Msg>(MSG_CHANNEL_CAPACITY);
-        let providers = Arc::new(ProviderFactory::new(crate::domain::Config::default()));
+        let providers = Arc::new(ProviderFactory::new(mermaid_domain::Config::default()));
         let tools = Arc::new(ToolRegistry::new());
         let child = EffectRunner::new_child(tx, PathBuf::from("/tmp"), providers, tools);
         assert!(
@@ -3796,7 +3800,7 @@ mod tests {
         // reap it — that would kill the parent's MCP servers for the rest of
         // the session. Only the top-level runner owns the reap.
         let (tx, _rx) = mpsc::channel::<Msg>(MSG_CHANNEL_CAPACITY);
-        let providers = Arc::new(ProviderFactory::new(crate::domain::Config::default()));
+        let providers = Arc::new(ProviderFactory::new(mermaid_domain::Config::default()));
         let tools = Arc::new(ToolRegistry::new());
         let child = EffectRunner::new_child(tx, PathBuf::from("/tmp"), providers, tools);
         assert!(
@@ -3850,7 +3854,7 @@ mod tests {
     async fn dispatch_save_emits_session_saved() {
         let (mut r, mut rx) = runner();
         r.dispatch(Cmd::SaveConversation(
-            crate::domain::ConversationHistory::new(
+            mermaid_domain::ConversationHistory::new(
                 "/p".to_string(),
                 "m".to_string(),
                 chrono::Local::now(),
@@ -3874,7 +3878,7 @@ mod tests {
         for name in ["one", "two"] {
             configs.insert(
                 name.to_string(),
-                crate::domain::McpServerConfig {
+                mermaid_domain::McpServerConfig {
                     command: "/nonexistent/mermaid-test-mcp-binary".to_string(),
                     ..Default::default()
                 },
@@ -3954,7 +3958,7 @@ mod tests {
     async fn dispatch_call_model_creates_scope() {
         let (mut r, _rx) = runner();
         let turn = TurnId(7);
-        let request = crate::domain::ChatRequest {
+        let request = mermaid_domain::ChatRequest {
             model_id: "test/m".to_string(),
             messages: vec![],
             system_prompt: String::new(),
@@ -3983,7 +3987,7 @@ mod tests {
     async fn empty_scopes_are_reaped_on_next_dispatch() {
         let (mut r, mut rx) = runner();
         let turn = TurnId(42);
-        let request = crate::domain::ChatRequest {
+        let request = mermaid_domain::ChatRequest {
             model_id: "test/m".to_string(),
             messages: vec![],
             system_prompt: String::new(),
@@ -4045,7 +4049,7 @@ mod tests {
             model_id: "ollama/test".to_string(),
             safety_mode: mermaid_runtime::SafetyMode::Ask,
             plan_file: None,
-            plan_permissions: crate::domain::PlanPermissions::default(),
+            plan_permissions: mermaid_domain::PlanPermissions::default(),
             context_percent: None,
             intent: None,
             session_id: "sess-test".to_string(),
@@ -4071,7 +4075,7 @@ mod tests {
         let turn = TurnId(9);
         r.dispatch(Cmd::CallModel {
             turn,
-            request: crate::domain::ChatRequest {
+            request: mermaid_domain::ChatRequest {
                 model_id: "m".to_string(),
                 messages: vec![],
                 system_prompt: String::new(),
@@ -4104,7 +4108,7 @@ mod tests {
         // `or_insert_with`. Turn ids are monotonic and never reused, so such a
         // Cmd can only be a post-cancel straggler.
         let (mut r, _rx) = runner();
-        let req = || crate::domain::ChatRequest {
+        let req = || mermaid_domain::ChatRequest {
             model_id: "test/m".to_string(),
             messages: vec![],
             system_prompt: String::new(),
@@ -4161,7 +4165,7 @@ mod tests {
         let (mut r, _rx) = runner();
         for _ in 0..5 {
             r.dispatch(Cmd::SaveConversation(
-                crate::domain::ConversationHistory::new(
+                mermaid_domain::ConversationHistory::new(
                     "/p".to_string(),
                     "m".to_string(),
                     chrono::Local::now(),
@@ -4177,9 +4181,9 @@ mod tests {
     fn persistence_fixture(
         root: &std::path::Path,
         archive_id: &str,
-    ) -> (crate::domain::ConversationHistory, PendingCompactionSave) {
+    ) -> (mermaid_domain::ConversationHistory, PendingCompactionSave) {
         let now = chrono::Local::now();
-        let mut full = crate::domain::ConversationHistory::new(
+        let mut full = mermaid_domain::ConversationHistory::new(
             root.display().to_string(),
             "test/model".to_string(),
             now,
@@ -4195,15 +4199,15 @@ mod tests {
             )],
             now,
         );
-        let archive = crate::domain::CompactionArchive {
+        let archive = mermaid_domain::CompactionArchive {
             id: archive_id.to_string(),
             conversation_id: full.id.clone(),
             created_at: now,
             messages: full.messages().to_vec(),
         };
-        let record = crate::domain::CompactionEvent {
+        let record = mermaid_domain::CompactionEvent {
             id: archive_id.to_string(),
-            trigger: crate::domain::CompactionTrigger::Manual,
+            trigger: mermaid_domain::CompactionTrigger::Manual,
             created_at: now,
             before_tokens: 100,
             after_tokens: 20,
@@ -4212,7 +4216,7 @@ mod tests {
             preserved_turn_count: 1,
             summary_tokens: 10,
             duration_secs: 0.1,
-            review_status: crate::domain::CompactionReviewStatus::Reviewed,
+            review_status: mermaid_domain::CompactionReviewStatus::Reviewed,
             review_error: None,
             focus: None,
             archive_path: None,

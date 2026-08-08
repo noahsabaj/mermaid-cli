@@ -746,7 +746,7 @@ pub fn display_info_for(call: &PendingToolCall) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{ManagedProcess, ToolMetadata, ToolRunMetadata};
+    use crate::{ManagedProcess, ToolMetadata, ToolRunMetadata};
     use mermaid_model::models::tool_call::{FunctionCall, ToolCall as ModelToolCall};
 
     fn sample_call(id: u64, name: &str) -> PendingToolCall {
@@ -1035,7 +1035,7 @@ mod tests {
                     failed_queries: 1,
                     partial: true,
                     truncated: true,
-                    failures: vec![crate::domain::WebSearchFailure {
+                    failures: vec![crate::WebSearchFailure {
                         query_index: 1,
                         error: "upstream timed out".to_string(),
                     }],

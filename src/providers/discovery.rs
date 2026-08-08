@@ -24,8 +24,8 @@
 
 use std::time::Duration;
 
-use crate::domain::Config;
 use crate::providers::factory::resolve_provider_endpoint;
+use mermaid_domain::Config;
 use mermaid_model::models::PROVIDER_REGISTRY;
 
 /// A remote provider this machine can actually use right now.
@@ -324,7 +324,7 @@ fn gemini_model_ids(body: &serde_json::Value) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::UserProviderConfig;
+    use mermaid_domain::UserProviderConfig;
 
     /// The bespoke providers were the whole point: before this module they
     /// were absent from the "configured remote providers" set, so a machine

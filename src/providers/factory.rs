@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
-use crate::domain::Config;
+use mermaid_domain::Config;
 use mermaid_model::models::config::BackendConfig;
 use mermaid_model::models::{ModelError, Result, lookup_provider};
 use mermaid_model::utils::{
@@ -338,7 +338,7 @@ fn base_url_is_local(base_url: &str) -> bool {
 /// prior registry path dropped.
 fn merged_headers(
     profile: &mermaid_model::models::ProviderProfile,
-    user_cfg: Option<&crate::domain::UserProviderConfig>,
+    user_cfg: Option<&mermaid_domain::UserProviderConfig>,
 ) -> std::collections::HashMap<String, String> {
     let mut headers: std::collections::HashMap<String, String> = profile
         .extra_headers
@@ -602,7 +602,7 @@ static PROFILE_CACHE: std::sync::LazyLock<
 /// provider) reuse the same `&'static`.
 fn user_profile_to_static(
     name: &str,
-    user_cfg: &crate::domain::UserProviderConfig,
+    user_cfg: &mermaid_domain::UserProviderConfig,
 ) -> Option<&'static mermaid_model::models::ProviderProfile> {
     use mermaid_model::models::{ProviderProfile, ReasoningExtraction, ReasoningStrategy};
 
@@ -822,7 +822,7 @@ mod tests {
         );
         assert!(base.contains_key("HTTP-Referer"));
         // User extra_headers merge on top and can override a static one.
-        let mut cfg = crate::domain::UserProviderConfig::default();
+        let mut cfg = mermaid_domain::UserProviderConfig::default();
         cfg.extra_headers.insert("X-Custom".into(), "v".into());
         cfg.extra_headers
             .insert("X-OpenRouter-Title".into(), "Override".into());
@@ -838,7 +838,7 @@ mod tests {
     #[test]
     fn merged_headers_resolves_env_headers_and_skips_missing() {
         let profile = mermaid_model::models::lookup_provider("openai").unwrap();
-        let mut cfg = crate::domain::UserProviderConfig::default();
+        let mut cfg = mermaid_domain::UserProviderConfig::default();
         cfg.env_headers
             .insert("X-Gateway-Token".into(), "MERMAID_TEST_GW_TOKEN".into());
         temp_env::with_var("MERMAID_TEST_GW_TOKEN", Some("secret123"), || {
@@ -1176,7 +1176,7 @@ mod tests {
     // growth.
     #[test]
     fn custom_profile_is_memoized_per_key() {
-        use crate::domain::UserProviderConfig;
+        use mermaid_domain::UserProviderConfig;
         let cfg = UserProviderConfig {
             base_url: Some("https://api.custom.test/v1".to_string()),
             api_key_env: Some("CUSTOM_KEY".to_string()),

@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::domain::{ChatRequest, TurnId};
+use mermaid_domain::{ChatRequest, TurnId};
 use mermaid_model::models::adapters::ModelLimits;
 use mermaid_model::models::adapters::ollama_sizing::NumCtxSource;
 use mermaid_model::models::{ModelError, Result, TokenUsage};

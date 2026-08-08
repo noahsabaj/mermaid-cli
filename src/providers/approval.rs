@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use crate::domain::{ApprovalChoice, ApprovalKind, Msg, ToolCallId, TurnId};
+use mermaid_domain::{ApprovalChoice, ApprovalKind, Msg, ToolCallId, TurnId};
 
 /// The user's decision, broker-side. `Cmd::ResolveApproval` carries the pure
 /// `domain::ApprovalChoice`; the `EffectRunner` maps it to this.

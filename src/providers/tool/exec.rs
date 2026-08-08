@@ -20,7 +20,7 @@
 //! (`rm -rf /`, fork bombs, dd to device, etc.) are cheap to catch
 //! upfront.
 
-use crate::domain::ProgressEvent;
+use mermaid_domain::ProgressEvent;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -29,8 +29,8 @@ use async_trait::async_trait;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
-use crate::domain::{FilesystemPolicy, NetworkPolicy};
-use crate::domain::{ManagedProcess, ToolDefinition, ToolMetadata, ToolOutcome, ToolRunMetadata};
+use mermaid_domain::{FilesystemPolicy, NetworkPolicy};
+use mermaid_domain::{ManagedProcess, ToolDefinition, ToolMetadata, ToolOutcome, ToolRunMetadata};
 use mermaid_model::constants::{COMMAND_MAX_TIMEOUT_SECS, COMMAND_TIMEOUT_SECS};
 
 use super::super::ctx::ExecContext;
@@ -436,7 +436,7 @@ impl ToolExecutor for ExecuteCommandTool {
         // the doom-loop breaker disarms on the shell spelling of plan
         // authoring instead of only on `write_file`/`apply_patch`.
         outcome.metadata.plan_file_written =
-            plan_write && outcome.status == crate::domain::ToolStatus::Success;
+            plan_write && outcome.status == mermaid_domain::ToolStatus::Success;
         let _ = mermaid_runtime::run_plugin_hooks(
             "after_shell",
             &serde_json::json!({
@@ -2116,8 +2116,8 @@ fn contains_dangerous_command(command: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{ToolCallId, TurnId};
     use crate::providers::ctx::test_exec_context;
+    use mermaid_domain::{ToolCallId, TurnId};
     use std::path::PathBuf;
 
     #[test]
@@ -2299,7 +2299,7 @@ mod tests {
             .execute(serde_json::json!({"command": "cmd /c exit 7"}), ctx)
             .await;
         match &outcome.metadata.detail {
-            crate::domain::ToolMetadata::ExecuteCommand { exit_code, .. } => {
+            mermaid_domain::ToolMetadata::ExecuteCommand { exit_code, .. } => {
                 assert_eq!(*exit_code, Some(7), "outcome: {outcome:?}");
             },
             other => panic!("unexpected metadata: {other:?}"),
@@ -2419,7 +2419,7 @@ mod tests {
 
         let mk_ctx = || {
             let (tx, rx) = tokio::sync::mpsc::channel(64);
-            let mut config = crate::domain::Config::default();
+            let mut config = mermaid_domain::Config::default();
             config.safety.mode = mermaid_runtime::SafetyMode::ReadOnly;
             let ctx = crate::providers::ctx::ExecContext::new(
                 tokio_util::sync::CancellationToken::new(),
@@ -2463,7 +2463,7 @@ mod tests {
             .await;
         assert_eq!(
             outcome.status,
-            crate::domain::ToolStatus::Error,
+            mermaid_domain::ToolStatus::Error,
             "out-of-project working_dir must be escalated + blocked: {outcome:?}",
         );
 
@@ -2487,7 +2487,7 @@ mod tests {
 
         let mk_ctx = || {
             let (tx, rx) = tokio::sync::mpsc::channel(64);
-            let mut config = crate::domain::Config::default();
+            let mut config = mermaid_domain::Config::default();
             config.safety.mode = mermaid_runtime::SafetyMode::ReadOnly;
             config.safety.checkpoint_on_mutation = false;
             let mut ctx = crate::providers::ctx::ExecContext::new(
@@ -2545,7 +2545,7 @@ mod tests {
             .await;
         assert_eq!(
             outcome.status,
-            crate::domain::ToolStatus::Error,
+            mermaid_domain::ToolStatus::Error,
             "a plan-relative write from another cwd is not a plan write: {outcome:?}",
         );
         assert!(
@@ -2652,9 +2652,9 @@ mod tests {
     /// Pipe-mode context: `[exec] pty = false` pins the pipe spawn path.
     fn pipes_ctx() -> (
         crate::providers::ctx::ExecContext,
-        tokio::sync::mpsc::Receiver<crate::domain::ProgressEvent>,
+        tokio::sync::mpsc::Receiver<mermaid_domain::ProgressEvent>,
     ) {
-        let mut config = crate::domain::Config::default();
+        let mut config = mermaid_domain::Config::default();
         config.safety.mode = mermaid_runtime::SafetyMode::FullAccess;
         config.exec.pty = Some(false);
         crate::providers::ctx::test_exec_context_with_config(
@@ -2896,7 +2896,7 @@ mod tests {
         let outcome = ExecuteCommandTool
             .execute(serde_json::json!({"command": "sleep 5", "timeout": 1}), ctx)
             .await;
-        assert_eq!(outcome.status, crate::domain::ToolStatus::Error);
+        assert_eq!(outcome.status, mermaid_domain::ToolStatus::Error);
         let output = outcome.as_tool_message_content();
         assert!(output.contains("timed out"));
         assert!(output.contains("was killed"));
@@ -2922,7 +2922,7 @@ mod tests {
         let outcome = ExecuteCommandTool
             .execute(serde_json::json!({ "command": command, "timeout": 1 }), ctx)
             .await;
-        assert_eq!(outcome.status, crate::domain::ToolStatus::Error);
+        assert_eq!(outcome.status, mermaid_domain::ToolStatus::Error);
 
         // Read the grandchild pid the command recorded (poll briefly in case the
         // write lands a touch after spawn).
@@ -3239,7 +3239,7 @@ mod tests {
         // ReadOnly gate: an ExternalDirectory escalation would classify as
         // ExternalAccess and be denied; a Shell read-only command is allowed.
         let (tx, _rx) = tokio::sync::mpsc::channel(64);
-        let mut config = crate::domain::Config::default();
+        let mut config = mermaid_domain::Config::default();
         config.safety.mode = mermaid_runtime::SafetyMode::ReadOnly;
         let mut ctx = crate::providers::ctx::ExecContext::new(
             tokio_util::sync::CancellationToken::new(),

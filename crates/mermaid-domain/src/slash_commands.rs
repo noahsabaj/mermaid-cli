@@ -415,7 +415,7 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
 /// indices.
 pub enum PaletteEntry<'a> {
     Builtin(&'static SlashCommand),
-    Plugin(&'a crate::domain::PluginCommand),
+    Plugin(&'a crate::PluginCommand),
 }
 
 impl PaletteEntry<'_> {
@@ -454,7 +454,7 @@ impl PaletteEntry<'_> {
 /// must use this so their indices agree.
 pub fn filter_entries<'a>(
     typed: &str,
-    plugin: &'a [crate::domain::PluginCommand],
+    plugin: &'a [crate::PluginCommand],
 ) -> Vec<PaletteEntry<'a>> {
     let needle = typed.to_lowercase();
     let mut entries: Vec<PaletteEntry<'a>> = filter_by_prefix(typed)
@@ -496,8 +496,8 @@ pub fn filter_by_prefix(typed: &str) -> Vec<&'static SlashCommand> {
 /// `SlashCmd`. Returns `SlashCmd::Unknown` if the command isn't in
 /// the registry. Shared between the TUI dispatcher (C8) and any
 /// non-interactive command dispatch.
-pub fn parse_slash_command(raw: &str) -> crate::domain::SlashCmd {
-    use crate::domain::SlashCmd;
+pub fn parse_slash_command(raw: &str) -> crate::SlashCmd {
+    use crate::SlashCmd;
     let trimmed = raw.trim();
     let (name, arg) = match trimmed.split_once(' ') {
         Some((n, a)) => (n.to_lowercase(), Some(a.trim().to_string())),
@@ -535,7 +535,7 @@ pub fn parse_slash_command(raw: &str) -> crate::domain::SlashCmd {
         Some("todos") => SlashCmd::Todos(arg),
         Some("scratchpad") => SlashCmd::Scratchpad,
         Some("context") => {
-            use crate::domain::ContextCmd;
+            use crate::ContextCmd;
             let a = arg.as_deref().map(str::trim);
             SlashCmd::Context(match a {
                 None | Some("") => ContextCmd::Show,

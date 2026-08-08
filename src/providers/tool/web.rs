@@ -7,15 +7,15 @@
 //! tool layer owns cancellation plumbing, snapshots, and multi-query fan-out;
 //! the backend owns the transport and destination policy.
 
-use crate::domain::ProgressEvent;
+use mermaid_domain::ProgressEvent;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use async_trait::async_trait;
 use futures::{StreamExt, stream};
 
-use crate::domain::{FetchBackend, SearchBackend, WebConfig};
-use crate::domain::{ToolDefinition, ToolMetadata, ToolOutcome, ToolRunMetadata};
+use mermaid_domain::{FetchBackend, SearchBackend, WebConfig};
+use mermaid_domain::{ToolDefinition, ToolMetadata, ToolOutcome, ToolRunMetadata};
 
 use super::super::ctx::ExecContext;
 use super::ToolExecutor;
@@ -346,7 +346,7 @@ impl ToolExecutor for WebSearchTool {
         let mut combined = String::new();
         let mut result_count = 0usize;
         let mut sources = Vec::new();
-        let mut errors: Vec<crate::domain::WebSearchFailure> = Vec::new();
+        let mut errors: Vec<mermaid_domain::WebSearchFailure> = Vec::new();
         for (idx, query, result) in completed {
             let display_query = mermaid_model::utils::redact_secrets(&query);
             // A single query returning nothing or erroring does NOT abort the
@@ -370,7 +370,7 @@ impl ToolExecutor for WebSearchTool {
                             &mermaid_model::utils::redact_secrets(&format!("{e:#}")),
                             MAX_WEB_SEARCH_FAILURE_BYTES,
                         );
-                        errors.push(crate::domain::WebSearchFailure {
+                        errors.push(mermaid_domain::WebSearchFailure {
                             query_index: idx,
                             error: safe_error.clone(),
                         });
@@ -1801,8 +1801,8 @@ mod tests {
 
     #[tokio::test]
     async fn web_fetch_failure_retains_typed_backend_provenance() {
-        use crate::domain::{ToolCallId, ToolStatus, TurnId};
         use crate::providers::ctx::test_exec_context;
+        use mermaid_domain::{ToolCallId, ToolStatus, TurnId};
 
         struct FailingFetch;
 
@@ -1847,8 +1847,8 @@ mod tests {
 
     #[tokio::test]
     async fn web_search_progress_redacts_without_changing_transport_query() {
-        use crate::domain::{ToolCallId, ToolStatus, TurnId};
         use crate::providers::ctx::test_exec_context;
+        use mermaid_domain::{ToolCallId, ToolStatus, TurnId};
 
         struct RecordingSearch {
             seen: Arc<Mutex<Option<String>>>,
@@ -1899,8 +1899,8 @@ mod tests {
 
     #[tokio::test]
     async fn snapshot_line_ranges_do_not_refetch_mutable_pages() {
-        use crate::domain::{ToolCallId, ToolStatus, TurnId};
         use crate::providers::ctx::test_exec_context;
+        use mermaid_domain::{ToolCallId, ToolStatus, TurnId};
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         struct MockFetch {
@@ -2045,10 +2045,10 @@ mod tests {
 
     #[tokio::test]
     async fn web_search_batch_survives_empty_and_failed_queries() {
-        use crate::domain::{ToolCallId, ToolStatus, TurnId};
         use crate::providers::ctx::test_exec_context;
         use crate::providers::tool::web_client::SearchResult;
         use async_trait::async_trait;
+        use mermaid_domain::{ToolCallId, ToolStatus, TurnId};
         use std::sync::Arc;
 
         struct Mock;
@@ -2140,9 +2140,9 @@ mod tests {
 
     #[tokio::test]
     async fn web_search_batch_caps_concurrency_and_restores_input_order() {
-        use crate::domain::{ToolCallId, ToolStatus, TurnId};
         use crate::providers::ctx::test_exec_context;
         use crate::providers::tool::web_client::SearchResult;
+        use mermaid_domain::{ToolCallId, ToolStatus, TurnId};
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         struct ConcurrencyMock {
@@ -2209,9 +2209,9 @@ mod tests {
 
     #[tokio::test]
     async fn web_search_complete_output_budget_is_byte_exact_for_multibyte_text() {
-        use crate::domain::{ToolCallId, ToolStatus, TurnId};
         use crate::providers::ctx::test_exec_context;
         use crate::providers::tool::web_client::SearchResult;
+        use mermaid_domain::{ToolCallId, ToolStatus, TurnId};
 
         struct MultibyteMock;
 
@@ -2253,8 +2253,8 @@ mod tests {
 
     #[tokio::test]
     async fn web_search_total_failure_and_structured_errors_are_byte_bounded() {
-        use crate::domain::{ToolCallId, ToolStatus, TurnId};
         use crate::providers::ctx::test_exec_context;
+        use mermaid_domain::{ToolCallId, ToolStatus, TurnId};
 
         struct LargeFailure;
 

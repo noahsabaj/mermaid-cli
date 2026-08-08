@@ -34,9 +34,9 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use mermaid_cli::domain::ChatRequest;
 use mermaid_cli::providers::model::ModelProvider;
 use mermaid_cli::providers::{FinalResponse, StreamContext, StreamEvent};
+use mermaid_domain::ChatRequest;
 use mermaid_model::models::ModelCapabilities;
 use mermaid_model::models::{
     FinishReason, FunctionCall, ReasoningCapability, Result, TokenUsage, ToolCall,

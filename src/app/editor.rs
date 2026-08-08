@@ -7,9 +7,9 @@
 //! load-bearing (see [`compose_in_editor`]).
 
 use crate::app::terminal::TerminalGuard;
-use crate::domain::Msg;
 use anyhow::Result;
 use crossterm::event::EventStream;
+use mermaid_domain::Msg;
 use std::path::{Path, PathBuf};
 
 /// Resolve the compose editor: `$VISUAL` then `$EDITOR`, first non-blank

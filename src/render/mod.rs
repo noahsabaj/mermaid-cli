@@ -27,7 +27,7 @@ use ratatui::{
 use rustc_hash::FxHashMap;
 use unicode_width::UnicodeWidthChar;
 
-use crate::domain::{State, TurnState};
+use mermaid_domain::{State, TurnState};
 use mermaid_model::models::{ReasoningCapability, ReasoningLevel, nearest_effort};
 
 use widgets::{
@@ -61,7 +61,7 @@ pub struct RenderCache {
     /// `wrapped_line_cache`) only on change, so `/theme` repaints instantly
     /// without per-frame `Theme` construction. `None` (fresh cache) keeps the
     /// `Theme::dark()` default until the first frame resolves it.
-    applied_theme: Option<(crate::domain::ThemeChoice, bool)>,
+    applied_theme: Option<(mermaid_domain::ThemeChoice, bool)>,
     /// Host + user for the status bar's `user@host:cwd` line, read once at
     /// startup so `StatusWidget::render` doesn't hit the environment on every
     /// frame (#55). Process-constant, so caching here is exact.
@@ -127,8 +127,8 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             theme::Theme::plain()
         } else {
             match state.ui.theme {
-                crate::domain::ThemeChoice::Dark => theme::Theme::dark(),
-                crate::domain::ThemeChoice::Light => theme::Theme::light(),
+                mermaid_domain::ThemeChoice::Dark => theme::Theme::dark(),
+                mermaid_domain::ThemeChoice::Light => theme::Theme::light(),
             }
         };
         // The wrapped-line cache is theme-keyed, but drop stale entries
@@ -332,20 +332,20 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         && !confirm_open
         && matches!(
             state.ui.mode,
-            crate::domain::UiMode::ConversationList { .. }
+            mermaid_domain::UiMode::ConversationList { .. }
         );
     let rewind_open = approval_item.is_none()
         && question_item.is_none()
         && !confirm_open
-        && matches!(state.ui.mode, crate::domain::UiMode::RewindPicker { .. });
+        && matches!(state.ui.mode, mermaid_domain::UiMode::RewindPicker { .. });
     let plan_config_open = approval_item.is_none()
         && question_item.is_none()
         && !confirm_open
-        && matches!(state.ui.mode, crate::domain::UiMode::PlanConfig { .. });
+        && matches!(state.ui.mode, mermaid_domain::UiMode::PlanConfig { .. });
     let model_picker_open = approval_item.is_none()
         && question_item.is_none()
         && !confirm_open
-        && matches!(state.ui.mode, crate::domain::UiMode::ModelPicker { .. });
+        && matches!(state.ui.mode, mermaid_domain::UiMode::ModelPicker { .. });
     let file_picker_open = approval_item.is_none()
         && question_item.is_none()
         && !confirm_open
@@ -387,7 +387,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             .next()
             .unwrap_or("");
         let row_count =
-            crate::domain::slash_commands::filter_entries(typed, &state.plugin_commands)
+            mermaid_domain::slash_commands::filter_entries(typed, &state.plugin_commands)
                 .len()
                 .clamp(1, 8);
         (row_count as u16) + 2
@@ -596,7 +596,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             accent: rstate.theme.colors.warning.to_color(),
         };
         frame.render_widget(widget, chunks[4]);
-    } else if let crate::domain::UiMode::ModelPicker {
+    } else if let mermaid_domain::UiMode::ModelPicker {
         candidates,
         query,
         cursor,
@@ -604,7 +604,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
     } = &state.ui.mode
     {
         use widgets::ModelPickerWidget;
-        let matches = crate::domain::reducer::filter_model_choices(candidates, query);
+        let matches = mermaid_domain::reducer::filter_model_choices(candidates, query);
         let widget = ModelPickerWidget {
             theme: &rstate.theme,
             matches: &matches,
@@ -614,7 +614,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             current: &state.session.model_id,
         };
         frame.render_widget(widget, chunks[4]);
-    } else if let crate::domain::UiMode::ConversationList { candidates, cursor } = &state.ui.mode {
+    } else if let mermaid_domain::UiMode::ConversationList { candidates, cursor } = &state.ui.mode {
         use widgets::ConversationListWidget;
         let widget = ConversationListWidget {
             theme: &rstate.theme,
@@ -622,7 +622,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             cursor: *cursor,
         };
         frame.render_widget(widget, chunks[4]);
-    } else if let crate::domain::UiMode::RewindPicker { candidates, cursor } = &state.ui.mode {
+    } else if let mermaid_domain::UiMode::RewindPicker { candidates, cursor } = &state.ui.mode {
         use widgets::RewindPickerWidget;
         let widget = RewindPickerWidget {
             theme: &rstate.theme,
@@ -630,7 +630,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             cursor: *cursor,
         };
         frame.render_widget(widget, chunks[4]);
-    } else if let crate::domain::UiMode::PlanConfig { cursor } = &state.ui.mode {
+    } else if let mermaid_domain::UiMode::PlanConfig { cursor } = &state.ui.mode {
         use widgets::PlanConfigWidget;
         let widget = PlanConfigWidget {
             theme: &rstate.theme,
@@ -656,7 +656,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             .split_whitespace()
             .next()
             .unwrap_or("");
-        let entries = crate::domain::slash_commands::filter_entries(typed, &state.plugin_commands);
+        let entries = mermaid_domain::slash_commands::filter_entries(typed, &state.plugin_commands);
         let palette_widget = SlashPaletteWidget {
             theme: &rstate.theme,
             entries,
@@ -925,22 +925,24 @@ fn build_live_messages<'a>(
         calls, outcomes, ..
     } = turn
     {
-        let actions: Vec<crate::domain::ActionDisplay> = calls
+        let actions: Vec<mermaid_domain::ActionDisplay> = calls
             .iter()
             .zip(outcomes)
             .filter_map(|(call, outcome)| match outcome {
-                Some(outcome) => Some(crate::domain::transition::action_display_for(call, outcome)),
+                Some(outcome) => Some(mermaid_domain::transition::action_display_for(
+                    call, outcome,
+                )),
                 None => {
                     let name = call.source.function.name.as_str();
                     if name == "agent" || name == "ask_user_question" {
                         return None;
                     }
-                    let (action_type, target) = crate::domain::display_info_for(call);
-                    Some(crate::domain::ActionDisplay {
+                    let (action_type, target) = mermaid_domain::display_info_for(call);
+                    Some(mermaid_domain::ActionDisplay {
                         action_type,
                         target,
-                        result: crate::domain::ActionResult::Running,
-                        details: crate::domain::ActionDetails::Simple,
+                        result: mermaid_domain::ActionResult::Running,
+                        details: mermaid_domain::ActionDetails::Simple,
                         duration_seconds: None,
                         metadata: None,
                     })
@@ -1072,7 +1074,7 @@ fn agent_panel_data(state: &State) -> (Vec<widgets::AgentPanelRow>, Option<Strin
                 continue;
             }
             running_agents += 1;
-            let (_, description) = crate::domain::display_info_for(call);
+            let (_, description) = mermaid_domain::display_info_for(call);
             let live = state.ui.live_tool_status.get(&call.call_id);
             rows.push(widgets::AgentPanelRow {
                 description,
@@ -1150,8 +1152,8 @@ mod bench;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::Config;
-    use crate::domain::{State, TurnState};
+    use mermaid_domain::Config;
+    use mermaid_domain::{State, TurnState};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use std::path::PathBuf;
@@ -1189,7 +1191,7 @@ mod tests {
             .session
             .append(mermaid_model::models::ChatMessage::user("hello"), state.now);
         let dark = render_to_string(&state);
-        state.ui.theme = crate::domain::ThemeChoice::Light;
+        state.ui.theme = mermaid_domain::ThemeChoice::Light;
         let light = render_to_string(&state);
         assert_eq!(dark, light, "light theme changed glyphs");
         state.ui.no_color = true;
@@ -1203,7 +1205,7 @@ mod tests {
         let mut rstate = RenderCache::new();
         render_frame(&state, &mut rstate, 80, 24);
         assert_eq!(rstate.theme.name, "Dark");
-        state.ui.theme = crate::domain::ThemeChoice::Light;
+        state.ui.theme = mermaid_domain::ThemeChoice::Light;
         render_frame(&state, &mut rstate, 80, 24);
         assert_eq!(rstate.theme.name, "Light");
         // NO_COLOR beats the theme choice.
@@ -1214,7 +1216,7 @@ mod tests {
 
     #[test]
     fn agent_calls_get_panel_rows_and_a_calm_status_override() {
-        use crate::domain::{LiveToolStatus, PendingToolCall, ToolCallId, TurnId};
+        use mermaid_domain::{LiveToolStatus, PendingToolCall, ToolCallId, TurnId};
 
         let mut state = mock_state();
         let call_id = ToolCallId(7);
@@ -1260,7 +1262,7 @@ mod tests {
 
     #[test]
     fn mixed_turn_names_first_non_agent_tool_with_stable_activity() {
-        use crate::domain::{LiveToolStatus, PendingToolCall, ToolCallId, TurnId};
+        use mermaid_domain::{LiveToolStatus, PendingToolCall, ToolCallId, TurnId};
 
         let mut state = mock_state();
         let exec_id = ToolCallId(8);
@@ -1310,7 +1312,7 @@ mod tests {
         assert_eq!(actions[0].target, "cargo test");
         assert!(matches!(
             actions[0].result,
-            crate::domain::ActionResult::Running
+            mermaid_domain::ActionResult::Running
         ));
         let (rows, override_text, _) = agent_panel_data(&state);
         assert_eq!(override_text, None);
@@ -1319,7 +1321,7 @@ mod tests {
 
     #[test]
     fn build_live_messages_borrows_idle_and_stamps_partial_with_injected_now() {
-        use crate::domain::{GenPhase, TurnId};
+        use mermaid_domain::{GenPhase, TurnId};
         use mermaid_model::models::ChatMessage;
         use std::borrow::Cow;
         use std::time::SystemTime;
@@ -1484,12 +1486,12 @@ mod tests {
             ),
         ];
         let streaming = TurnState::Generating {
-            id: crate::domain::TurnId(1),
+            id: mermaid_domain::TurnId(1),
             started: std::time::SystemTime::UNIX_EPOCH,
             partial_text: "first half and the rest".to_string(),
             partial_reasoning: String::new(),
             tokens: 0,
-            phase: crate::domain::GenPhase::Streaming,
+            phase: mermaid_domain::GenPhase::Streaming,
             provider_continuation: None,
             pending_tool_calls: Vec::new(),
             continuation: true,
@@ -1508,7 +1510,7 @@ mod tests {
 
     #[test]
     fn build_live_messages_stamps_streaming_continuation_and_trims_echo() {
-        use crate::domain::{GenPhase, TurnId};
+        use mermaid_domain::{GenPhase, TurnId};
         use mermaid_model::models::{ChatMessage, ChatMessageKind};
 
         let committed = vec![ChatMessage::assistant(
@@ -1576,7 +1578,7 @@ mod tests {
 
     #[test]
     fn streaming_continuation_renders_without_fresh_bullet() {
-        use crate::domain::{GenPhase, TurnId};
+        use mermaid_domain::{GenPhase, TurnId};
         use mermaid_model::models::{ChatMessage, ChatMessageKind};
         let mut s = mock_state();
         s.session.append(ChatMessage::user("audit"), s.now);
@@ -1657,8 +1659,8 @@ mod tests {
     #[test]
     fn status_line_appears_during_generating() {
         let mut s = mock_state();
-        s.turn = crate::domain::transition::start_generating(
-            crate::domain::TurnId(1),
+        s.turn = mermaid_domain::transition::start_generating(
+            mermaid_domain::TurnId(1),
             std::time::SystemTime::now(),
         );
         let frame = render_to_string(&s);
@@ -1670,11 +1672,11 @@ mod tests {
 
     #[test]
     fn in_flight_tool_renders_as_transcript_row_with_bare_status_line() {
-        use crate::domain::PendingToolCall;
+        use mermaid_domain::PendingToolCall;
         use mermaid_model::models::tool_call::{FunctionCall, ToolCall as ModelToolCall};
         let mut s = mock_state();
         let call = PendingToolCall {
-            call_id: crate::domain::ToolCallId(1),
+            call_id: mermaid_domain::ToolCallId(1),
             source: ModelToolCall {
                 id: Some("c1".to_string()),
                 function: FunctionCall {
@@ -1684,7 +1686,7 @@ mod tests {
             },
         };
         s.turn = TurnState::ExecutingTools {
-            id: crate::domain::TurnId(1),
+            id: mermaid_domain::TurnId(1),
             started: std::time::SystemTime::now(),
             calls: vec![call],
             outcomes: vec![None],
@@ -1706,11 +1708,11 @@ mod tests {
 
     #[test]
     fn pending_question_and_agent_calls_get_no_transcript_row() {
-        use crate::domain::PendingToolCall;
+        use mermaid_domain::PendingToolCall;
         use mermaid_model::models::tool_call::{FunctionCall, ToolCall as ModelToolCall};
         let mut s = mock_state();
         let mk = |id: u64, name: &str, args: serde_json::Value| PendingToolCall {
-            call_id: crate::domain::ToolCallId(id),
+            call_id: mermaid_domain::ToolCallId(id),
             source: ModelToolCall {
                 id: Some(format!("c{id}")),
                 function: FunctionCall {
@@ -1720,7 +1722,7 @@ mod tests {
             },
         };
         s.turn = TurnState::ExecutingTools {
-            id: crate::domain::TurnId(1),
+            id: mermaid_domain::TurnId(1),
             started: std::time::SystemTime::now(),
             calls: vec![
                 mk(1, "ask_user_question", serde_json::json!({"questions": []})),
@@ -1745,13 +1747,13 @@ mod tests {
     fn status_line_appears_during_tool_execution_and_shows_queue() {
         let mut s = mock_state();
         s.turn = TurnState::ExecutingTools {
-            id: crate::domain::TurnId(1),
+            id: mermaid_domain::TurnId(1),
             started: std::time::SystemTime::now(),
             calls: Vec::new(),
             outcomes: Vec::new(),
         };
         s.ui.queued_messages
-            .push_back(crate::domain::QueuedMessage {
+            .push_back(mermaid_domain::QueuedMessage {
                 text: "please steer this".to_string(),
                 attachment_ids: Vec::new(),
             });
@@ -1789,14 +1791,14 @@ mod tests {
         let mut s = mock_state();
         let mut msg = mermaid_model::models::ChatMessage::assistant("");
         msg.thinking = Some("private chain of thought".to_string());
-        msg.actions.push(crate::domain::ActionDisplay {
+        msg.actions.push(mermaid_domain::ActionDisplay {
             action_type: "Bash".to_string(),
             target: "dir".to_string(),
-            result: crate::domain::ActionResult::Success {
+            result: mermaid_domain::ActionResult::Success {
                 output: "ok".to_string(),
                 images: None,
             },
-            details: crate::domain::ActionDetails::Simple,
+            details: mermaid_domain::ActionDetails::Simple,
             duration_seconds: Some(0.015),
             metadata: None,
         });

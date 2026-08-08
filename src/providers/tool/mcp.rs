@@ -13,8 +13,8 @@
 
 use async_trait::async_trait;
 
-use crate::domain::{ToolDefinition, ToolMetadata, ToolOutcome, ToolRunMetadata, ToolStatus};
 use crate::mcp::{McpServerManager, manager_ref};
+use mermaid_domain::{ToolDefinition, ToolMetadata, ToolOutcome, ToolRunMetadata, ToolStatus};
 
 use super::super::ctx::ExecContext;
 use super::ToolExecutor;
@@ -172,8 +172,8 @@ fn outcome_from_mcp(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{ToolCallId, TurnId};
     use crate::providers::ctx::test_exec_context;
+    use mermaid_domain::{ToolCallId, TurnId};
     use std::path::PathBuf;
 
     #[tokio::test]
@@ -182,7 +182,7 @@ mod tests {
         let outcome = McpToolProxy
             .execute(serde_json::json!({"tool_name": "x"}), ctx)
             .await;
-        assert_eq!(outcome.status, crate::domain::ToolStatus::Error);
+        assert_eq!(outcome.status, mermaid_domain::ToolStatus::Error);
     }
 
     #[tokio::test]
@@ -191,7 +191,7 @@ mod tests {
         let outcome = McpToolProxy
             .execute(serde_json::json!({"server_name": "x"}), ctx)
             .await;
-        assert_eq!(outcome.status, crate::domain::ToolStatus::Error);
+        assert_eq!(outcome.status, mermaid_domain::ToolStatus::Error);
     }
 
     #[tokio::test]
@@ -207,7 +207,7 @@ mod tests {
             .await;
         // Either Error (uninitialized) or Error (server not found) —
         // both acceptable; the test asserts *not Finished*.
-        assert_eq!(outcome.status, crate::domain::ToolStatus::Error);
+        assert_eq!(outcome.status, mermaid_domain::ToolStatus::Error);
     }
 
     #[test]

@@ -11,7 +11,7 @@
 //! Loading is startup-only (no watcher): skills are rarely-edited authored
 //! artifacts; restart to pick up changes.
 
-use crate::domain::{LoadedSkills, SkillEntry, SkillSource};
+use mermaid_domain::{LoadedSkills, SkillEntry, SkillSource};
 use std::path::{Path, PathBuf};
 
 /// Hard cap on indexed skills — the index is prompt real estate.
@@ -23,18 +23,6 @@ const MAX_INDEX_BYTES: usize = 8 * 1024;
 /// Bounded read for each SKILL.md — only the frontmatter matters here, and the
 /// model reads the full body itself on activation.
 const MAX_SKILL_FILE_BYTES: usize = 8 * 1024;
-
-impl SkillSource {
-    /// Short label rendered in the index so the model (and the user reading a
-    /// transcript) can see where each playbook comes from.
-    fn label(self) -> &'static str {
-        match self {
-            SkillSource::Project => "project",
-            SkillSource::User => "user",
-            SkillSource::Plugin => "plugin",
-        }
-    }
-}
 
 /// Discover every skill visible from `cwd`, or `None` when there are none.
 /// Never errors: an unreadable root or file is skipped (per-file tolerance) —

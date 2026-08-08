@@ -12,8 +12,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 
 use super::truncate_to_cells;
-use crate::domain::ConversationSummary;
 use crate::render::theme::Theme;
+use mermaid_domain::ConversationSummary;
 
 pub struct ConversationListWidget<'a> {
     pub theme: &'a Theme,

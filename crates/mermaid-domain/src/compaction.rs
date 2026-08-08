@@ -1329,8 +1329,8 @@ mod tests {
                 request.policy,
                 Some(window),
             );
-            let used = crate::domain::estimate_context_usage_for_request(&summary, Some(window))
-                .used_tokens;
+            let used =
+                crate::estimate_context_usage_for_request(&summary, Some(window)).used_tokens;
             if let Some((prev_window, prev_used)) = previous {
                 assert!(
                     used <= prev_used,
@@ -1362,8 +1362,8 @@ mod tests {
                 request.policy,
                 Some(window),
             );
-            let used = crate::domain::estimate_context_usage_for_request(&summary, Some(window))
-                .used_tokens;
+            let used =
+                crate::estimate_context_usage_for_request(&summary, Some(window)).used_tokens;
             assert!(
                 used.saturating_add(summary.max_tokens) <= window,
                 "window {window}: input {used} + output {} exceeds it",
@@ -1445,7 +1445,7 @@ mod tests {
             request.policy,
             Some(window),
         );
-        let usage = crate::domain::estimate_context_usage_for_request(&summary, Some(window));
+        let usage = crate::estimate_context_usage_for_request(&summary, Some(window));
         assert!(usage.used_tokens.saturating_add(summary.max_tokens) <= window);
     }
 
@@ -1478,7 +1478,7 @@ mod tests {
             !prepared.summary_images.is_empty(),
             "the newest image fits the budget and must be attached"
         );
-        let usage = crate::domain::estimate_context_usage_for_request(&summary, Some(window));
+        let usage = crate::estimate_context_usage_for_request(&summary, Some(window));
         assert!(
             usage.used_tokens.saturating_add(summary.max_tokens) <= window,
             "used {} + max_tokens {} > window {}",

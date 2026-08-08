@@ -11,8 +11,8 @@
 
 use std::path::PathBuf;
 
-use mermaid_cli::domain::Config;
-use mermaid_cli::domain::{Msg, State, ToolCallId, ToolOutcome, TurnId, start_generating, update};
+use mermaid_domain::Config;
+use mermaid_domain::{Msg, State, ToolCallId, ToolOutcome, TurnId, start_generating, update};
 use mermaid_model::models::tool_call::{FunctionCall, ToolCall as ModelToolCall};
 use mermaid_model::models::{FinishReason, MessageRole, TokenUsage};
 
@@ -98,7 +98,7 @@ fn script() -> Vec<(i64, Msg)> {
                 stop_reason: Some(FinishReason::Stop),
             },
         ),
-        (7, Msg::Slash(mermaid_cli::domain::SlashCmd::Usage)),
+        (7, Msg::Slash(mermaid_domain::SlashCmd::Usage)),
         (7, Msg::Tick),
         (8, Msg::Quit),
     ]

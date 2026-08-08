@@ -124,3 +124,53 @@ pub struct SessionProvenance {
     pub git_sha: Option<String>,
     pub cli_version: Option<String>,
 }
+
+impl LoadedInstructions {
+    /// Approximate token count for status messages. ~4 chars/token is
+    /// the rule of thumb that's correct enough for user-facing display.
+    pub fn approx_tokens(&self) -> usize {
+        self.content.len() / 4
+    }
+}
+
+impl MemoryScope {
+    /// Kebab token used in frontmatter and the `scope` tool argument.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MemoryScope::Global => "global",
+            MemoryScope::ProjectPrivate => "project-private",
+            MemoryScope::ProjectShared => "project-shared",
+        }
+    }
+
+    /// Human label for the index section header.
+    pub fn label(self) -> &'static str {
+        match self {
+            MemoryScope::Global => "Global (all projects)",
+            MemoryScope::ProjectPrivate => "Project (private)",
+            MemoryScope::ProjectShared => "Project (shared)",
+        }
+    }
+}
+
+impl LoadedMemory {
+    pub fn approx_tokens(&self) -> usize {
+        self.index.len() / 4
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+impl SkillSource {
+    /// Short label rendered in the index so the model (and the user reading a
+    /// transcript) can see where each playbook comes from.
+    pub fn label(self) -> &'static str {
+        match self {
+            SkillSource::Project => "project",
+            SkillSource::User => "user",
+            SkillSource::Plugin => "plugin",
+        }
+    }
+}

@@ -15,10 +15,10 @@ use std::time::Duration;
 
 use crate::app::instructions::{self, ReloadOutcome};
 use crate::app::memory::{self, MemoryReloadOutcome};
-use crate::domain::LoadedInstructions;
-use crate::domain::LoadedMemory;
-use crate::domain::MemoryConfig;
-use crate::domain::Msg;
+use mermaid_domain::LoadedInstructions;
+use mermaid_domain::LoadedMemory;
+use mermaid_domain::MemoryConfig;
+use mermaid_domain::Msg;
 
 use super::MsgSender;
 

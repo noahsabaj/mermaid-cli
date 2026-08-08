@@ -12,7 +12,7 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 
-use crate::domain::ChatRequest;
+use mermaid_domain::ChatRequest;
 use mermaid_model::models::adapters::ModelLimits;
 use mermaid_model::models::adapters::openai_compat::OpenAICompatAdapter;
 use mermaid_model::models::{Model, ModelConfig, ModelError, ProviderProfile, Result};

@@ -21,9 +21,9 @@
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
-use crate::domain::checklist::{ChecklistItem, ChecklistStatus, ChecklistStore};
-use crate::domain::{ChecklistOrigin, TurnState};
 use crate::render::theme::Theme;
+use mermaid_domain::checklist::{ChecklistItem, ChecklistStatus, ChecklistStore};
+use mermaid_domain::{ChecklistOrigin, TurnState};
 
 use super::truncate_to_cells;
 
@@ -258,7 +258,7 @@ fn cost_suffix(task: &ChecklistItem) -> String {
     {
         bits.push(format!(
             "{} tok",
-            crate::domain::format_compact_count(tokens as usize)
+            mermaid_domain::format_compact_count(tokens as usize)
         ));
     }
     if bits.is_empty() {
@@ -281,8 +281,8 @@ fn format_duration(secs: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::ChecklistEdit;
-    use crate::domain::checklist::{ChecklistSpec, Stamp};
+    use mermaid_domain::ChecklistEdit;
+    use mermaid_domain::checklist::{ChecklistSpec, Stamp};
 
     fn store_of(statuses: &[ChecklistStatus]) -> ChecklistStore {
         let mut store = ChecklistStore::default();

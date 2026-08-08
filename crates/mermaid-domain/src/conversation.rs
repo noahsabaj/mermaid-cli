@@ -40,7 +40,7 @@ pub struct ConversationHistory {
     pub updated_at: DateTime<Local>,
     /// Metadata for context compactions performed in this conversation.
     #[serde(default)]
-    pub compactions: Vec<crate::domain::CompactionEvent>,
+    pub compactions: Vec<crate::CompactionEvent>,
     /// History of user input prompts for navigation (up/down arrows)
     #[serde(default)]
     pub input_history: VecDeque<String>,
@@ -62,7 +62,7 @@ pub struct ConversationHistory {
     /// session was saved mid-planning, so `--resume` re-enters plan mode with
     /// the same plan file and restore target.
     #[serde(default)]
-    pub plan: Option<crate::domain::PlanState>,
+    pub plan: Option<crate::PlanState>,
     /// The mode-defining facts the model was last told about (see
     /// `domain::AdvertisedContext`) — the dispatch-time context-delta
     /// injector's baseline. Rides the conversation (not `Session`) so
@@ -70,13 +70,13 @@ pub struct ConversationHistory {
     /// free. `None` on fresh conversations and pre-field saves: the first
     /// dispatch stamps it silently instead of announcing current state.
     #[serde(default)]
-    pub advertised_context: Option<crate::domain::AdvertisedContext>,
+    pub advertised_context: Option<crate::AdvertisedContext>,
     #[serde(default)]
-    pub last_token_usage: Option<crate::domain::TokenUsageTotals>,
+    pub last_token_usage: Option<crate::TokenUsageTotals>,
     #[serde(default)]
-    pub cumulative_token_usage: crate::domain::TokenUsageTotals,
+    pub cumulative_token_usage: crate::TokenUsageTotals,
     #[serde(default)]
-    pub context_usage: Option<crate::domain::ContextUsageSnapshot>,
+    pub context_usage: Option<crate::ContextUsageSnapshot>,
     /// Session lineage / provenance, all `#[serde(default)]` (older files omit
     /// them). Stamped in the impure startup path, never the pure reducer.
     /// `forked_from`/`parent_session` are set when a session is branched from
@@ -93,7 +93,7 @@ pub struct ConversationHistory {
     /// Snapshotted on every save so --resume/--continue restore an in-flight
     /// plan; sessions saved before this field existed load an empty store.
     #[serde(default)]
-    pub tasks: crate::domain::ChecklistStore,
+    pub tasks: crate::ChecklistStore,
 }
 
 impl ConversationHistory {
@@ -156,14 +156,14 @@ impl ConversationHistory {
             // Stamped by the injector at the first dispatch (silent seed).
             advertised_context: None,
             last_token_usage: None,
-            cumulative_token_usage: crate::domain::TokenUsageTotals::default(),
+            cumulative_token_usage: crate::TokenUsageTotals::default(),
             context_usage: None,
             // Lineage/provenance filled in by the impure startup path.
             forked_from: None,
             parent_session: None,
             cli_version: None,
             git_sha: None,
-            tasks: crate::domain::ChecklistStore::default(),
+            tasks: crate::ChecklistStore::default(),
         }
     }
 
@@ -188,7 +188,7 @@ impl ConversationHistory {
 
     /// Record a completed context compaction. `now` injected — see
     /// [`Self::add_messages`].
-    pub fn add_compaction(&mut self, record: crate::domain::CompactionEvent, now: DateTime<Local>) {
+    pub fn add_compaction(&mut self, record: crate::CompactionEvent, now: DateTime<Local>) {
         self.compactions.push(record);
         self.updated_at = now;
     }

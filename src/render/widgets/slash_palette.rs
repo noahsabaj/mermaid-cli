@@ -15,8 +15,8 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Widget},
 };
 
-use crate::domain::slash_commands::PaletteEntry;
 use crate::render::theme::Theme;
+use mermaid_domain::slash_commands::PaletteEntry;
 
 /// Hard cap on visible rows — anything beyond is hidden until the user
 /// narrows the filter. Current registry has 9 entries; cap at 8 means
@@ -142,7 +142,7 @@ mod tests {
         // #103: a caller that lets `selected_index` exceed the filtered list
         // must not panic the `commands[scroll_offset..visible_end]` slice.
         let theme = Theme::dark();
-        let entries = crate::domain::slash_commands::filter_entries("", &[]);
+        let entries = mermaid_domain::slash_commands::filter_entries("", &[]);
         assert!(!entries.is_empty(), "registry should expose commands");
         let widget = SlashPaletteWidget {
             theme: &theme,

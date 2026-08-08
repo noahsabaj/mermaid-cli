@@ -561,7 +561,7 @@ impl Default for MemoryConfig {
 
 /// Context-compaction settings.
 ///
-/// Every field maps onto a [`crate::domain::CompactionPolicy`] knob that was
+/// Every field maps onto a [`crate::CompactionPolicy`] knob that was
 /// previously a hard-coded constant. Values are sanitized on the way out (see
 /// [`CompactionConfig::policy`]) rather than validated on the way in: a bad
 /// number should degrade to the nearest sane one, not refuse to start the app.
@@ -624,7 +624,7 @@ pub struct CompactionConfig {
 
 impl Default for CompactionConfig {
     fn default() -> Self {
-        let policy = crate::domain::CompactionPolicy::default();
+        let policy = crate::CompactionPolicy::default();
         Self {
             max_truncation_recoveries:
                 mermaid_model::constants::COMPACTION_MAX_TRUNCATION_RECOVERIES,
@@ -650,11 +650,11 @@ impl CompactionConfig {
     /// failure mode that motivated it is a `min_response_reserve` above
     /// `max_response_reserve`, which would make `response_reserve` return the
     /// smaller *maximum* and quietly under-reserve on every turn.
-    pub fn policy(&self) -> crate::domain::CompactionPolicy {
-        let defaults = crate::domain::CompactionPolicy::default();
+    pub fn policy(&self) -> crate::CompactionPolicy {
+        let defaults = crate::CompactionPolicy::default();
         let min_reserve = self.min_response_reserve_tokens;
         let max_reserve = self.max_response_reserve_tokens;
-        crate::domain::CompactionPolicy {
+        crate::CompactionPolicy {
             auto_enabled: self.auto_enabled,
             auto_threshold_percent: self.auto_threshold_percent.clamp(1, 100),
             tail_turns: self.tail_turns.max(1),
@@ -1154,7 +1154,7 @@ pub enum ConfigLayer {
 
 impl ConfigLayer {
     /// Human name used in unknown-key warnings ("in user config (…)").
-    pub(crate) fn name(self) -> &'static str {
+    pub fn name(self) -> &'static str {
         match self {
             ConfigLayer::Defaults => "defaults",
             ConfigLayer::User => "user config",
@@ -1167,7 +1167,7 @@ impl ConfigLayer {
 
 /// One layer's raw table plus where it came from (for warning attribution).
 #[derive(Debug, Clone)]
-pub(crate) struct LayerSource {
+pub struct LayerSource {
     /// Which precedence slot this table occupies.
     pub layer: ConfigLayer,
     /// Human-readable origin (file path or "command line") for warnings.

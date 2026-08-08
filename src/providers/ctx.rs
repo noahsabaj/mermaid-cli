@@ -18,7 +18,7 @@
 //!   identifiers so the reducer can match results to the call that
 //!   produced them.
 
-use crate::domain::ProgressEvent;
+use mermaid_domain::ProgressEvent;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::domain::{Msg, ToolCallId, TurnId};
+use mermaid_domain::{Msg, ToolCallId, TurnId};
 use mermaid_model::models::tool_call::ToolCall as ModelToolCall;
 use mermaid_model::models::{
     ChatMessage, FinishReason, ProviderContinuation, ReasoningChunk, TokenUsage,
@@ -150,7 +150,7 @@ pub struct ExecContext {
     /// servers, etc. Other tools don't consult it — keeping it as a
     /// typed field (rather than a global) means the dependency is
     /// explicit in the signature.
-    pub config: Arc<crate::domain::Config>,
+    pub config: Arc<mermaid_domain::Config>,
     /// Parent session's active model id (e.g. `"anthropic/claude-opus-4-7"`).
     /// Subagents inherit this so they hit the same provider.
     pub model_id: String,
@@ -183,7 +183,7 @@ pub struct ExecContext {
     /// LIVE per-category plan permission levels, threaded from the reducer
     /// (the frozen startup `config` would go stale under `/plan config`
     /// edits). Only consulted while `plan_file` is `Some`; defaults in `new`.
-    pub plan_permissions: crate::domain::PlanPermissions,
+    pub plan_permissions: mermaid_domain::PlanPermissions,
     /// Context-window fill at dispatch, when known (`exit_plan_mode` shows
     /// it on the clear-context approval option). Defaults to `None` in `new`.
     pub context_percent: Option<u8>,
@@ -252,7 +252,7 @@ impl ExecContext {
         call_id: ToolCallId,
         turn: TurnId,
         workdir: PathBuf,
-        config: Arc<crate::domain::Config>,
+        config: Arc<mermaid_domain::Config>,
         model_id: String,
         task_id: Option<String>,
         session_id: Option<String>,
@@ -272,7 +272,7 @@ impl ExecContext {
             background: CancellationToken::new(),
             notify: None,
             plan_file: None,
-            plan_permissions: crate::domain::PlanPermissions::default(),
+            plan_permissions: mermaid_domain::PlanPermissions::default(),
             context_percent: None,
             // Field-set by the live execute path alongside `background`/
             // `notify`; tests and bare contexts leave it unset.
@@ -348,7 +348,7 @@ pub fn test_exec_context(
     call_id: ToolCallId,
     workdir: PathBuf,
 ) -> (ExecContext, mpsc::Receiver<ProgressEvent>) {
-    let mut config = crate::domain::Config::default();
+    let mut config = mermaid_domain::Config::default();
     config.safety.mode = mermaid_runtime::SafetyMode::FullAccess;
     test_exec_context_with_config(turn, call_id, workdir, config)
 }
@@ -361,7 +361,7 @@ pub fn test_exec_context_with_config(
     turn: TurnId,
     call_id: ToolCallId,
     workdir: PathBuf,
-    config: crate::domain::Config,
+    config: mermaid_domain::Config,
 ) -> (ExecContext, mpsc::Receiver<ProgressEvent>) {
     let token = CancellationToken::new();
     let (tx, rx) = mpsc::channel(64);

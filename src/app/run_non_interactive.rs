@@ -14,10 +14,10 @@ use tokio::time::timeout;
 
 use crate::app::lifecycle::RuntimeLifecycle;
 use crate::cli::OutputFormat;
-use crate::domain::Config;
-use crate::domain::{Msg, RUN_EVENT_PROTOCOL_VERSION, RunEvent, State, TurnState, update};
 use crate::effect::EffectRunner;
 use crate::providers::ToolRegistry;
+use mermaid_domain::Config;
+use mermaid_domain::{Msg, RUN_EVENT_PROTOCOL_VERSION, RunEvent, State, TurnState, update};
 use mermaid_model::models::MessageRole;
 
 /// Output shape the CLI prints.
@@ -65,7 +65,7 @@ pub struct RunOptions {
     /// Saved conversation to seed the session with (`--resume <id>` /
     /// `--continue`). The run appends to the SAME session id, so repeated
     /// `--resume <id>` invocations chain naturally.
-    pub seed: Option<crate::domain::ConversationHistory>,
+    pub seed: Option<mermaid_domain::ConversationHistory>,
     /// `--output-schema`: JSON Schema the final answer must conform to. The
     /// agentic loop runs normally; one extra FORMATTING turn (no tools,
     /// native constrained output where supported) reshapes the final answer,
@@ -74,7 +74,7 @@ pub struct RunOptions {
     /// Live `RunEvent` tee for daemon task subscriptions (`subscribe_task`).
     /// Every event that would print on an NDJSON stream is also broadcast
     /// here (send is sync + non-blocking; no-receiver errors are ignored).
-    pub event_tx: Option<tokio::sync::broadcast::Sender<crate::domain::RunEvent>>,
+    pub event_tx: Option<tokio::sync::broadcast::Sender<mermaid_domain::RunEvent>>,
     /// `mermaid run --plan`: enter plan mode before the prompt seeds, so the
     /// run explores read-only and delivers a plan file.
     pub plan: bool,
@@ -101,7 +101,7 @@ pub async fn run_non_interactive_with(
     // approved plan into implementation.
     if opts.plan_autoaccept {
         config.plan.auto_approve = true;
-        config.plan.post_approve = Some(crate::domain::PlanPostApprove::Start);
+        config.plan.post_approve = Some(mermaid_domain::PlanPostApprove::Start);
     }
 
     // Fold enabled plugins' MCP servers + agent types into the merged
@@ -168,7 +168,7 @@ pub async fn run_non_interactive_with(
     // through the registry we just emptied, so spinning up their
     // processes is wasted work.
     if !config.mcp_servers.is_empty() && !opts.no_execute {
-        runner.dispatch(crate::domain::Cmd::InitMcpServers(
+        runner.dispatch(mermaid_domain::Cmd::InitMcpServers(
             config.mcp_servers.clone(),
         ));
     }
@@ -176,7 +176,7 @@ pub async fn run_non_interactive_with(
     // A resumed session may carry an in-flight checklist; hand it to the
     // TaskBroker so headless task tool calls continue the restored list.
     if !state.session.conversation.tasks.tasks.is_empty() {
-        runner.dispatch(crate::domain::Cmd::SyncTaskStore(
+        runner.dispatch(mermaid_domain::Cmd::SyncTaskStore(
             state.session.conversation.tasks.clone(),
         ));
     }
@@ -216,7 +216,7 @@ pub async fn run_non_interactive_with(
     // swap, prompt injection all included).
     if opts.plan {
         state.now = chrono::Local::now();
-        let (new_state, cmds) = update(state, Msg::Slash(crate::domain::SlashCmd::Plan(None)));
+        let (new_state, cmds) = update(state, Msg::Slash(mermaid_domain::SlashCmd::Plan(None)));
         state = new_state;
         for cmd in cmds {
             runner.dispatch(cmd);
@@ -522,7 +522,7 @@ fn build_result(state: &State) -> RunResult {
 
     for msg in state.session.messages() {
         for action in &msg.actions {
-            if let crate::domain::ActionResult::Error { error } = &action.result {
+            if let mermaid_domain::ActionResult::Error { error } = &action.result {
                 out.errors
                     .push(format!("{}: {}", action.action_type, error));
             }
@@ -639,8 +639,8 @@ mod tests {
     #[test]
     fn build_result_joins_an_auto_continued_reply() {
         use mermaid_model::models::{ChatMessage, ChatMessageKind};
-        let mut state = crate::domain::State::new(
-            crate::domain::Config::default(),
+        let mut state = mermaid_domain::State::new(
+            mermaid_domain::Config::default(),
             std::path::PathBuf::from("/tmp/p"),
             "ollama/test".to_string(),
             chrono::Local::now(),
@@ -668,8 +668,8 @@ mod tests {
     #[test]
     fn build_result_without_chain_takes_the_last_reply() {
         use mermaid_model::models::ChatMessage;
-        let mut state = crate::domain::State::new(
-            crate::domain::Config::default(),
+        let mut state = mermaid_domain::State::new(
+            mermaid_domain::Config::default(),
             std::path::PathBuf::from("/tmp/p"),
             "ollama/test".to_string(),
             chrono::Local::now(),
@@ -700,10 +700,10 @@ mod tests {
         assert_eq!(strip_code_fences("  {\"a\":1}  "), "{\"a\":1}");
     }
 
-    fn schema_state(reply: &str) -> crate::domain::State {
+    fn schema_state(reply: &str) -> mermaid_domain::State {
         use mermaid_model::models::ChatMessage;
-        let mut state = crate::domain::State::new(
-            crate::domain::Config::default(),
+        let mut state = mermaid_domain::State::new(
+            mermaid_domain::Config::default(),
             std::path::PathBuf::from("/tmp/p"),
             "ollama/test".to_string(),
             chrono::Local::now(),
@@ -785,8 +785,8 @@ mod tests {
         // message) -> keep the agent's answer, record the failure.
         let schema = serde_json::json!({"type": "object"});
         use mermaid_model::models::ChatMessage;
-        let mut state = crate::domain::State::new(
-            crate::domain::Config::default(),
+        let mut state = mermaid_domain::State::new(
+            mermaid_domain::Config::default(),
             std::path::PathBuf::from("/tmp/p"),
             "ollama/test".to_string(),
             chrono::Local::now(),
@@ -814,7 +814,7 @@ mod tests {
         // The broadcast tee is exercised end-to-end by the daemon integration
         // test; here pin the terminal event SHAPE subscribers rely on (a
         // `result` type ends the stream).
-        let event = crate::domain::RunEvent::Result {
+        let event = mermaid_domain::RunEvent::Result {
             response: "done".to_string(),
             reasoning: None,
             total_tokens: 3,
@@ -824,7 +824,7 @@ mod tests {
         };
         let wire = serde_json::to_string(&event).unwrap();
         assert!(wire.contains("\"type\":\"result\""), "{wire}");
-        let (tx, mut rx) = tokio::sync::broadcast::channel::<crate::domain::RunEvent>(4);
+        let (tx, mut rx) = tokio::sync::broadcast::channel::<mermaid_domain::RunEvent>(4);
         tx.send(event.clone()).unwrap();
         assert_eq!(rx.try_recv().unwrap(), event);
     }

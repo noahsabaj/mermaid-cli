@@ -21,8 +21,8 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::domain::ConversationHistory;
-use crate::domain::McpServerConfig;
+use crate::ConversationHistory;
+use crate::McpServerConfig;
 use mermaid_model::models::ChatMessage;
 use mermaid_model::models::ReasoningLevel;
 use mermaid_model::models::tool_call::ToolCall as ModelToolCall;
@@ -80,7 +80,7 @@ pub enum Cmd {
         /// LIVE per-category plan permission levels (`/plan config` edits
         /// them mid-session; the startup `Config` snapshot in `ExecContext`
         /// would go stale). Only consulted while `plan_file` is `Some`.
-        plan_permissions: crate::domain::PlanPermissions,
+        plan_permissions: crate::PlanPermissions,
         /// Context-window fill at dispatch, when known. `exit_plan_mode`
         /// shows it on the clear-context option so the tradeoff is legible.
         context_percent: Option<u8>,
@@ -135,23 +135,23 @@ pub enum Cmd {
     /// reducer changes checklist truth outside the broker's own publish
     /// cycle: rewind/fork and `/clear` (both clear it) and `--replay`
     /// re-seeding. Fire-and-forget to the broker, not turn-scoped.
-    SyncTaskStore(crate::domain::checklist::ChecklistStore),
+    SyncTaskStore(crate::checklist::ChecklistStore),
     /// Persist the `[plan]` table to the user config file (the `/plan
     /// config` picker edits live state; this writes it through the
     /// key-scoped updater so unrelated keys and defaults stay unfrozen).
-    PersistPlanConfig(crate::domain::PlanConfig),
+    PersistPlanConfig(crate::PlanConfig),
 
     /// A user `/tasks` edit. Routed through the effect runner to the
     /// `TaskBroker` (the single writer) instead of mutating reducer state
     /// directly, so a concurrent tool call can't clobber it; the broker's
     /// `Msg::TasksUpdated` publish brings the result back.
-    UserTaskEdit(crate::domain::checklist::UserChecklistEdit),
+    UserTaskEdit(crate::checklist::UserChecklistEdit),
 
     /// A task transitioned to completed: run the gated `task_completed`
     /// plugin hook. A denying hook flips the task back to in_progress via
     /// the broker and queues a notice for the model's next turn.
     NotifyTaskCompleted {
-        task: crate::domain::checklist::ChecklistItem,
+        task: crate::checklist::ChecklistItem,
         completed: u32,
         total: u32,
     },
@@ -202,7 +202,7 @@ pub enum Cmd {
     /// Persist the Ollama RAM-offload toggle (`/context offload on|off`).
     PersistOllamaOffload(bool),
     /// Persist the `/theme` choice as `ui.theme` in the user config file.
-    PersistUiTheme(crate::domain::ThemeChoice),
+    PersistUiTheme(crate::ThemeChoice),
     /// List saved memories; emits `Msg::RuntimeText` with the rendered list.
     ListMemory,
     /// Save free-text to private memory; emits `Msg::MemoryChanged` + status.

@@ -16,12 +16,12 @@
 //! load/refresh, and the write/delete primitives the memory tool and slash
 //! commands build on.
 
-use crate::domain::{LoadedMemory, MemoryEntry, MemoryScope};
+use mermaid_domain::{LoadedMemory, MemoryEntry, MemoryScope};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use crate::domain::MemoryConfig;
+use mermaid_domain::MemoryConfig;
 use mermaid_model::constants::MEMORY_INDEX_TRUNCATION_MARKER;
 
 /// Hard cap on directory levels `find_git_root` walks up (symlink-loop guard).
@@ -31,36 +31,6 @@ const MAX_WALK_DEPTH: usize = 32;
 /// refresh. A single fact is tiny; this only bounds a pathological/huge file so
 /// `refresh()` can't be made to slurp unbounded bytes every turn (F47).
 const MAX_MEMORY_FILE_BYTES: usize = 64_000;
-
-impl MemoryScope {
-    /// Kebab token used in frontmatter and the `scope` tool argument.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            MemoryScope::Global => "global",
-            MemoryScope::ProjectPrivate => "project-private",
-            MemoryScope::ProjectShared => "project-shared",
-        }
-    }
-
-    /// Human label for the index section header.
-    fn label(self) -> &'static str {
-        match self {
-            MemoryScope::Global => "Global (all projects)",
-            MemoryScope::ProjectPrivate => "Project (private)",
-            MemoryScope::ProjectShared => "Project (shared)",
-        }
-    }
-}
-
-impl LoadedMemory {
-    pub fn approx_tokens(&self) -> usize {
-        self.index.len() / 4
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-}
 
 /// Outcome of a per-turn `refresh()`, for optional status reporting.
 #[derive(Debug, PartialEq, Eq)]

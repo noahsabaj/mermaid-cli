@@ -346,34 +346,6 @@ mod tests {
         );
     }
 
-    /// Systematized version of the old `subagent` regression: every core
-    /// tool name the prompt advertises must resolve in the registry, so the
-    /// prose inventory can't drift from the dispatchable surface.
-    #[test]
-    fn advertised_tools_exist_in_the_registry() {
-        let prompt = get_system_prompt();
-        let registry = crate::providers::tool::ToolRegistry::default();
-        for name in [
-            "read_file",
-            "write_file",
-            "apply_patch",
-            "delete_file",
-            "create_directory",
-            "execute_command",
-            "memory",
-            "ask_user_question",
-        ] {
-            assert!(
-                prompt.contains(&format!("`{name}`")),
-                "prompt must advertise `{name}`"
-            );
-            assert!(
-                registry.get(name).is_some(),
-                "advertised tool `{name}` must be registered"
-            );
-        }
-    }
-
     /// The Runtime Awareness section must teach the model that MERMAID.md
     /// exists, auto-reloads, and is the place to capture learned project
     /// rules. Without the capture nudge, learned rules evaporate at
@@ -1096,7 +1068,7 @@ mod tests {
             }
             out
         }
-        let registry = crate::domain::slash_commands::COMMAND_REGISTRY;
+        let registry = crate::slash_commands::COMMAND_REGISTRY;
         for text in [SYSTEM_PROMPT_TEMPLATE, PLAN_MODE_PROMPT] {
             let commands = backticked_commands(text);
             assert!(
@@ -1122,7 +1094,7 @@ mod tests {
         for key in ["Shift+Tab", "Esc"] {
             assert!(prompt.contains(key), "prompt must mention the {key} key");
             assert!(
-                crate::domain::slash_commands::KEYBINDINGS
+                crate::slash_commands::KEYBINDINGS
                     .iter()
                     .any(|(k, _)| *k == key),
                 "prompt names {key} but the KEYBINDINGS table does not bind it"
@@ -1168,7 +1140,7 @@ mod tests {
             );
         }
         let sample = "## Summary\nx\n## Approach\ny\n## Tasks\n1. Wire the broker\n2. Add tests\n## Verification\nz\n## Assumptions\nnone\n";
-        let specs = crate::domain::plan::parse_plan_tasks(sample);
+        let specs = crate::plan::parse_plan_tasks(sample);
         assert_eq!(
             specs.len(),
             2,

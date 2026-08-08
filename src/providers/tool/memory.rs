@@ -17,8 +17,8 @@
 use async_trait::async_trait;
 
 use crate::app::memory::{self};
-use crate::domain::MemoryScope;
-use crate::domain::{ToolDefinition, ToolMetadata, ToolOutcome, ToolRunMetadata};
+use mermaid_domain::MemoryScope;
+use mermaid_domain::{ToolDefinition, ToolMetadata, ToolOutcome, ToolRunMetadata};
 
 use super::super::ctx::ExecContext;
 use super::ToolExecutor;

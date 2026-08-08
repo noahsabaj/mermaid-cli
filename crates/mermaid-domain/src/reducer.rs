@@ -27,8 +27,8 @@
 //!     queued-message auto-submit) without self-invoking the
 //!     reducer.
 
-use crate::domain::{ProgressEvent, SubagentPhase};
 use crate::prompts::get_system_prompt;
+use crate::{ProgressEvent, SubagentPhase};
 use mermaid_model::models::{ChatMessage, MessageRole, ProviderContinuation, TokenUsage};
 use mermaid_runtime::TaskStatus;
 
@@ -352,9 +352,8 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
                     // window smaller than the prompt wedges the session (every
                     // turn truncates). If the fitting window can't hold the
                     // conversation, keep the larger one and warn instead.
-                    let convo_tokens = crate::domain::compaction::estimate_messages_tokens(
-                        state.session.messages(),
-                    );
+                    let convo_tokens =
+                        crate::compaction::estimate_messages_tokens(state.session.messages());
                     // Auto-converge: adopt a new, smaller window the probe says
                     // fits VRAM — only in auto mode, only if it changed, and only
                     // if it still holds the conversation. `None` ⇒ shrinking can't
@@ -535,7 +534,7 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
                     e.tools = tools.clone();
                 })
                 .or_insert_with(|| McpServerEntry {
-                    config: crate::domain::McpServerConfig::default(),
+                    config: crate::McpServerConfig::default(),
                     status: McpServerStatus::Ready,
                     tools,
                 });
@@ -550,7 +549,7 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
                 .entry(name.clone())
                 .and_modify(|e| e.status = status.clone())
                 .or_insert_with(|| McpServerEntry {
-                    config: crate::domain::McpServerConfig::default(),
+                    config: crate::McpServerConfig::default(),
                     status,
                     tools: Vec::new(),
                 });
@@ -766,7 +765,7 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             // against `state.now`; the 60 Hz tick redraws it away. Never a
             // transcript row — that is what left "Copied N chars to clipboard"
             // parked above the input for the rest of the session.
-            state.ui.toast = Some((text, state.now + crate::domain::state::TOAST_TTL));
+            state.ui.toast = Some((text, state.now + crate::state::TOAST_TTL));
         },
         Msg::EditorReturned { text } => {
             // $EDITOR compose round-trip (Ctrl+O / /editor). `Some` replaces
@@ -786,7 +785,7 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             state
                 .runtime
                 .background_agents
-                .push(crate::domain::runtime::BackgroundAgent {
+                .push(crate::runtime::BackgroundAgent {
                     agent_id,
                     description,
                     started: std::time::SystemTime::from(state.now),
@@ -1180,7 +1179,7 @@ fn apply_input_key(
 ) -> QuestionKeyAction {
     let is_number = matches!(
         set.questions[q_idx].kind,
-        crate::domain::QuestionKind::Number { .. }
+        crate::QuestionKind::Number { .. }
     );
     match code {
         KeyCode::Char(c) if !mods.ctrl && !mods.alt => {
@@ -1201,7 +1200,7 @@ fn apply_input_key(
         },
         KeyCode::Enter => {
             let kind = set.questions[q_idx].kind.clone();
-            if crate::domain::validate_input(&kind, &set.selections[q_idx].value).is_ok() {
+            if crate::validate_input(&kind, &set.selections[q_idx].value).is_ok() {
                 advance_question(set)
             } else {
                 QuestionKeyAction::Stay
@@ -1214,7 +1213,7 @@ fn apply_input_key(
 /// Step a Number question's value by `dir * step`, clamped to min/max.
 fn step_number(set: &mut mermaid_model::question::PendingQuestionSet, q_idx: usize, dir: f64) {
     let (min, max, step) = match &set.questions[q_idx].kind {
-        crate::domain::QuestionKind::Number { min, max, step, .. } => (*min, *max, *step),
+        crate::QuestionKind::Number { min, max, step, .. } => (*min, *max, *step),
         _ => return,
     };
     let step = step.unwrap_or(1.0);
@@ -1299,13 +1298,13 @@ fn handle_question_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mo
             let Some(set) = state.pending_question.front() else {
                 return;
             };
-            crate::domain::QuestionResolution::Answered {
+            crate::QuestionResolution::Answered {
                 answers: set.build_answers(),
                 remember: set.remember,
             }
         },
-        QuestionKeyAction::Dismiss => crate::domain::QuestionResolution::Dismissed,
-        QuestionKeyAction::Reformulate => crate::domain::QuestionResolution::Reformulate,
+        QuestionKeyAction::Dismiss => crate::QuestionResolution::Dismissed,
+        QuestionKeyAction::Reformulate => crate::QuestionResolution::Reformulate,
     };
     if let Some(front) = state.pending_question.front() {
         let call_id = front.call_id;
@@ -1443,7 +1442,7 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
     // key is swallowed. Resolving emits `Cmd::ResolveApproval`, which unblocks
     // the parked tool task via the broker.
     if !state.pending_approval.is_empty() {
-        use crate::domain::ApprovalChoice;
+        use crate::ApprovalChoice;
         // Content-bearing external tools are non-allowlistable: the gate signals
         // this with an empty allowlist scope, and the modal then omits the
         // middle "approve always" option (#6, #31). Layout:
@@ -1640,7 +1639,7 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
     // input buffer opens with `/`. Enter falls through to the normal
     // handler below so the command actually dispatches.
     if state.ui.input_buffer.starts_with('/') {
-        use crate::domain::slash_commands::filter_entries;
+        use crate::slash_commands::filter_entries;
         let typed = state
             .ui
             .input_buffer
@@ -1799,7 +1798,7 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
                 // If a whole `[Image #N]` pill ends at the cursor, delete it and
                 // drop its attachment together; otherwise one codepoint.
                 if let Some((start, number)) =
-                    crate::domain::image_token::token_ending_at(&state.ui.input_buffer, pos)
+                    crate::image_token::token_ending_at(&state.ui.input_buffer, pos)
                 {
                     state.ui.input_buffer.drain(start..pos);
                     state.ui.input_cursor = start;
@@ -1823,7 +1822,7 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
                 // Symmetric to Backspace: a pill starting at the cursor deletes
                 // whole, taking its attachment with it.
                 if let Some((end, number)) =
-                    crate::domain::image_token::token_starting_at(&state.ui.input_buffer, pos)
+                    crate::image_token::token_starting_at(&state.ui.input_buffer, pos)
                 {
                     state.ui.input_buffer.drain(pos..end);
                     state.ui.attachments.retain(|a| a.number != number);
@@ -1906,7 +1905,7 @@ fn handle_rewind_esc(state: &mut State) {
 /// The rewind targets: user-role `Normal` messages, NEWEST FIRST (the most
 /// recent exchange is the most likely rewind point). Excerpts are the first
 /// non-empty line, clipped.
-fn rewind_candidates(messages: &[ChatMessage]) -> Vec<crate::domain::RewindCandidate> {
+fn rewind_candidates(messages: &[ChatMessage]) -> Vec<crate::RewindCandidate> {
     const EXCERPT_MAX_CHARS: usize = 80;
     messages
         .iter()
@@ -1930,7 +1929,7 @@ fn rewind_candidates(messages: &[ChatMessage]) -> Vec<crate::domain::RewindCandi
             } else {
                 line.to_string()
             };
-            crate::domain::RewindCandidate {
+            crate::RewindCandidate {
                 message_index,
                 excerpt,
             }
@@ -1983,13 +1982,9 @@ fn handle_rewind_picker_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCod
 /// snapshot, firing `Cmd::NotifyTaskCompleted` for each task that flipped to
 /// completed relative to the previous copy (a re-sent identical snapshot
 /// fires nothing — the diff is the dedupe).
-fn handle_tasks_updated(
-    state: &mut State,
-    cmds: &mut Vec<Cmd>,
-    store: crate::domain::ChecklistStore,
-) {
+fn handle_tasks_updated(state: &mut State, cmds: &mut Vec<Cmd>, store: crate::ChecklistStore) {
     let (completed, total) = store.counts();
-    let fresh: Vec<crate::domain::ChecklistItem> = store
+    let fresh: Vec<crate::ChecklistItem> = store
         .newly_completed(&state.session.conversation.tasks)
         .into_iter()
         .cloned()
@@ -2009,7 +2004,7 @@ fn handle_tasks_updated(
 /// list; edits route through `Cmd::UserTaskEdit` to the TaskBroker (single
 /// writer), whose publish updates the band and whose notice tells the model.
 fn handle_todos_command(state: &mut State, cmds: &mut Vec<Cmd>, arg: Option<&str>) {
-    use crate::domain::UserChecklistEdit;
+    use crate::UserChecklistEdit;
     let arg = arg.unwrap_or("").trim();
     if arg.is_empty() {
         state
@@ -2057,7 +2052,7 @@ fn todos_text(state: &State) -> String {
             task.id,
             task.status.as_str(),
             task.subject,
-            if task.origin == crate::domain::ChecklistOrigin::User {
+            if task.origin == crate::ChecklistOrigin::User {
                 " (you)"
             } else {
                 ""
@@ -2125,7 +2120,7 @@ fn fork_conversation_at(state: &mut State, cmds: &mut Vec<Cmd>, message_index: u
     // 2. Mint the fork from the injected clock — the new id is a pure
     //    function of `state.now` (replay-exact; the `/clear` handler is the
     //    precedent).
-    let mut fork = crate::domain::ConversationHistory::new(
+    let mut fork = crate::ConversationHistory::new(
         original.project_path.clone(),
         original.model_name.clone(),
         state.now,
@@ -2134,7 +2129,7 @@ fn fork_conversation_at(state: &mut State, cmds: &mut Vec<Cmd>, message_index: u
     // the original would share its id — and its save file. Deterministic
     // 1ms bump keeps the fork pure while guaranteeing a distinct file.
     if fork.id == original.id {
-        fork = crate::domain::ConversationHistory::new(
+        fork = crate::ConversationHistory::new(
             original.project_path.clone(),
             original.model_name.clone(),
             state.now + chrono::Duration::milliseconds(1),
@@ -2176,7 +2171,7 @@ fn fork_conversation_at(state: &mut State, cmds: &mut Vec<Cmd>, message_index: u
     // Marked as an estimate (the `~` prefix) until the next real call returns
     // provider-counted usage.
     state.session.context_usage = Some(estimate_current_context(state));
-    cmds.push(Cmd::SyncTaskStore(crate::domain::ChecklistStore::default()));
+    cmds.push(Cmd::SyncTaskStore(crate::ChecklistStore::default()));
     // The fork minted a fresh conversation id, so it gets its own scratch
     // dir too — the original session's scratch contents describe work on
     // the timeline being discarded.
@@ -2279,10 +2274,10 @@ fn switch_model(state: &mut State, cmds: &mut Vec<Cmd>, new_model: String) {
 /// `anthropic/claude-opus-4-5`. A provider can return 200 ids, so filtering is
 /// what makes the list usable at all — the difference between this picker and
 /// the fixed four-row ones it is modeled on.
-pub(crate) fn filter_model_choices<'a>(
-    candidates: &'a [crate::domain::state::ModelChoice],
+pub fn filter_model_choices<'a>(
+    candidates: &'a [crate::state::ModelChoice],
     query: &str,
-) -> Vec<&'a crate::domain::state::ModelChoice> {
+) -> Vec<&'a crate::state::ModelChoice> {
     let needle = query.trim().to_lowercase();
     candidates
         .iter()
@@ -2394,7 +2389,7 @@ fn recompute_file_matches(state: &mut State) {
     let query = state.ui.input_buffer[token.query_start..token.query_end].to_string();
     let files: &[String] = state.ui.project_files.as_deref().unwrap_or(&[]);
     state.ui.file_picker_matches =
-        crate::domain::file_mention::fuzzy_rank(files, &query, FILE_PICKER_MAX_MATCHES);
+        crate::file_mention::fuzzy_rank(files, &query, FILE_PICKER_MAX_MATCHES);
     // Clamp (don't reset) the cursor so ↑/↓ position survives narrowing.
     let max = state.ui.file_picker_matches.len().saturating_sub(1);
     let cur = state.ui.file_picker_cursor.unwrap_or(0);
@@ -2558,7 +2553,7 @@ fn submit_current_input(state: &mut State) {
             Some((n, a)) => (n.to_lowercase(), a),
             None => (rest.to_lowercase(), ""),
         };
-        let builtin = crate::domain::slash_commands::COMMAND_REGISTRY
+        let builtin = crate::slash_commands::COMMAND_REGISTRY
             .iter()
             .any(|c| c.name == name || c.aliases.contains(&name.as_str()));
         if !builtin && let Some(cmd) = state.plugin_commands.iter().find(|c| c.name == name) {
@@ -2573,7 +2568,7 @@ fn submit_current_input(state: &mut State) {
             });
             return;
         }
-        let slash = crate::domain::parse_slash_command(rest);
+        let slash = crate::parse_slash_command(rest);
         state.ui.input_buffer.clear();
         state.ui.input_cursor = 0;
         state.ui.palette_cursor = None;
@@ -2646,7 +2641,7 @@ fn handle_clipboard_read(state: &mut State, cmds: &mut Vec<Cmd>, read: Clipboard
             // reset history-nav and advance past it.
             state.ui.input_history_cursor = None;
             state.ui.history_draft.clear();
-            let token = crate::domain::image_token::render_token(number);
+            let token = crate::image_token::render_token(number);
             let pos = clamp_cursor(&state.ui.input_buffer, state.ui.input_cursor);
             state.ui.input_buffer.insert_str(pos, &token);
             state.ui.input_cursor = clamp_cursor(&state.ui.input_buffer, pos + token.len());
@@ -2708,7 +2703,7 @@ fn commit_user_message(state: &mut State, text: String, attachment_ids: &[u64]) 
     // path can never grab a later message's image. `images[i]` and
     // `image_numbers[i]` stay parallel so the model correlates each image block
     // with its `[Image #N]` reference.
-    let numbers = crate::domain::image_token::numbers_in_order(&text);
+    let numbers = crate::image_token::numbers_in_order(&text);
     let mut images: Vec<String> = Vec::new();
     let mut image_numbers: Vec<u64> = Vec::new();
     for n in &numbers {
@@ -2949,7 +2944,7 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
             }
         },
         SlashCmd::Context(cmd) => {
-            use crate::domain::ContextCmd;
+            use crate::ContextCmd;
             let model_id = state.session.model_id.clone();
             let is_ollama = model_id.starts_with("ollama/");
             match cmd {
@@ -3243,7 +3238,7 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
             );
         },
         SlashCmd::Theme(arg) => {
-            use crate::domain::ThemeChoice;
+            use crate::ThemeChoice;
             // The trailing NO_COLOR note keeps a persisted-but-invisible
             // switch from reading as a broken command.
             let no_color_note = if state.ui.no_color {
@@ -3535,7 +3530,7 @@ fn handle_manual_compact(state: &mut State, cmds: &mut Vec<Cmd>, instructions: O
     });
 }
 
-fn help_text(plugin_commands: &[crate::domain::PluginCommand]) -> String {
+fn help_text(plugin_commands: &[crate::PluginCommand]) -> String {
     let mut lines = Vec::with_capacity(COMMAND_REGISTRY.len() + COMMAND_GROUPS.len() + 2);
     lines.push("Mermaid commands".to_string());
     lines.push(
@@ -3584,7 +3579,7 @@ fn help_text(plugin_commands: &[crate::domain::PluginCommand]) -> String {
     }
     lines.push(String::new());
     lines.push("Keyboard shortcuts:".to_string());
-    for (keys, desc) in crate::domain::slash_commands::KEYBINDINGS {
+    for (keys, desc) in crate::slash_commands::KEYBINDINGS {
         lines.push(format!("  {keys} - {desc}"));
     }
     lines.join("\n")
@@ -3654,7 +3649,7 @@ fn doctor_text(state: &State) -> String {
             .mcp
             .servers
             .values()
-            .filter(|entry| matches!(entry.status, crate::domain::McpServerStatus::Ready))
+            .filter(|entry| matches!(entry.status, crate::McpServerStatus::Ready))
             .count()
     ));
     lines.push(
@@ -3893,7 +3888,7 @@ fn context_text(state: &State) -> String {
         Ok(()) => "would run before the next model call".to_string(),
         // Paused is not "not needed" — the threshold may well be exceeded;
         // the pause is the reason it won't run.
-        Err(reason @ crate::domain::compaction::CompactionSkip::Suppressed) => reason.to_string(),
+        Err(reason @ crate::compaction::CompactionSkip::Suppressed) => reason.to_string(),
         Err(reason) => format!("not needed ({reason})"),
     };
     lines.push(format!("Auto compact: {auto_status}"));
@@ -3902,7 +3897,7 @@ fn context_text(state: &State) -> String {
             "Suggested action: continue normally; Mermaid will compact before the next model call."
                 .to_string(),
         ),
-        Err(crate::domain::compaction::CompactionSkip::Suppressed) => lines.push(
+        Err(crate::compaction::CompactionSkip::Suppressed) => lines.push(
             "Suggested action: run /compact to checkpoint now and re-enable automatic compaction."
                 .to_string(),
         ),
@@ -3988,8 +3983,8 @@ fn context_text(state: &State) -> String {
         lines.push(format!(
             "- review: {}",
             match last.review_status {
-                crate::domain::CompactionReviewStatus::Reviewed => "reviewed".to_string(),
-                crate::domain::CompactionReviewStatus::DraftValidated => last
+                crate::CompactionReviewStatus::Reviewed => "reviewed".to_string(),
+                crate::CompactionReviewStatus::DraftValidated => last
                     .review_error
                     .as_ref()
                     .map(|err| format!("validated draft ({err})"))
@@ -4318,7 +4313,7 @@ fn handle_confirm_accepted(state: &mut State, cmds: &mut Vec<Cmd>) {
             // same working tree.
             let git_branch = state.session.conversation.git_branch.clone();
             state.session.conversation =
-                crate::domain::ConversationHistory::new(project_path, model_name, state.now);
+                crate::ConversationHistory::new(project_path, model_name, state.now);
             state.session.conversation.git_branch = git_branch;
             state.session.last_token_usage = None;
             state.session.cumulative_token_usage = TokenUsageTotals::default();
@@ -4336,7 +4331,7 @@ fn handle_confirm_accepted(state: &mut State, cmds: &mut Vec<Cmd>) {
             state.turn = TurnState::Idle;
             // The fresh conversation starts with an empty checklist; the
             // broker must forget the old one too (single-writer sync).
-            cmds.push(Cmd::SyncTaskStore(crate::domain::ChecklistStore::default()));
+            cmds.push(Cmd::SyncTaskStore(crate::ChecklistStore::default()));
             // New conversation id -> new scratch dir. The old one stays on
             // disk until the sweep reaps it (its pid lock expires with us).
             refresh_scratchpad(state, cmds);
@@ -4573,7 +4568,7 @@ fn handle_compaction_finished(
 
 fn compaction_intervening_messages(
     current: &[ChatMessage],
-    source: &[crate::domain::CompactionBoundary],
+    source: &[crate::CompactionBoundary],
 ) -> Vec<ChatMessage> {
     if source.is_empty() {
         return Vec::new();
@@ -4582,7 +4577,7 @@ fn compaction_intervening_messages(
     let mut intervening = Vec::new();
     for message in current {
         // One hash per live message; the lookahead below compares strings.
-        let fingerprint = crate::domain::CompactionBoundary::fingerprint_of(message);
+        let fingerprint = crate::CompactionBoundary::fingerprint_of(message);
         if source_index < source.len() && source[source_index].fingerprint == fingerprint {
             source_index += 1;
             continue;
@@ -4904,12 +4899,8 @@ fn handle_stream_done(
                     .compaction
                     .policy()
                     .response_reserve(&build_chat_request(state));
-                match crate::domain::compaction::classify_length_stop(
-                    usage.as_ref(),
-                    window,
-                    reserve,
-                ) {
-                    crate::domain::compaction::LengthCause::OutputCapped => {
+                match crate::compaction::classify_length_stop(usage.as_ref(), window, reserve) {
+                    crate::compaction::LengthCause::OutputCapped => {
                         // Never compact for an output-cap stop — the input
                         // isn't the problem. If the cut left visible content
                         // and the model wasn't cut off mid-reasoning, continue
@@ -4929,8 +4920,8 @@ fn handle_stream_done(
                             push_system(state, cmds, hint);
                         }
                     },
-                    crate::domain::compaction::LengthCause::ContextFull
-                    | crate::domain::compaction::LengthCause::Unknown => {
+                    crate::compaction::LengthCause::ContextFull
+                    | crate::compaction::LengthCause::Unknown => {
                         // Visible assistant text is real forward progress even if
                         // the context filled again. The guard bounds only repeated
                         // no-output thrashing, as the config promises.
@@ -5216,8 +5207,8 @@ fn handle_stream_done(
                 " · {completed} task{} completed",
                 if completed == 1 { "" } else { "s" }
             ));
-            state.session.conversation.tasks = crate::domain::ChecklistStore::default();
-            cmds.push(Cmd::SyncTaskStore(crate::domain::ChecklistStore::default()));
+            state.session.conversation.tasks = crate::ChecklistStore::default();
+            cmds.push(Cmd::SyncTaskStore(crate::ChecklistStore::default()));
         }
         state
             .session
@@ -5415,7 +5406,7 @@ fn handle_tool_progress(
     _cmds: &mut Vec<Cmd>,
     turn: TurnId,
     call_id: mermaid_model::ids::ToolCallId,
-    event: crate::domain::ProgressEvent,
+    event: crate::ProgressEvent,
 ) {
     use base64::{Engine as _, engine::general_purpose};
 
@@ -5674,13 +5665,13 @@ fn note_plan_tool_outcome(
     if !planning {
         return;
     }
-    if outcome.status == crate::domain::ToolStatus::Error
+    if outcome.status == crate::ToolStatus::Error
         && PLAN_MUTATING_TOOLS.contains(&tool)
         && outcome.model_content.contains(&plan_denial_signature())
     {
         runtime.plan_thrash_armed = true;
     }
-    if outcome.metadata.plan_file_written && outcome.status == crate::domain::ToolStatus::Success {
+    if outcome.metadata.plan_file_written && outcome.status == crate::ToolStatus::Success {
         runtime.plan_thrash_armed = false;
         runtime.plan_calls_since_denial = 0;
     }
@@ -5858,7 +5849,7 @@ fn push_plan_reminder(state: &mut State, cmds: &mut Vec<Cmd>) {
 /// planning session.
 fn checklist_writers_suppressed(state: &State) -> bool {
     state.session.safety_mode.is_planning()
-        && state.settings.plan.permissions.tasks != crate::domain::PlanPermLevel::Allow
+        && state.settings.plan.permissions.tasks != crate::PlanPermLevel::Allow
 }
 
 fn push_call_model(state: &mut State, cmds: &mut Vec<Cmd>, turn: TurnId) {
@@ -6129,8 +6120,8 @@ fn system_prompt_for_state(state: &State) -> String {
 /// Compose the "what runs while planning" sentence from the LIVE permission
 /// profile, so the prompt never promises a capability the gate will deny
 /// (`/plan config` can retune the profile mid-session).
-fn plan_capabilities_line(perms: &crate::domain::PlanPermissions) -> String {
-    use crate::domain::PlanPermLevel as L;
+fn plan_capabilities_line(perms: &crate::PlanPermissions) -> String {
+    use crate::PlanPermLevel as L;
     // Read-only subagent fan-out is always allowed under the plan-mode floor
     // (policy_gate leaves the Subagent Allow untouched) — without naming it,
     // "everything else is blocked" suppresses legitimate parallel exploration.
@@ -6439,7 +6430,7 @@ fn handle_plan_config_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode)
 /// the permission profile rides each tool dispatch, and the model/reasoning
 /// overrides are read at the next plan-mode entry.
 fn cycle_plan_config_row(state: &mut State, row: usize, forward: bool) {
-    use crate::domain::{PlanPermLevel as L, PlanPermissions, PlanPostApprove};
+    use crate::{PlanPermLevel as L, PlanPermissions, PlanPostApprove};
     fn cycle<T: Copy + PartialEq>(order: &[T], current: T, forward: bool) -> T {
         let idx = order.iter().position(|v| *v == current).unwrap_or(0);
         let len = order.len();
@@ -6803,7 +6794,7 @@ fn handoff_plan_mode(
     // BEFORE swapping (the fork_conversation_at ordering).
     cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
     let original = &state.session.conversation;
-    let mut next = crate::domain::ConversationHistory::new(
+    let mut next = crate::ConversationHistory::new(
         original.project_path.clone(),
         original.model_name.clone(),
         state.now,
@@ -6811,7 +6802,7 @@ fn handoff_plan_mode(
     // Millisecond-derived ids: bump deterministically on collision (the
     // rewind-fork precedent) so the two sessions never share a save file.
     if next.id == original.id {
-        next = crate::domain::ConversationHistory::new(
+        next = crate::ConversationHistory::new(
             original.project_path.clone(),
             original.model_name.clone(),
             state.now + chrono::Duration::milliseconds(1),
@@ -6892,13 +6883,12 @@ fn plan_tool_transition(
     };
     match tool_name.as_deref() {
         Some(name)
-            if name == ENTER_PLAN_MODE_TOOL
-                && outcome.status == crate::domain::ToolStatus::Success =>
+            if name == ENTER_PLAN_MODE_TOOL && outcome.status == crate::ToolStatus::Success =>
         {
             enter_plan_mode_state(state, cmds);
         },
         Some(name) if name == EXIT_PLAN_MODE_TOOL => {
-            if let crate::domain::ToolMetadata::Plan {
+            if let crate::ToolMetadata::Plan {
                 body,
                 start,
                 fresh,
@@ -6954,10 +6944,10 @@ fn finish_plan_mode(state: &mut State, cmds: &mut Vec<Cmd>, body: &str, start: b
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::Config;
-    use crate::domain::msg::{Key, KeyCode, KeyMods};
-    use crate::domain::state::{McpServerEntry, McpState, PendingToolCall, UiState};
-    use crate::domain::transition::start_executing_tools;
+    use crate::Config;
+    use crate::msg::{Key, KeyCode, KeyMods};
+    use crate::state::{McpServerEntry, McpState, PendingToolCall, UiState};
+    use crate::transition::start_executing_tools;
     use std::path::PathBuf;
 
     fn fresh_state() -> State {
@@ -7603,7 +7593,7 @@ mod tests {
     /// output lands in chat only when the tool finishes.
     #[test]
     fn tool_progress_output_does_not_append_message() {
-        use crate::domain::ProgressEvent;
+        use crate::ProgressEvent;
         let mut state = fresh_state();
         state.turn = start_generating(TurnId(1), std::time::SystemTime::now());
         let turn = state.current_turn_id().unwrap();
@@ -7876,7 +7866,7 @@ mod tests {
         );
         let (text, until) = state.ui.toast.clone().expect("toast is armed");
         assert_eq!(text, "copied 42 chars to clipboard");
-        assert_eq!(until, now + crate::domain::state::TOAST_TTL);
+        assert_eq!(until, now + crate::state::TOAST_TTL);
         assert!(
             state.session.messages().is_empty(),
             "a toast must not become a transcript row: {:?}",
@@ -7889,7 +7879,7 @@ mod tests {
         // Expiry is lazy against `state.now` — nothing has to clear it.
         assert!(now <= until, "live immediately after the keystroke");
         assert!(
-            now + crate::domain::state::TOAST_TTL + chrono::Duration::milliseconds(1) > until,
+            now + crate::state::TOAST_TTL + chrono::Duration::milliseconds(1) > until,
             "gone once the TTL passes"
         );
     }
@@ -8195,11 +8185,8 @@ mod tests {
     #[test]
     fn resume_continues_image_numbering_past_transcript_max() {
         let mut state = fresh_state();
-        let mut history = crate::domain::ConversationHistory::new(
-            "proj".to_string(),
-            "model".to_string(),
-            state.now,
-        );
+        let mut history =
+            crate::ConversationHistory::new("proj".to_string(), "model".to_string(), state.now);
         history
             .messages_mut()
             .push(ChatMessage::user("look [Image #16]").with_image_numbers(vec![16]));
@@ -8889,7 +8876,7 @@ mod tests {
                 .unwrap_or(false)
         );
         // With memory → the auto-derived index is composed into the suffix.
-        state.memory = Some(crate::domain::LoadedMemory {
+        state.memory = Some(crate::LoadedMemory {
             entries: Vec::new(),
             index: "# Memory\n\n## Global (all projects)\n- [pnpm] use pnpm — /m/pnpm.md\n"
                 .to_string(),
@@ -8913,7 +8900,7 @@ mod tests {
                 .unwrap_or(false)
         );
         // With skills → the pre-rendered index is composed into the suffix.
-        state.skills = Some(crate::domain::LoadedSkills {
+        state.skills = Some(crate::LoadedSkills {
             entries: Vec::new(),
             index: "# Skills\n\n- [deploy] Ship a release — /s/deploy/SKILL.md (project)\n"
                 .to_string(),
@@ -9239,7 +9226,7 @@ mod tests {
         );
         assert_eq!(
             state.runtime.run_tokens,
-            crate::domain::runtime::RunTokenCounter::default(),
+            crate::runtime::RunTokenCounter::default(),
             "token counter reset on submit"
         );
     }
@@ -9276,7 +9263,7 @@ mod tests {
     /// the count — the record of the work, where the run's totals live.
     #[test]
     fn run_end_retires_a_fully_completed_checklist() {
-        use crate::domain::ChecklistStatus::Completed;
+        use crate::ChecklistStatus::Completed;
         let mut state = fresh_state();
         state.session.conversation.tasks = sample_task_store(&[Completed, Completed, Completed]);
         let (state, cmds) = finish_run(state);
@@ -9306,7 +9293,7 @@ mod tests {
     /// fully-green list retires.
     #[test]
     fn run_end_keeps_a_checklist_with_unfinished_work() {
-        use crate::domain::ChecklistStatus::{Completed, Pending};
+        use crate::ChecklistStatus::{Completed, Pending};
         let mut state = fresh_state();
         state.session.conversation.tasks = sample_task_store(&[Completed, Pending]);
         let (state, cmds) = finish_run(state);
@@ -9336,7 +9323,7 @@ mod tests {
     /// checklist — green or not — stays put.
     #[test]
     fn cancelled_run_keeps_a_fully_completed_checklist() {
-        use crate::domain::ChecklistStatus::Completed;
+        use crate::ChecklistStatus::Completed;
         let mut state = fresh_state();
         state.session.conversation.tasks = sample_task_store(&[Completed, Completed]);
         state.runtime.run_started = Some(std::time::SystemTime::from(state.now));
@@ -9357,8 +9344,8 @@ mod tests {
     /// loads with an empty store instead of resurrecting a zombie band.
     #[test]
     fn seeding_a_conversation_preserves_the_saved_checklist() {
-        use crate::domain::ChecklistStatus::{Completed, Pending};
-        let mut history = crate::domain::ConversationHistory::new(
+        use crate::ChecklistStatus::{Completed, Pending};
+        let mut history = crate::ConversationHistory::new(
             "/tmp/project".to_string(),
             "ollama/test".to_string(),
             chrono::Local::now(),
@@ -9377,7 +9364,7 @@ mod tests {
             "a saved checklist survives resume; only run end retires one",
         );
         // And an unfinished list still resumes intact.
-        let mut history = crate::domain::ConversationHistory::new(
+        let mut history = crate::ConversationHistory::new(
             "/tmp/project".to_string(),
             "ollama/test".to_string(),
             chrono::Local::now(),
@@ -9537,13 +9524,13 @@ mod tests {
             state,
             Msg::ToolFinished {
                 turn: TurnId(1),
-                call_id: crate::domain::ToolCallId(1),
+                call_id: crate::ToolCallId(1),
                 outcome,
             },
         );
         assert_eq!(
             state.runtime.run_line_changes,
-            crate::domain::runtime::RunLineChanges {
+            crate::runtime::RunLineChanges {
                 added: 3,
                 removed: 1
             },
@@ -10331,12 +10318,12 @@ mod tests {
     }
 
     fn fake_recovery_result(replacement: Vec<ChatMessage>) -> CompactionResult {
-        let snap = crate::domain::state::ContextUsageSnapshot::from_estimate(
-            crate::domain::state::PromptTokenBreakdown::default(),
+        let snap = crate::state::ContextUsageSnapshot::from_estimate(
+            crate::state::PromptTokenBreakdown::default(),
             Some(12_000),
         );
         CompactionResult {
-            record: crate::domain::CompactionEvent {
+            record: crate::CompactionEvent {
                 id: "rec1".to_string(),
                 trigger: CompactionTrigger::TruncationRecovery,
                 created_at: chrono::Local::now(),
@@ -10350,7 +10337,7 @@ mod tests {
                     .count(),
                 summary_tokens: 10,
                 duration_secs: 0.0,
-                review_status: crate::domain::CompactionReviewStatus::Reviewed,
+                review_status: crate::CompactionReviewStatus::Reviewed,
                 review_error: None,
                 focus: None,
                 archive_path: None,
@@ -10376,7 +10363,7 @@ mod tests {
             .session
             .messages()
             .iter()
-            .map(crate::domain::CompactionBoundary::from_message)
+            .map(crate::CompactionBoundary::from_message)
             .collect();
         state.turn = TurnState::Compacting {
             id: TurnId(7),
@@ -10419,7 +10406,7 @@ mod tests {
             .session
             .messages()
             .iter()
-            .map(crate::domain::CompactionBoundary::from_message)
+            .map(crate::CompactionBoundary::from_message)
             .collect();
         state.turn = TurnState::Compacting {
             id: TurnId(7),
@@ -10809,10 +10796,10 @@ mod tests {
 
     #[test]
     fn compaction_config_defaults_to_three() {
-        let cfg = crate::domain::CompactionConfig::default();
+        let cfg = crate::CompactionConfig::default();
         assert_eq!(cfg.max_truncation_recoveries, 3);
         // An absent [compaction] section deserializes to the default.
-        let parsed: crate::domain::Config = toml::from_str("").unwrap();
+        let parsed: crate::Config = toml::from_str("").unwrap();
         assert_eq!(parsed.compaction.max_truncation_recoveries, 3);
     }
 
@@ -11041,8 +11028,8 @@ mod tests {
             pending_tool_calls: Vec::new(),
             continuation: false,
         };
-        let snapshot = crate::domain::state::ContextUsageSnapshot::from_estimate(
-            crate::domain::state::PromptTokenBreakdown {
+        let snapshot = crate::state::ContextUsageSnapshot::from_estimate(
+            crate::state::PromptTokenBreakdown {
                 system_tokens: 10,
                 instructions_tokens: 0,
                 message_tokens: 20,
@@ -11367,7 +11354,7 @@ mod tests {
 
     #[test]
     fn slash_context_set_persists_per_model() {
-        use crate::domain::ContextCmd;
+        use crate::ContextCmd;
         let state = fresh_state();
         let (state, cmds) = update(
             state,
@@ -11385,7 +11372,7 @@ mod tests {
 
     #[test]
     fn slash_context_auto_clears_override() {
-        use crate::domain::ContextCmd;
+        use crate::ContextCmd;
         let mut state = fresh_state();
         state
             .settings
@@ -11406,7 +11393,7 @@ mod tests {
 
     #[test]
     fn slash_context_offload_toggles_and_persists() {
-        use crate::domain::ContextCmd;
+        use crate::ContextCmd;
         let state = fresh_state();
         let (state, cmds) = update(
             state,
@@ -11670,7 +11657,7 @@ mod tests {
 
     #[test]
     fn slash_context_auto_clears_converged_value() {
-        use crate::domain::ContextCmd;
+        use crate::ContextCmd;
         let mut state = fresh_state();
         state
             .runtime
@@ -11736,8 +11723,8 @@ mod tests {
 
     // ── /model picker ────────────────────────────────────────────────
 
-    fn model_choice(id: &str, group: &str) -> crate::domain::state::ModelChoice {
-        crate::domain::state::ModelChoice {
+    fn model_choice(id: &str, group: &str) -> crate::state::ModelChoice {
+        crate::state::ModelChoice {
             id: id.to_string(),
             group: group.to_string(),
             detail: String::new(),
@@ -12213,7 +12200,7 @@ mod tests {
                 call_id: mermaid_model::ids::ToolCallId(5),
                 tool: "execute_command".to_string(),
                 risk: "shell_mutation".to_string(),
-                kind: crate::domain::ApprovalKind::Shell,
+                kind: crate::ApprovalKind::Shell,
                 prompt: "$ npm test".to_string(),
                 allowlist_scope: "execute_command:npm".to_string(),
             },
@@ -12253,7 +12240,7 @@ mod tests {
 
     #[test]
     fn theme_command_switches_persists_and_reports() {
-        use crate::domain::ThemeChoice;
+        use crate::ThemeChoice;
         // /theme light → state flips, persist emitted, confirmation appended.
         let (state, cmds) = update(
             fresh_state(),
@@ -12365,8 +12352,8 @@ mod tests {
         assert_eq!(state.ui.input_buffer, "kept");
     }
 
-    fn plugin_cmd(name: &str, body: &str) -> crate::domain::PluginCommand {
-        crate::domain::PluginCommand {
+    fn plugin_cmd(name: &str, body: &str) -> crate::PluginCommand {
+        crate::PluginCommand {
             name: name.to_string(),
             description: "does things".to_string(),
             body: body.to_string(),
@@ -12393,7 +12380,7 @@ mod tests {
         assert_eq!(last_user.as_deref(), Some("Deploy to prod now."));
         assert!(state.ui.input_buffer.is_empty());
         // No-args + no token: body submits verbatim.
-        state.turn = crate::domain::TurnState::Idle;
+        state.turn = crate::TurnState::Idle;
         state.plugin_commands = vec![plugin_cmd("ship", "Ship it.")];
         state.ui.input_buffer = "/ship".to_string();
         let (state, _) = update(state, key(KeyCode::Enter));
@@ -12437,7 +12424,7 @@ mod tests {
 
     #[test]
     fn palette_filter_entries_appends_plugins_and_agrees_on_indices() {
-        use crate::domain::slash_commands::{COMMAND_REGISTRY, filter_entries};
+        use crate::slash_commands::{COMMAND_REGISTRY, filter_entries};
         let plugin = vec![plugin_cmd("deploy", "body")];
         let all = filter_entries("", &plugin);
         assert_eq!(all.len(), COMMAND_REGISTRY.len() + 1);
@@ -12542,7 +12529,7 @@ mod tests {
                 call_id: mermaid_model::ids::ToolCallId(5),
                 tool: "execute_command".to_string(),
                 risk: "shell_mutation".to_string(),
-                kind: crate::domain::ApprovalKind::Shell,
+                kind: crate::ApprovalKind::Shell,
                 prompt: "$ rm -rf /".to_string(),
                 allowlist_scope: "execute_command:rm".to_string(),
             },
@@ -12569,7 +12556,7 @@ mod tests {
 
     #[test]
     fn approval_keys_emit_the_right_decision() {
-        use crate::domain::ApprovalChoice as A;
+        use crate::ApprovalChoice as A;
         for (code, expected) in [
             (KeyCode::Char('1'), A::Approve),
             (KeyCode::Char('y'), A::Approve),
@@ -12630,7 +12617,7 @@ mod tests {
 
     #[test]
     fn approval_enter_resolves_the_highlighted_option() {
-        use crate::domain::ApprovalChoice as A;
+        use crate::ApprovalChoice as A;
         // Highlight option 3 (No) with two ↓, then Enter → Deny.
         let (state, _) = update(pending_approval_state(), key(KeyCode::Down));
         let (state, _) = update(state, key(KeyCode::Down));
@@ -12657,7 +12644,7 @@ mod tests {
                 call_id: mermaid_model::ids::ToolCallId(6),
                 tool: "write_file".to_string(),
                 risk: "file_mutation".to_string(),
-                kind: crate::domain::ApprovalKind::FileMutation,
+                kind: crate::ApprovalKind::FileMutation,
                 prompt: "src/x.rs".to_string(),
                 allowlist_scope: "write_file".to_string(),
             },
@@ -12720,7 +12707,7 @@ mod tests {
         state
             .session
             .append(ChatMessage::assistant("two"), state.now);
-        state.session.context_usage = Some(crate::domain::ContextUsageSnapshot::from_usage(
+        state.session.context_usage = Some(crate::ContextUsageSnapshot::from_usage(
             &mermaid_model::models::TokenUsage::provider(120_000, 900),
             Some(200_000),
         ));
@@ -12778,7 +12765,7 @@ mod tests {
         state.mcp.servers.insert(
             "s1".to_string(),
             McpServerEntry {
-                config: crate::domain::McpServerConfig {
+                config: crate::McpServerConfig {
                     command: "echo".to_string(),
                     args: vec![],
                     env: std::collections::HashMap::new(),
@@ -12813,14 +12800,14 @@ mod tests {
             state.mcp.servers.insert(
                 name.to_string(),
                 McpServerEntry {
-                    config: crate::domain::McpServerConfig {
+                    config: crate::McpServerConfig {
                         command: "echo".to_string(),
                         args: vec![],
                         env: std::collections::HashMap::new(),
                         ..Default::default()
                     },
                     status: McpServerStatus::Ready,
-                    tools: vec![crate::domain::state::McpToolSpec {
+                    tools: vec![crate::state::McpToolSpec {
                         name: format!("mcp__{name}__do"),
                         raw_name: "do".to_string(),
                         description: "d".to_string(),
@@ -12861,9 +12848,9 @@ mod tests {
         state.mcp.servers.insert(
             "srv".to_string(),
             McpServerEntry {
-                config: crate::domain::McpServerConfig::default(),
+                config: crate::McpServerConfig::default(),
                 status: McpServerStatus::Ready,
-                tools: vec![crate::domain::state::McpToolSpec {
+                tools: vec![crate::state::McpToolSpec {
                     name: "mcp__srv__alpha".to_string(),
                     raw_name: "alpha".to_string(),
                     description: "does alpha things".to_string(),
@@ -12974,7 +12961,7 @@ mod tests {
 
     fn pending_read_file_call() -> super::super::state::PendingToolCall {
         super::super::state::PendingToolCall {
-            call_id: crate::domain::ToolCallId(1),
+            call_id: crate::ToolCallId(1),
             source: mermaid_model::models::ToolCall {
                 id: Some("call_a".to_string()),
                 function: mermaid_model::models::FunctionCall {
@@ -13009,7 +12996,7 @@ mod tests {
             state,
             Msg::ToolFinished {
                 turn: TurnId(1),
-                call_id: crate::domain::ToolCallId(1),
+                call_id: crate::ToolCallId(1),
                 outcome: ToolOutcome::success("file body", "read it", 0.1),
             },
         );
@@ -13068,7 +13055,7 @@ mod tests {
             state,
             Msg::ToolFinished {
                 turn: TurnId(1),
-                call_id: crate::domain::ToolCallId(1),
+                call_id: crate::ToolCallId(1),
                 outcome: ToolOutcome::success("done", "done", 0.1),
             },
         );
@@ -13280,7 +13267,7 @@ mod tests {
     /// tests must not hand-roll it.
     fn enter_planning(state: &mut State, plan_path: &str) {
         state.session.safety_mode = mermaid_runtime::SafetyMode::Plan;
-        state.session.plan = Some(crate::domain::PlanState {
+        state.session.plan = Some(crate::PlanState {
             plan_path: PathBuf::from(plan_path),
             ..Default::default()
         });
@@ -13353,7 +13340,7 @@ mod tests {
     /// contradiction re-injected itself every `TASK_STALENESS_CALLS` dispatches.
     #[test]
     fn no_task_staleness_nudge_while_the_checklist_writers_are_withdrawn() {
-        use crate::domain::ChecklistStatus::InProgress;
+        use crate::ChecklistStatus::InProgress;
         let mut state = fresh_state();
         state.session.conversation.tasks = sample_task_store(&[InProgress]);
         enter_planning(&mut state, "/tmp/project/.mermaid/plans/x.md");
@@ -14128,7 +14115,7 @@ mod tests {
         );
         // An explicit `tasks = allow` in the plan profile restores them,
         // matching the runtime backstop in tasks::plan_mode_block.
-        state.settings.plan.permissions.tasks = crate::domain::PlanPermLevel::Allow;
+        state.settings.plan.permissions.tasks = crate::PlanPermLevel::Allow;
         assert!(
             build_chat_request(&state)
                 .suppressed_builtin_tools
@@ -14136,7 +14123,7 @@ mod tests {
             "tasks=allow restores advertisement"
         );
         // Subagents never plan, so nothing is suppressed for them either.
-        state.settings.plan.permissions.tasks = crate::domain::PlanPermLevel::Deny;
+        state.settings.plan.permissions.tasks = crate::PlanPermLevel::Deny;
         exit_planning(&mut state);
         state.session.is_subagent = true;
         assert!(
@@ -14148,7 +14135,7 @@ mod tests {
 
     /// Drive a single named tool call through StreamDone so the turn lands in
     /// `ExecutingTools`, returning the allocated call id.
-    fn drive_single_tool_call(state: &mut State, tool: &str) -> crate::domain::ToolCallId {
+    fn drive_single_tool_call(state: &mut State, tool: &str) -> crate::ToolCallId {
         state.turn = TurnState::Generating {
             id: TurnId(9),
             started: std::time::SystemTime::now(),
@@ -14192,8 +14179,8 @@ mod tests {
 
         let body = "## Summary\nS\n\n## Tasks\n1. Add the flag\n2. Wire the broker\n";
         let outcome = ToolOutcome::success("The user approved the plan.", "plan approved", 0.1)
-            .with_metadata(crate::domain::ToolRunMetadata {
-                detail: crate::domain::ToolMetadata::Plan {
+            .with_metadata(crate::ToolRunMetadata {
+                detail: crate::ToolMetadata::Plan {
                     path: ".mermaid/plans/x.md".to_string(),
                     body: body.to_string(),
                     start: true,
@@ -14241,13 +14228,13 @@ mod tests {
 
     #[test]
     fn replan_reconcile_preserves_completed_tasks() {
-        use crate::domain::checklist::{
+        use crate::checklist::{
             ChecklistEdit, ChecklistOrigin, ChecklistSpec, ChecklistStatus, Stamp,
         };
         let mut state = fresh_state();
         enter_planning(&mut state, "/tmp/project/.mermaid/plans/x.md");
         // Prior round: one completed, one still open.
-        let mut store = crate::domain::checklist::ChecklistStore::default();
+        let mut store = crate::checklist::ChecklistStore::default();
         let ids = store.create(
             vec![
                 ChecklistSpec {
@@ -14282,7 +14269,7 @@ mod tests {
         let body = "## Tasks\n1. Add the flag\n2. New step\n";
         finish_plan_mode(&mut state, &mut cmds, body, false);
 
-        let visible: Vec<(String, crate::domain::checklist::ChecklistStatus)> = state
+        let visible: Vec<(String, crate::checklist::ChecklistStatus)> = state
             .session
             .conversation
             .tasks
@@ -14320,7 +14307,7 @@ mod tests {
 
     #[test]
     fn plan_config_picker_cycles_values_and_persists() {
-        use crate::domain::{PlanPermLevel, PlanPermissions};
+        use crate::{PlanPermLevel, PlanPermissions};
         let (mut state, _) = update(
             fresh_state(),
             Msg::Slash(SlashCmd::Plan(Some("config".into()))),
@@ -14376,7 +14363,7 @@ mod tests {
 
     #[test]
     fn plan_capabilities_line_tracks_the_profile() {
-        use crate::domain::PlanPermissions;
+        use crate::PlanPermissions;
         let line = plan_capabilities_line(&PlanPermissions::default());
         assert!(line.contains("build and test"));
         assert!(line.contains("web search/fetch"));
@@ -14392,8 +14379,8 @@ mod tests {
 
     fn plan_outcome(fresh: bool, fork: bool, model: Option<&str>) -> ToolOutcome {
         ToolOutcome::success("approved", "plan approved", 0.1).with_metadata(
-            crate::domain::ToolRunMetadata {
-                detail: crate::domain::ToolMetadata::Plan {
+            crate::ToolRunMetadata {
+                detail: crate::ToolMetadata::Plan {
                     path: ".mermaid/plans/x.md".to_string(),
                     body: "## Tasks\n1. Step one\n2. Step two\n".to_string(),
                     start: true,
@@ -14497,7 +14484,7 @@ mod tests {
         state.runtime.provider_capabilities.max_context_tokens = Some(1_000_000);
         // A provider-counted figure for the FULL transcript, as a live session
         // would have after its last call.
-        state.session.context_usage = Some(crate::domain::ContextUsageSnapshot::from_usage(
+        state.session.context_usage = Some(crate::ContextUsageSnapshot::from_usage(
             &mermaid_model::models::TokenUsage::provider(250_000, 1_000),
             Some(1_000_000),
         ));
@@ -14603,7 +14590,7 @@ mod tests {
         state.mcp.servers.insert(
             "s1".to_string(),
             McpServerEntry {
-                config: crate::domain::McpServerConfig {
+                config: crate::McpServerConfig {
                     command: "echo".to_string(),
                     args: vec![],
                     env: std::collections::HashMap::new(),
@@ -14822,11 +14809,9 @@ mod tests {
         assert!(!state.ui.tasks_collapsed, "second press expands again");
     }
 
-    fn sample_task_store(
-        statuses: &[crate::domain::ChecklistStatus],
-    ) -> crate::domain::ChecklistStore {
-        use crate::domain::checklist::{ChecklistEdit, ChecklistSpec, Stamp};
-        let mut store = crate::domain::ChecklistStore::default();
+    fn sample_task_store(statuses: &[crate::ChecklistStatus]) -> crate::ChecklistStore {
+        use crate::checklist::{ChecklistEdit, ChecklistSpec, Stamp};
+        let mut store = crate::ChecklistStore::default();
         store.create(
             statuses
                 .iter()
@@ -14838,13 +14823,13 @@ mod tests {
                     in_progress: false,
                 })
                 .collect(),
-            crate::domain::ChecklistOrigin::Model,
+            crate::ChecklistOrigin::Model,
             Stamp::default(),
         );
         let edits: Vec<ChecklistEdit> = statuses
             .iter()
             .enumerate()
-            .filter(|(_, s)| **s != crate::domain::ChecklistStatus::Pending)
+            .filter(|(_, s)| **s != crate::ChecklistStatus::Pending)
             .map(|(i, s)| ChecklistEdit {
                 id: (i + 1) as u32,
                 status: Some(*s),
@@ -14857,7 +14842,7 @@ mod tests {
 
     #[test]
     fn tasks_updated_replaces_snapshot_and_diffs_completions() {
-        use crate::domain::ChecklistStatus::{Completed, InProgress, Pending};
+        use crate::ChecklistStatus::{Completed, InProgress, Pending};
         let state = fresh_state();
         // First snapshot: nothing completed — no notifications.
         let (state, cmds) = update(
@@ -14908,7 +14893,7 @@ mod tests {
 
     #[test]
     fn fork_clears_tasks_and_syncs_the_broker() {
-        use crate::domain::ChecklistStatus::InProgress;
+        use crate::ChecklistStatus::InProgress;
         let state = fresh_state();
         let (mut state, _) = update(
             state,
@@ -14956,7 +14941,7 @@ mod tests {
         );
         assert!(cmds.iter().any(|c| matches!(
             c,
-            Cmd::UserTaskEdit(crate::domain::UserChecklistEdit::Add { subject }) if subject == "review the docs"
+            Cmd::UserTaskEdit(crate::UserChecklistEdit::Add { subject }) if subject == "review the docs"
         )));
         assert!(state.session.conversation.tasks.is_empty());
 
@@ -14967,7 +14952,7 @@ mod tests {
         );
         assert!(cmds.iter().any(|c| matches!(
             c,
-            Cmd::UserTaskEdit(crate::domain::UserChecklistEdit::Done { id: 3 })
+            Cmd::UserTaskEdit(crate::UserChecklistEdit::Done { id: 3 })
         )));
         let (state, _) = update(
             state,
@@ -15007,7 +14992,7 @@ mod tests {
 
     #[test]
     fn stale_in_progress_task_triggers_a_nudge_every_n_calls() {
-        use crate::domain::ChecklistStatus::InProgress;
+        use crate::ChecklistStatus::InProgress;
         let state = fresh_state();
         let (mut state, _) = update(
             state,
@@ -15078,8 +15063,8 @@ mod tests {
         assert!(cmds.is_empty());
     }
 
-    fn test_attachment(id: u64) -> crate::domain::Attachment {
-        crate::domain::Attachment {
+    fn test_attachment(id: u64) -> crate::Attachment {
+        crate::Attachment {
             id,
             // Mirror id → number so a test can reference the pill as `[Image #id]`.
             number: id,
@@ -15376,8 +15361,8 @@ mod tests {
                     "background process started",
                     0.2,
                 )
-                .with_metadata(crate::domain::ToolRunMetadata {
-                    process: Some(crate::domain::ManagedProcess {
+                .with_metadata(crate::ToolRunMetadata {
+                    process: Some(crate::ManagedProcess {
                         id: "bg-123".to_string(),
                         pid: 123,
                         command: "npm run dev".to_string(),
@@ -15386,7 +15371,7 @@ mod tests {
                         detected_url: Some("http://127.0.0.1:5173".to_string()),
                         status: mermaid_runtime::ProcessStatus::Running,
                     }),
-                    ..crate::domain::ToolRunMetadata::default()
+                    ..crate::ToolRunMetadata::default()
                 }),
             },
         );
@@ -15754,7 +15739,7 @@ mod tests {
         );
         assert_eq!(
             state.ui.live_tool_status.get(&call_id),
-            Some(&crate::domain::LiveToolStatus {
+            Some(&crate::LiveToolStatus {
                 activity: "thinking".to_string(),
                 tokens: 1234,
             }),
@@ -15809,8 +15794,8 @@ mod tests {
 
         let usage =
             mermaid_model::models::TokenUsage::provider(1_000, 250).with_reasoning_output(50);
-        let metadata = crate::domain::ToolRunMetadata {
-            detail: crate::domain::ToolMetadata::Subagent {
+        let metadata = crate::ToolRunMetadata {
+            detail: crate::ToolMetadata::Subagent {
                 model_id: "ollama/test".to_string(),
                 agent_id: "a1".to_string(),
             },

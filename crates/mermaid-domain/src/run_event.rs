@@ -316,8 +316,8 @@ pub struct TaskLine {
     pub origin: Option<String>,
 }
 
-impl From<&crate::domain::ChecklistItem> for TaskLine {
-    fn from(task: &crate::domain::ChecklistItem) -> Self {
+impl From<&crate::ChecklistItem> for TaskLine {
+    fn from(task: &crate::ChecklistItem) -> Self {
         Self {
             id: task.id,
             subject: task.subject.clone(),
@@ -327,8 +327,8 @@ impl From<&crate::domain::ChecklistItem> for TaskLine {
             tokens_spent: task.tokens_spent,
             origin: Some(
                 match task.origin {
-                    crate::domain::ChecklistOrigin::Model => "model",
-                    crate::domain::ChecklistOrigin::User => "user",
+                    crate::ChecklistOrigin::Model => "model",
+                    crate::ChecklistOrigin::User => "user",
                 }
                 .to_string(),
             ),
@@ -471,7 +471,7 @@ fn finish_reason_str(reason: &FinishReason) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::state::ToolOutcome;
+    use crate::state::ToolOutcome;
     use mermaid_model::ids::{ToolCallId, TurnId};
     use mermaid_model::models::TokenUsage;
     use mermaid_model::tool_run::ToolRunMetadata;
@@ -836,7 +836,7 @@ mod tests {
                     failed_queries: 1,
                     partial: true,
                     truncated: true,
-                    failures: vec![crate::domain::WebSearchFailure {
+                    failures: vec![crate::WebSearchFailure {
                         query_index: 1,
                         error: "upstream timed out".to_string(),
                     }],

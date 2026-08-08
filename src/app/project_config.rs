@@ -14,8 +14,8 @@
 use std::path::{Path, PathBuf};
 
 use super::config::read_config_table;
-use crate::domain::config::{ConfigLayer, LayerSource, SafetyConfig};
-use crate::domain::{FilesystemPolicy, NetworkPolicy};
+use mermaid_domain::config::{ConfigLayer, LayerSource, SafetyConfig};
+use mermaid_domain::{FilesystemPolicy, NetworkPolicy};
 use mermaid_runtime::SafetyMode;
 
 /// Top-level `Config` keys a project file may set. Everything absent from

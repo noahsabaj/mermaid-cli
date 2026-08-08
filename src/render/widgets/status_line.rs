@@ -4,8 +4,8 @@ use std::collections::VecDeque;
 use unicode_width::UnicodeWidthStr;
 
 use super::{GenerationStatus, truncate_to_cells};
-use crate::domain::QueuedMessage;
 use crate::render::theme::Theme;
+use mermaid_domain::QueuedMessage;
 
 /// How many queued-message rows to show under the spinner before stopping.
 const MAX_QUEUED_ROWS: usize = 5;
@@ -172,7 +172,7 @@ pub fn build_status_lines(
         if row.tokens > 0 {
             bits.push(format!(
                 "↓ ~{} tokens",
-                crate::domain::compaction::format_compact_count(row.tokens)
+                mermaid_domain::compaction::format_compact_count(row.tokens)
             ));
         }
         let desc_budget = width.min(desc.width());

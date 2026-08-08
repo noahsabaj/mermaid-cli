@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 
-use crate::domain::{ToolDefinition, ToolOutcome};
+use mermaid_domain::{ToolDefinition, ToolOutcome};
 
 use super::super::ctx::ExecContext;
 use super::ToolExecutor;
@@ -23,11 +23,11 @@ pub struct EnterPlanModeTool;
 #[async_trait]
 impl ToolExecutor for EnterPlanModeTool {
     fn name(&self) -> &'static str {
-        crate::domain::plan::ENTER_PLAN_MODE_TOOL
+        mermaid_domain::plan::ENTER_PLAN_MODE_TOOL
     }
 
     fn schema(&self) -> ToolDefinition {
-        crate::domain::plan::enter_plan_mode_definition()
+        mermaid_domain::plan::enter_plan_mode_definition()
     }
 
     fn is_internal(&self) -> bool {

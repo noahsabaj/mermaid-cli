@@ -335,7 +335,7 @@ pub async fn validate_argv(
 /// Validate a Streamable HTTP MCP server config: connect, initialize, list
 /// tools, then end the session on every path. Sibling of [`validate_argv`]
 /// for url-shaped configs.
-pub async fn validate_http(config: &crate::domain::McpServerConfig) -> Result<Vec<String>> {
+pub async fn validate_http(config: &mermaid_domain::McpServerConfig) -> Result<Vec<String>> {
     let transport = super::transport_http::HttpTransport::new(config)?;
     let mut client = McpClient::new(transport.into());
 

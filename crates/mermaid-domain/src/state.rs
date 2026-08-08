@@ -21,9 +21,9 @@ use std::time::SystemTime;
 
 use chrono::{DateTime, Local};
 
-use crate::domain::ConversationHistory;
-use crate::domain::LoadedInstructions;
-use crate::domain::{Config, McpServerConfig};
+use crate::ConversationHistory;
+use crate::LoadedInstructions;
+use crate::{Config, McpServerConfig};
 use mermaid_model::models::ChatMessage;
 use mermaid_model::models::tool_call::ToolCall as ModelToolCall;
 use mermaid_model::models::{ProviderContinuation, ReasoningLevel, TokenUsage, TokenUsageSource};
@@ -53,11 +53,11 @@ pub struct State {
     /// Durable semantic memory snapshot (auto-derived index + entries),
     /// refreshed per turn like `instructions`. Its index is injected into the
     /// model prompt alongside project instructions.
-    pub memory: Option<crate::domain::LoadedMemory>,
+    pub memory: Option<crate::LoadedMemory>,
     /// Discovered SKILL.md playbooks (project/user/plugin) plus the rendered
     /// index injected into the model prompt alongside instructions and memory.
     /// Loaded once at startup — skills are authored artifacts, not live state.
-    pub skills: Option<crate::domain::LoadedSkills>,
+    pub skills: Option<crate::LoadedSkills>,
     /// Context strings injected by `before_tool_use` plugin hooks
     /// (`additionalContext`), buffered until the next dispatched model
     /// request consumes them (see `push_call_model`). Byte-capped; transient
@@ -231,7 +231,7 @@ impl State {
         // result, or a result whose call was archived out) would otherwise resume
         // with an orphan and 400 the first request. Repair pairing on the loaded
         // prefix so both the transcript and the next request are valid.
-        crate::domain::compaction::normalize_history(self.session.conversation.messages_mut());
+        crate::compaction::normalize_history(self.session.conversation.messages_mut());
         // Checklist retirement deliberately does NOT happen here. There is one
         // retirement rule and it lives at natural run end
         // (`handle_stream_done`), where the summary line absorbs the count so
@@ -1004,7 +1004,7 @@ pub struct UiState {
     /// Active color theme. Seeded from `config.ui.theme` in `State::new`;
     /// `/theme` switches it live (and persists via `Cmd::PersistUiTheme`).
     /// The render layer memoizes the resolved `Theme` off this value.
-    pub theme: crate::domain::ThemeChoice,
+    pub theme: crate::ThemeChoice,
     /// `NO_COLOR` was set (present and non-empty) at startup. Injected by the
     /// run loop after `State::new` — the reducer never reads the environment.
     /// While true the render layer draws `Theme::plain()` regardless of
@@ -1152,11 +1152,11 @@ impl UiState {
     /// The @-mention token under the cursor, when the picker may show:
     /// not user-dismissed, and not while the buffer is a slash command
     /// (the slash palette owns that surface).
-    pub fn active_file_token(&self) -> Option<crate::domain::file_mention::AtToken> {
+    pub fn active_file_token(&self) -> Option<crate::file_mention::AtToken> {
         if self.file_picker_dismissed || self.input_buffer.starts_with('/') {
             return None;
         }
-        crate::domain::file_mention::active_at_token(&self.input_buffer, self.input_cursor)
+        crate::file_mention::active_at_token(&self.input_buffer, self.input_cursor)
     }
 
     /// Whether the @-mention file picker is currently open.

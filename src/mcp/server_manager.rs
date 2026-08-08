@@ -20,8 +20,8 @@ use super::client::{ContentBlock, McpClient, McpToolDef, McpToolResult};
 use super::sanitize;
 use super::transport::{StdioTransport, Transport};
 use super::transport_http::HttpTransport;
-use crate::domain::McpToolSpec;
-use crate::domain::{McpServerConfig, TransportKind};
+use mermaid_domain::McpToolSpec;
+use mermaid_domain::{McpServerConfig, TransportKind};
 
 /// Wall-clock bound for one server's spawn + initialize + list_tools.
 /// The per-JSON-RPC request timeout inside the transport is 30s, so the

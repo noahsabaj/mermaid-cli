@@ -1,14 +1,31 @@
-//! Pure-function reducer: `fn update(State, Msg) -> (State, Vec<Cmd>)`.
+//! The pure Model-View-Update core, and nothing above it.
 //!
-//! Heart of the MVU architecture. Everything here is synchronous,
-//! does no I/O, and is testable without tokio or a terminal. The
-//! effect runner (`crate::effect`) takes the `Cmd` values the reducer
-//! emits and performs the actual work; results come back as `Msg`
-//! events that feed into another `update` call.
+//! `fn update(State, Msg) -> (State, Vec<Cmd>)`: synchronous, no I/O, no wall
+//! clock (it reads `state.now`, injected, so `--replay` is deterministic).
+//! Effects are DATA — the `Cmd` values this crate returns are executed by the
+//! impure shell in `mermaid-cli`.
 //!
-//! The split is load-bearing: stale events racing with cancellation,
-//! lost tool results, and two event loops competing for input are all
-//! impossible to express against these types.
+//! It is a crate because the property was asserted and not enforced. A guard
+//! that greps `src/domain` for `std::fs` and `tokio::` cannot see
+//! `use crate::app::Config`, so the "pure" core had accumulated 34 upward
+//! edges — into `app`, `session`, `providers` and `render` — and two of them
+//! were cycles:
+//!
+//!   * `app::CompactionConfig::policy()` returned a `domain::CompactionPolicy`
+//!     while `domain::State` held an `app::Config`. Neither module could be
+//!     compiled without the other.
+//!   * `app::stamp_session_provenance` took `&mut domain::State`, against
+//!     `state.rs`'s own rule that only `update()` may hold one — and because
+//!     that stamp was not a recorded `Msg`, `--replay` overwrote a recording's
+//!     git branch with the replaying machine's.
+//!
+//! Both are gone, and now unrepresentable: `use crate::app::Config` in here is
+//! an `unresolved import`, not a review comment. Same play as `mermaid-model`
+//! (commit 7c2f2ad); see that crate's docs for the five edges it fixed.
+//!
+//! What is absent from `Cargo.toml` is part of the enforcement: no `tokio`, no
+//! `reqwest`, no `rusqlite`, no `crossterm`, no `clap`. A reducer that wants to
+//! await something cannot, because the runtime is not on the dependency list.
 
 pub mod checklist;
 pub mod cmd;
@@ -21,6 +38,7 @@ pub mod image_token;
 pub mod msg;
 pub mod plan;
 pub mod progress;
+pub mod prompts;
 pub mod reducer;
 pub mod run_event;
 pub mod runtime;

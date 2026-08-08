@@ -23,8 +23,8 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
 use super::{RenderCache, render};
-use crate::domain::Config;
-use crate::domain::State;
+use mermaid_domain::Config;
+use mermaid_domain::State;
 use mermaid_model::models::{ChatMessage, ChatMessageKind};
 
 /// Frames discarded before timing starts (cache fill, allocator warm-up).

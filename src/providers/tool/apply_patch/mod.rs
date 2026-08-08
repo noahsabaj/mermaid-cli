@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 
-use crate::domain::{ToolDefinition, ToolMetadata, ToolOutcome, ToolRunMetadata};
+use mermaid_domain::{ToolDefinition, ToolMetadata, ToolOutcome, ToolRunMetadata};
 use mermaid_model::constants::MAX_PATCH_FILE_BYTES;
 use mermaid_model::diff::{DisplayDiff, MAX_DISPLAY_DIFF_LINES, generate_display_diff};
 // The pure patch engine (parser + graduated fuzzy matcher + applier) lives in

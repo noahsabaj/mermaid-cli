@@ -9,8 +9,8 @@
 
 use std::path::PathBuf;
 
-use mermaid_cli::domain::Config;
-use mermaid_cli::domain::{
+use mermaid_domain::Config;
+use mermaid_domain::{
     Cmd, CompactionEvent, CompactionResult, CompactionTrigger, ContextUsageSnapshot, Msg,
     PendingToolCall, PromptTokenBreakdown, SlashCmd, State, ToolCallId, ToolOutcome, TurnId,
     TurnState, start_executing_tools, start_generating, update,
@@ -490,7 +490,7 @@ fn compaction_finished_replaces_history_and_archives_head() {
             preserved_turn_count: 1,
             summary_tokens: 10,
             duration_secs: 0.5,
-            review_status: mermaid_cli::domain::CompactionReviewStatus::Reviewed,
+            review_status: mermaid_domain::CompactionReviewStatus::Reviewed,
             review_error: None,
             focus: None,
             archive_path: None,
@@ -656,7 +656,7 @@ fn manual_compaction_finish_drains_queued_message() {
             preserved_turn_count: 1,
             summary_tokens: 10,
             duration_secs: 0.5,
-            review_status: mermaid_cli::domain::CompactionReviewStatus::Reviewed,
+            review_status: mermaid_domain::CompactionReviewStatus::Reviewed,
             review_error: None,
             focus: None,
             archive_path: None,
@@ -764,7 +764,7 @@ fn tool_progress_artifact_routes_image_to_assistant_message() {
     // during ExecutingTools should land base64-encoded on the last
     // assistant message's `images` field so the chat widget renders
     // it without waiting for ToolFinished.
-    use mermaid_cli::domain::ProgressEvent;
+    use mermaid_domain::ProgressEvent;
 
     // Build a state with a committed assistant message and
     // ExecutingTools turn state (the shape a tool runs inside).
@@ -838,8 +838,8 @@ fn tool_progress_artifact_routes_image_to_assistant_message() {
 /// configured MCP tools never reached the outgoing `ChatRequest.tools`.
 #[test]
 fn configured_mcp_servers_seed_state_and_ready_updates() {
-    use mermaid_cli::domain::{Config as AppConfig, McpServerConfig};
-    use mermaid_cli::domain::{McpServerStatus, McpToolSpec};
+    use mermaid_domain::{Config as AppConfig, McpServerConfig};
+    use mermaid_domain::{McpServerStatus, McpToolSpec};
 
     let mut cfg = AppConfig::default();
     cfg.mcp_servers.insert(
@@ -907,7 +907,7 @@ use mermaid_model::question::{
     PendingQuestionSet, Question, QuestionKind, QuestionOption, QuestionResolution, TextValidate,
 };
 
-use mermaid_cli::domain::{Key, KeyCode, KeyMods};
+use mermaid_domain::{Key, KeyCode, KeyMods};
 
 fn opt(label: &str) -> QuestionOption {
     QuestionOption {

@@ -12,12 +12,12 @@
 //! shapes — just wrapped in the new trait so future tools only have
 //! to learn this surface.
 
-use crate::domain::ProgressEvent;
+use mermaid_domain::ProgressEvent;
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 
-use crate::domain::{ToolDefinition, ToolMetadata, ToolOutcome, ToolRunMetadata};
+use mermaid_domain::{ToolDefinition, ToolMetadata, ToolOutcome, ToolRunMetadata};
 use mermaid_model::constants::MAX_RESPONSE_CHARS as MAX_FILE_READ_BYTES;
 
 use super::super::ctx::ExecContext;
@@ -796,8 +796,8 @@ fn format_duration_for_diff(seconds: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{ToolCallId, TurnId};
     use crate::providers::ctx::test_exec_context;
+    use mermaid_domain::{ToolCallId, TurnId};
     use std::fs;
 
     /// Memory facts live outside the project/scratchpad roots and the index
@@ -881,7 +881,7 @@ mod tests {
         let dir = temp_root("read_missing_path");
         let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), dir.clone());
         let outcome = ReadFileTool.execute(serde_json::json!({}), ctx).await;
-        assert_eq!(outcome.status, crate::domain::ToolStatus::Error);
+        assert_eq!(outcome.status, mermaid_domain::ToolStatus::Error);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -892,7 +892,7 @@ mod tests {
         let outcome = ReadFileTool
             .execute(serde_json::json!({"path": "does_not_exist.txt"}), ctx)
             .await;
-        assert_eq!(outcome.status, crate::domain::ToolStatus::Error);
+        assert_eq!(outcome.status, mermaid_domain::ToolStatus::Error);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1144,7 +1144,7 @@ mod tests {
         let outcome = WriteFileTool
             .execute(serde_json::json!({"path": "x.txt"}), ctx)
             .await;
-        assert_eq!(outcome.status, crate::domain::ToolStatus::Error);
+        assert_eq!(outcome.status, mermaid_domain::ToolStatus::Error);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1244,7 +1244,7 @@ mod tests {
         workdir: PathBuf,
         scratchpad: Option<PathBuf>,
     ) -> (ExecContext, tokio::sync::mpsc::Receiver<ProgressEvent>) {
-        let mut config = crate::domain::Config::default();
+        let mut config = mermaid_domain::Config::default();
         config.safety.mode = mode;
         let (tx, rx) = tokio::sync::mpsc::channel(8);
         let mut ctx = ExecContext::new(

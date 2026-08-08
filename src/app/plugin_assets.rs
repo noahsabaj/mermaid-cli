@@ -17,7 +17,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::domain::{AgentTypeConfig, McpServerConfig};
+use mermaid_domain::{AgentTypeConfig, McpServerConfig};
 
 /// Everything enabled plugins contribute (besides skills), plus the
 /// warnings the startup path should surface.
@@ -27,7 +27,7 @@ pub struct PluginAssets {
     /// prefix would pollute the `mcp__<server>__<tool>` tool names).
     pub mcp_servers: HashMap<String, McpServerConfig>,
     /// Prompt-backed slash commands.
-    pub commands: Vec<crate::domain::PluginCommand>,
+    pub commands: Vec<mermaid_domain::PluginCommand>,
     /// Agent types, merged into `config.agents.types` for absent names only.
     pub agent_types: HashMap<String, AgentTypeConfig>,
     pub warnings: Vec<String>,
@@ -189,7 +189,7 @@ pub(crate) fn assets_from_manifest(
             continue;
         }
         // Builtins always win — a plugin must not shadow /help or /quit.
-        if crate::domain::slash_commands::COMMAND_REGISTRY
+        if mermaid_domain::slash_commands::COMMAND_REGISTRY
             .iter()
             .any(|c| c.name == name || c.aliases.contains(&name.as_str()))
         {
@@ -198,7 +198,7 @@ pub(crate) fn assets_from_manifest(
             ));
             continue;
         }
-        assets.commands.push(crate::domain::PluginCommand {
+        assets.commands.push(mermaid_domain::PluginCommand {
             name,
             description: description.unwrap_or_default(),
             body: body.trim().to_string(),
@@ -241,7 +241,7 @@ fn read_contained(
 /// Fold plugin assets into the already-merged `Config`. Config-defined
 /// entries always win (a user's `[mcp_servers.x]` / `[agents.types.x]`
 /// beats a plugin's); returns the warnings to surface at startup.
-pub fn apply(config: &mut crate::domain::Config, assets: &PluginAssets) -> Vec<String> {
+pub fn apply(config: &mut mermaid_domain::Config, assets: &PluginAssets) -> Vec<String> {
     let mut warnings = assets.warnings.clone();
     for (name, server) in &assets.mcp_servers {
         if config.mcp_servers.contains_key(name) {
@@ -440,7 +440,7 @@ mod tests {
 
     #[test]
     fn apply_lets_config_win_and_merges_the_rest() {
-        let mut config = crate::domain::Config::default();
+        let mut config = mermaid_domain::Config::default();
         config.mcp_servers.insert(
             "shared".to_string(),
             McpServerConfig {

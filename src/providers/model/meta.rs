@@ -13,7 +13,7 @@ use futures::StreamExt;
 use reqwest::Client;
 use serde_json::{Value, json};
 
-use crate::domain::ChatRequest;
+use mermaid_domain::ChatRequest;
 use mermaid_model::models::tool_call::{FunctionCall, ToolCall};
 use mermaid_model::models::{
     BackendError, FinishReason, MessageRole, MetaResponseItem, ModelError, ProviderContinuation,
@@ -586,8 +586,8 @@ async fn send(sink: &tokio::sync::mpsc::Sender<StreamEvent>, event: StreamEvent)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{ToolDefinition, TurnId};
     use crate::providers::test_stream_context;
+    use mermaid_domain::{ToolDefinition, TurnId};
     use mermaid_model::models::ChatMessage;
 
     fn request() -> ChatRequest {

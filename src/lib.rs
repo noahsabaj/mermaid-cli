@@ -1,11 +1,9 @@
 pub mod app;
 pub mod cli;
 pub mod clipboard;
-pub mod domain;
 pub mod effect;
 pub mod mcp;
 pub mod ollama;
-pub mod prompts;
 pub mod providers;
 pub mod render;
 pub mod runtime_client;

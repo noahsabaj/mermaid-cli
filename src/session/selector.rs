@@ -26,7 +26,7 @@ use std::io;
 use std::path::Path;
 
 use super::conversation::ConversationManager;
-use crate::domain::ConversationHistory;
+use mermaid_domain::ConversationHistory;
 
 /// Entries the mouse wheel scrolls the picker viewport per notch. The wheel
 /// moves the *viewport*; the arrow keys move the *selection*.

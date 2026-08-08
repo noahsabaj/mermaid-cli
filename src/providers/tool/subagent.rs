@@ -36,7 +36,7 @@
 //!   user message, so a follow-up question reuses the context the child
 //!   already built instead of re-exploring from scratch.
 
-use crate::domain::{ProgressEvent, SubagentPhase};
+use mermaid_domain::{ProgressEvent, SubagentPhase};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -48,13 +48,13 @@ use serde_json::Value;
 use tokio::sync::{Semaphore, mpsc};
 use tokio_util::sync::CancellationToken;
 
-use crate::domain::{
-    Msg, State, TokenUsageTotals, ToolDefinition, ToolMetadata, ToolOutcome, ToolRunMetadata,
-    TurnState, update,
-};
 use crate::effect::{EffectRunner, MSG_CHANNEL_CAPACITY};
 use crate::providers::ProviderFactory;
 use crate::providers::ctx::ExecContext;
+use mermaid_domain::{
+    Msg, State, TokenUsageTotals, ToolDefinition, ToolMetadata, ToolOutcome, ToolRunMetadata,
+    TurnState, update,
+};
 use mermaid_model::models::MessageRole;
 use mermaid_runtime::SafetyMode;
 
@@ -174,7 +174,7 @@ commit: finishing is what lands the work.";
 /// name the valid types / tools / safety modes.
 fn resolve_agent_type(
     requested: Option<&str>,
-    config: &crate::domain::Config,
+    config: &mermaid_domain::Config,
 ) -> Result<AgentType, String> {
     let name = requested.unwrap_or("general");
     if let Some(custom) = config.agents.types.get(name) {
@@ -1401,7 +1401,7 @@ impl ChildProgress {
 
 /// Look up a tool name from a `PendingToolCall` in the state.
 /// Returns `None` if the call id isn't known (e.g. during teardown).
-fn lookup_tool_name(state: &State, call_id: crate::domain::ToolCallId) -> Option<String> {
+fn lookup_tool_name(state: &State, call_id: mermaid_domain::ToolCallId) -> Option<String> {
     match &state.turn {
         TurnState::ExecutingTools { calls, .. } => calls
             .iter()
@@ -1434,17 +1434,17 @@ fn seed_child_mcp(state: &mut State) {
 /// (failed to start) keep their `Starting` status and stay un-advertised —
 /// same as in the parent.
 fn apply_live_mcp(
-    servers: &mut std::collections::HashMap<String, crate::domain::McpServerEntry>,
-    live_specs: &[(String, crate::domain::McpToolSpec)],
+    servers: &mut std::collections::HashMap<String, mermaid_domain::McpServerEntry>,
+    live_specs: &[(String, mermaid_domain::McpToolSpec)],
     has_server: impl Fn(&str) -> bool,
 ) {
     for (name, entry) in servers.iter_mut() {
         if !has_server(name) {
             continue;
         }
-        entry.status = crate::domain::McpServerStatus::Ready;
+        entry.status = mermaid_domain::McpServerStatus::Ready;
         let cfg = &entry.config;
-        let tools: Vec<crate::domain::McpToolSpec> = live_specs
+        let tools: Vec<mermaid_domain::McpToolSpec> = live_specs
             .iter()
             .filter(|(server, _)| server == name)
             // Honor the per-server enabled_tools/disabled_tools filter,
@@ -1474,7 +1474,7 @@ fn apply_live_mcp(
 fn build_child_registry(
     providers: Arc<ProviderFactory>,
     tools: Option<&[String]>,
-    config: &crate::domain::Config,
+    config: &mermaid_domain::Config,
     safety_mode: SafetyMode,
     web: &WebCapabilities,
 ) -> Arc<ToolRegistry> {
@@ -1532,13 +1532,13 @@ fn build_child_registry(
 /// inline approval broker. Mirrors the policy gate's explicit headless and
 /// ReadOnly opt-ins while also honoring user safety overrides.
 fn headless_web_tool_is_executable(
-    config: &crate::domain::Config,
+    config: &mermaid_domain::Config,
     safety_mode: SafetyMode,
     tool: &'static str,
 ) -> bool {
     use mermaid_runtime::{ActionRequest, PolicyDecision, PolicyEngine, ToolCategory};
 
-    if config.safety.network == crate::domain::NetworkPolicy::Deny {
+    if config.safety.network == mermaid_domain::NetworkPolicy::Deny {
         return false;
     }
     let request = ActionRequest::new(tool, ToolCategory::Web, tool);
@@ -1563,7 +1563,7 @@ fn headless_web_tool_is_executable(
 /// (e.g. a test harness that uses the default `test_exec_context`
 /// builder). Production code always provides the parent's active model
 /// id via `Cmd::ExecuteTool::model_id`.
-fn default_model_id(config: &crate::domain::Config) -> String {
+fn default_model_id(config: &mermaid_domain::Config) -> String {
     if !config.default_model.provider.is_empty() && !config.default_model.name.is_empty() {
         format!(
             "{}/{}",
@@ -1577,13 +1577,13 @@ fn default_model_id(config: &crate::domain::Config) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{ToolCallId, TurnId};
     use crate::providers::ctx::test_exec_context;
+    use mermaid_domain::{ToolCallId, TurnId};
     use std::path::PathBuf;
 
     fn test_state() -> State {
         State::new(
-            crate::domain::Config::default(),
+            mermaid_domain::Config::default(),
             PathBuf::from("/tmp"),
             "ollama/test".to_string(),
             chrono::Local::now(),
@@ -1591,7 +1591,7 @@ mod tests {
     }
 
     fn test_spawner() -> SubagentSpawner {
-        let config = crate::domain::Config::default();
+        let config = mermaid_domain::Config::default();
         let providers = Arc::new(ProviderFactory::new(config.clone()));
         let web_capabilities = Arc::new(WebCapabilities::resolve(&config.web));
         SubagentSpawner::new(providers, web_capabilities)
@@ -1690,7 +1690,7 @@ mod tests {
         let tool = SubagentTool::new(spawner);
         let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), PathBuf::from("/tmp"));
         let outcome = tool.execute(serde_json::json!({"prompt": "  "}), ctx).await;
-        assert_eq!(outcome.status, crate::domain::ToolStatus::Error);
+        assert_eq!(outcome.status, mermaid_domain::ToolStatus::Error);
     }
 
     #[test]
@@ -1699,7 +1699,7 @@ mod tests {
         // static config default `State::new` would otherwise apply — otherwise
         // a downgraded session is escapable by delegating to a subagent.
         use mermaid_runtime::SafetyMode;
-        let mut config = crate::domain::Config::default();
+        let mut config = mermaid_domain::Config::default();
         config.safety.mode = SafetyMode::FullAccess; // static config default
         let mut child_state = State::new(
             config,
@@ -1738,7 +1738,7 @@ mod tests {
     /// This pins the happy-path behavior.
     #[test]
     fn default_model_id_reads_config_provider_and_name() {
-        let mut cfg = crate::domain::Config::default();
+        let mut cfg = mermaid_domain::Config::default();
         cfg.default_model.provider = "ollama".to_string();
         cfg.default_model.name = "qwen3-coder:30b".to_string();
         assert_eq!(default_model_id(&cfg), "ollama/qwen3-coder:30b");
@@ -1746,7 +1746,7 @@ mod tests {
 
     #[test]
     fn default_model_id_returns_bare_name_when_provider_empty() {
-        let mut cfg = crate::domain::Config::default();
+        let mut cfg = mermaid_domain::Config::default();
         cfg.default_model.name = "just-a-name".to_string();
         // provider is empty — single-slash shape would be
         // "/just-a-name", which provider resolution would reject.
@@ -1755,9 +1755,9 @@ mod tests {
 
     #[test]
     fn apply_live_mcp_marks_running_servers_ready_with_their_tools() {
-        use crate::domain::{McpServerEntry, McpServerStatus};
+        use mermaid_domain::{McpServerEntry, McpServerStatus};
         let entry = || McpServerEntry {
-            config: crate::domain::McpServerConfig::default(),
+            config: mermaid_domain::McpServerConfig::default(),
             status: McpServerStatus::Starting,
             tools: Vec::new(),
         };
@@ -1768,7 +1768,7 @@ mod tests {
         let live = vec![
             (
                 "slack".to_string(),
-                crate::domain::McpToolSpec {
+                mermaid_domain::McpToolSpec {
                     name: "mcp__slack__send".to_string(),
                     raw_name: "send".to_string(),
                     description: "send a message".to_string(),
@@ -1780,7 +1780,7 @@ mod tests {
             // not create an entry out of thin air.
             (
                 "other".to_string(),
-                crate::domain::McpToolSpec {
+                mermaid_domain::McpToolSpec {
                     name: "mcp__other__x".to_string(),
                     raw_name: "x".to_string(),
                     description: String::new(),
@@ -1818,7 +1818,7 @@ mod tests {
         assert_eq!(usage.completion_tokens, 40);
         assert!(matches!(
             some.detail,
-            crate::domain::ToolMetadata::Subagent { ref model_id, ref agent_id }
+            mermaid_domain::ToolMetadata::Subagent { ref model_id, ref agent_id }
                 if model_id == "ollama/test" && agent_id == "a7"
         ));
         // A provider that reported nothing must not render as "0 tokens".
@@ -1855,8 +1855,8 @@ mod tests {
 
     #[test]
     fn resolve_agent_type_builtins_custom_shadowing_and_errors() {
-        use crate::domain::AgentTypeConfig;
-        let mut config = crate::domain::Config::default();
+        use mermaid_domain::AgentTypeConfig;
+        let mut config = mermaid_domain::Config::default();
 
         // Built-ins: no request defaults to general; explore pins read_only.
         assert_eq!(resolve_agent_type(None, &config).unwrap().name, "general");
@@ -1939,7 +1939,7 @@ mod tests {
         let spawner = test_spawner();
         let mk_state = || {
             State::new(
-                crate::domain::Config::default(),
+                mermaid_domain::Config::default(),
                 PathBuf::from("/tmp"),
                 "ollama/test".to_string(),
                 chrono::Local::now(),
@@ -1990,7 +1990,7 @@ mod tests {
                 ctx,
             )
             .await;
-        assert_eq!(outcome.status, crate::domain::ToolStatus::Error);
+        assert_eq!(outcome.status, mermaid_domain::ToolStatus::Error);
         let msg = outcome.error_message().unwrap_or_default();
         assert!(msg.contains("a99"), "names the bad id: {msg}");
         assert!(
@@ -2009,7 +2009,7 @@ mod tests {
                 ctx,
             )
             .await;
-        assert_eq!(outcome.status, crate::domain::ToolStatus::Error);
+        assert_eq!(outcome.status, mermaid_domain::ToolStatus::Error);
         let msg = outcome.error_message().unwrap_or_default();
         assert!(msg.contains("sandbox"), "names what was rejected: {msg}");
         assert!(msg.contains("worktree"), "names the valid modes: {msg}");
@@ -2031,7 +2031,7 @@ mod tests {
                 ctx,
             )
             .await;
-        assert_eq!(outcome.status, crate::domain::ToolStatus::Error);
+        assert_eq!(outcome.status, mermaid_domain::ToolStatus::Error);
         let msg = outcome.error_message().unwrap_or_default();
         assert!(msg.contains("could not isolate"), "{msg}");
     }
@@ -2052,7 +2052,7 @@ mod tests {
         // Point the child at a provider that cannot answer, so the drive
         // fails without a model: what is under test is the workspace
         // plumbing around the drive, not the drive.
-        let mut config = crate::domain::Config::default();
+        let mut config = mermaid_domain::Config::default();
         config.ollama.host = "http://127.0.0.1:1".to_string();
         // The default `Ask` would block the spawn on an approval UI that a
         // test has no way to answer; the gate itself is covered elsewhere.
@@ -2080,7 +2080,7 @@ mod tests {
 
         // A child that died mid-run has its work left in place rather than
         // half-merged, and the parent is told where to find it.
-        assert_eq!(outcome.status, crate::domain::ToolStatus::Error);
+        assert_eq!(outcome.status, mermaid_domain::ToolStatus::Error);
         let msg = outcome.error_message().unwrap_or_default();
         assert!(msg.contains("isolated worktree is kept"), "{msg}");
         assert!(msg.contains("NOT in the project"), "{msg}");
@@ -2103,14 +2103,14 @@ mod tests {
                 ctx,
             )
             .await;
-        assert_eq!(outcome.status, crate::domain::ToolStatus::Error);
+        assert_eq!(outcome.status, mermaid_domain::ToolStatus::Error);
         let msg = outcome.error_message().unwrap_or_default();
         assert!(msg.contains("wizard") && msg.contains("explore"), "{msg}");
     }
 
     #[test]
     fn build_child_registry_excludes_gui_and_self() {
-        let config = crate::domain::Config::default();
+        let config = mermaid_domain::Config::default();
         let providers = Arc::new(ProviderFactory::new(config.clone()));
         let web = WebCapabilities::resolve(&config.web);
         let r = build_child_registry(providers, None, &config, SafetyMode::Ask, &web);
@@ -2136,14 +2136,14 @@ mod tests {
     #[test]
     fn child_registry_exposes_web_only_when_headless_policy_can_execute_it() {
         let configured = |mode, readonly_web, headless_opt_in, network| {
-            let mut config = crate::domain::Config::default();
+            let mut config = mermaid_domain::Config::default();
             config.safety.mode = mode;
             config.safety.allow_readonly_web = readonly_web;
             config.safety.allow_untrusted_headless_tools = headless_opt_in;
             config.safety.network = network;
             // A configured SearXNG client is platform-independent, unlike the
             // managed bundle, so this test covers both tools on Windows too.
-            config.web.search_backend = crate::domain::SearchBackend::Searxng;
+            config.web.search_backend = mermaid_domain::SearchBackend::Searxng;
             config.web.searxng_url = "http://127.0.0.1:8080".to_string();
             let providers = Arc::new(ProviderFactory::new(config.clone()));
             let web = WebCapabilities::resolve(&config.web);
@@ -2151,7 +2151,7 @@ mod tests {
         };
 
         for mode in [SafetyMode::Auto, SafetyMode::FullAccess] {
-            let registry = configured(mode, false, false, crate::domain::NetworkPolicy::Allow);
+            let registry = configured(mode, false, false, mermaid_domain::NetworkPolicy::Allow);
             assert!(registry.get("web_fetch").is_some(), "mode {mode:?}");
             assert!(registry.get("web_search").is_some(), "mode {mode:?}");
         }
@@ -2160,7 +2160,7 @@ mod tests {
             SafetyMode::ReadOnly,
             true,
             false,
-            crate::domain::NetworkPolicy::Allow,
+            mermaid_domain::NetworkPolicy::Allow,
         );
         assert!(readonly.get("web_fetch").is_some());
         assert!(readonly.get("web_search").is_some());
@@ -2169,7 +2169,7 @@ mod tests {
             SafetyMode::Ask,
             false,
             true,
-            crate::domain::NetworkPolicy::Allow,
+            mermaid_domain::NetworkPolicy::Allow,
         );
         assert!(opted_in.get("web_fetch").is_some());
         assert!(opted_in.get("web_search").is_some());
@@ -2178,7 +2178,7 @@ mod tests {
             SafetyMode::FullAccess,
             true,
             true,
-            crate::domain::NetworkPolicy::Deny,
+            mermaid_domain::NetworkPolicy::Deny,
         );
         assert!(denied.get("web_fetch").is_none());
         assert!(denied.get("web_search").is_none());
@@ -2186,7 +2186,7 @@ mod tests {
 
     #[test]
     fn child_web_visibility_honors_explicit_policy_overrides() {
-        let mut config = crate::domain::Config::default();
+        let mut config = mermaid_domain::Config::default();
         config.safety.overrides = vec![mermaid_runtime::PolicyOverride {
             category: Some(mermaid_runtime::ToolCategory::Web),
             decision: mermaid_runtime::PolicyOverrideDecision::Allow,
@@ -2283,9 +2283,9 @@ mod tests {
 
     #[test]
     fn explore_registry_is_a_read_only_surface() {
-        let providers = Arc::new(ProviderFactory::new(crate::domain::Config::default()));
+        let providers = Arc::new(ProviderFactory::new(mermaid_domain::Config::default()));
         let explore = builtin_agent_type("explore").expect("builtin");
-        let config = crate::domain::Config::default();
+        let config = mermaid_domain::Config::default();
         let web = WebCapabilities::resolve(&config.web);
         let r = build_child_registry(
             providers,

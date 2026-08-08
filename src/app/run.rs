@@ -29,12 +29,12 @@ use crate::app::event_source::coalesce_key_burst;
 use crate::app::lifecycle::RuntimeLifecycle;
 use crate::app::recorder::{RECORDING_FORMAT_VERSION, Recorder, SessionHeader};
 use crate::app::terminal::TerminalGuard;
-use crate::domain::Config;
-use crate::domain::ConversationHistory;
-use crate::domain::{Cmd, Msg, RuntimeSignal, State, update};
 use crate::effect::EffectRunner;
 use crate::providers::ToolRegistry;
 use crate::render::{RenderCache, render};
+use mermaid_domain::Config;
+use mermaid_domain::ConversationHistory;
+use mermaid_domain::{Cmd, Msg, RuntimeSignal, State, update};
 
 /// Options for `run_interactive_with`. Added so new flags land without
 /// reshuffling positional args.
@@ -163,7 +163,7 @@ pub async fn run_interactive_with(
     // TaskBroker (tool-side truth) so the first task tool call of the new
     // process starts from the restored list instead of an empty one.
     if !state.session.conversation.tasks.tasks.is_empty() {
-        runner.dispatch(crate::domain::Cmd::SyncTaskStore(
+        runner.dispatch(mermaid_domain::Cmd::SyncTaskStore(
             state.session.conversation.tasks.clone(),
         ));
     }
@@ -465,7 +465,7 @@ fn web_capabilities_notice(
 ) -> Option<String> {
     use crate::providers::tool::web::Egress;
 
-    if config.safety.network == crate::domain::NetworkPolicy::Deny {
+    if config.safety.network == mermaid_domain::NetworkPolicy::Deny {
         return Some(format!(
             "Web egress disabled by safety.network = \"deny\" (selected fetch backend: {}; selected search backend: {}).",
             capabilities.fetch.backend, capabilities.search.backend
@@ -558,7 +558,7 @@ mod tests {
         let mut cfg = Config::default();
         cfg.mcp_servers.insert(
             "example".to_string(),
-            crate::domain::McpServerConfig {
+            mermaid_domain::McpServerConfig {
                 command: "echo".to_string(),
                 args: vec![],
                 env: std::collections::HashMap::new(),
@@ -748,7 +748,7 @@ mod tests {
     #[test]
     fn web_capability_notice_honors_global_network_denial() {
         let mut config = Config::default();
-        config.safety.network = crate::domain::NetworkPolicy::Deny;
+        config.safety.network = mermaid_domain::NetworkPolicy::Deny;
         // Denial reports regardless of viability or locality — both backends
         // resolve here, and both stay on this machine.
         let capabilities = capabilities(local_fetch(), local_search());

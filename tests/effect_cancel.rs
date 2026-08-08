@@ -18,10 +18,10 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use mermaid_cli::domain::{ToolCallId, TurnId};
 use mermaid_cli::providers::ctx::test_exec_context;
 use mermaid_cli::providers::tool::ToolExecutor;
 use mermaid_cli::providers::tool::exec::ExecuteCommandTool;
+use mermaid_domain::{ToolCallId, TurnId};
 
 #[tokio::test]
 async fn execute_command_cancellation_aborts_promptly() {
@@ -77,7 +77,7 @@ async fn execute_command_timeout_honored() {
         .await;
     let elapsed = start.elapsed();
 
-    assert_eq!(outcome.status, mermaid_cli::domain::ToolStatus::Error);
+    assert_eq!(outcome.status, mermaid_domain::ToolStatus::Error);
     let output = outcome.as_tool_message_content();
     assert!(output.contains("timed out"), "got: {}", output);
     assert!(output.contains("was killed"), "got: {}", output);
@@ -105,13 +105,13 @@ async fn cancelling_empty_scope_is_safe() {
 
 #[tokio::test]
 async fn effect_runner_cancels_scope_on_command() {
-    use mermaid_cli::domain::{Cmd, Msg};
     use mermaid_cli::effect::EffectRunner;
+    use mermaid_domain::{Cmd, Msg};
 
     let (mut runner, _rx) = EffectRunner::pair(PathBuf::from("/tmp"));
 
     // Dispatch a CallModel to create a scope.
-    let request = mermaid_cli::domain::ChatRequest {
+    let request = mermaid_domain::ChatRequest {
         model_id: "test/m".to_string(),
         messages: vec![],
         system_prompt: String::new(),
@@ -150,8 +150,8 @@ async fn effect_runner_cancels_scope_on_command() {
 
 #[tokio::test]
 async fn effect_runner_shutdown_bounded_time() {
-    use mermaid_cli::domain::Cmd;
     use mermaid_cli::effect::EffectRunner;
+    use mermaid_domain::Cmd;
 
     let (mut runner, _rx) = EffectRunner::pair(PathBuf::from("/tmp"));
 

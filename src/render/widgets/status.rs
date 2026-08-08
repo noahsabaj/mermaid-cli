@@ -7,8 +7,8 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use crate::domain::{ContextUsageSnapshot, format_compact_count};
 use crate::render::theme::Theme;
+use mermaid_domain::{ContextUsageSnapshot, format_compact_count};
 use mermaid_model::models::{ReasoningLevel, TokenUsageSource};
 use mermaid_runtime::SafetyMode;
 
@@ -217,7 +217,7 @@ mod tests {
     #[test]
     fn token_status_marks_estimates() {
         let context = ContextUsageSnapshot::from_estimate(
-            crate::domain::PromptTokenBreakdown {
+            mermaid_domain::PromptTokenBreakdown {
                 system_tokens: 10,
                 instructions_tokens: 0,
                 message_tokens: 20,
