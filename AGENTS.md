@@ -15,14 +15,18 @@ tests hold the detail; this is what's easy to get wrong.
   `state.now`, injected, so `--replay` is deterministic). Effects are **data**
   (`Cmd`); the impure shell (`src/effect/`) executes them. `render(&State)` is
   pure too — a function of domain state and nothing else.
-  The crate boundary owns DIRECTION;
-  `.github/scripts/check_layering.py` owns the half no manifest can express —
-  purity — for `mermaid-domain` and `src/render`: neither and none of them may touch the filesystem, the network, a
-  process, an async runtime, or the wall clock. Dependency **direction** is the
-  half the old guard could not see — `use crate::app::Config` contains no
-  forbidden token — and it is how the "pure" core came to hold 34 upward edges,
-  two of them cycles. That debt is recorded in
-  `.github/baselines/layering.txt`, which may only shrink.
+
+  Enforcement is split, and the split is the point. **Direction** belongs to the
+  crate boundary: `use crate::app::Config` inside `mermaid-domain` is an
+  `unresolved import`. So does most of **purity**, via what the manifest omits —
+  it lists no `tokio`, `reqwest`, `rusqlite`, `crossterm` or `clap`, so a
+  reducer that wants to `.await` cannot, because the runtime is not a
+  dependency. `.github/scripts/check_layering.py` owns only what neither can
+  express: `std::fs`, `std::process`, `std::net` and the wall clock, for
+  `mermaid-domain` and `src/render`. Its predecessor could see none of the
+  first two, which is how the "pure" core came to hold 34 upward edges, two of
+  them cycles. What debt remains is in `.github/baselines/layering.txt`, which
+  may only shrink.
 - One `TurnId` = one model call + its tools; an agentic run spans many turns.
   Tool outcomes gate through `Vec<Option<ToolOutcome>>` plus a stale-turn drop —
   don't bypass it.
@@ -33,7 +37,8 @@ tests hold the detail; this is what's easy to get wrong.
   (`.github/scripts/check_no_emoji.py`). Box-drawing, arrows, and the middot are
   fine — they sit below the flagged ranges.
 - **No back-compat shims.** The product is the `mermaid` binary. The published
-  crates (`mermaid-cli`, `mermaid-model`, `mermaid-runtime`) carry **no
+  crates (`mermaid-cli`, `mermaid-domain`, `mermaid-model`, `mermaid-runtime`)
+  carry **no
   API-stability promise** — they are on crates.io only because `cargo publish`
   cannot resolve an unpublished path dependency. So delete cleanly rather than
   deprecate: no renamed `_vars`, no "removed" tombstone comments, and no
@@ -65,7 +70,7 @@ appended to would be a place debt goes to be forgotten.
 
 | baseline | guard | what it counts |
 |---|---|---|
-| `layering.txt` | `check_layering.py` | upward imports + impurity in `domain`/`render`/`prompts` |
+| `layering.txt` | `check_layering.py` | impurity in `mermaid-domain` and `src/render` |
 | `expect_budget.txt` | `check_expect_budget.py` | every `#[expect]` / `#[allow]` of a clippy lint |
 
 Run `just ratchet` and commit the result. The `N keys / M occurrences` header
