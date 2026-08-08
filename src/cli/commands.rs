@@ -644,7 +644,13 @@ fn run_self_test(config: &Config, format: OutputFormat, keep_workspace: bool) ->
         },
         Err(err) => DoctorCheck {
             status: "warning",
-            message: err.to_string(),
+            // `{err:#}` and not `to_string()`: this is the only report the
+            // user gets, and the outermost context is always the same
+            // "failed to open runtime DB <path>" — the sentence that says
+            // WHY (a locked file, a schema this build will not migrate, a
+            // permissions denial) is the rusqlite cause underneath it, which
+            // `to_string()` drops on the floor.
+            message: format!("{err:#}"),
         },
     };
 
