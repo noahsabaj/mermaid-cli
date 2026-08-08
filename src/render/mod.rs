@@ -17,6 +17,7 @@
 pub mod markdown;
 pub mod theme;
 pub mod widgets;
+pub mod wrap;
 
 use ratatui::{
     Frame,
