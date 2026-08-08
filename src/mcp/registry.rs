@@ -49,8 +49,25 @@ struct RegistryEntry {
 
 /// The built-in registry of popular MCP servers.
 ///
-/// Last npm/PyPI verification: 2026-04-16. TODO: re-verify quarterly —
-/// stale/deprecated packages produce confusing `mermaid add` errors.
+/// Last npm/PyPI verification: 2026-08-08. Re-verify quarterly (next: 2026-11-08)
+/// — stale/deprecated packages produce confusing `mermaid add` errors.
+///
+/// Verifying an entry means four questions, in order: does the package still
+/// resolve on its registry; is its latest version deprecated (npm) or yanked
+/// (PyPI); does its `bin` still exist, since `npx`/`uvx` launch by package name
+/// and a package that drops its executable fails at spawn rather than at
+/// install; and does its description still match the purpose this entry claims.
+/// That last one is not pedantry — `perplexity-mcp` and `mcp-server-docker` are
+/// unscoped names owned by individuals on npm, so a transfer or a squat would
+/// change what `mermaid add perplexity` runs without changing anything here.
+///
+/// 2026-08-08: all 16 resolve, none deprecated or yanked, all `bin`s and
+/// descriptions intact. Four have gone quiet, which is worth watching but is
+/// not by itself a defect — an MCP server can be finished:
+/// `postgres-mcp` 0.3.0 (2025-05-16), `mcp-server-docker` 1.0.0 (2025-06-15),
+/// `@zencoderai/slack-mcp-server` 0.0.1 (2025-07-16), `perplexity-mcp` 0.2.3
+/// (2025-11-01). The `@modelcontextprotocol/*` entries and the three `uvx`
+/// reference servers all published within the last month.
 const REGISTRY: &[RegistryEntry] = &[
     RegistryEntry {
         name: "context7",
