@@ -510,6 +510,17 @@ impl ConversationManager {
     }
 }
 
+/// Probe the session's provenance. Impure — spawns `git` twice — so it is a
+/// value the shell resolves once at startup and delivers as
+/// `Msg::SessionProvenanceResolved`.
+pub fn probe_session_provenance(cwd: &Path) -> crate::domain::SessionProvenance {
+    crate::domain::SessionProvenance {
+        git_branch: detect_git_branch(cwd),
+        git_sha: detect_git_sha(cwd),
+        cli_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

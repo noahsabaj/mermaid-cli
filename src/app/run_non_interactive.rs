@@ -140,7 +140,12 @@ pub async fn run_non_interactive_with(
     if let Some(history) = opts.seed.clone() {
         state.seed_conversation(history);
     }
-    crate::app::stamp_session_provenance(&mut state, &cwd);
+    state
+        .ui
+        .pending_msgs
+        .push_back(Msg::SessionProvenanceResolved(
+            crate::session::probe_session_provenance(&cwd),
+        ));
     let session_id = state.session.conversation.id.clone();
     let mut lifecycle = RuntimeLifecycle::new();
 

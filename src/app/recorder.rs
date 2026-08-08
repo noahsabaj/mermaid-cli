@@ -670,6 +670,7 @@ mod tests {
                 | MsgKind::HookContext
                 | MsgKind::InstructionsChanged
                 | MsgKind::MemoryChanged
+                | MsgKind::SessionProvenanceResolved
                 | MsgKind::SessionSaved
                 | MsgKind::ConversationLoaded
                 | MsgKind::ConversationsListed
@@ -921,6 +922,11 @@ mod tests {
             },
             Msg::InstructionsChanged(None),
             Msg::MemoryChanged(None),
+            Msg::SessionProvenanceResolved(crate::domain::SessionProvenance {
+                git_branch: Some("main".to_string()),
+                git_sha: Some("a614aa9f".to_string()),
+                cli_version: Some("0.21.1".to_string()),
+            }),
             Msg::SessionSaved,
             Msg::ConversationLoaded(ConversationHistory::new(
                 "/p".to_string(),
@@ -1009,6 +1015,7 @@ mod tests {
             MsgKind::HookContext,
             MsgKind::InstructionsChanged,
             MsgKind::MemoryChanged,
+            MsgKind::SessionProvenanceResolved,
             MsgKind::SessionSaved,
             MsgKind::ConversationLoaded,
             MsgKind::ConversationsListed,

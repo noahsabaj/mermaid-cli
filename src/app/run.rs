@@ -96,7 +96,12 @@ pub async fn run_interactive_with(
         // `State::seed_conversation` so both build the same starting state.
         state.seed_conversation(history);
     }
-    crate::app::stamp_session_provenance(&mut state, &cwd);
+    state
+        .ui
+        .pending_msgs
+        .push_back(Msg::SessionProvenanceResolved(
+            crate::session::probe_session_provenance(&cwd),
+        ));
     // NO_COLOR (https://no-color.org): present and non-empty disables all
     // color. Read once here — the reducer never touches the environment; the
     // render layer resolves `Theme::plain()` off this flag.

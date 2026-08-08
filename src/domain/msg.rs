@@ -289,6 +289,9 @@ pub enum Msg {
     /// `MERMAID.md` loaded / changed / removed since last check.
     InstructionsChanged(Option<LoadedInstructions>),
     /// Memory files loaded / changed / removed since last check.
+    /// Git branch/SHA/CLI version probed once at startup by the shell.
+    /// Fill-blanks-only: a resumed session keeps what it was saved with.
+    SessionProvenanceResolved(crate::domain::SessionProvenance),
     MemoryChanged(Option<crate::domain::LoadedMemory>),
     /// `save_conversation` finished.
     SessionSaved,
@@ -709,6 +712,7 @@ impl Msg {
             Msg::HookContext { .. } => MsgKind::HookContext,
             Msg::InstructionsChanged(_) => MsgKind::InstructionsChanged,
             Msg::MemoryChanged(_) => MsgKind::MemoryChanged,
+            Msg::SessionProvenanceResolved(_) => MsgKind::SessionProvenanceResolved,
             Msg::SessionSaved => MsgKind::SessionSaved,
             Msg::ConversationLoaded(_) => MsgKind::ConversationLoaded,
             Msg::ConversationsListed(_) => MsgKind::ConversationsListed,
@@ -777,6 +781,7 @@ pub enum MsgKind {
     InstructionsChanged,
     HookContext,
     MemoryChanged,
+    SessionProvenanceResolved,
     SessionSaved,
     ConversationLoaded,
     ConversationsListed,

@@ -5,6 +5,7 @@
 //! core. Discovering and reading the files that produce them stays in
 //! `src/app/{instructions,memory,skills}.rs`, which walk the filesystem.
 
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::SystemTime;
 
@@ -106,4 +107,20 @@ pub struct LoadedSkills {
     pub entries: Vec<SkillEntry>,
     /// The rendered `# Skills` block (capped; see `render_index`).
     pub index: String,
+}
+
+/// Where a session came from: the git branch and SHA at creation, plus the CLI
+/// version that created it. Feeds the `--resume` picker.
+///
+/// A VALUE probed by the shell and delivered as a `Msg`, not a mutation the
+/// shell performs. It used to be `app::stamp_session_provenance(&mut State)`,
+/// which contradicted `state.rs`'s own rule that nothing outside `update()`
+/// holds a `&mut State` — and, less obviously, broke replay: `--replay` re-ran
+/// the probe live and stamped the REPLAYING machine's branch and SHA over the
+/// recorded ones. As a `Msg` it is recorded and replayed like everything else.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionProvenance {
+    pub git_branch: Option<String>,
+    pub git_sha: Option<String>,
+    pub cli_version: Option<String>,
 }

@@ -573,6 +573,18 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
         Msg::InstructionsChanged(loaded) => {
             state.instructions = loaded;
         },
+        Msg::SessionProvenanceResolved(provenance) => {
+            let conversation = &mut state.session.conversation;
+            if conversation.git_branch.is_none() {
+                conversation.git_branch = provenance.git_branch;
+            }
+            if conversation.git_sha.is_none() {
+                conversation.git_sha = provenance.git_sha;
+            }
+            if conversation.cli_version.is_none() {
+                conversation.cli_version = provenance.cli_version;
+            }
+        },
         Msg::MemoryChanged(loaded) => {
             state.memory = loaded;
         },

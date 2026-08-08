@@ -49,7 +49,7 @@ pub use config::{
 };
 pub use context::{
     InstructionSource, LoadedInstructions, LoadedMemory, LoadedSkills, MemoryEntry, MemoryScope,
-    SkillEntry, SkillSource,
+    SessionProvenance, SkillEntry, SkillSource,
 };
 pub use conversation::ConversationHistory;
 pub use mermaid_model::action::{ActionDetails, ActionDisplay, ActionResult};
