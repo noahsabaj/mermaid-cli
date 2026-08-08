@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The two biggest `Result` families got real `# Errors` sections:
+  `missing_errors_doc` 265 down to 153.** The only entry near the top of
+  `clippy_pedantic.txt` with no machine-applicable fix — clippy cannot write
+  the prose. 112 of the 265 sat in two files, both repetitive enough that a
+  real contract exists to state rather than boilerplate to emit.
+
+  `storage/repos.rs` (61) is a SQLite repository layer whose failure surface
+  splits into families that say genuinely different things: a missing row is
+  `Ok(None)` and not an error; one undecodable row fails a whole `list`; for
+  a write, the reload is what produces the returned record; losing a `claim`
+  race is `Ok(false)`; and `archive` runs its per-id updates outside a
+  transaction, so a mid-loop failure leaves the earlier ids archived. The
+  families were derived from what each body actually does — `.optional()`,
+  `query_map`, `.context(...)`, transaction — not guessed from signatures.
+
+  `runtime_client/client.rs` (51) is two parallel impls. `RuntimeClient`
+  dispatches to the daemon and falls back to the local store, so what a caller
+  needs to know is that a daemon which is simply not running is *not* an error,
+  while one that rejects the request or answers with an unexpected shape is.
+
+  The remaining 153 are a long tail across roughly forty files with no shared
+  contract, needing per-call-site prose. Emitting 153 sentences of "Returns an
+  error if the operation fails" would satisfy the lint and make the
+  documentation worse, so they stay tracked.
+
+- **The four remaining test-repo seeds could still collide on a commit hash.**
+  The `worktree.rs` fix above covered one helper; `tests/subagent_worktree.rs`,
+  `tests/subagent_worktree_scripted.rs`, `providers/tool/subagent.rs` and
+  `providers/tool/workspace.rs` seeded theirs the old way. None had failed on
+  it, which is the point: a shared hash does not cause a failure, it removes a
+  failure's ability to clear on retry, so it stays invisible until some later
+  assertion happens to be hash-sensitive and then reproduces forever.
+
 - **`clippy::must_use_candidate` paid off entirely: 395 down to zero, and it
   took `return_self_not_must_use` from 30 to 6 with it.** Two keys' worth of
   movement from one machine-applicable pass — 80 keys become 79, and tracked

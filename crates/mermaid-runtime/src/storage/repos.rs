@@ -28,6 +28,10 @@ pub struct SessionsRepo<'a> {
 }
 
 impl SessionsRepo<'_> {
+    /// # Errors
+    ///
+    /// Errors if the write statement fails, or if the row cannot be read back
+    /// afterwards -- the reload is what produces the returned record.
     pub fn upsert(&self, new: NewSession) -> Result<SessionRecord> {
         let now = now_rfc3339();
         let id = new.id.unwrap_or_else(|| fresh_id("session"));
@@ -57,6 +61,10 @@ impl SessionsRepo<'_> {
             .context("session was upserted but could not be reloaded")
     }
 
+    /// # Errors
+    ///
+    /// Errors if the query fails or the stored row does not decode. A row that is
+    /// not there is `Ok(None)`, not an error.
     pub fn get(&self, id: &str) -> Result<Option<SessionRecord>> {
         self.conn
             .query_row(
@@ -70,6 +78,10 @@ impl SessionsRepo<'_> {
             .map_err(Into::into)
     }
 
+    /// # Errors
+    ///
+    /// Errors if the statement fails to prepare or run, or if any row does not
+    /// decode -- one undecodable row fails the whole call.
     pub fn list(&self, limit: usize) -> Result<Vec<SessionRecord>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, project_path, model_id, title, conversation_path,
@@ -87,6 +99,10 @@ pub struct MessagesRepo<'a> {
 }
 
 impl MessagesRepo<'_> {
+    /// # Errors
+    ///
+    /// Errors if the write statement fails, or if the row cannot be read back
+    /// afterwards -- the reload is what produces the returned record.
     pub fn add(&self, new: NewMessage) -> Result<MessageRecord> {
         self.conn.execute(
             "INSERT INTO messages (session_id, role, content_json, created_at)
@@ -98,6 +114,10 @@ impl MessagesRepo<'_> {
             .context("message was inserted but could not be reloaded")
     }
 
+    /// # Errors
+    ///
+    /// Errors if the query fails or the stored row does not decode. A row that is
+    /// not there is `Ok(None)`, not an error.
     pub fn get(&self, id: i64) -> Result<Option<MessageRecord>> {
         self.conn
             .query_row(
@@ -118,6 +138,11 @@ impl MessagesRepo<'_> {
     /// could OOM the daemon. We return the **most recent** `MAX_SESSION_MESSAGES`
     /// (newest activity is what a viewer wants) but still in ascending `id`
     /// order, by taking the tail in a subquery and re-sorting it ascending.
+    ///
+    /// # Errors
+    ///
+    /// Errors if the statement fails to prepare or run, or if any row does not
+    /// decode -- one undecodable row fails the whole call.
     pub fn list_for_session(&self, session_id: &str) -> Result<Vec<MessageRecord>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, session_id, role, content_json, created_at FROM (
@@ -133,6 +158,10 @@ impl MessagesRepo<'_> {
 }
 
 impl TasksRepo<'_> {
+    /// # Errors
+    ///
+    /// Errors if the write transaction fails, or if the row cannot be read back
+    /// afterwards -- the reload is what produces the returned record.
     pub fn create(&self, new: NewTask) -> Result<TaskRecord> {
         let now = now_rfc3339();
         // Owner tag isn't part of the public `TaskRecord`; move it out before the
@@ -183,6 +212,10 @@ impl TasksRepo<'_> {
             .context("task was inserted but could not be reloaded")
     }
 
+    /// # Errors
+    ///
+    /// Errors if the query fails or the stored row does not decode. A row that is
+    /// not there is `Ok(None)`, not an error.
     pub fn get(&self, id: &str) -> Result<Option<TaskRecord>> {
         self.conn
             .query_row(
@@ -196,6 +229,10 @@ impl TasksRepo<'_> {
             .map_err(Into::into)
     }
 
+    /// # Errors
+    ///
+    /// Errors if the statement fails to prepare or run, or if any row does not
+    /// decode -- one undecodable row fails the whole call.
     pub fn list(&self, limit: usize) -> Result<Vec<TaskRecord>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, title, status, priority, project_path, model_id, conversation_id,
@@ -211,6 +248,10 @@ impl TasksRepo<'_> {
         collect_tolerant(rows)
     }
 
+    /// # Errors
+    ///
+    /// Errors if the statement fails. The work runs in a transaction, so a failure
+    /// leaves the table unchanged.
     pub fn update_status(
         &self,
         id: &str,
@@ -250,6 +291,12 @@ impl TasksRepo<'_> {
     /// since two enqueues can share a coarse-clock timestamp). The claim is a
     /// single `UPDATE … RETURNING`, so concurrent claimers can never run the
     /// same task twice.
+    ///
+    /// # Errors
+    ///
+    /// Errors if the query fails or the stored row does not decode. A row that is
+    /// not there is `Ok(None)`, not an error. The work runs in a transaction, so a
+    /// failure leaves the table unchanged.
     pub fn claim_next_queued(&self) -> Result<Option<TaskRecord>> {
         let tx = self.conn.unchecked_transaction()?;
         let claimed = tx
@@ -289,6 +336,9 @@ impl TasksRepo<'_> {
         Ok(claimed)
     }
 
+    /// # Errors
+    ///
+    /// Errors if the statement fails.
     pub fn add_event(&self, task_id: &str, kind: &str, message: &str) -> Result<()> {
         self.conn.execute(
             "INSERT INTO task_events (task_id, kind, message, created_at)
@@ -298,6 +348,10 @@ impl TasksRepo<'_> {
         Ok(())
     }
 
+    /// # Errors
+    ///
+    /// Errors if the statement fails to prepare or run, or if any row does not
+    /// decode -- one undecodable row fails the whole call.
     pub fn events(&self, task_id: &str) -> Result<Vec<TaskTimelineEvent>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, task_id, kind, message, created_at
@@ -316,6 +370,10 @@ pub struct ToolRunsRepo<'a> {
 }
 
 impl ToolRunsRepo<'_> {
+    /// # Errors
+    ///
+    /// Errors if the write statement fails, or if the row cannot be read back
+    /// afterwards -- the reload is what produces the returned record.
     pub fn start(&self, mut new: NewToolRun) -> Result<ToolRunRecord> {
         // The repository is the mandatory persistence choke point. Callers may
         // pass executable arguments unchanged; only this cloned serialized
@@ -343,6 +401,9 @@ impl ToolRunsRepo<'_> {
             .context("tool run was inserted but could not be reloaded")
     }
 
+    /// # Errors
+    ///
+    /// Errors if the statement fails.
     pub fn finish(&self, id: &str, status: &str, output_json: Option<&str>) -> Result<()> {
         let output_json = output_json.map(crate::redact::redact_json_text);
         let changed = self.conn.execute(
@@ -355,6 +416,10 @@ impl ToolRunsRepo<'_> {
         Ok(())
     }
 
+    /// # Errors
+    ///
+    /// Errors if the query fails or the stored row does not decode. A row that is
+    /// not there is `Ok(None)`, not an error.
     pub fn get(&self, id: &str) -> Result<Option<ToolRunRecord>> {
         self.conn
             .query_row(
@@ -368,6 +433,10 @@ impl ToolRunsRepo<'_> {
             .map_err(Into::into)
     }
 
+    /// # Errors
+    ///
+    /// Errors if the statement fails to prepare or run, or if any row does not
+    /// decode -- one undecodable row fails the whole call.
     pub fn list(&self, limit: usize) -> Result<Vec<ToolRunRecord>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, task_id, turn_id, call_id, tool_name, status, args_json,
@@ -387,6 +456,11 @@ pub struct OutcomesRepo<'a> {
 impl OutcomesRepo<'_> {
     /// Record a verifiable outcome / reward signal for a trajectory. Append-only
     /// — the loop reads these; nothing mutates them after the fact.
+    ///
+    /// # Errors
+    ///
+    /// Errors if the write statement fails, or if the row cannot be read back
+    /// afterwards -- the reload is what produces the returned record.
     pub fn record(&self, new: NewOutcome) -> Result<OutcomeRecord> {
         let id = new.id.unwrap_or_else(|| fresh_id("outcome"));
         self.conn.execute(
@@ -409,6 +483,10 @@ impl OutcomesRepo<'_> {
             .context("outcome was inserted but could not be reloaded")
     }
 
+    /// # Errors
+    ///
+    /// Errors if the query fails or the stored row does not decode. A row that is
+    /// not there is `Ok(None)`, not an error.
     pub fn get(&self, id: &str) -> Result<Option<OutcomeRecord>> {
         self.conn
             .query_row(
@@ -424,6 +502,11 @@ impl OutcomesRepo<'_> {
 
     /// Every outcome recorded against one task, oldest first (the order the
     /// trajectory earned them).
+    ///
+    /// # Errors
+    ///
+    /// Errors if the statement fails to prepare or run, or if any row does not
+    /// decode -- one undecodable row fails the whole call.
     pub fn list_for_task(&self, task_id: &str) -> Result<Vec<OutcomeRecord>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, task_id, tool_run_id, kind, label, reward, source,
@@ -435,6 +518,10 @@ impl OutcomesRepo<'_> {
             .map_err(Into::into)
     }
 
+    /// # Errors
+    ///
+    /// Errors if the statement fails to prepare or run, or if any row does not
+    /// decode -- one undecodable row fails the whole call.
     pub fn list(&self, limit: usize) -> Result<Vec<OutcomeRecord>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, task_id, tool_run_id, kind, label, reward, source,
@@ -466,6 +553,10 @@ pub struct ApprovalsRepo<'a> {
 }
 
 impl ApprovalsRepo<'_> {
+    /// # Errors
+    ///
+    /// Errors if the write statement fails, or if the row cannot be read back
+    /// afterwards -- the reload is what produces the returned record.
     pub fn create(&self, new: NewApproval) -> Result<ApprovalRecord> {
         let record = ApprovalRecord {
             id: fresh_id("approval"),
@@ -505,6 +596,10 @@ impl ApprovalsRepo<'_> {
             .context("approval was inserted but could not be reloaded")
     }
 
+    /// # Errors
+    ///
+    /// Errors if the query fails or the stored row does not decode. A row that is
+    /// not there is `Ok(None)`, not an error.
     pub fn get(&self, id: &str) -> Result<Option<ApprovalRecord>> {
         self.conn
             .query_row(
@@ -519,6 +614,9 @@ impl ApprovalsRepo<'_> {
             .map_err(Into::into)
     }
 
+    /// # Errors
+    ///
+    /// Errors if the statement fails.
     pub fn decide(&self, id: &str, user_decision: &str) -> Result<()> {
         // Single-shot decision: only an undecided, un-archived approval can be
         // decided, so a denied approval cannot be resurrected as "approved".
@@ -547,6 +645,11 @@ impl ApprovalsRepo<'_> {
     /// `rows_affected == 1` and runs the un-rollback-able effect, the other sees
     /// `false` and bails — so the effect can't fire twice. A claim that crashes
     /// before finalizing is reset to NULL by the daemon's startup reconcile.
+    ///
+    /// # Errors
+    ///
+    /// Errors if the UPDATE fails. Losing the race is `Ok(false)`, not an error:
+    /// the row was already decided, already claimed, or archived.
     pub fn claim(&self, id: &str) -> Result<bool> {
         let changed = self.conn.execute(
             "UPDATE approvals
@@ -559,6 +662,10 @@ impl ApprovalsRepo<'_> {
 
     /// Release a claim taken by [`Self::claim`] back to undecided, so the action
     /// stays re-runnable after the replay effect failed.
+    ///
+    /// # Errors
+    ///
+    /// Errors if the statement fails.
     pub fn release_claim(&self, id: &str) -> Result<()> {
         self.conn.execute(
             "UPDATE approvals SET user_decision = NULL
@@ -570,6 +677,10 @@ impl ApprovalsRepo<'_> {
 
     /// Finalize a claimed approval's decision (the `approving` → terminal-value
     /// transition that [`Self::decide`]'s `WHERE user_decision IS NULL` can't make).
+    ///
+    /// # Errors
+    ///
+    /// Errors if the statement fails.
     pub fn finalize_claimed(&self, id: &str, user_decision: &str) -> Result<()> {
         let changed = self.conn.execute(
             "UPDATE approvals
@@ -581,14 +692,24 @@ impl ApprovalsRepo<'_> {
         Ok(())
     }
 
+    /// # Errors
+    ///
+    /// Errors if the underlying query fails or any row does not decode.
     pub fn list_pending(&self) -> Result<Vec<ApprovalRecord>> {
         self.list_pending_with_archived(false)
     }
 
+    /// # Errors
+    ///
+    /// Errors if the underlying query fails or any row does not decode.
     pub fn list_pending_all(&self) -> Result<Vec<ApprovalRecord>> {
         self.list_pending_with_archived(true)
     }
 
+    /// # Errors
+    ///
+    /// Errors if the statement fails to prepare or run, or if any row does not
+    /// decode -- one undecodable row fails the whole call.
     pub fn list_all(&self, limit: usize) -> Result<Vec<ApprovalRecord>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, task_id, proposed_action, risk_classification, policy_decision,
@@ -625,6 +746,12 @@ impl ApprovalsRepo<'_> {
             .map_err(Into::into)
     }
 
+    /// # Errors
+    ///
+    /// Errors if any one of the per-id updates fails, and stops there -- the ids
+    /// before it stay archived, because the loop runs outside a transaction. The
+    /// count is of rows actually changed, so ids already archived add nothing and
+    /// are not an error.
     pub fn archive(&self, ids: &[String], reason: &str) -> Result<usize> {
         let archived_at = now_rfc3339();
         let mut changed = 0;
@@ -640,6 +767,9 @@ impl ApprovalsRepo<'_> {
         Ok(changed)
     }
 
+    /// # Errors
+    ///
+    /// Errors if the count query fails.
     pub fn count_archived(&self) -> Result<usize> {
         self.conn
             .query_row(
@@ -657,6 +787,10 @@ pub struct ProcessesRepo<'a> {
 }
 
 impl ProcessesRepo<'_> {
+    /// # Errors
+    ///
+    /// Errors if the write statement fails, or if the row cannot be read back
+    /// afterwards -- the reload is what produces the returned record.
     pub fn upsert(&self, new: NewProcess) -> Result<ProcessRecord> {
         let now = now_rfc3339();
         let id = new.id.unwrap_or_else(|| fresh_id("process"));
@@ -692,6 +826,10 @@ impl ProcessesRepo<'_> {
             .context("process was upserted but could not be reloaded")
     }
 
+    /// # Errors
+    ///
+    /// Errors if the query fails or the stored row does not decode. A row that is
+    /// not there is `Ok(None)`, not an error.
     pub fn get(&self, id: &str) -> Result<Option<ProcessRecord>> {
         self.conn
             .query_row(
@@ -705,6 +843,10 @@ impl ProcessesRepo<'_> {
             .map_err(Into::into)
     }
 
+    /// # Errors
+    ///
+    /// Errors if the statement fails to prepare or run, or if any row does not
+    /// decode -- one undecodable row fails the whole call.
     pub fn list(&self, limit: usize) -> Result<Vec<ProcessRecord>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, task_id, pid, command, cwd, log_path, detected_url, status, health,
@@ -725,6 +867,10 @@ pub struct CheckpointsRepo<'a> {
 }
 
 impl CheckpointsRepo<'_> {
+    /// # Errors
+    ///
+    /// Errors if the write statement fails, or if the row cannot be read back
+    /// afterwards -- the reload is what produces the returned record.
     pub fn create(&self, new: NewCheckpoint) -> Result<CheckpointRecord> {
         let id = new.id.unwrap_or_else(|| fresh_id("checkpoint"));
         self.conn.execute(
@@ -749,6 +895,10 @@ impl CheckpointsRepo<'_> {
             .context("checkpoint was inserted but could not be reloaded")
     }
 
+    /// # Errors
+    ///
+    /// Errors if the query fails or the stored row does not decode. A row that is
+    /// not there is `Ok(None)`, not an error.
     pub fn get(&self, id: &str) -> Result<Option<CheckpointRecord>> {
         self.conn
             .query_row(
@@ -763,6 +913,9 @@ impl CheckpointsRepo<'_> {
             .map_err(Into::into)
     }
 
+    /// # Errors
+    ///
+    /// Errors if the statement fails.
     pub fn set_approval(&self, id: &str, approval_id: &str) -> Result<()> {
         let changed = self.conn.execute(
             "UPDATE checkpoints SET approval_id = ?2 WHERE id = ?1",
@@ -781,6 +934,11 @@ impl CheckpointsRepo<'_> {
     /// checkpoint would lose its directory while its row survived, and a later
     /// `restore_checkpoint` would fail on the missing manifest. The dir GC now
     /// calls this so `list()` and the on-disk dirs stay in agreement.
+    ///
+    /// # Errors
+    ///
+    /// Errors if the DELETE fails. A checkpoint that was not there is `Ok(false)`,
+    /// not an error.
     pub fn delete(&self, id: &str) -> Result<bool> {
         let changed = self
             .conn
@@ -788,10 +946,16 @@ impl CheckpointsRepo<'_> {
         Ok(changed > 0)
     }
 
+    /// # Errors
+    ///
+    /// Errors if the statement fails.
     pub fn list(&self, limit: usize) -> Result<Vec<CheckpointRecord>> {
         self.list_with_archived(limit, false)
     }
 
+    /// # Errors
+    ///
+    /// Errors if the statement fails.
     pub fn list_all(&self, limit: usize) -> Result<Vec<CheckpointRecord>> {
         self.list_with_archived(limit, true)
     }
@@ -825,6 +989,11 @@ impl CheckpointsRepo<'_> {
     /// the discarded timeline. Oldest-first because each checkpoint is a
     /// PRE-mutation snapshot: the oldest one past the cut holds the file
     /// state closest to the fork point.
+    ///
+    /// # Errors
+    ///
+    /// Errors if the statement fails to prepare or run, or if any row does not
+    /// decode -- one undecodable row fails the whole call.
     pub fn list_for_session(
         &self,
         session_id: &str,
@@ -846,6 +1015,12 @@ impl CheckpointsRepo<'_> {
             .map_err(Into::into)
     }
 
+    /// # Errors
+    ///
+    /// Errors if any one of the per-id updates fails, and stops there -- the ids
+    /// before it stay archived, because the loop runs outside a transaction. The
+    /// count is of rows actually changed, so ids already archived add nothing and
+    /// are not an error.
     pub fn archive(&self, ids: &[String], reason: &str) -> Result<usize> {
         let archived_at = now_rfc3339();
         let mut changed = 0;
@@ -861,6 +1036,9 @@ impl CheckpointsRepo<'_> {
         Ok(changed)
     }
 
+    /// # Errors
+    ///
+    /// Errors if the count query fails.
     pub fn count_archived(&self) -> Result<usize> {
         self.conn
             .query_row(
@@ -878,6 +1056,10 @@ pub struct CompactionsRepo<'a> {
 }
 
 impl CompactionsRepo<'_> {
+    /// # Errors
+    ///
+    /// Errors if the write statement fails, or if the row cannot be read back
+    /// afterwards -- the reload is what produces the returned record.
     pub fn create(&self, new: NewCompaction) -> Result<CompactionRecord> {
         let id = new.id.unwrap_or_else(|| fresh_id("compaction"));
         self.conn.execute(
@@ -909,6 +1091,10 @@ impl CompactionsRepo<'_> {
             .context("compaction was inserted but could not be reloaded")
     }
 
+    /// # Errors
+    ///
+    /// Errors if the query fails or the stored row does not decode. A row that is
+    /// not there is `Ok(None)`, not an error.
     pub fn get(&self, id: &str) -> Result<Option<CompactionRecord>> {
         self.conn
             .query_row(
@@ -922,6 +1108,10 @@ impl CompactionsRepo<'_> {
             .map_err(Into::into)
     }
 
+    /// # Errors
+    ///
+    /// Errors if the statement fails to prepare or run, or if any row does not
+    /// decode -- one undecodable row fails the whole call.
     pub fn list(&self, limit: usize) -> Result<Vec<CompactionRecord>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, task_id, session_id, source_token_estimate, summary_token_count,
@@ -939,6 +1129,10 @@ pub struct PluginsRepo<'a> {
 }
 
 impl PluginsRepo<'_> {
+    /// # Errors
+    ///
+    /// Errors if the write statement fails, or if the row cannot be read back
+    /// afterwards -- the reload is what produces the returned record.
     pub fn install(&self, new: NewPluginInstall) -> Result<PluginInstallRecord> {
         let now = now_rfc3339();
         let id = new.id.unwrap_or_else(|| fresh_id("plugin"));
@@ -968,6 +1162,10 @@ impl PluginsRepo<'_> {
             .context("plugin install was inserted but could not be reloaded")
     }
 
+    /// # Errors
+    ///
+    /// Errors if the query fails or the stored row does not decode. A row that is
+    /// not there is `Ok(None)`, not an error.
     pub fn get(&self, id: &str) -> Result<Option<PluginInstallRecord>> {
         self.conn
             .query_row(
@@ -980,6 +1178,10 @@ impl PluginsRepo<'_> {
             .map_err(Into::into)
     }
 
+    /// # Errors
+    ///
+    /// Errors if the statement fails to prepare or run, or if any row does not
+    /// decode -- one undecodable row fails the whole call.
     pub fn list(&self) -> Result<Vec<PluginInstallRecord>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, name, source, version, enabled, manifest_json, installed_at, updated_at
@@ -990,6 +1192,9 @@ impl PluginsRepo<'_> {
             .map_err(Into::into)
     }
 
+    /// # Errors
+    ///
+    /// Errors if the statement fails.
     pub fn set_enabled(&self, id: &str, enabled: bool) -> Result<()> {
         self.conn.execute(
             "UPDATE plugin_installs SET enabled = ?2, updated_at = ?3 WHERE id = ?1",
@@ -1004,6 +1209,10 @@ pub struct ProviderProbesRepo<'a> {
 }
 
 impl ProviderProbesRepo<'_> {
+    /// # Errors
+    ///
+    /// Errors if the write statement fails, or if the row cannot be read back
+    /// afterwards -- the reload is what produces the returned record.
     pub fn upsert(&self, new: NewProviderProbe) -> Result<ProviderProbeRecord> {
         let now = now_rfc3339();
         let provider = new.provider;
@@ -1032,6 +1241,10 @@ impl ProviderProbesRepo<'_> {
             .context("provider probe was inserted but could not be reloaded")
     }
 
+    /// # Errors
+    ///
+    /// Errors if the query fails or the stored row does not decode. A row that is
+    /// not there is `Ok(None)`, not an error.
     pub fn get(
         &self,
         provider: &str,
@@ -1050,6 +1263,10 @@ impl ProviderProbesRepo<'_> {
             .map_err(Into::into)
     }
 
+    /// # Errors
+    ///
+    /// Errors if the statement fails to prepare or run, or if any row does not
+    /// decode -- one undecodable row fails the whole call.
     pub fn list(
         &self,
         provider: Option<&str>,
@@ -1080,6 +1297,10 @@ pub struct PairingTokensRepo<'a> {
 }
 
 impl PairingTokensRepo<'_> {
+    /// # Errors
+    ///
+    /// Errors if the write statement fails, or if the row cannot be read back
+    /// afterwards -- the reload is what produces the returned record.
     pub fn create(
         &self,
         token_hash: &str,
@@ -1097,6 +1318,10 @@ impl PairingTokensRepo<'_> {
             .context("pairing token was inserted but could not be reloaded")
     }
 
+    /// # Errors
+    ///
+    /// Errors if the query fails or the stored row does not decode. A row that is
+    /// not there is `Ok(None)`, not an error.
     pub fn get(&self, id: &str) -> Result<Option<PairingTokenRecord>> {
         self.conn
             .query_row(
@@ -1117,6 +1342,11 @@ impl PairingTokensRepo<'_> {
     /// secret) and compare each hash in constant time. The candidate count is
     /// tiny and not secret. All candidates are scanned without early exit so the
     /// timing doesn't reveal which (if any) token matched.
+    ///
+    /// # Errors
+    ///
+    /// Errors if the query fails or a row does not decode. No match is `Ok(None)`,
+    /// not an error, and so is a token that matches but has expired.
     pub fn verify_token(&self, token_hash: &str) -> Result<Option<PairingTokenRecord>> {
         // Expiry is evaluated in Rust as a parsed instant (see `is_expired`),
         // not via a SQL `expires_at > ?` string compare. The skipped-because-
@@ -1143,6 +1373,10 @@ impl PairingTokensRepo<'_> {
         Ok(found)
     }
 
+    /// # Errors
+    ///
+    /// Errors if the statement fails to prepare or run, or if any row does not
+    /// decode -- one undecodable row fails the whole call.
     pub fn list(&self) -> Result<Vec<PairingTokenRecord>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, token_hash, label, enabled, created_at, last_used_at, expires_at
@@ -1158,6 +1392,10 @@ impl PairingTokensRepo<'_> {
     /// over the local socket to same-UID processes. The hash is
     /// secret-equivalent (it's all `verify_token` compares against) and must
     /// not leave the store.
+    ///
+    /// # Errors
+    ///
+    /// Errors if the underlying query fails or any row does not decode.
     pub fn list_redacted(&self) -> Result<Vec<PairingTokenRecord>> {
         Ok(self
             .list()?
@@ -1169,6 +1407,9 @@ impl PairingTokensRepo<'_> {
             .collect())
     }
 
+    /// # Errors
+    ///
+    /// Errors if the statement fails.
     pub fn mark_used(&self, id: &str) -> Result<()> {
         self.conn.execute(
             "UPDATE pairing_tokens SET last_used_at = ?2 WHERE id = ?1 AND enabled = 1",
@@ -1179,6 +1420,11 @@ impl PairingTokensRepo<'_> {
 
     /// Revoke a token by disabling it. Returns `true` if a live token was
     /// revoked, `false` if it was already disabled or unknown.
+    ///
+    /// # Errors
+    ///
+    /// Errors if the UPDATE fails. A token that was already revoked, or absent, is
+    /// `Ok(false)`, not an error.
     pub fn revoke(&self, id: &str) -> Result<bool> {
         let changed = self.conn.execute(
             "UPDATE pairing_tokens SET enabled = 0 WHERE id = ?1 AND enabled = 1",
