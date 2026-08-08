@@ -588,7 +588,7 @@ fn print_doctor_text(report: &DoctorReport) {
         report.safety_mode, report.checkpoint_on_mutation
     );
     if let Some(profile) = &report.active_profile {
-        println!("  [INFO] Config profile: {}", profile);
+        println!("  [INFO] Config profile: {profile}");
     }
     println!(
         "  [INFO] Prompt customization: {}",
@@ -832,7 +832,7 @@ fn login(provider: Option<&str>, config: &Config) -> Result<()> {
                 override_env.as_deref(),
             );
             let env_name = override_env.as_deref().unwrap_or(default_env);
-            println!("  {:<14} {:<8} (${})", name, source, env_name);
+            println!("  {name:<14} {source:<8} (${env_name})");
         }
         return Ok(());
     };
@@ -849,14 +849,14 @@ fn login(provider: Option<&str>, config: &Config) -> Result<()> {
             names.join(", ")
         );
     };
-    let key = rpassword::prompt_password(format!("API key for {} (input hidden): ", name))
+    let key = rpassword::prompt_password(format!("API key for {name} (input hidden): "))
         .context("read API key")?;
     let key = key.trim();
     anyhow::ensure!(!key.is_empty(), "no key entered; nothing stored");
     let store = mermaid_model::utils::default_store();
     store
         .set(&name, key)
-        .with_context(|| format!("store key for {}", name))?;
+        .with_context(|| format!("store key for {name}"))?;
     println!(
         "Stored key for {} in {} (service \"mermaid\").",
         name,
@@ -865,10 +865,7 @@ fn login(provider: Option<&str>, config: &Config) -> Result<()> {
     // The env var, when set, silently wins — say so now, not at 2am.
     if mermaid_model::utils::resolve_api_key(&default_env, override_env.as_deref()).is_some() {
         let env_name = override_env.as_deref().unwrap_or(&default_env);
-        println!(
-            "Note: ${} is currently set and takes precedence over the stored key.",
-            env_name
-        );
+        println!("Note: ${env_name} is currently set and takes precedence over the stored key.");
     }
     Ok(())
 }
@@ -883,7 +880,7 @@ fn logout(provider: &str, config: &Config) -> Result<()> {
     let store = mermaid_model::utils::default_store();
     if store
         .delete(&provider)
-        .with_context(|| format!("delete key for {}", provider))?
+        .with_context(|| format!("delete key for {provider}"))?
     {
         println!(
             "Removed stored key for {} from {}.",
@@ -891,7 +888,7 @@ fn logout(provider: &str, config: &Config) -> Result<()> {
             store.label()
         );
     } else {
-        println!("No stored key for {}.", provider);
+        println!("No stored key for {provider}.");
     }
     Ok(())
 }
@@ -1274,7 +1271,7 @@ fn print_task_detail(task: &TaskRecord) {
     println!("Project: {}", task.project_path);
     println!("Model: {}", task.model_id);
     if let Some(conversation_id) = &task.conversation_id {
-        println!("Conversation: {}", conversation_id);
+        println!("Conversation: {conversation_id}");
     }
     println!("Created: {}", task.created_at);
     println!("Updated: {}", task.updated_at);
@@ -1305,16 +1302,16 @@ fn show_processes(limit: usize) -> Result<()> {
             process.command
         );
         if let Some(task_id) = process.task_id {
-            println!("    task: {}", task_id);
+            println!("    task: {task_id}");
         }
         if let Some(cwd) = process.cwd {
-            println!("    cwd: {}", cwd);
+            println!("    cwd: {cwd}");
         }
         if let Some(log_path) = process.log_path {
-            println!("    log: {}", log_path);
+            println!("    log: {log_path}");
         }
         if let Some(url) = process.detected_url {
-            println!("    url: {}", url);
+            println!("    url: {url}");
         }
     }
     Ok(())
@@ -1411,7 +1408,7 @@ async fn show_model_info(model: &str, config: &Config) -> Result<()> {
         confidence: context_confidence.to_string(),
         error: None,
     });
-    println!("Model: {}", model);
+    println!("Model: {model}");
     println!("Provider: {}", snapshot.provider);
     println!("Name: {}", snapshot.model);
     println!("Supports tools: {}", snapshot.supports_tools);
@@ -1643,10 +1640,10 @@ fn show_approvals() -> Result<()> {
             approval.proposed_action
         );
         if let Some(args) = approval.args_summary {
-            println!("    args: {}", args);
+            println!("    args: {args}");
         }
         if let Some(checkpoint_id) = approval.checkpoint_id {
-            println!("    checkpoint: {}", checkpoint_id);
+            println!("    checkpoint: {checkpoint_id}");
         }
         if approval.pending_action_json.is_some() {
             println!("    pending action: recorded");
@@ -1657,7 +1654,7 @@ fn show_approvals() -> Result<()> {
 
 fn approve(id: &str) -> Result<()> {
     let result = RuntimeClient::auto().approve(id)?;
-    println!("Approved {}", id);
+    println!("Approved {id}");
     if result.replayed {
         println!("{}", result.summary);
     }
@@ -1666,7 +1663,7 @@ fn approve(id: &str) -> Result<()> {
 
 fn deny(id: &str) -> Result<()> {
     let _ = RuntimeClient::auto().deny(id)?;
-    println!("Denied {}", id);
+    println!("Denied {id}");
     Ok(())
 }
 
@@ -1730,9 +1727,9 @@ fn cancel_task(id: &str) -> Result<()> {
     ) {
         Ok(response) => {
             if response.get("cancelling").and_then(|v| v.as_bool()) == Some(true) {
-                println!("Cancelling {} (running; the agent unwinds gracefully)", id);
+                println!("Cancelling {id} (running; the agent unwinds gracefully)");
             } else {
-                println!("Cancelled {}", id);
+                println!("Cancelled {id}");
             }
             Ok(())
         },
@@ -1745,7 +1742,7 @@ fn cancel_task(id: &str) -> Result<()> {
                         mermaid_runtime::TaskStatus::Cancelled,
                         Some("cancelled before start"),
                     )?;
-                    println!("Cancelled {} (was queued; daemon unreachable)", id);
+                    println!("Cancelled {id} (was queued; daemon unreachable)");
                     Ok(())
                 },
                 Some(task) => anyhow::bail!(
@@ -1754,7 +1751,7 @@ fn cancel_task(id: &str) -> Result<()> {
                     task.status,
                     daemon_err
                 ),
-                None => anyhow::bail!("task not found: {}", id),
+                None => anyhow::bail!("task not found: {id}"),
             }
         },
     }
@@ -1773,13 +1770,13 @@ fn show_tool_runs(limit: usize) -> Result<()> {
             run.id, run.status, run.tool_name, run.started_at
         );
         if let Some(turn_id) = run.turn_id {
-            println!("    turn: {}", turn_id);
+            println!("    turn: {turn_id}");
         }
         if let Some(call_id) = run.call_id {
-            println!("    call: {}", call_id);
+            println!("    call: {call_id}");
         }
         if let Some(finished_at) = run.finished_at {
-            println!("    finished: {}", finished_at);
+            println!("    finished: {finished_at}");
         }
     }
     Ok(())
@@ -1800,7 +1797,7 @@ fn show_checkpoints(limit: usize) -> Result<()> {
         println!("    snapshot: {}", checkpoint.snapshot_path);
         println!("    files: {}", checkpoint.changed_files_json);
         if let Some(approval_id) = checkpoint.approval_id {
-            println!("    approval: {}", approval_id);
+            println!("    approval: {approval_id}");
         }
     }
     Ok(())
@@ -1820,10 +1817,10 @@ fn restore_checkpoint(id: &str, force: bool) -> Result<()> {
     let manifest = RuntimeClient::auto().restore_checkpoint(id)?.checkpoint;
     println!("Restored {} ({} files)", manifest.id, manifest.files.len());
     if let Some(repo) = manifest.shadow_git_repo {
-        println!("Shadow repo: {}", repo);
+        println!("Shadow repo: {repo}");
     }
     if let Some(commit) = manifest.shadow_git_commit {
-        println!("Shadow commit: {}", commit);
+        println!("Shadow commit: {commit}");
     }
     if let Some(action) = manifest.pending_action {
         println!("Pending action: {}", serde_json::to_string_pretty(&action)?);
@@ -1880,11 +1877,11 @@ fn handle_plugin(command: &PluginCommand) -> Result<()> {
                 print_plugin_capability_preview(&preview);
             }
             client.set_plugin_enabled(id, true)?;
-            println!("Enabled plugin {} — its hooks will now run.", id);
+            println!("Enabled plugin {id} — its hooks will now run.");
         },
         PluginCommand::Disable { id } => {
             RuntimeClient::auto().set_plugin_enabled(id, false)?;
-            println!("Disabled plugin {}", id);
+            println!("Disabled plugin {id}");
         },
         PluginCommand::Audit { path } => {
             let manifest_path = if path.is_dir() {
@@ -1945,7 +1942,7 @@ fn handle_pair(command: &PairCommand) -> Result<()> {
                     .pairing_tokens()
                     .create(&hash, label.as_deref(), expires_at.as_deref())?;
             println!("Pairing token id: {}", record.id);
-            println!("Pairing token: {}", token);
+            println!("Pairing token: {token}");
             println!(
                 "Expires: {}",
                 record.expires_at.as_deref().unwrap_or("never")
@@ -2093,7 +2090,7 @@ pub async fn list_models(config: &Config) -> Result<()> {
         Some(models) => {
             println!("Ollama models (local/cloud):");
             for name in &models {
-                println!("  - ollama/{}", name);
+                println!("  - ollama/{name}");
             }
         },
     }
@@ -2397,7 +2394,7 @@ fn show_mcp_servers() {
                     .join(", ")
             )
         };
-        println!("  {} — {}{}", name, package, env_display);
+        println!("  {name} — {package}{env_display}");
     }
     println!("\nManage with: mermaid add <name> / mermaid remove <name>");
 }
@@ -2461,7 +2458,7 @@ async fn show_status(config: &Config) -> Result<()> {
             Some(models) => {
                 println!("  [OK] Ollama: Running ({} models installed)", models.len());
                 for model in models.iter().take(3) {
-                    println!("      - {}", model);
+                    println!("      - {model}");
                 }
                 if models.len() > 3 {
                     println!("      ... and {} more", models.len() - 3);
@@ -2503,7 +2500,7 @@ async fn show_status(config: &Config) -> Result<()> {
                     .map(String::as_str)
                     .unwrap_or(server_cfg.command.as_str()),
             };
-            println!("      - {} ({})", name, target);
+            println!("      - {name} ({target})");
         }
     }
 

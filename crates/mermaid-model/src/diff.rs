@@ -144,13 +144,13 @@ mod tests {
 
     #[test]
     fn parses_added_line() {
-        let line = format!("   5{}fn main() {{", DIFF_ADDED_MARKER);
+        let line = format!("   5{DIFF_ADDED_MARKER}fn main() {{");
         assert_eq!(parse_diff_line(&line), DiffLineKind::Added);
     }
 
     #[test]
     fn parses_removed_line() {
-        let line = format!("  12{}old = true;", DIFF_REMOVED_MARKER);
+        let line = format!("  12{DIFF_REMOVED_MARKER}old = true;");
         assert_eq!(parse_diff_line(&line), DiffLineKind::Removed);
     }
 

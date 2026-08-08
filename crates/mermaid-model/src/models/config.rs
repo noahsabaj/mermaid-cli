@@ -150,7 +150,7 @@ impl ModelConfig {
             self.dynamic_system_suffix.as_deref(),
         ) {
             (Some(s), Some(suffix)) if !s.is_empty() && !suffix.is_empty() => {
-                Some(format!("{}\n\n---\n\n{}", s, suffix))
+                Some(format!("{s}\n\n---\n\n{suffix}"))
             },
             (Some(s), _) if !s.is_empty() => Some(s.to_string()),
             (_, Some(suffix)) if !suffix.is_empty() => Some(suffix.to_string()),

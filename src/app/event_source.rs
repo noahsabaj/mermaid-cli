@@ -673,7 +673,7 @@ mod tests {
     fn parse_slash_unknown_command() {
         match mermaid_domain::parse_slash_command("nope") {
             SlashCmd::Unknown(name) => assert_eq!(name, "nope"),
-            other => panic!("expected Unknown, got {:?}", other),
+            other => panic!("expected Unknown, got {other:?}"),
         }
     }
 

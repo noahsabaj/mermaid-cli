@@ -246,7 +246,7 @@ async fn start_and_wait(
 /// One cheap liveness probe: `GET /api/version` with the client's short
 /// timeout.
 async fn healthy(client: &reqwest::Client, base_url: &str) -> bool {
-    let url = format!("{}/api/version", base_url);
+    let url = format!("{base_url}/api/version");
     matches!(client.get(&url).send().await, Ok(r) if r.status().is_success())
 }
 

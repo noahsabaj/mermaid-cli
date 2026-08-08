@@ -340,7 +340,7 @@ impl RuntimeState {
         self.auto_compact_suppressed = false;
         self.push_timeline(
             RuntimeTimelineKind::Provider,
-            format!("model set to {}", model_id),
+            format!("model set to {model_id}"),
         );
     }
 

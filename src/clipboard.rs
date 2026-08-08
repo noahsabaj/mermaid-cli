@@ -428,12 +428,11 @@ pub fn read_image_bytes() -> Result<(Vec<u8>, String)> {
                 mermaid_model::utils::private_temp_dir()?.join("mermaid-clipboard-paste.png");
             let temp_str = temp_path.to_string_lossy();
             let script = format!(
-                "set theFile to POSIX file \"{}\"\n\
+                "set theFile to POSIX file \"{temp_str}\"\n\
                  tell application \"System Events\" to set theData to the clipboard as «class PNGf»\n\
                  set fp to open for access theFile with write permission\n\
                  write theData to fp\n\
-                 close access fp",
-                temp_str
+                 close access fp"
             );
             // Try the simpler pngpaste approach first (if available), fall back to osascript
             let pngpaste_output =

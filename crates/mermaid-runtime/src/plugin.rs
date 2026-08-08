@@ -562,7 +562,7 @@ fn resolve_plugin_source(path: &Path) -> Result<PathBuf> {
             .arg(&git_source)
             .arg(&dest)
             .run()
-            .with_context(|| format!("failed to clone plugin source {}", git_source))?;
+            .with_context(|| format!("failed to clone plugin source {git_source}"))?;
     }
     Ok(dest)
 }
@@ -572,16 +572,12 @@ fn ensure_relative_paths(kind: &str, paths: &[String], root: &Path) -> Result<()
         let rel = Path::new(path);
         anyhow::ensure!(
             !rel.is_absolute() && !path.contains(".."),
-            "{} path must stay inside plugin root: {}",
-            kind,
-            path
+            "{kind} path must stay inside plugin root: {path}"
         );
         let full = root.join(rel);
         anyhow::ensure!(
             full.exists(),
-            "{} path does not exist under plugin root: {}",
-            kind,
-            path
+            "{kind} path does not exist under plugin root: {path}"
         );
     }
     Ok(())

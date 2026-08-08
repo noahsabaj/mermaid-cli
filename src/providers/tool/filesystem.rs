@@ -107,8 +107,7 @@ impl ToolExecutor for ReadFileTool {
                                     format!("read {}/{}: {}", idx + 1, paths.len(), raw_path),
                                 )).await;
                                 combined.push_str(&format!(
-                                    "=== {} ===\n{}\n\n",
-                                    raw_path, content
+                                    "=== {raw_path} ===\n{content}\n\n"
                                 ));
                             } else {
                                 combined = content;
@@ -116,7 +115,7 @@ impl ToolExecutor for ReadFileTool {
                         },
                         Err(e) => {
                             return ToolOutcome::error(
-                                format!("{}: {}", raw_path, e),
+                                format!("{raw_path}: {e}"),
                                 start.elapsed().as_secs_f64(),
                             );
                         },
@@ -201,7 +200,7 @@ impl ToolExecutor for DeleteFileTool {
             in_scratchpad,
         } = match resolve_in_roots(&roots, raw_path) {
             Ok(r) => r,
-            Err(e) => return err(&format!("delete_file: {}", e), 0.0),
+            Err(e) => return err(&format!("delete_file: {e}"), 0.0),
         };
         let pending_action = serde_json::json!({
             "tool": "delete_file",
@@ -246,7 +245,7 @@ impl ToolExecutor for DeleteFileTool {
                 ctx.checkpoint_origin(),
             )
         {
-            return err(&format!("delete_file checkpoint failed: {}", e), 0.0);
+            return err(&format!("delete_file checkpoint failed: {e}"), 0.0);
         }
         let display = raw_path.to_string();
 
@@ -259,7 +258,7 @@ impl ToolExecutor for DeleteFileTool {
                         let duration_secs = start.elapsed().as_secs_f64();
                         after_file_mutation(&ctx, "delete_file", &display);
                         ToolOutcome::success(
-                            format!("Deleted {}", display),
+                            format!("Deleted {display}"),
                             "file deleted",
                             duration_secs,
                         )
@@ -268,9 +267,9 @@ impl ToolExecutor for DeleteFileTool {
                             ..ToolRunMetadata::default()
                         })
                     },
-                    Ok(Err(e)) => err(&format!("delete_file({}): {}", display, e),
+                    Ok(Err(e)) => err(&format!("delete_file({display}): {e}"),
                                        start.elapsed().as_secs_f64()),
-                    Err(e) => err(&format!("delete_file join error: {}", e),
+                    Err(e) => err(&format!("delete_file join error: {e}"),
                                    start.elapsed().as_secs_f64()),
                 }
             }
@@ -312,7 +311,7 @@ impl ToolExecutor for CreateDirectoryTool {
             in_scratchpad,
         } = match resolve_in_roots(&roots, raw_path) {
             Ok(r) => r,
-            Err(e) => return err(&format!("create_directory: {}", e), 0.0),
+            Err(e) => return err(&format!("create_directory: {e}"), 0.0),
         };
         let pending_action = serde_json::json!({
             "tool": "create_directory",
@@ -354,7 +353,7 @@ impl ToolExecutor for CreateDirectoryTool {
                 ctx.checkpoint_origin(),
             )
         {
-            return err(&format!("create_directory checkpoint failed: {}", e), 0.0);
+            return err(&format!("create_directory checkpoint failed: {e}"), 0.0);
         }
         let display = raw_path.to_string();
 
@@ -367,7 +366,7 @@ impl ToolExecutor for CreateDirectoryTool {
                         let duration_secs = start.elapsed().as_secs_f64();
                         after_file_mutation(&ctx, "create_directory", &display);
                         ToolOutcome::success(
-                            format!("Created directory {}", display),
+                            format!("Created directory {display}"),
                             "directory created",
                             duration_secs,
                         )
@@ -376,9 +375,9 @@ impl ToolExecutor for CreateDirectoryTool {
                             ..ToolRunMetadata::default()
                         })
                     },
-                    Ok(Err(e)) => err(&format!("create_directory({}): {}", display, e),
+                    Ok(Err(e)) => err(&format!("create_directory({display}): {e}"),
                                        start.elapsed().as_secs_f64()),
-                    Err(e) => err(&format!("create_directory join error: {}", e),
+                    Err(e) => err(&format!("create_directory join error: {e}"),
                                    start.elapsed().as_secs_f64()),
                 }
             }
@@ -433,7 +432,7 @@ impl ToolExecutor for WriteFileTool {
             in_scratchpad,
         } = match resolve_in_roots(&roots, path) {
             Ok(r) => r,
-            Err(e) => return ToolOutcome::error(format!("write_file: {}", e), 0.0),
+            Err(e) => return ToolOutcome::error(format!("write_file: {e}"), 0.0),
         };
         let pending_action = serde_json::json!({
             "tool": "write_file",
@@ -478,7 +477,7 @@ impl ToolExecutor for WriteFileTool {
                 ctx.checkpoint_origin(),
             )
         {
-            return ToolOutcome::error(format!("write_file checkpoint failed: {}", e), 0.0);
+            return ToolOutcome::error(format!("write_file checkpoint failed: {e}"), 0.0);
         }
         let display_path = path.to_string();
         let line_count = content.lines().count();
@@ -519,11 +518,11 @@ impl ToolExecutor for WriteFileTool {
                         })
                     },
                     Ok(Err(e)) => ToolOutcome::error(
-                        format!("write_file({}): {}", display_path, e),
+                        format!("write_file({display_path}): {e}"),
                         start.elapsed().as_secs_f64(),
                     ),
                     Err(e) => ToolOutcome::error(
-                        format!("write_file join error: {}", e),
+                        format!("write_file join error: {e}"),
                         start.elapsed().as_secs_f64(),
                     ),
                 }
@@ -672,8 +671,7 @@ fn write_with_diff_blocking(
     let diff = if elide_diff {
         mermaid_model::diff::DisplayDiff {
             display_diff: format!(
-                "[diff preview skipped: existing file exceeds the {}-byte cap]",
-                MAX_FILE_READ_BYTES
+                "[diff preview skipped: existing file exceeds the {MAX_FILE_READ_BYTES}-byte cap]"
             ),
             added: 0,
             removed: 0,
@@ -721,7 +719,7 @@ pub(super) async fn mutation_policy_outcome(
     let mut request = mermaid_runtime::ActionRequest::new(
         tool,
         mermaid_runtime::ToolCategory::Edit,
-        format!("{} {}", tool, path),
+        format!("{tool} {path}"),
     );
     request.path = Some(path.to_string());
     // File mutations are replayable: an Ask decision checkpoints, records an
@@ -787,7 +785,7 @@ fn format_duration_for_diff(seconds: f64) -> String {
     if seconds < 1.0 {
         format!("{}ms", (seconds * 1000.0).round().max(1.0) as u64)
     } else if seconds < 10.0 {
-        format!("{:.1}s", seconds)
+        format!("{seconds:.1}s")
     } else {
         format!("{}s", seconds.round() as u64)
     }
@@ -855,7 +853,7 @@ mod tests {
     }
 
     fn temp_root(name: &str) -> PathBuf {
-        let p = std::env::temp_dir().join(format!("mermaid_providers_fs_{}", name));
+        let p = std::env::temp_dir().join(format!("mermaid_providers_fs_{name}"));
         let _ = fs::remove_dir_all(&p);
         fs::create_dir_all(&p).expect("create tmpdir");
         p
@@ -871,7 +869,7 @@ mod tests {
         let outcome = tool
             .execute(serde_json::json!({"path": "a.txt"}), ctx)
             .await;
-        assert!(outcome.is_success(), "expected success: {:?}", outcome);
+        assert!(outcome.is_success(), "expected success: {outcome:?}");
         assert_eq!(outcome.output(), "hello");
         let _ = fs::remove_dir_all(&dir);
     }
@@ -905,7 +903,7 @@ mod tests {
         let outcome = ReadFileTool
             .execute(serde_json::json!({"paths": ["a.txt", "b.txt"]}), ctx)
             .await;
-        assert!(outcome.is_success(), "expected success: {:?}", outcome);
+        assert!(outcome.is_success(), "expected success: {outcome:?}");
         let output = outcome.output();
         assert!(output.contains("=== a.txt ==="));
         assert!(output.contains("alpha"));
@@ -926,7 +924,7 @@ mod tests {
         let outcome = ReadFileTool
             .execute(serde_json::json!({"paths": ["a.txt", "b.txt"]}), ctx)
             .await;
-        assert!(outcome.is_success(), "expected success: {:?}", outcome);
+        assert!(outcome.is_success(), "expected success: {outcome:?}");
         let output = outcome.output();
         assert!(
             output.len() <= MAX_READ_AGGREGATE_CHARS + 64,
@@ -941,7 +939,7 @@ mod tests {
             ToolMetadata::ReadFile { truncated, .. } => {
                 assert!(*truncated, "aggregate truncation must set truncated")
             },
-            other => panic!("expected ReadFile metadata, got {:?}", other),
+            other => panic!("expected ReadFile metadata, got {other:?}"),
         }
         let _ = fs::remove_dir_all(&dir);
     }
@@ -960,7 +958,7 @@ mod tests {
                 ctx,
             )
             .await;
-        assert!(outcome.is_success(), "expected success: {:?}", outcome);
+        assert!(outcome.is_success(), "expected success: {outcome:?}");
         let diff = outcome
             .metadata
             .display_diff
@@ -978,7 +976,7 @@ mod tests {
             ToolMetadata::WriteFile { created, .. } => {
                 assert_eq!(*created, Some(false), "existing file is not 'created'")
             },
-            other => panic!("expected WriteFile metadata, got {:?}", other),
+            other => panic!("expected WriteFile metadata, got {other:?}"),
         }
         // The file was actually overwritten despite the elided diff.
         let written = fs::read_to_string(dir.join("big.txt")).expect("read");
@@ -1002,13 +1000,13 @@ mod tests {
         let outcome = ReadFileTool
             .execute(serde_json::json!({"path": "a.txt"}), ctx)
             .await;
-        assert!(outcome.is_success(), "expected success: {:?}", outcome);
+        assert!(outcome.is_success(), "expected success: {outcome:?}");
         match &outcome.metadata.detail {
             ToolMetadata::ReadFile { truncated, .. } => assert!(
                 !truncated,
                 "a file whose content contains the marker must not be flagged truncated"
             ),
-            other => panic!("expected ReadFile metadata, got {:?}", other),
+            other => panic!("expected ReadFile metadata, got {other:?}"),
         }
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1039,7 +1037,7 @@ mod tests {
                 ctx,
             )
             .await;
-        assert!(outcome.is_success(), "expected success: {:?}", outcome);
+        assert!(outcome.is_success(), "expected success: {outcome:?}");
         assert!(outcome.output().contains("3 lines"));
         let written = fs::read_to_string(dir.join("out.txt")).expect("read");
         assert!(written.contains("line1"));
@@ -1080,7 +1078,7 @@ mod tests {
                 ctx,
             )
             .await;
-        assert!(outcome.is_success(), "expected success: {:?}", outcome);
+        assert!(outcome.is_success(), "expected success: {outcome:?}");
         let diff = outcome
             .metadata
             .display_diff
@@ -1108,7 +1106,7 @@ mod tests {
                 ctx,
             )
             .await;
-        assert!(outcome.is_success(), "expected success: {:?}", outcome);
+        assert!(outcome.is_success(), "expected success: {outcome:?}");
         let diff = outcome
             .metadata
             .display_diff
@@ -1132,7 +1130,7 @@ mod tests {
                 ctx,
             )
             .await;
-        assert!(outcome.is_success(), "expected success: {:?}", outcome);
+        assert!(outcome.is_success(), "expected success: {outcome:?}");
         assert!(dir.join("sub/nested/out.txt").exists());
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1164,8 +1162,7 @@ mod tests {
         let error = outcome.error_message().expect("expected error");
         assert!(
             error.contains("outside the project"),
-            "expected security reject, got: {}",
-            error
+            "expected security reject, got: {error}"
         );
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1183,7 +1180,7 @@ mod tests {
                 ctx,
             )
             .await;
-        assert!(outcome.is_success(), "expected success: {:?}", outcome);
+        assert!(outcome.is_success(), "expected success: {outcome:?}");
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1206,8 +1203,7 @@ mod tests {
         let error = outcome.error_message().expect("expected error");
         assert!(
             error.contains("outside the project"),
-            "expected security reject, got: {}",
-            error
+            "expected security reject, got: {error}"
         );
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1228,8 +1224,7 @@ mod tests {
         let error = outcome.error_message().expect("expected error");
         assert!(
             error.contains("outside the project"),
-            "expected security reject, got: {}",
-            error
+            "expected security reject, got: {error}"
         );
         let _ = fs::remove_dir_all(&dir);
     }

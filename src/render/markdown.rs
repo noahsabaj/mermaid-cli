@@ -173,7 +173,7 @@ pub fn parse_markdown(input: &str, theme: &Theme, width: usize) -> Vec<MarkdownL
                         let marker = if let Some(state) = list_stack.last_mut() {
                             if let Some(current) = state.next_number {
                                 state.next_number = Some(current + 1);
-                                format!("{}. ", current)
+                                format!("{current}. ")
                             } else {
                                 "• ".to_string()
                             }
@@ -297,7 +297,7 @@ pub fn parse_markdown(input: &str, theme: &Theme, width: usize) -> Vec<MarkdownL
                                 .collect();
                             if !url.is_empty() && !text.ends_with(&url) {
                                 current_line_spans.push(Span::styled(
-                                    format!(" ({})", url),
+                                    format!(" ({url})"),
                                     Style::new().fg(c.text_disabled.to_color()),
                                 ));
                             }

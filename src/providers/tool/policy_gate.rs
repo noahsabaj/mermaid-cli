@@ -593,7 +593,7 @@ fn format_approval_body(request: &ActionRequest, classifier_reason: Option<&str>
         // categories. Computer-use / MCP details (`type_text "…"`, `mcp s__t(…)`)
         // render verbatim so the prompt isn't misleading (#30, #31).
         match request.category {
-            C::Shell | C::Git | C::Process => format!("$ {}", cmd),
+            C::Shell | C::Git | C::Process => format!("$ {cmd}"),
             _ => clip_preview(cmd),
         }
     } else if let Some(path) = &request.path {
@@ -605,7 +605,7 @@ fn format_approval_body(request: &ActionRequest, classifier_reason: Option<&str>
         }
     };
     if let Some(reason) = classifier_reason {
-        body.push_str(&format!("\n\nAuto-review flagged this: {}", reason));
+        body.push_str(&format!("\n\nAuto-review flagged this: {reason}"));
     }
     body
 }
@@ -696,7 +696,7 @@ fn block_for_approval(
             "Approval required for {}{}",
             request.summary,
             approval_id
-                .map(|id| format!(" (approval {})", id))
+                .map(|id| format!(" (approval {id})"))
                 .unwrap_or_default()
         ),
         0.0,

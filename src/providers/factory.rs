@@ -474,8 +474,7 @@ async fn build_provider(config: &Config, model_id: &str) -> Result<Box<dyn Model
     // below only turn that answer into the right adapter.
     if !is_known_provider(config, &provider_lc) {
         return Err(ModelError::InvalidRequest(format!(
-            "Unknown provider '{}' (model_id: {})",
-            provider, model_id
+            "Unknown provider '{provider}' (model_id: {model_id})"
         )));
     }
     let endpoint = resolve_provider_endpoint(config, &provider_lc)?;
@@ -534,8 +533,7 @@ async fn build_provider(config: &Config, model_id: &str) -> Result<Box<dyn Model
             .and_then(|cfg| user_profile_to_static(&provider_lc, cfg))
             .ok_or_else(|| {
                 ModelError::InvalidRequest(format!(
-                    "Unknown provider '{}' (model_id: {})",
-                    provider, model_id
+                    "Unknown provider '{provider}' (model_id: {model_id})"
                 ))
             })?,
     };
@@ -1063,11 +1061,10 @@ mod tests {
         match f.resolve("totally-made-up/model").await {
             Ok(_) => panic!("expected error"),
             Err(e) => {
-                let msg = format!("{}", e);
+                let msg = format!("{e}");
                 assert!(
                     msg.contains("totally-made-up") || msg.contains("Unknown provider"),
-                    "error message: {}",
-                    msg
+                    "error message: {msg}"
                 );
             },
         }

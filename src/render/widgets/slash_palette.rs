@@ -65,10 +65,7 @@ impl<'a> Widget for SlashPaletteWidget<'a> {
                 total
             )
         } else {
-            format!(
-                " Commands ({})  ↑↓ navigate · Tab complete · Esc dismiss ",
-                total
-            )
+            format!(" Commands ({total})  ↑↓ navigate · Tab complete · Esc dismiss ")
         };
 
         let block = Block::default()
@@ -119,7 +116,7 @@ impl<'a> Widget for SlashPaletteWidget<'a> {
             };
 
             // Pad command column so descriptions align.
-            let padded_name = format!(" {:<22}", name_part);
+            let padded_name = format!(" {name_part:<22}");
             lines.push(Line::from(vec![
                 Span::styled(padded_name, name_style),
                 Span::styled(format!(" {}", entry.description()), desc_style),

@@ -318,7 +318,7 @@ fn label_instruction_bodies(bodies: Vec<(PathBuf, String)>) -> Vec<String> {
                 .file_name()
                 .and_then(|name| name.to_str())
                 .unwrap_or("instructions");
-            format!("# Project Instructions: {}\n\n{}", name, body)
+            format!("# Project Instructions: {name}\n\n{body}")
         })
         .collect()
 }
@@ -396,7 +396,7 @@ mod tests {
     static FS_LOCK: Mutex<()> = Mutex::new(());
 
     fn temp_dir(name: &str) -> PathBuf {
-        let p = std::env::temp_dir().join(format!("mermaid_instructions_test_{}", name));
+        let p = std::env::temp_dir().join(format!("mermaid_instructions_test_{name}"));
         let _ = fs::remove_dir_all(&p);
         fs::create_dir_all(&p).expect("create temp dir");
         p

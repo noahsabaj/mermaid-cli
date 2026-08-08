@@ -108,7 +108,7 @@ pub fn create_checkpoint_for_task(
             files.push(CheckpointFile {
                 path: display,
                 existed: true,
-                snapshot_relpath: Some(format!("files/{}", safe_rel)),
+                snapshot_relpath: Some(format!("files/{safe_rel}")),
             });
         } else {
             files.push(CheckpointFile {
@@ -280,7 +280,7 @@ pub fn restore_checkpoint(id: &str) -> Result<CheckpointManifest> {
         let pending_action_json = serde_json::to_string(action).ok();
         if let Ok(approval) = store.approvals().create(NewApproval {
             task_id: manifest.task_id.clone(),
-            proposed_action: format!("restore replay: {}", proposed_action),
+            proposed_action: format!("restore replay: {proposed_action}"),
             risk_classification: "restored_action".to_string(),
             policy_decision: "ask".to_string(),
             args_summary: pending_action_json.clone(),

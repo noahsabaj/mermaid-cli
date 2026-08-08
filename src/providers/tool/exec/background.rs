@@ -75,12 +75,12 @@ pub(crate) async fn run_background_command(
             startup.ready_message
         );
         if let Some(url) = startup.detected_url.as_ref() {
-            output.push_str(&format!("Detected URL: {}\n", url));
+            output.push_str(&format!("Detected URL: {url}\n"));
         }
         if let Some((url, result)) = opened {
             match result {
-                Ok(()) => output.push_str(&format!("Opened URL: {}\n", url)),
-                Err(error) => output.push_str(&format!("Open URL failed: {} ({})\n", url, error)),
+                Ok(()) => output.push_str(&format!("Opened URL: {url}\n")),
+                Err(error) => output.push_str(&format!("Open URL failed: {url} ({error})\n")),
             }
         }
         if !startup.log_excerpt.trim().is_empty() {
@@ -92,7 +92,7 @@ pub(crate) async fn run_background_command(
         let log_path_str = log_path.display().to_string();
         let detected_urls = startup.detected_url.iter().cloned().collect::<Vec<_>>();
         let process = ManagedProcess {
-            id: format!("bg-{}", pid),
+            id: format!("bg-{pid}"),
             pid,
             command: command.to_string(),
             cwd: Some(workdir.display().to_string()),
@@ -260,7 +260,7 @@ pub(crate) async fn wait_for_background_startup(
         if let Some(pattern) = ready_pattern {
             if last_log.contains(pattern) {
                 return Ok(BackgroundStartup {
-                    ready_message: format!("Ready: matched pattern {:?}", pattern),
+                    ready_message: format!("Ready: matched pattern {pattern:?}"),
                     log_excerpt: tail_lines(&last_log, 40),
                     detected_url,
                 });
@@ -278,13 +278,11 @@ pub(crate) async fn wait_for_background_startup(
         if start.elapsed() >= startup_timeout {
             let ready_message = if let Some(pattern) = ready_pattern {
                 format!(
-                    "Ready: pattern {:?} was not seen within {}s; process is still running",
-                    pattern, startup_timeout_secs
+                    "Ready: pattern {pattern:?} was not seen within {startup_timeout_secs}s; process is still running"
                 )
             } else {
                 format!(
-                    "Ready: startup check reached {}s; process is still running",
-                    startup_timeout_secs
+                    "Ready: startup check reached {startup_timeout_secs}s; process is still running"
                 )
             };
             return Ok(BackgroundStartup {

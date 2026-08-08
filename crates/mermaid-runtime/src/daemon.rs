@@ -42,7 +42,7 @@ pub fn daemon_socket_path() -> Result<PathBuf> {
 pub fn generate_pairing_token() -> Result<(String, String)> {
     let mut bytes = [0_u8; 32];
     getrandom::fill(&mut bytes)
-        .map_err(|err| anyhow::anyhow!("failed to generate pairing token: {}", err))?;
+        .map_err(|err| anyhow::anyhow!("failed to generate pairing token: {err}"))?;
     let token = format!("mermaid_{}", general_purpose::URL_SAFE_NO_PAD.encode(bytes));
     let hash = hash_pairing_token(&token);
     Ok((token, hash))

@@ -455,9 +455,7 @@ impl RuntimeStore {
         let current: i32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         anyhow::ensure!(
             current <= SCHEMA_VERSION,
-            "runtime DB schema version {} is newer than this build supports ({}); upgrade mermaid",
-            current,
-            SCHEMA_VERSION
+            "runtime DB schema version {current} is newer than this build supports ({SCHEMA_VERSION}); upgrade mermaid"
         );
 
         // F17 (RC-E): the overwhelmingly common case is an already-current DB.
@@ -493,9 +491,7 @@ impl RuntimeStore {
         let version: i32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         anyhow::ensure!(
             version == SCHEMA_VERSION,
-            "unsupported runtime DB schema version {} (expected {})",
-            version,
-            SCHEMA_VERSION
+            "unsupported runtime DB schema version {version} (expected {SCHEMA_VERSION})"
         );
         Ok(())
     }
@@ -827,7 +823,7 @@ mod tests {
     }
 
     pub(crate) fn temp_db(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("mermaid_runtime_store_{}", name));
+        let dir = std::env::temp_dir().join(format!("mermaid_runtime_store_{name}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create temp dir");
         dir.join("runtime.sqlite3")

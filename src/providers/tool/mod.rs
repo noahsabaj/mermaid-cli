@@ -290,7 +290,7 @@ mod tests {
             "execute_command",
             "memory",
         ] {
-            assert!(r.get(name).is_some(), "missing: {}", name);
+            assert!(r.get(name).is_some(), "missing: {name}");
         }
         assert!(r.get("not_a_tool").is_none());
         assert!(r.len() >= 6);

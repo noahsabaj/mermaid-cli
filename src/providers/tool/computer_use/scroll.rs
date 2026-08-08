@@ -75,10 +75,7 @@ impl ToolExecutor for ScrollTool {
             .to_string();
         if direction != "up" && direction != "down" {
             return ToolOutcome::error(
-                format!(
-                    "scroll: direction must be 'up' or 'down', got '{}'",
-                    direction
-                ),
+                format!("scroll: direction must be 'up' or 'down', got '{direction}'"),
                 started.elapsed().as_secs_f64(),
             );
         }
@@ -96,20 +93,20 @@ impl ToolExecutor for ScrollTool {
         };
         if let Err(e) = res {
             return ToolOutcome::error(
-                format!("scroll failed: {}", e),
+                format!("scroll failed: {e}"),
                 started.elapsed().as_secs_f64(),
             );
         }
 
         let clamp_note = if requested != amount {
-            format!(" (clamped from {} to {})", requested, amount)
+            format!(" (clamped from {requested} to {amount})")
         } else {
             String::new()
         };
         computer_use_success(
             "scroll",
             args,
-            format!("Scrolled {} by {}{}", direction, amount, clamp_note),
+            format!("Scrolled {direction} by {amount}{clamp_note}"),
             started.elapsed().as_secs_f64(),
         )
     }

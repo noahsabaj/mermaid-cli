@@ -635,7 +635,7 @@ pub async fn resolve_model_id(cli_model: Option<&str>, config: &Config) -> anyho
     // from someone who set `ANTHROPIC_API_KEY` and never wanted local models.
     let local = crate::ollama::local_models(config).await;
     if let Some(first) = local.as_ref().and_then(|models| models.first()) {
-        return Ok(format!("ollama/{}", first));
+        return Ok(format!("ollama/{first}"));
     }
     if let Some(model_id) = configured_provider_default_model(config) {
         return Ok(model_id);
@@ -719,16 +719,12 @@ fn resolve_model_alias(requested: &str, config: &Config) -> anyhow::Result<Optio
     if let Some(model) = config.model_aliases.get(alias) {
         anyhow::ensure!(
             !model.trim().is_empty(),
-            "model alias `{}` is configured with an empty model id",
-            alias
+            "model alias `{alias}` is configured with an empty model id"
         );
         return Ok(Some(model.clone()));
     }
     if requested.starts_with("alias:") {
-        anyhow::bail!(
-            "model alias `{}` is not configured; add it under [model_aliases]",
-            alias
-        );
+        anyhow::bail!("model alias `{alias}` is not configured; add it under [model_aliases]");
     }
     Ok(None)
 }

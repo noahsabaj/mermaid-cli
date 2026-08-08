@@ -58,8 +58,7 @@ async fn execute_command_cancellation_aborts_promptly() {
     // wide margin while still catching a real "cancel didn't propagate" hang.
     assert!(
         elapsed < Duration::from_secs(2),
-        "cancellation took {:?} — far slower than expected (regression?)",
-        elapsed
+        "cancellation took {elapsed:?} — far slower than expected (regression?)"
     );
 }
 
@@ -79,8 +78,8 @@ async fn execute_command_timeout_honored() {
 
     assert_eq!(outcome.status, mermaid_domain::ToolStatus::Error);
     let output = outcome.as_tool_message_content();
-    assert!(output.contains("timed out"), "got: {}", output);
-    assert!(output.contains("was killed"), "got: {}", output);
+    assert!(output.contains("timed out"), "got: {output}");
+    assert!(output.contains("was killed"), "got: {output}");
     // The 1s timeout must fire (>=900ms, so it didn't abort instantly) and the
     // 10s sleep must be killed early (<8s). The ceiling measures process-kill +
     // task teardown overhead on top of the 1s timeout, not the timeout itself,
@@ -89,8 +88,7 @@ async fn execute_command_timeout_honored() {
     // sleep, so it still catches a real "timeout never fired" regression.
     assert!(
         elapsed >= Duration::from_millis(900) && elapsed < Duration::from_secs(8),
-        "timeout duration off: {:?}",
-        elapsed
+        "timeout duration off: {elapsed:?}"
     );
 }
 
@@ -166,7 +164,6 @@ async fn effect_runner_shutdown_bounded_time() {
 
     assert!(
         elapsed < Duration::from_millis(500),
-        "shutdown took {:?} — bounded drain broken?",
-        elapsed
+        "shutdown took {elapsed:?} — bounded drain broken?"
     );
 }

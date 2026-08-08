@@ -409,13 +409,11 @@ impl ToolExecutor for SubagentTool {
                  cannot mutate), plus any defined in config [agents.types]. Every result \
                  ends with an [agent_id: …] trailer; pass that id back as `agent_id` to \
                  send a follow-up prompt to the same child with its context intact (the \
-                 {max_cached} most recent children are kept). Breadth-capped at \
-                 {max_breadth} concurrent; subagents can't themselves spawn subagents \
+                 {MAX_CACHED_AGENTS} most recent children are kept). Breadth-capped at \
+                 {MAX_INFLIGHT} concurrent; subagents can't themselves spawn subagents \
                  and never get GUI (screenshot/click/…) access. A child moved to the \
                  background (the user detaches one with Ctrl+B) can be cancelled with \
                  action: \"kill\" plus its agent_id.",
-                max_cached = MAX_CACHED_AGENTS,
-                max_breadth = MAX_INFLIGHT,
             ),
             input_schema: serde_json::json!({
                 "type": "object",
@@ -564,7 +562,7 @@ impl ToolExecutor for SubagentTool {
             &ctx,
             "agent",
             mermaid_runtime::ToolCategory::Subagent,
-            format!("subagent: {}", description),
+            format!("subagent: {description}"),
             &args,
         )
         .await

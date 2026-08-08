@@ -100,8 +100,8 @@ pub enum ModelError {
 impl fmt::Display for ModelError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ModelError::Backend(e) => write!(f, "Backend error: {}", e),
-            ModelError::Config(e) => write!(f, "Configuration error: {}", e),
+            ModelError::Backend(e) => write!(f, "Backend error: {e}"),
+            ModelError::Config(e) => write!(f, "Configuration error: {e}"),
             ModelError::ModelNotFound { model, searched } => {
                 write!(
                     f,
@@ -115,12 +115,11 @@ impl fmt::Display for ModelError {
                 duration_secs,
             } => {
                 if *duration_secs == 0 {
-                    write!(f, "Operation '{}' timed out", operation)
+                    write!(f, "Operation '{operation}' timed out")
                 } else {
                     write!(
                         f,
-                        "Operation '{}' timed out after {} seconds",
-                        operation, duration_secs
+                        "Operation '{operation}' timed out after {duration_secs} seconds"
                     )
                 }
             },
@@ -130,25 +129,25 @@ impl fmt::Display for ModelError {
             } => {
                 write!(f, "Rate limit exceeded")?;
                 if let Some(secs) = retry_after {
-                    write!(f, " (retry after {} seconds)", secs)?;
+                    write!(f, " (retry after {secs} seconds)")?;
                 }
                 if let Some(reason) = message {
-                    write!(f, ": {}", reason)?;
+                    write!(f, ": {reason}")?;
                 }
                 Ok(())
             },
-            ModelError::InvalidRequest(msg) => write!(f, "Invalid request: {}", msg),
+            ModelError::InvalidRequest(msg) => write!(f, "Invalid request: {msg}"),
             ModelError::ParseError { message, raw } => {
                 if let Some(r) = raw {
-                    write!(f, "Parse error: {} (raw: {})", message, r)
+                    write!(f, "Parse error: {message} (raw: {r})")
                 } else {
-                    write!(f, "Parse error: {}", message)
+                    write!(f, "Parse error: {message}")
                 }
             },
-            ModelError::StreamError(msg) => write!(f, "Stream error: {}", msg),
-            ModelError::Authentication(msg) => write!(f, "Authentication error: {}", msg),
+            ModelError::StreamError(msg) => write!(f, "Stream error: {msg}"),
+            ModelError::Authentication(msg) => write!(f, "Authentication error: {msg}"),
             ModelError::Unsupported { feature } => {
-                write!(f, "Feature not supported by this adapter: {}", feature)
+                write!(f, "Feature not supported by this adapter: {feature}")
             },
             ModelError::Cancelled => write!(f, "Cancelled by user"),
         }
@@ -167,12 +166,12 @@ impl ModelError {
         match self {
             ModelError::Backend(BackendError::ConnectionFailed { backend, url, .. }) => {
                 UserFacingError {
-                    summary: format!("{} connection failed", backend),
-                    message: format!("Could not connect to {} at {}", backend, url),
+                    summary: format!("{backend} connection failed"),
+                    message: format!("Could not connect to {backend} at {url}"),
                     suggestion: if backend == "ollama" {
                         "Run 'ollama serve' to start Ollama, or check if it's running on the correct port".to_string()
                     } else {
-                        format!("Check if {} is running and accessible", backend)
+                        format!("Check if {backend} is running and accessible")
                     },
                     category: ErrorCategory::Connection,
                     recoverable: true,
@@ -180,12 +179,12 @@ impl ModelError {
             },
             ModelError::Backend(BackendError::NotAvailable { backend, reason }) => {
                 UserFacingError {
-                    summary: format!("{} unavailable", backend),
-                    message: format!("{} is not available: {}", backend, reason),
+                    summary: format!("{backend} unavailable"),
+                    message: format!("{backend} is not available: {reason}"),
                     suggestion: if backend == "ollama" {
                         "Start Ollama with 'ollama serve' or pull the model with 'ollama pull <model>'".to_string()
                     } else {
-                        format!("Ensure {} service is running and healthy", backend)
+                        format!("Ensure {backend} service is running and healthy")
                     },
                     category: ErrorCategory::Connection,
                     recoverable: true,
@@ -223,8 +222,8 @@ impl ModelError {
                 // Render the extracted message when we can, fall back to the
                 // raw body so we never lose information.
                 let rendered = match try_extract_error_message(message) {
-                    Some(clean) => format!("HTTP {}: {}", status, clean),
-                    None => format!("HTTP {}: {}", status, message),
+                    Some(clean) => format!("HTTP {status}: {clean}"),
+                    None => format!("HTTP {status}: {message}"),
                 };
                 UserFacingError {
                     summary: summary.to_string(),
@@ -248,7 +247,7 @@ impl ModelError {
             ModelError::Backend(BackendError::UnexpectedResponse { backend, message }) => {
                 UserFacingError {
                     summary: "Unexpected response".to_string(),
-                    message: format!("Received unexpected response from {}: {}", backend, message),
+                    message: format!("Received unexpected response from {backend}: {message}"),
                     suggestion: "This might be a version mismatch - try updating the backend"
                         .to_string(),
                     category: ErrorCategory::Internal,
@@ -263,23 +262,18 @@ impl ModelError {
             }) => {
                 let code_str = code.as_deref().unwrap_or("unknown");
                 UserFacingError {
-                    summary: format!("{} error", provider),
-                    message: debug.suffix(format!(
-                        "{} returned error {}: {}",
-                        provider, code_str, message
-                    )),
-                    suggestion: format!(
-                        "Check {} documentation for error code {}",
-                        provider, code_str
-                    ),
+                    summary: format!("{provider} error"),
+                    message: debug
+                        .suffix(format!("{provider} returned error {code_str}: {message}")),
+                    suggestion: format!("Check {provider} documentation for error code {code_str}"),
                     category: ErrorCategory::Internal,
                     recoverable: false,
                 }
             },
             ModelError::Config(ConfigError::MissingRequired(field)) => UserFacingError {
                 summary: "Missing configuration".to_string(),
-                message: format!("Required configuration '{}' is missing", field),
-                suggestion: format!("Add '{}' to ~/.config/mermaid/config.toml", field),
+                message: format!("Required configuration '{field}' is missing"),
+                suggestion: format!("Add '{field}' to ~/.config/mermaid/config.toml"),
                 category: ErrorCategory::Config,
                 recoverable: false,
             },
@@ -289,14 +283,14 @@ impl ModelError {
                 reason,
             }) => UserFacingError {
                 summary: "Invalid configuration".to_string(),
-                message: format!("Invalid value '{}' for '{}': {}", value, field, reason),
-                suggestion: format!("Fix '{}' in ~/.config/mermaid/config.toml", field),
+                message: format!("Invalid value '{value}' for '{field}': {reason}"),
+                suggestion: format!("Fix '{field}' in ~/.config/mermaid/config.toml"),
                 category: ErrorCategory::Config,
                 recoverable: false,
             },
             ModelError::Config(ConfigError::FileError { path, reason }) => UserFacingError {
                 summary: "Config file error".to_string(),
-                message: format!("Cannot read config file '{}': {}", path, reason),
+                message: format!("Cannot read config file '{path}': {reason}"),
                 suggestion: "Check file permissions and syntax".to_string(),
                 category: ErrorCategory::Config,
                 recoverable: false,
@@ -305,8 +299,7 @@ impl ModelError {
                 summary: "Model not found".to_string(),
                 message: format!("Model '{}' not found in: {}", model, searched.join(", ")),
                 suggestion: format!(
-                    "Pull the model with 'ollama pull {}' or check if the model name is correct",
-                    model
+                    "Pull the model with 'ollama pull {model}' or check if the model name is correct"
                 ),
                 category: ErrorCategory::NotFound,
                 recoverable: false,
@@ -317,9 +310,9 @@ impl ModelError {
             } => UserFacingError {
                 summary: "Request timed out".to_string(),
                 message: if *duration_secs == 0 {
-                    format!("'{}' timed out", operation)
+                    format!("'{operation}' timed out")
                 } else {
-                    format!("'{}' timed out after {} seconds", operation, duration_secs)
+                    format!("'{operation}' timed out after {duration_secs} seconds")
                 },
                 suggestion: "The model might be overloaded - try a smaller model or wait and retry"
                     .to_string(),
@@ -331,7 +324,7 @@ impl ModelError {
                 message,
             } => {
                 let wait_msg = retry_after
-                    .map(|s| format!("Wait {} seconds and retry", s))
+                    .map(|s| format!("Wait {s} seconds and retry"))
                     .unwrap_or_else(|| {
                         "This can be a burst limit (retry shortly) or an exhausted quota"
                             .to_string()
@@ -344,21 +337,21 @@ impl ModelError {
                     message: message.clone().unwrap_or_else(|| {
                         "The provider rejected the request with 429 (too many requests)".to_string()
                     }),
-                    suggestion: format!("{}. Local Ollama models have no rate limits", wait_msg),
+                    suggestion: format!("{wait_msg}. Local Ollama models have no rate limits"),
                     category: ErrorCategory::Temporary,
                     recoverable: true,
                 }
             },
             ModelError::InvalidRequest(msg) => UserFacingError {
                 summary: "Invalid request".to_string(),
-                message: format!("The request was invalid: {}", msg),
+                message: format!("The request was invalid: {msg}"),
                 suggestion: "Check your message format or try rephrasing".to_string(),
                 category: ErrorCategory::Internal,
                 recoverable: false,
             },
             ModelError::ParseError { message, .. } => UserFacingError {
                 summary: "Parse error".to_string(),
-                message: format!("Failed to parse response: {}", message),
+                message: format!("Failed to parse response: {message}"),
                 suggestion:
                     "The model returned an unexpected format - try sending the message again"
                         .to_string(),
@@ -367,14 +360,14 @@ impl ModelError {
             },
             ModelError::StreamError(msg) => UserFacingError {
                 summary: "Stream interrupted".to_string(),
-                message: format!("Connection lost during streaming: {}", msg),
+                message: format!("Connection lost during streaming: {msg}"),
                 suggestion: "Check your network connection and try again".to_string(),
                 category: ErrorCategory::Connection,
                 recoverable: true,
             },
             ModelError::Authentication(msg) => UserFacingError {
                 summary: "Authentication failed".to_string(),
-                message: format!("Authentication error: {}", msg),
+                message: format!("Authentication error: {msg}"),
                 suggestion:
                     "Check your API key in ~/.config/mermaid/config.toml or environment variables"
                         .to_string(),
@@ -383,10 +376,9 @@ impl ModelError {
             },
             ModelError::Unsupported { feature } => UserFacingError {
                 summary: "Unsupported feature".to_string(),
-                message: format!("The current model adapter does not support '{}'.", feature),
+                message: format!("The current model adapter does not support '{feature}'."),
                 suggestion: format!(
-                    "Switch to a provider/model that supports '{}', or omit this operation.",
-                    feature
+                    "Switch to a provider/model that supports '{feature}', or omit this operation."
                 ),
                 category: ErrorCategory::Internal,
                 recoverable: false,
@@ -520,10 +512,10 @@ impl fmt::Display for BackendError {
                 url,
                 reason,
             } => {
-                write!(f, "Failed to connect to {} at {}: {}", backend, url, reason)
+                write!(f, "Failed to connect to {backend} at {url}: {reason}")
             },
             BackendError::NotAvailable { backend, reason } => {
-                write!(f, "Backend '{}' not available: {}", backend, reason)
+                write!(f, "Backend '{backend}' not available: {reason}")
             },
             // `debug` ids are deliberately NOT printed here: Display feeds
             // logs and try_extract_error_message; the ids surface once, in
@@ -531,10 +523,10 @@ impl fmt::Display for BackendError {
             BackendError::HttpError {
                 status, message, ..
             } => {
-                write!(f, "HTTP error {}: {}", status, message)
+                write!(f, "HTTP error {status}: {message}")
             },
             BackendError::UnexpectedResponse { backend, message } => {
-                write!(f, "Unexpected response from {}: {}", backend, message)
+                write!(f, "Unexpected response from {backend}: {message}")
             },
             BackendError::ProviderError {
                 provider,
@@ -543,9 +535,9 @@ impl fmt::Display for BackendError {
                 ..
             } => {
                 if let Some(c) = code {
-                    write!(f, "{} error {}: {}", provider, c, message)
+                    write!(f, "{provider} error {c}: {message}")
                 } else {
-                    write!(f, "{} error: {}", provider, message)
+                    write!(f, "{provider} error: {message}")
                 }
             },
         }
@@ -575,17 +567,17 @@ impl fmt::Display for ConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ConfigError::MissingRequired(field) => {
-                write!(f, "Missing required configuration: {}", field)
+                write!(f, "Missing required configuration: {field}")
             },
             ConfigError::InvalidValue {
                 field,
                 value,
                 reason,
             } => {
-                write!(f, "Invalid value for '{}': '{}' ({})", field, value, reason)
+                write!(f, "Invalid value for '{field}': '{value}' ({reason})")
             },
             ConfigError::FileError { path, reason } => {
-                write!(f, "Error reading config file '{}': {}", path, reason)
+                write!(f, "Error reading config file '{path}': {reason}")
             },
         }
     }
@@ -686,7 +678,7 @@ fn try_extract_error_message(body: &str) -> Option<String> {
             .and_then(|v| v.as_str())
             .or_else(|| obj.get("code").and_then(|v| v.as_str()));
         let out = match kind {
-            Some(k) if !k.is_empty() => format!("{}: {}", k, message),
+            Some(k) if !k.is_empty() => format!("{k}: {message}"),
             _ => message.to_string(),
         };
         return Some(out.trim().to_string());

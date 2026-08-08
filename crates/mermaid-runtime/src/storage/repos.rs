@@ -351,7 +351,7 @@ impl ToolRunsRepo<'_> {
              WHERE id = ?1",
             params![id, status, output_json, now_rfc3339()],
         )?;
-        anyhow::ensure!(changed > 0, "tool run not found: {}", id);
+        anyhow::ensure!(changed > 0, "tool run not found: {id}");
         Ok(())
     }
 
@@ -535,8 +535,7 @@ impl ApprovalsRepo<'_> {
         )?;
         anyhow::ensure!(
             changed > 0,
-            "approval {} cannot be decided (already decided, archived, or not found)",
-            id
+            "approval {id} cannot be decided (already decided, archived, or not found)"
         );
         Ok(())
     }
@@ -578,7 +577,7 @@ impl ApprovalsRepo<'_> {
              WHERE id = ?1 AND user_decision = 'approving'",
             params![id, user_decision, now_rfc3339()],
         )?;
-        anyhow::ensure!(changed > 0, "approval {} was not in the claimed state", id);
+        anyhow::ensure!(changed > 0, "approval {id} was not in the claimed state");
         Ok(())
     }
 
@@ -769,7 +768,7 @@ impl CheckpointsRepo<'_> {
             "UPDATE checkpoints SET approval_id = ?2 WHERE id = ?1",
             params![id, approval_id],
         )?;
-        anyhow::ensure!(changed > 0, "checkpoint not found: {}", id);
+        anyhow::ensure!(changed > 0, "checkpoint not found: {id}");
         Ok(())
     }
 

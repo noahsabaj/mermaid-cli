@@ -65,7 +65,7 @@ impl ToolExecutor for ListWindowsTool {
             r = self.driver.list_windows(&ctx.token) => match r {
                 Ok(w) => w,
                 Err(e) => return ToolOutcome::error(
-                    format!("list_windows failed: {}", e),
+                    format!("list_windows failed: {e}"),
                     started.elapsed().as_secs_f64(),
                 ),
             },
@@ -76,7 +76,7 @@ impl ToolExecutor for ListWindowsTool {
         } else {
             let list = windows
                 .iter()
-                .map(|w| format!("  - {}", w))
+                .map(|w| format!("  - {w}"))
                 .collect::<Vec<_>>()
                 .join("\n");
             format!("Visible windows ({}):\n{}", windows.len(), list)

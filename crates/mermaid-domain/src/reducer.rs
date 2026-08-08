@@ -555,7 +555,7 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             push_system(
                 &mut state,
                 &mut cmds,
-                format!("MCP server {} errored: {}", name, reason),
+                format!("MCP server {name} errored: {reason}"),
             );
         },
         Msg::McpServerStopped { name } => {
@@ -723,7 +723,7 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
         },
         Msg::ModelPullFinished { model } => {
-            push_system(&mut state, &mut cmds, format!("Pulled {}", model));
+            push_system(&mut state, &mut cmds, format!("Pulled {model}"));
         },
         Msg::ModelPullProgress(_line) => {
             // Pull progress used to stream into the status banner. With the
@@ -1703,7 +1703,7 @@ pub(crate) fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, 
                         Some(idx) => &after_slash[idx..],
                         None => "",
                     };
-                    state.ui.input_buffer = format!("/{}{}", name, rest);
+                    state.ui.input_buffer = format!("/{name}{rest}");
                     state.ui.input_cursor = state.ui.input_buffer.len();
                 }
                 // Fall through to the Enter handler below.
@@ -2652,9 +2652,7 @@ pub(crate) fn handle_clipboard_read(state: &mut State, cmds: &mut Vec<Cmd>, read
         ClipboardRead::Image { bytes, format } => {
             let id = state.ids.tool_call.next();
             let number = state.ids.fresh_image();
-            let temp_path = state
-                .temp_dir
-                .join(format!("mermaid-img-{}.{}", id, format));
+            let temp_path = state.temp_dir.join(format!("mermaid-img-{id}.{format}"));
             // Splice the inline `[Image #N] ` token into the buffer at the
             // cursor — the token IS how the image lives in the message now, so
             // reset history-nav and advance past it.
@@ -3284,7 +3282,7 @@ pub(crate) fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd
                     push_system(
                         state,
                         cmds,
-                        format!("Unknown theme '{}'. Usage: /theme <dark|light>", other),
+                        format!("Unknown theme '{other}'. Usage: /theme <dark|light>"),
                     );
                     return;
                 },
@@ -3320,7 +3318,7 @@ pub(crate) fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd
             request_exit(state, cmds);
         },
         SlashCmd::Unknown(name) => {
-            push_system(state, cmds, format!("Unknown command: /{}", name));
+            push_system(state, cmds, format!("Unknown command: /{name}"));
         },
     }
 }
@@ -4040,7 +4038,7 @@ pub(crate) fn handle_compaction_failed(
         },
     };
     state.session.append(
-        ChatMessage::system(format!("{}: {}", prefix, message)),
+        ChatMessage::system(format!("{prefix}: {message}")),
         state.now,
     );
 }
@@ -4650,7 +4648,7 @@ pub(crate) fn handle_open_image_at(
         return;
     };
     let id = state.ids.tool_call.next();
-    let temp_path = state.temp_dir.join(format!("mermaid-img-{}.png", id));
+    let temp_path = state.temp_dir.join(format!("mermaid-img-{id}.png"));
     cmds.push(Cmd::WriteImageToTemp {
         path: temp_path.clone(),
         bytes,
@@ -6484,7 +6482,7 @@ mod tests {
         for i in 0..(MAX_RETAINED_SCREENSHOTS + 3) {
             msgs.push(ChatMessage {
                 role: MessageRole::Assistant,
-                content: format!("turn {}", i),
+                content: format!("turn {i}"),
                 timestamp: chrono::Local::now(),
                 kind: mermaid_model::models::ChatMessageKind::Normal,
                 metadata: None,
@@ -6522,7 +6520,7 @@ mod tests {
         for i in 0..5 {
             msgs.push(ChatMessage {
                 role: MessageRole::User,
-                content: format!("text only {}", i),
+                content: format!("text only {i}"),
                 timestamp: chrono::Local::now(),
                 kind: mermaid_model::models::ChatMessageKind::Normal,
                 metadata: None,
@@ -6539,7 +6537,7 @@ mod tests {
         for i in 0..2 {
             msgs.push(ChatMessage {
                 role: MessageRole::Assistant,
-                content: format!("with image {}", i),
+                content: format!("with image {i}"),
                 timestamp: chrono::Local::now(),
                 kind: mermaid_model::models::ChatMessageKind::Normal,
                 metadata: None,
@@ -10297,8 +10295,7 @@ mod tests {
         assert!(
             cmds.iter()
                 .any(|c| { matches!(c, Cmd::PullOllamaModel { model } if model == "qwen3:8b") }),
-            "local Ollama model should dispatch pull: {:?}",
-            cmds
+            "local Ollama model should dispatch pull: {cmds:?}"
         );
     }
 
@@ -10313,8 +10310,7 @@ mod tests {
             cmds.iter().any(|c| {
                 matches!(c, Cmd::PullOllamaModel { model } if model == "qwen3-coder:30b")
             }),
-            "bare model names should dispatch an Ollama pull: {:?}",
-            cmds
+            "bare model names should dispatch an Ollama pull: {cmds:?}"
         );
     }
 

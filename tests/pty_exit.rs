@@ -152,14 +152,11 @@ fn double_ctrl_c_from_empty_tui_exits_and_restores_terminal_modes() {
 
     assert!(
         status.success(),
-        "shell wrapper exited unsuccessfully: {:?}\n{}",
-        status,
-        text
+        "shell wrapper exited unsuccessfully: {status:?}\n{text}"
     );
     assert!(
-        text.contains(&format!("{}0", EXIT_MARKER)),
-        "Mermaid did not report a clean exit. Output:\n{}",
-        text
+        text.contains(&format!("{EXIT_MARKER}0")),
+        "Mermaid did not report a clean exit. Output:\n{text}"
     );
 
     for cleanup in [
@@ -182,8 +179,7 @@ fn double_ctrl_c_from_empty_tui_exits_and_restores_terminal_modes() {
         !bytes
             .windows(INJECTED_MOUSE_REPORT.len())
             .any(|window| window == INJECTED_MOUSE_REPORT),
-        "injected SGR mouse report leaked back into shell output:\n{}",
-        text
+        "injected SGR mouse report leaked back into shell output:\n{text}"
     );
 
     let after_marker = text.split_once(EXIT_MARKER).map_or("", |(_, after)| after);
@@ -192,8 +188,7 @@ fn double_ctrl_c_from_empty_tui_exits_and_restores_terminal_modes() {
             && terminal_mode_token_present(after_marker, "echo")
             && !terminal_mode_token_present(after_marker, "-icanon")
             && !terminal_mode_token_present(after_marker, "-echo"),
-        "terminal did not return to canonical echo mode after Mermaid exit:\n{}",
-        text
+        "terminal did not return to canonical echo mode after Mermaid exit:\n{text}"
     );
 }
 
@@ -227,15 +222,12 @@ fn ctrl_l_full_repaint_does_not_query_cursor_or_crash() {
 
     assert!(
         status.success(),
-        "shell wrapper exited unsuccessfully: {:?}\n{}",
-        status,
-        text
+        "shell wrapper exited unsuccessfully: {status:?}\n{text}"
     );
     assert!(
-        text.contains(&format!("{}0", EXIT_MARKER)),
+        text.contains(&format!("{EXIT_MARKER}0")),
         "Mermaid did not survive the Ctrl+L full repaint (expected clean exit \
-         via double Ctrl+C afterwards). Output:\n{}",
-        text
+         via double Ctrl+C afterwards). Output:\n{text}"
     );
 
     const CURSOR_POSITION_QUERY: &[u8] = b"\x1b[6n";
@@ -245,8 +237,7 @@ fn ctrl_l_full_repaint_does_not_query_cursor_or_crash() {
             .any(|window| window == CURSOR_POSITION_QUERY),
         "full-repaint path emitted an ESC[6n cursor-position query; it must \
          not query the terminal (the reply deadlocks against the EventStream \
-         reader). Output:\n{}",
-        text
+         reader). Output:\n{text}"
     );
 }
 

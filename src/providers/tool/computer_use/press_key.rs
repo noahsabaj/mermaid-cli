@@ -82,13 +82,13 @@ impl ToolExecutor for PressKeyTool {
         };
         if let Err(e) = res {
             return ToolOutcome::error(
-                format!("press_key failed: {}", e),
+                format!("press_key failed: {e}"),
                 started.elapsed().as_secs_f64(),
             );
         }
 
         tokio::time::sleep(std::time::Duration::from_millis(POST_KEY_DELAY_MS)).await;
-        let base_msg = format!("Pressed: {}", key);
+        let base_msg = format!("Pressed: {key}");
 
         let (summary, image) = match super::emit_auto_screenshot(
             &self.driver,
@@ -102,7 +102,7 @@ impl ToolExecutor for PressKeyTool {
         };
 
         let out = match &summary {
-            Some(s) => format!("{}\n[auto-screenshot: {}]", base_msg, s),
+            Some(s) => format!("{base_msg}\n[auto-screenshot: {s}]"),
             None => base_msg,
         };
         let mut outcome =

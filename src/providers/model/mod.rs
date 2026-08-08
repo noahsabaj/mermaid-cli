@@ -150,9 +150,9 @@ pub(crate) async fn collect_text(
     });
 
     let response = provider.chat(request, ctx).await;
-    let (text, stream_usage) = collector.await.map_err(|err| {
-        ModelError::StreamError(format!("collect_text collector failed: {}", err))
-    })?;
+    let (text, stream_usage) = collector
+        .await
+        .map_err(|err| ModelError::StreamError(format!("collect_text collector failed: {err}")))?;
     match response {
         Ok(final_response) => Ok((text, final_response.usage.or(stream_usage))),
         Err(err) => Err(err),

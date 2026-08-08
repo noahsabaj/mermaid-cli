@@ -589,7 +589,7 @@ impl GeminiAdapter {
             return Err(http_error_from_response(response).await);
         }
         let info: GeminiModelInfo = response.json().await.map_err(|e| ModelError::ParseError {
-            message: format!("Failed to parse Gemini model info: {}", e),
+            message: format!("Failed to parse Gemini model info: {e}"),
             raw: None,
         })?;
         Ok(info.into())
@@ -602,7 +602,7 @@ impl GeminiAdapter {
         }
 
         let json: GeminiResponse = response.json().await.map_err(|e| ModelError::ParseError {
-            message: format!("Failed to parse Gemini response: {}", e),
+            message: format!("Failed to parse Gemini response: {e}"),
             raw: None,
         })?;
 
@@ -834,7 +834,7 @@ fn process_chunk_payload(
     hide_reasoning_trace: bool,
 ) -> Result<()> {
     let parsed: Value = serde_json::from_str(payload).map_err(|e| ModelError::ParseError {
-        message: format!("Failed to parse Gemini stream chunk: {}", e),
+        message: format!("Failed to parse Gemini stream chunk: {e}"),
         raw: Some(payload.to_string()),
     })?;
 
@@ -1155,7 +1155,7 @@ async fn http_error_from_response(response: reqwest::Response) -> ModelError {
         return ModelError::Backend(BackendError::ProviderError {
             provider: "gemini".to_string(),
             code,
-            message: format!("{}{}", msg, suffix),
+            message: format!("{msg}{suffix}"),
             debug: debug.clone(),
         });
     }
@@ -1600,7 +1600,7 @@ mod tests {
                 assert!(levels.contains(&ReasoningLevel::Minimal));
                 assert!(levels.contains(&ReasoningLevel::Max));
             },
-            other => panic!("expected Levels, got {:?}", other),
+            other => panic!("expected Levels, got {other:?}"),
         }
     }
 
@@ -2226,7 +2226,7 @@ mod tests {
                 assert_eq!(code.as_deref(), Some("RESOURCE_EXHAUSTED"));
                 assert!(message.contains("Resource exhausted"));
             },
-            other => panic!("expected ProviderError, got {:?}", other),
+            other => panic!("expected ProviderError, got {other:?}"),
         }
     }
 

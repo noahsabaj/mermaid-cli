@@ -477,7 +477,7 @@ fn wrap_assistant_content(
         // Add role indicator to first line or 2-space margin to others.
         let mut spans = if line_idx == 0 {
             vec![Span::styled(
-                format!("{} ", role_prefix),
+                format!("{role_prefix} "),
                 Style::new().fg(role_color).bold(),
             )]
         } else {
@@ -928,7 +928,7 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
 
                             let mut spans = vec![
                                 Span::styled(
-                                    format!("{} ", role_prefix),
+                                    format!("{role_prefix} "),
                                     Style::new().fg(role_color).bold(),
                                 ),
                                 Span::raw(text_content.to_string()),
@@ -1389,7 +1389,7 @@ fn render_actions(
 
                         let preview_content = preview_lines.join("\n");
                         let mut parsed = parse_markdown(
-                            &format!("```\n{}\n```", preview_content),
+                            &format!("```\n{preview_content}\n```"),
                             theme,
                             viewport_width.saturating_sub(4),
                         );
@@ -1447,7 +1447,7 @@ fn render_actions(
                                 DiffLineKind::Removed => {
                                     push_wrapped_diff_rows(
                                         lines,
-                                        format!("    {}", diff_line),
+                                        format!("    {diff_line}"),
                                         Style::new()
                                             .fg(theme.colors.error.to_color())
                                             .bg(removed_bg),
@@ -1457,7 +1457,7 @@ fn render_actions(
                                 DiffLineKind::Added => {
                                     push_wrapped_diff_rows(
                                         lines,
-                                        format!("    {}", diff_line),
+                                        format!("    {diff_line}"),
                                         Style::new()
                                             .fg(theme.colors.success.to_color())
                                             .bg(added_bg),
@@ -1488,7 +1488,7 @@ fn render_actions(
                             lines.push(Line::from(vec![
                                 Span::styled("    ", Style::new().fg(action_color)),
                                 Span::styled(
-                                    format!("... ({} more lines)", remaining),
+                                    format!("... ({remaining} more lines)"),
                                     Style::new()
                                         .fg(theme.colors.text_disabled.to_color())
                                         .italic(),
@@ -1500,7 +1500,7 @@ fn render_actions(
             },
             ActionResult::Error { error } => {
                 let error =
-                    append_action_duration(format!("Error: {}", error), action.duration_seconds);
+                    append_action_duration(format!("Error: {error}"), action.duration_seconds);
                 // Word-wrap so the full error body (an HTTP error JSON can run
                 // hundreds of cells) is readable instead of clipped at the
                 // viewport edge. Multi-line errors keep their own rows.
@@ -1701,7 +1701,7 @@ fn format_action_duration(seconds: f64) -> String {
     if seconds < 1.0 {
         format!("{}ms", (seconds * 1000.0).round().max(1.0) as u64)
     } else if seconds < 10.0 {
-        format!("{:.1}s", seconds)
+        format!("{seconds:.1}s")
     } else {
         format!("{}s", seconds.round() as u64)
     }
@@ -1797,9 +1797,7 @@ mod tests {
         let removed_bg = theme.colors.diff_removed_bg.to_color();
         // Lines at increasing tab depth — the exact shape that staircased.
         let diff = format!(
-            "  62{m}\tconst out = [];\n  63{p}\t\tlet fixed = false;\n  64{p}\t\t\tdeeplyNested();",
-            m = DIFF_REMOVED_MARKER,
-            p = DIFF_ADDED_MARKER
+            "  62{DIFF_REMOVED_MARKER}\tconst out = [];\n  63{DIFF_ADDED_MARKER}\t\tlet fixed = false;\n  64{DIFF_ADDED_MARKER}\t\t\tdeeplyNested();"
         );
         let action = ActionDisplay {
             action_type: "Update".to_string(),

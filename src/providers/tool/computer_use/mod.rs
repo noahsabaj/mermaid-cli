@@ -177,7 +177,7 @@ pub(super) fn computer_use_success(
     output: String,
     duration_secs: f64,
 ) -> ToolOutcome {
-    ToolOutcome::success(output, format!("{} completed", action), duration_secs).with_metadata(
+    ToolOutcome::success(output, format!("{action} completed"), duration_secs).with_metadata(
         ToolRunMetadata {
             detail: ToolMetadata::ComputerUse {
                 action: action.to_string(),

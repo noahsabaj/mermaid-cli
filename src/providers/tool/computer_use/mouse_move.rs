@@ -90,7 +90,7 @@ impl ToolExecutor for MouseMoveTool {
         };
         if let Err(e) = res {
             return ToolOutcome::error(
-                format!("mouse_move failed: {}", e),
+                format!("mouse_move failed: {e}"),
                 started.elapsed().as_secs_f64(),
             );
         }
@@ -98,7 +98,7 @@ impl ToolExecutor for MouseMoveTool {
         computer_use_success(
             "mouse_move",
             args,
-            format!("Moved to ({}, {}) [screen: ({}, {})]", x, y, sx, sy),
+            format!("Moved to ({x}, {y}) [screen: ({sx}, {sy})]"),
             started.elapsed().as_secs_f64(),
         )
     }
