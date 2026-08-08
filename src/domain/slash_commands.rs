@@ -492,6 +492,109 @@ pub fn filter_by_prefix(typed: &str) -> Vec<&'static SlashCommand> {
         .collect()
 }
 
+/// Parse a slash-command input line (without the leading `/`) into a
+/// `SlashCmd`. Returns `SlashCmd::Unknown` if the command isn't in
+/// the registry. Shared between the TUI dispatcher (C8) and any
+/// non-interactive command dispatch.
+pub fn parse_slash_command(raw: &str) -> crate::domain::SlashCmd {
+    use crate::domain::SlashCmd;
+    let trimmed = raw.trim();
+    let (name, arg) = match trimmed.split_once(' ') {
+        Some((n, a)) => (n.to_lowercase(), Some(a.trim().to_string())),
+        None => (trimmed.to_lowercase(), None),
+    };
+
+    // Route through the registry so command aliases (/q → /quit) work.
+    use COMMAND_REGISTRY;
+    let canonical = COMMAND_REGISTRY
+        .iter()
+        .find(|c| c.name == name.as_str() || c.aliases.contains(&name.as_str()))
+        .map(|c| c.name);
+
+    match canonical {
+        Some("model") => SlashCmd::Model(arg),
+        Some("reasoning") => match arg.as_deref() {
+            None => SlashCmd::Reasoning(None),
+            Some(level) => SlashCmd::Reasoning(mermaid_model::models::ReasoningLevel::parse(level)),
+        },
+        Some("visible-reasoning") => SlashCmd::VisibleReasoning(arg),
+        Some("safety") => match arg.as_deref() {
+            None => SlashCmd::Safety(None),
+            // Invalid value ⇒ `None` ⇒ the reducer shows current + options.
+            Some(mode) => {
+                SlashCmd::Safety(mermaid_runtime::SafetyMode::parse(&mode.to_lowercase()))
+            },
+        },
+        Some("plan") => SlashCmd::Plan(arg),
+        Some("config") => SlashCmd::Config,
+        Some("clear") => SlashCmd::Clear,
+        Some("save") => SlashCmd::Save(arg),
+        Some("load") => SlashCmd::Load(arg),
+        Some("list") => SlashCmd::List,
+        Some("usage") => SlashCmd::Usage,
+        Some("todos") => SlashCmd::Todos(arg),
+        Some("scratchpad") => SlashCmd::Scratchpad,
+        Some("context") => {
+            use crate::domain::ContextCmd;
+            let a = arg.as_deref().map(str::trim);
+            SlashCmd::Context(match a {
+                None | Some("") => ContextCmd::Show,
+                Some("auto") => ContextCmd::Auto,
+                Some("max") | Some("full") => ContextCmd::Max,
+                Some(s) => {
+                    if let Some(rest) = s.strip_prefix("offload") {
+                        match rest.trim() {
+                            "on" | "true" | "enable" | "yes" => ContextCmd::Offload(true),
+                            "off" | "false" | "disable" | "no" | "" => ContextCmd::Offload(false),
+                            // "offload garbage" → just show.
+                            _ => ContextCmd::Show,
+                        }
+                    } else if let Ok(n) = s.parse::<u32>() {
+                        ContextCmd::Set(n)
+                    } else {
+                        // Unrecognized arg → show (self-documenting report).
+                        ContextCmd::Show
+                    }
+                },
+            })
+        },
+        Some("compact") => SlashCmd::Compact(arg),
+        Some("memory") => SlashCmd::Memory,
+        Some("remember") => SlashCmd::Remember(arg),
+        Some("forget") => SlashCmd::Forget(arg),
+        Some("consolidate-memory") => SlashCmd::ConsolidateMemory,
+        Some("doctor") => SlashCmd::Doctor,
+        Some("tasks") => SlashCmd::Tasks,
+        Some("task") => SlashCmd::Task(arg),
+        Some("pause") => SlashCmd::Pause(arg),
+        Some("resume") => SlashCmd::Resume(arg),
+        Some("cancel") => SlashCmd::Cancel(arg),
+        Some("handoff") => SlashCmd::Handoff(arg),
+        Some("report") => SlashCmd::Report(arg),
+        Some("agents") => SlashCmd::Agents(arg),
+        Some("processes") => SlashCmd::Processes,
+        Some("logs") => SlashCmd::Logs(arg),
+        Some("stop") => SlashCmd::Stop(arg),
+        Some("restart") => SlashCmd::Restart(arg),
+        Some("open") => SlashCmd::Open(arg),
+        Some("ports") => SlashCmd::Ports,
+        Some("approvals") => SlashCmd::Approvals,
+        Some("approve") => SlashCmd::Approve(arg),
+        Some("deny") => SlashCmd::Deny(arg),
+        Some("checkpoint") => SlashCmd::Checkpoint(arg),
+        Some("checkpoints") => SlashCmd::Checkpoints,
+        Some("restore") => SlashCmd::Restore(arg),
+        Some("plugins") => SlashCmd::Plugins,
+        Some("model-info") => SlashCmd::ModelInfo(arg),
+        Some("cloud-setup") => SlashCmd::CloudSetup,
+        Some("theme") => SlashCmd::Theme(arg),
+        Some("editor") => SlashCmd::Editor,
+        Some("help") => SlashCmd::Help,
+        Some("quit") => SlashCmd::Quit,
+        _ => SlashCmd::Unknown(name),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

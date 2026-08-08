@@ -1127,7 +1127,7 @@ impl EffectRunner {
                     let name = memory_title_from_text(&text);
                     let status = match crate::app::memory::write_memory(
                         &workdir,
-                        crate::app::memory::MemoryScope::ProjectPrivate,
+                        crate::domain::MemoryScope::ProjectPrivate,
                         &name,
                         &text,
                         &[],

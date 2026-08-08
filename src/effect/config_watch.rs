@@ -13,8 +13,10 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::app::instructions::{self, LoadedInstructions, ReloadOutcome};
-use crate::app::memory::{self, LoadedMemory, MemoryReloadOutcome};
+use crate::app::instructions::{self, ReloadOutcome};
+use crate::app::memory::{self, MemoryReloadOutcome};
+use crate::domain::LoadedInstructions;
+use crate::domain::LoadedMemory;
 use crate::domain::MemoryConfig;
 use crate::domain::Msg;
 

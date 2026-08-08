@@ -14,6 +14,7 @@ pub mod checklist;
 pub mod cmd;
 pub mod compaction;
 pub mod config;
+pub mod context;
 pub mod conversation;
 pub mod file_mention;
 pub mod image_token;
@@ -46,6 +47,10 @@ pub use config::{
     PlanPermissions, PlanPostApprove, SafetyConfig, SearchBackend, SessionFlags, ThemeChoice,
     TransportKind, UiConfig, UserProviderConfig, WebConfig,
 };
+pub use context::{
+    InstructionSource, LoadedInstructions, LoadedMemory, LoadedSkills, MemoryEntry, MemoryScope,
+    SkillEntry, SkillSource,
+};
 pub use conversation::ConversationHistory;
 pub use mermaid_model::action::{ActionDetails, ActionDisplay, ActionResult};
 pub use mermaid_model::ids::{ToolCallId, TurnId};
@@ -66,7 +71,9 @@ pub use runtime::{
     ProviderCapabilitySnapshot, RuntimeSignal, RuntimeState, RuntimeTimelineEvent,
     RuntimeTimelineKind,
 };
-pub use slash_commands::{COMMAND_GROUPS, COMMAND_REGISTRY, SlashCommand, filter_by_prefix};
+pub use slash_commands::{
+    COMMAND_GROUPS, COMMAND_REGISTRY, SlashCommand, filter_by_prefix, parse_slash_command,
+};
 pub use state::{
     AdvertisedContext, ApprovalChoice, ApprovalKind, Attachment, Confirmation, ConfirmationTarget,
     ContextUsageSnapshot, ConversationSummary, GenPhase, LiveToolStatus, McpServerEntry,

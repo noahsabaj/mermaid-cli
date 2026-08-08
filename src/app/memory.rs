@@ -16,9 +16,10 @@
 //! load/refresh, and the write/delete primitives the memory tool and slash
 //! commands build on.
 
+use crate::domain::{LoadedMemory, MemoryEntry, MemoryScope};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
 use crate::domain::MemoryConfig;
 use mermaid_model::constants::MEMORY_INDEX_TRUNCATION_MARKER;
@@ -30,16 +31,6 @@ const MAX_WALK_DEPTH: usize = 32;
 /// refresh. A single fact is tiny; this only bounds a pathological/huge file so
 /// `refresh()` can't be made to slurp unbounded bytes every turn (F47).
 const MAX_MEMORY_FILE_BYTES: usize = 64_000;
-
-/// Where a memory lives. The *directory* is authoritative; the frontmatter
-/// `scope` field is advisory/portable metadata so a hand-moved file is still
-/// classified by its location.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum MemoryScope {
-    Global,
-    ProjectPrivate,
-    ProjectShared,
-}
 
 impl MemoryScope {
     /// Kebab token used in frontmatter and the `scope` tool argument.
@@ -59,28 +50,6 @@ impl MemoryScope {
             MemoryScope::ProjectShared => "Project (shared)",
         }
     }
-}
-
-/// One memory file's index entry. Deliberately holds no body — the full fact
-/// is read on demand via `read_file` on `path`, keeping the always-loaded
-/// snapshot small.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct MemoryEntry {
-    pub name: String,
-    pub description: String,
-    pub path: PathBuf,
-    pub scope: MemoryScope,
-    pub mtime: SystemTime,
-}
-
-/// Snapshot of all loaded memory across scopes plus the rendered index block.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct LoadedMemory {
-    pub entries: Vec<MemoryEntry>,
-    /// Pre-rendered `# Memory` block injected into the prompt (capped).
-    pub index: String,
-    /// True when the index exceeded the cap and was clipped.
-    pub truncated: bool,
 }
 
 impl LoadedMemory {
@@ -562,6 +531,7 @@ mod tests {
     use mermaid_model::constants::MAX_MEMORY_INDEX_BYTES;
     use std::fs;
     use std::sync::Mutex;
+    use std::time::SystemTime;
 
     static FS_LOCK: Mutex<()> = Mutex::new(());
 

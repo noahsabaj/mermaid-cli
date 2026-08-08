@@ -2561,7 +2561,7 @@ fn submit_current_input(state: &mut State) {
             });
             return;
         }
-        let slash = crate::app::event_source::parse_slash_command(rest);
+        let slash = crate::domain::parse_slash_command(rest);
         state.ui.input_buffer.clear();
         state.ui.input_cursor = 0;
         state.ui.palette_cursor = None;
@@ -8877,7 +8877,7 @@ mod tests {
                 .unwrap_or(false)
         );
         // With memory → the auto-derived index is composed into the suffix.
-        state.memory = Some(crate::app::memory::LoadedMemory {
+        state.memory = Some(crate::domain::LoadedMemory {
             entries: Vec::new(),
             index: "# Memory\n\n## Global (all projects)\n- [pnpm] use pnpm — /m/pnpm.md\n"
                 .to_string(),
@@ -8901,7 +8901,7 @@ mod tests {
                 .unwrap_or(false)
         );
         // With skills → the pre-rendered index is composed into the suffix.
-        state.skills = Some(crate::app::skills::LoadedSkills {
+        state.skills = Some(crate::domain::LoadedSkills {
             entries: Vec::new(),
             index: "# Skills\n\n- [deploy] Ship a release — /s/deploy/SKILL.md (project)\n"
                 .to_string(),

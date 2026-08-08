@@ -21,7 +21,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::app::instructions::LoadedInstructions;
+use crate::domain::LoadedInstructions;
 use crate::domain::McpServerConfig;
 use mermaid_model::models::tool_call::ToolCall as ModelToolCall;
 use mermaid_model::models::{
@@ -289,7 +289,7 @@ pub enum Msg {
     /// `MERMAID.md` loaded / changed / removed since last check.
     InstructionsChanged(Option<LoadedInstructions>),
     /// Memory files loaded / changed / removed since last check.
-    MemoryChanged(Option<crate::app::memory::LoadedMemory>),
+    MemoryChanged(Option<crate::domain::LoadedMemory>),
     /// `save_conversation` finished.
     SessionSaved,
     /// `/load <id>` — a saved conversation has been read off disk.

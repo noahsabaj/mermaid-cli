@@ -3,10 +3,7 @@
 # Debt that predates the guard. This file may only SHRINK.
 # Regenerate with: just ratchet
 #
-# 6 keys / 12 occurrences
+# 3 keys / 6 occurrences
 impure|src/domain/state.rs|std::env 1
 impure|src/render/mod.rs|std::env 4
 impure|src/render/widgets/chat.rs|chrono now 1
-layer|src/domain/msg.rs|app 2
-layer|src/domain/reducer.rs|app 1
-layer|src/domain/state.rs|app 3

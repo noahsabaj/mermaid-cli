@@ -26,7 +26,7 @@ pub use config::{
     persist_plan_config, persist_reasoning_for_model, persist_ui_theme, remove_user_config_key,
     resolve_model_id, update_user_config_key,
 };
-pub use event_source::{event_to_msg, parse_slash_command};
+pub use event_source::event_to_msg;
 pub use lifecycle::RuntimeLifecycle;
 pub use recorder::{
     RECORDING_FORMAT_VERSION, RecordLine, Recorder, Replay, ReplayEntry, SessionHeader,

@@ -12,8 +12,9 @@
 //! file is gone, drop the instructions. One stat per turn is
 //! microseconds — no need for a filesystem watcher.
 
+use crate::domain::{InstructionSource, LoadedInstructions};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
 use mermaid_model::constants::{INSTRUCTIONS_TRUNCATION_MARKER, MAX_INSTRUCTIONS_BYTES};
 
@@ -26,39 +27,6 @@ pub const INSTRUCTION_FILENAMES: &[&str] = &["AGENTS.md", "MERMAID.md"];
 /// Hard cap on how many directory levels `find_instruction_files` walks up
 /// before giving up. Guards against pathological symlink loops.
 const MAX_WALK_DEPTH: usize = 32;
-
-/// One loaded instruction file inside a combined project-instructions
-/// snapshot.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct InstructionSource {
-    pub path: PathBuf,
-    pub mtime: SystemTime,
-    pub byte_len: usize,
-}
-
-/// One-shot snapshot of loaded project instructions. Stored on `App` and
-/// `NonInteractiveRunner` so the per-turn auto-reload check has
-/// something to compare against.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct LoadedInstructions {
-    /// Primary absolute path the content was read from. Kept for
-    /// compatibility with older renderer/status code; `sources`
-    /// carries the full set.
-    pub path: PathBuf,
-    /// File body, possibly truncated. The truncation marker is
-    /// appended in-place so the model sees the elision.
-    pub content: String,
-    /// mtime at last read — compared against the next `stat()` to
-    /// decide whether to re-read.
-    pub mtime: SystemTime,
-    /// Original file size on disk (before any truncation).
-    pub byte_len: usize,
-    /// True when the file was larger than `MAX_INSTRUCTIONS_BYTES`
-    /// and the content was clipped + marker appended.
-    pub truncated: bool,
-    /// All files that contributed to `content`.
-    pub sources: Vec<InstructionSource>,
-}
 
 impl LoadedInstructions {
     /// Approximate token count for status messages. ~4 chars/token is
@@ -333,8 +301,8 @@ pub fn load_project_context(
     mem_cfg: &crate::domain::MemoryConfig,
 ) -> (
     Option<LoadedInstructions>,
-    Option<crate::app::memory::LoadedMemory>,
-    Option<crate::app::skills::LoadedSkills>,
+    Option<crate::domain::LoadedMemory>,
+    Option<crate::domain::LoadedSkills>,
 ) {
     let (instructions, _) = refresh(None, cwd);
     let (memory, _) = crate::app::memory::refresh(None, cwd, mem_cfg);

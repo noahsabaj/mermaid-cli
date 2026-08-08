@@ -21,8 +21,8 @@ use std::time::SystemTime;
 
 use chrono::{DateTime, Local};
 
-use crate::app::instructions::LoadedInstructions;
 use crate::domain::ConversationHistory;
+use crate::domain::LoadedInstructions;
 use crate::domain::{Config, McpServerConfig};
 use mermaid_model::models::ChatMessage;
 use mermaid_model::models::tool_call::ToolCall as ModelToolCall;
@@ -53,11 +53,11 @@ pub struct State {
     /// Durable semantic memory snapshot (auto-derived index + entries),
     /// refreshed per turn like `instructions`. Its index is injected into the
     /// model prompt alongside project instructions.
-    pub memory: Option<crate::app::memory::LoadedMemory>,
+    pub memory: Option<crate::domain::LoadedMemory>,
     /// Discovered SKILL.md playbooks (project/user/plugin) plus the rendered
     /// index injected into the model prompt alongside instructions and memory.
     /// Loaded once at startup — skills are authored artifacts, not live state.
-    pub skills: Option<crate::app::skills::LoadedSkills>,
+    pub skills: Option<crate::domain::LoadedSkills>,
     /// Context strings injected by `before_tool_use` plugin hooks
     /// (`additionalContext`), buffered until the next dispatched model
     /// request consumes them (see `push_call_model`). Byte-capped; transient

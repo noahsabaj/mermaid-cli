@@ -11,6 +11,7 @@
 //! Loading is startup-only (no watcher): skills are rarely-edited authored
 //! artifacts; restart to pick up changes.
 
+use crate::domain::{LoadedSkills, SkillEntry, SkillSource};
 use std::path::{Path, PathBuf};
 
 /// Hard cap on indexed skills — the index is prompt real estate.
@@ -23,17 +24,6 @@ const MAX_INDEX_BYTES: usize = 8 * 1024;
 /// model reads the full body itself on activation.
 const MAX_SKILL_FILE_BYTES: usize = 8 * 1024;
 
-/// Where a skill was discovered — also its precedence class (project wins).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SkillSource {
-    /// `<git-root>/.mermaid/skills/<name>/SKILL.md` — shared with the team.
-    Project,
-    /// `<config_dir>/skills/<name>/SKILL.md` — this machine's user.
-    User,
-    /// Declared by an enabled plugin's manifest `skills` list.
-    Plugin,
-}
-
 impl SkillSource {
     /// Short label rendered in the index so the model (and the user reading a
     /// transcript) can see where each playbook comes from.
@@ -44,30 +34,6 @@ impl SkillSource {
             SkillSource::Plugin => "plugin",
         }
     }
-}
-
-/// One discovered skill: index metadata plus the absolute SKILL.md path the
-/// model reads on activation.
-#[derive(Debug, Clone)]
-pub struct SkillEntry {
-    /// Frontmatter `name:`, falling back to the skill's directory name.
-    pub name: String,
-    /// Frontmatter `description:`, falling back to the first body line.
-    pub description: String,
-    /// Absolute path to the SKILL.md file.
-    pub path: PathBuf,
-    /// Discovery origin (and precedence class).
-    pub source: SkillSource,
-}
-
-/// Snapshot of all discovered skills plus the pre-rendered index block that
-/// `build_chat_request` injects into the instructions suffix.
-#[derive(Debug, Clone)]
-pub struct LoadedSkills {
-    /// Deduplicated entries in precedence order (project, user, plugin).
-    pub entries: Vec<SkillEntry>,
-    /// The rendered `# Skills` block (capped; see `render_index`).
-    pub index: String,
 }
 
 /// Discover every skill visible from `cwd`, or `None` when there are none.
