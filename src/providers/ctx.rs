@@ -59,6 +59,18 @@ impl WebByteBudget {
     /// fixed per-turn limit. An overflowing charge atomically saturates the
     /// counter so every later response observes an exhausted budget before it
     /// polls another body.
+    // Nightly renamed `fetch_update` to `try_update` and deprecated the old
+    // name. `try_update` is not stable, so the call cannot be migrated yet and
+    // the deprecation cannot be avoided — and since the `[lints.rust]
+    // warnings = "deny"` table landed in every manifest, a warning the nightly
+    // toolchain emits is a hard error in the test build now, not only in
+    // clippy. That is what turned this into a red nightly leg.
+    //
+    // `#[allow]` and not `#[expect]`: on stable there is no deprecation to
+    // fulfil, so an expectation would itself become the warning on the
+    // toolchain that matters most. Delete both of these once `try_update`
+    // reaches the MSRV.
+    #[allow(deprecated, reason = "try_update is not stable yet; see above")]
     pub fn charge(&self, bytes: usize) -> Result<usize, usize> {
         let limit = mermaid_model::constants::MAX_WEB_TURN_BYTES;
         let prior = self

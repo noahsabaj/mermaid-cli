@@ -862,6 +862,9 @@ impl ProvisionLock {
         Ok(())
     }
 
+    // See `WebByteBudget::charge` for why this is `#[allow(deprecated)]`
+    // rather than a rename or an `#[expect]`.
+    #[allow(deprecated, reason = "try_update is not stable yet")]
     fn write_heartbeat_claimed(&self) -> Result<()> {
         self.verify_owner_claimed()?;
         let previous = self
