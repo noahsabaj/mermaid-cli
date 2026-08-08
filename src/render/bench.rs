@@ -62,6 +62,7 @@ fn state_with(pairs: usize, marker: bool, continuation: bool) -> State {
         std::path::PathBuf::from("/project/demo"),
         "ollama/test".to_string(),
         fixed_now(),
+        std::path::PathBuf::from("/tmp"),
     );
     let now = fixed_now();
     for i in 0..pairs {
@@ -105,9 +106,7 @@ fn summarize(samples: &[Duration]) -> Stats {
 fn time_idle_frames(state: &State) -> Stats {
     let backend = TestBackend::new(SIZE.0, SIZE.1);
     let mut terminal = Terminal::new(backend).expect("terminal");
-    let mut cache = RenderCache::new();
-    cache.hostname = "benchhost".to_string();
-    cache.username = "benchuser".to_string();
+    let mut cache = RenderCache::new("benchhost".to_string(), "benchuser".to_string());
 
     for _ in 0..WARMUP {
         terminal
@@ -184,7 +183,7 @@ fn chat_widget_share_of_the_frame() {
         let state = state_with(pairs, true, false);
         let frame = time_idle_frames(&state);
 
-        let mut cache = RenderCache::new();
+        let mut cache = RenderCache::new("benchhost".to_string(), "benchuser".to_string());
         let area = Rect::new(0, 0, SIZE.0, SIZE.1);
         let mut buf = Buffer::empty(area);
         let messages = state.session.messages();
@@ -200,6 +199,7 @@ fn chat_widget_share_of_the_frame() {
                 wrapped_line_cache: &mut cache.wrapped_line_cache,
                 show_reasoning: false,
                 blink_on: false,
+                today: fixed_now().date_naive(),
             };
             // SAFETY-free split borrow: chat state is a separate field.
             let mut chat = std::mem::take(&mut cache.chat);

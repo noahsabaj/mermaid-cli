@@ -9,6 +9,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The layering baseline is empty: 3 keys / 6 occurrences to 0 / 0.** The
+  guard landed with its recorded debt intact; this pays the last of it, so
+  `layering.txt` is now an assertion rather than an allowance.
+
+  Three reads, all of them injected instead of deleted, because each value is
+  genuinely needed by the pure code that consumed it:
+
+  `env::temp_dir()` in `State::new` — the reducer joins it into pasted-image
+  scratch paths, which is pure path construction over an impure input. It is
+  now a `State::new` parameter, passed by the shell, alongside `cwd` and `now`.
+  It sits last in the argument list rather than beside `cwd`: two adjacent
+  `PathBuf` parameters are silently swappable and nothing in the type system
+  would catch it.
+
+  `HOSTNAME`/`HOST` and `USER`/`USERNAME` in `RenderCache::default` — the
+  status bar's `user@host`. `RenderCache::new` now takes them; `app::run`
+  reads the environment. The `Default` impl is gone rather than kept beside
+  the new constructor.
+
+  `chrono::Local::now()` in the chat widget's frame-memo key — a user
+  timestamp renders as "Today"/"Yesterday"/an absolute date, so the date is a
+  real render input. It arrives as `ChatWidget::today`, derived from the
+  injected `state.now` by the same route `blink_on` already took.
+
+  That last one purifies the *key*, not yet the label: the string itself comes
+  from `mermaid_model::utils::format_relative_timestamp`, which still calls
+  `Local::now()` internally. `mermaid-model` is outside the layering guard's
+  scope, so this is the honest edge of what "0 occurrences" claims — the render
+  tree no longer reads the clock, and one crate below it still does. Live, the
+  two agree, because `state.now` is re-seeded from the wall clock every loop
+  iteration. Threading the date through the formatter as well would change what
+  the snapshot suite renders (its fixture date is deliberately in the past so
+  every user timestamp falls through to the absolute-date branch), so it is a
+  separate change.
+
+  The snapshot and bench rigs previously pinned `hostname`/`username` by
+  assigning over the environment-derived values after construction. They now
+  pass them, and the three render tests that took whatever machine they ran on
+  pass pinned literals too.
+
 - **The purity guard now checks dependency direction, not just I/O tokens.**
   `check_domain_purity.py` scanned `src/domain` for seven strings —
   `std::fs`, `tokio::`, `reqwest`, and friends. `use crate::app::Config`
@@ -22,9 +62,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   It also read less of the tree than it appeared to. It truncated each file at
   the first `#[cfg(test)]`, so it scanned 43% of `reducer.rs`; and its `ROOT`
   was `src/domain` alone, so `src/render` was never scanned at all despite
-  AGENTS.md claiming CI enforced its purity. `src/render` is not pure:
-  `chrono::Local::now()` sits in a render cache key and `std::env::var` is read
-  per frame.
+  AGENTS.md claiming CI enforced its purity. `src/render` was not pure when
+  the guard first scanned it: `chrono::Local::now()` sat in a render cache key
+  and `std::env::var` fed the status bar. (Both are gone — see the layering
+  baseline entry above, which lands in this same release.)
 
   `.github/scripts/check_layering.py` replaces it. It covers `src/domain`,
   `src/render`, and `src/prompts.rs`; enforces a declared layer table so an

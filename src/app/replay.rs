@@ -140,6 +140,7 @@ fn fold(header: &SessionHeader, msgs: &[(usize, DateTime<Local>, Msg)]) -> (Stat
         header.cwd.clone(),
         header.model_id.clone(),
         header.ts,
+        std::env::temp_dir(),
     );
     if let Some(seed) = header.seed_conversation.clone() {
         state.seed_conversation(seed);
@@ -321,7 +322,13 @@ mod tests {
         r.record_header(&h).expect("header");
         // Fold while recording, exactly like the live driver: one shared
         // clock per entry, and the trailer seals the final session.
-        let mut state = State::new(h.config.clone(), h.cwd.clone(), h.model_id.clone(), h.ts);
+        let mut state = State::new(
+            h.config.clone(),
+            h.cwd.clone(),
+            h.model_id.clone(),
+            h.ts,
+            PathBuf::from("/tmp"),
+        );
         let script: Vec<(i64, Msg)> = vec![
             (
                 1,

@@ -63,13 +63,12 @@ fn fixed_now() -> chrono::DateTime<chrono::Local> {
         .expect("fixture wall clock exists in the local timezone")
 }
 
-/// A `RenderCache` with the process-environment and compile-time reads pinned
-/// (the status bar renders `user@host` and `mermaid v<version>`; a pinned
-/// version keeps the suite immune to release bumps).
+/// A `RenderCache` with the status bar's machine-dependent values pinned: it
+/// renders `user@host` and `mermaid v<version>`. `user@host` is pinned by
+/// construction now that `RenderCache::new` takes it; the version is still
+/// assigned over, which keeps the suite immune to release bumps.
 fn snapshot_cache() -> RenderCache {
-    let mut cache = RenderCache::new();
-    cache.hostname = "snaphost".to_string();
-    cache.username = "snapuser".to_string();
+    let mut cache = RenderCache::new("snaphost".to_string(), "snapuser".to_string());
     cache.version = "0.0.0".to_string();
     cache
 }
@@ -82,6 +81,7 @@ fn scene_state() -> State {
         std::path::PathBuf::from("/project/demo"),
         "ollama/test".to_string(),
         fixed_now(),
+        std::path::PathBuf::from("/tmp"),
     )
 }
 

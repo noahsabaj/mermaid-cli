@@ -1,4 +1,5 @@
 use crate::render::wrap::{wrap_styled_line, wrap_text_with_indent};
+use chrono::NaiveDate;
 use std::hash::{Hash, Hasher};
 
 use ratatui::{
@@ -421,6 +422,19 @@ pub struct ChatWidget<'a> {
     /// by the frame memo — when no message carries a running action, so idle
     /// frames don't reassemble twice a second.
     pub blink_on: bool,
+    /// Today's date, from the injected `state.now` — the same route `blink_on`
+    /// takes, and for the same reason. A user timestamp renders as
+    /// "Today"/"Yesterday"/an absolute date *relative to this*, so it is a real
+    /// render input and belongs in the frame memo key; reading the wall clock
+    /// here instead would make `render()` a function of more than its
+    /// arguments.
+    ///
+    /// This keys the memo, it does not yet produce the label:
+    /// `format_relative_timestamp` still reads `Local::now()` itself, one crate
+    /// down in `mermaid-model`, which the layering guard does not cover. Live
+    /// the two agree, since `state.now` is re-seeded from the wall clock every
+    /// loop iteration.
+    pub today: NaiveDate,
 }
 
 /// Render assistant message content (markdown) into wrapped, role-prefixed
@@ -519,6 +533,7 @@ pub(crate) fn frame_key(
     theme_seed: u64,
     content_width: u16,
     show_reasoning: bool,
+    today: NaiveDate,
 ) -> u64 {
     let mut h = rustc_hash::FxHasher::default();
     content_key.hash(&mut h);
@@ -527,7 +542,8 @@ pub(crate) fn frame_key(
     show_reasoning.hash(&mut h);
     // The day-relative label ("Today"/"Yesterday"/date) on user timestamps
     // changes only at midnight; fold today's date in so the memo refreshes then.
-    chrono::Local::now().date_naive().hash(&mut h);
+    // Passed in rather than read here — see `ChatWidget::today`.
+    today.hash(&mut h);
     h.finish()
 }
 
@@ -631,6 +647,7 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
             theme_seed,
             content_width,
             self.show_reasoning,
+            self.today,
         );
         // Cross-check the O(1) key against the full-content hash it replaced:
         // if the content changed, the key MUST have changed. The converse is
@@ -1695,6 +1712,13 @@ fn format_action_duration(seconds: f64) -> String {
 mod tests {
     use super::*;
 
+    /// A pinned "today" for the widget's day-relative timestamp labels. Fixed
+    /// rather than `Local::now()` so a test that renders a user message asserts
+    /// the same glyphs whatever day it runs on.
+    fn fixed_today() -> NaiveDate {
+        NaiveDate::from_ymd_opt(2026, 1, 2).expect("2026-01-02 is a real date")
+    }
+
     #[test]
     fn question_answers_render_as_question_arrow_answer_block() {
         use mermaid_domain::{QuestionAnswer, ToolMetadata, ToolRunMetadata};
@@ -2044,6 +2068,7 @@ mod tests {
                     wrapped_line_cache: cache,
                     show_reasoning: true,
                     blink_on: true,
+                    today: fixed_today(),
                 };
                 f.render_stateful_widget(widget, Rect::new(0, 0, width, height), &mut state);
             })
@@ -2086,6 +2111,7 @@ mod tests {
                 wrapped_line_cache: &mut cache,
                 show_reasoning: true,
                 blink_on: true,
+                today: fixed_today(),
             };
             f.render_stateful_widget(widget, Rect::new(0, 0, width, height), &mut state);
         })
@@ -2825,6 +2851,7 @@ mod tests {
                     wrapped_line_cache: cache,
                     show_reasoning: true,
                     blink_on: true,
+                    today: fixed_today(),
                 };
                 f.render_stateful_widget(widget, Rect::new(0, 0, width, height), state);
             })

@@ -264,7 +264,13 @@ mod tests {
             mcp_defer_tools: defer_global,
             ..Config::default()
         };
-        let mut state = State::new(config, PathBuf::from("/tmp"), "test/model".into(), now);
+        let mut state = State::new(
+            config,
+            PathBuf::from("/tmp"),
+            "test/model".into(),
+            now,
+            PathBuf::from("/tmp"),
+        );
         for (name, entry) in entries {
             state.mcp.servers.insert(name.to_string(), entry);
         }

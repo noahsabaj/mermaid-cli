@@ -131,7 +131,13 @@ pub async fn run_non_interactive_with(
     let stream_ndjson = opts.stream_ndjson;
     let event_model = model_id.clone();
 
-    let mut state = State::new(config.clone(), cwd.clone(), model_id, chrono::Local::now());
+    let mut state = State::new(
+        config.clone(),
+        cwd.clone(),
+        model_id,
+        chrono::Local::now(),
+        std::env::temp_dir(),
+    );
     // `--resume <id>` / `--continue`: seed the session from the saved
     // conversation (same machinery as the interactive path — meters restored,
     // orphan tool pairs repaired via normalize_history), then backfill
@@ -644,6 +650,7 @@ mod tests {
             std::path::PathBuf::from("/tmp/p"),
             "ollama/test".to_string(),
             chrono::Local::now(),
+            std::path::PathBuf::from("/tmp"),
         );
         state
             .session
@@ -673,6 +680,7 @@ mod tests {
             std::path::PathBuf::from("/tmp/p"),
             "ollama/test".to_string(),
             chrono::Local::now(),
+            std::path::PathBuf::from("/tmp"),
         );
         state.session.append(ChatMessage::user("first"), state.now);
         state
@@ -707,6 +715,7 @@ mod tests {
             std::path::PathBuf::from("/tmp/p"),
             "ollama/test".to_string(),
             chrono::Local::now(),
+            std::path::PathBuf::from("/tmp"),
         );
         state.session.append(ChatMessage::user("q"), state.now);
         state
@@ -790,6 +799,7 @@ mod tests {
             std::path::PathBuf::from("/tmp/p"),
             "ollama/test".to_string(),
             chrono::Local::now(),
+            std::path::PathBuf::from("/tmp"),
         );
         state.session.append(ChatMessage::user("q"), state.now);
         state
