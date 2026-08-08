@@ -42,6 +42,14 @@ array-size-threshold = 512
 # `dbg!` is denied workspace-wide; tests may still use it.
 allow-dbg-in-tests = true
 
+# The tracked `clippy::unwrap_used` count measures SHIPPED code, not the
+# suite. Without this the number was 1,353, of which all but a handful were
+# tests -- `unwrap()` in a test IS the assertion, and the panic is the failure
+# being reported. Counting them made the metric a proxy for suite size and
+# charged every new test against a budget, which is what it had begun doing in
+# practice. Same reasoning as allow-dbg-in-tests above.
+allow-unwrap-in-tests = true
+
 # Words `clippy::doc_markdown` must stop demanding backticks around. The lint is
 # tracked by the ratchet job, not blocking (see `check_clippy_ratchet.py`), and
 # it is the single largest entry in `clippy_pedantic.txt` — but it fires on any

@@ -6,11 +6,11 @@
 # baselines this one is platform-dependent: it records what the compiler
 # actually linted, and four test files plus 99 items under `src/` are
 # `#[cfg(unix)]`. Regenerating on Windows writes a different, wrong file
-# (85 keys / 5378 occurrences) -- take the numbers from the CI log, which
+# (82 keys / 2865 occurrences) -- take the numbers from the CI log, which
 # the guard prints in full on failure.
 # Regenerate with: just clippy-debt-record
 #
-# 80 keys / 4209 occurrences
+# 80 keys / 2877 occurrences
 clippy::assigning_clones 31
 clippy::bool_to_int_with_if 2
 clippy::borrow_as_ptr 2
@@ -86,7 +86,7 @@ clippy::unnested_or_patterns 19
 clippy::unreadable_literal 2
 clippy::unused_async 4
 clippy::unused_self 3
-clippy::unwrap_used 1353
+clippy::unwrap_used 21
 clippy::used_underscore_binding 16
 clippy::useless_let_if_seq 2
 clippy::wildcard_enum_match_arm 175
