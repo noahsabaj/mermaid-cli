@@ -49,7 +49,9 @@ def read_baseline(name: str) -> dict[str, int]:
     return out
 
 
-def write_baseline(name: str, findings: dict[str, int], title: str) -> None:
+def write_baseline(
+    name: str, findings: dict[str, int], title: str, regen: str = "just ratchet"
+) -> None:
     path = BASELINE_DIR / f"{name}.txt"
     path.parent.mkdir(parents=True, exist_ok=True)
     total = sum(findings.values())
@@ -61,7 +63,7 @@ def write_baseline(name: str, findings: dict[str, int], title: str) -> None:
         f"# Ratchet baseline: {title}\n"
         f"#\n"
         f"# Debt that predates the guard. This file may only SHRINK.\n"
-        f"# Regenerate with: just ratchet\n"
+        f"# Regenerate with: {regen}\n"
         f"#\n"
         f"# {len(findings)} keys / {total} occurrences\n"
         f"{body}",
@@ -75,14 +77,21 @@ def ratchet(
     findings: dict[str, int],
     occurrences: dict[str, list[str]],
     argv: list[str],
+    regen: str = "just ratchet",
 ) -> int:
     """Compare `findings` against the recorded baseline and print a verdict.
 
     `occurrences[key]` is a list of `path:line: text` strings for humans; it is
     never persisted, only printed.
+
+    `regen` is the command a failure tells the reader to run. It is a parameter
+    and not a constant because one guard (`check_clippy_ratchet.py`) rebuilds
+    the workspace and so cannot live in `just ratchet` with the instant ones.
+    A message naming the wrong command is worse than none: it sends the reader
+    to a recipe that will not touch the file they were just told to update.
     """
     if "--write-baseline" in argv:
-        write_baseline(name, findings, title)
+        write_baseline(name, findings, title, regen)
         print(
             f"{name}: wrote {len(findings)} keys "
             f"/ {sum(findings.values())} occurrences"
@@ -103,8 +112,8 @@ def ratchet(
             for line in occurrences.get(key, [])[:8]:
                 print(f"      {line}")
         print(
-            "\nFix them, or — if this is deliberate — run `just ratchet` "
-            "and explain the new line in the PR description."
+            f"\nFix them, or — if this is deliberate — run `{regen}` "
+            f"and explain the new line in the PR description."
         )
         return 1
 
@@ -115,7 +124,7 @@ def ratchet(
         for key, count in sorted(better.items()):
             print(f"  {base[key]} -> {count}, lower the number: {key}")
         print(
-            f"\nRun `just ratchet` and commit "
+            f"\nRun `{regen}` and commit "
             f"`.github/baselines/{name}.txt`."
         )
         return 1

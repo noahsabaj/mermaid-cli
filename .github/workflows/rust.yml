@@ -75,6 +75,34 @@ jobs:
         # root package and silently skipped it.
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+  # Tier-2 lint debt: pedantic + nursery + a handful of named lints, tracked
+  # against `.github/baselines/clippy_pedantic.txt` rather than blocking.
+  #
+  # NOT on pull requests, and the reason is measurable: enabling these lints
+  # changes clippy's fingerprint, so this job cannot share the `Clippy` job's
+  # cache and rebuilds the workspace (~200s). "How much pedantic debt is there"
+  # does not change PR-to-PR in a way a merge should wait on. Same trade the
+  # `test` matrix already makes for its beta and nightly legs: the same signal,
+  # arriving within a day, off the critical path.
+  clippy-ratchet:
+    name: Lint Debt (pedantic + nursery)
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: stable
+          components: clippy
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # Its own key: the lint set makes these artifacts useless to the
+          # blocking `Clippy` job, and sharing one key would have each evict
+          # the other's cache on every run.
+          key: clippy-ratchet
+      - name: Pedantic + nursery debt only shrinks
+        run: python3 .github/scripts/check_clippy_ratchet.py
+
   # Build and test on multiple Rust versions and OS
   test:
     name: Test Suite
@@ -169,7 +197,14 @@ jobs:
           RUSTDOCFLAGS: -D warnings -A rustdoc::private_intra_doc_links
         run: cargo doc --no-deps --document-private-items
 
-  # Security audit
+  # Dependency hygiene: advisories, licenses, bans, sources, and deps declared
+  # but never imported. Reads manifests and Cargo.lock; compiles nothing.
+  #
+  # The job keeps the id `security` and the name "Security Audit" even though
+  # its scope is now wider than advisories: "Security Audit" is a REQUIRED
+  # status check on `main`. Renaming it does not fail the gate, it deletes the
+  # gate — the required context stops reporting and every PR waits forever on a
+  # check that no longer exists. Rename the branch-protection context first.
   security:
     name: Security Audit
     runs-on: ubuntu-latest
@@ -180,20 +215,32 @@ jobs:
       # Cargo.lock against an advisory database. That made it 94% as long as
       # the Windows leg — the critical path — for no reason a prebuilt binary
       # doesn't solve. `taiki-e/install-action` downloads one (the same action
-      # already used for nextest), and `cargo audit` is the same tool reading
-      # the same RustSec database, so the verdict is unchanged.
+      # already used for nextest).
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
         with:
           toolchain: stable
       - uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad # v2.85.10
         with:
-          tool: cargo-audit
-      # Plain `cargo audit`, not `--deny warnings`: the action failed on
-      # vulnerabilities and only annotated unmaintained/unsound advisories, and
-      # this job is meant to run exactly as strict as it did before, not one
-      # notch stricter.
-      - name: Audit dependencies
-        run: cargo audit
+          tool: cargo-deny,cargo-machete
+      # `cargo deny` replaced `cargo audit`. It reads the same RustSec
+      # database, so the security verdict is unchanged — `deny.toml` sets
+      # `unmaintained = "workspace"`, which preserves the judgement the old
+      # step encoded by declining `--deny warnings`. What it adds is the three
+      # questions `audit` cannot ask: license compatibility (a transitive GPL
+      # dep in a statically linked `MIT OR Apache-2.0` binary is a licensing
+      # incident, and nothing looked), bans (`openssl-sys` must never reappear
+      # in a deliberately rustls-only build; `wildcards = "deny"` stops
+      # `foo = "*"`), and source provenance. The rationale for each is in
+      # `deny.toml`.
+      - name: Advisories, licenses, bans, sources
+        run: cargo deny check
+      # Declared-but-never-imported dependencies. Not cosmetic here: the root
+      # manifest carried `keyring` and `dbus-secret-service` while every call
+      # site lived in `mermaid-model`, and workspace feature unification kept
+      # `cargo build` green — the same class of gap that half-released v0.21.0
+      # from the other direction.
+      - name: Unused dependencies
+        run: cargo machete
 
   # Every publishable crate must build ALONE, on Linux.
   #
@@ -258,6 +305,8 @@ jobs:
         run: python3 .github/scripts/check_layering.py
       - name: Lint-suppression budget
         run: python3 .github/scripts/check_expect_budget.py
+      - name: Crate-root re-exports have consumers
+        run: python3 .github/scripts/check_exports.py
 
   # Heavier integration coverage that CI's default suite skips: the daemon
   # `#[ignore]`d tests (spawn a real mermaidd) and the deterministic, model-free

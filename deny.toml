@@ -1,0 +1,78 @@
+# cargo-deny configuration.
+#
+# This replaced `cargo audit` in CI. Same RustSec advisory database, so the
+# security verdict is unchanged — but `audit` can only ask one of the four
+# questions below, and the other three had never been asked at all:
+#
+#   licenses  Mermaid ships statically linked binaries under `MIT OR
+#             Apache-2.0`. A transitive GPL dependency is a licensing incident,
+#             and nothing in CI looked.
+#   bans      `openssl-sys` must never reappear: reqwest is configured
+#             `default-features = false, features = ["rustls"]` precisely so
+#             the release binaries carry no OpenSSL. A dependency flipping a
+#             default feature would undo that silently.
+#   sources   Every crate comes from crates.io. A git dependency slipped into a
+#             manifest is not something a reviewer should have to notice.
+#
+# `cargo deny check` runs all four.
+
+[graph]
+# The three platforms CI builds. Without this, cargo-deny evaluates every
+# target in the universe and reports license/ban findings for crates that
+# never link into anything this project ships.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]
+
+[advisories]
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "deny"
+# `workspace`, not `all`. This preserves the judgement the `cargo audit` step
+# already encoded by declining `--deny warnings`: an unmaintained crate buried
+# five levels down is not something a merge should block on, because the fix is
+# not in this repo. An unmaintained crate *this workspace names directly* is,
+# because it is.
+unmaintained = "workspace"
+
+[licenses]
+# Everything the current graph resolves to. Deliberately a list and not a
+# permissive-by-category rule: adding a license here is a decision, and it
+# should look like one in the diff.
+allow = [
+    "MIT",
+    # MIT with the attribution clause dropped — strictly more permissive.
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "MPL-2.0",
+]
+confidence-threshold = 0.8
+
+[bans]
+# Duplicate versions are noise in a graph this size and say nothing about
+# correctness; the checks above are what this file is for.
+multiple-versions = "allow"
+# `foo = "*"` resolves to whatever was published most recently, which makes a
+# build non-reproducible and an audit meaningless.
+wildcards = "deny"
+
+[[bans.deny]]
+crate = "openssl-sys"
+reason = "rustls-only by design; see the reqwest features in Cargo.toml"
+
+[[bans.deny]]
+crate = "openssl"
+reason = "rustls-only by design; see the reqwest features in Cargo.toml"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

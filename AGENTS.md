@@ -42,7 +42,10 @@ tests hold the detail; this is what's easy to get wrong.
   API-stability promise** — they are on crates.io only because `cargo publish`
   cannot resolve an unpublished path dependency. So delete cleanly rather than
   deprecate: no renamed `_vars`, no "removed" tombstone comments, and no
-  `pub use` kept alive for a hypothetical downstream. Breaking a library
+  `pub use` kept alive for a hypothetical downstream. That last clause is the
+  one the compiler cannot help with — a `pub` item is reachable by definition,
+  so `-D warnings` never sees it — and it is why
+  `.github/scripts/check_exports.py` exists. Breaking a library
   signature is free; breaking a CLI flag or an on-disk format needs a CHANGELOG
   entry under `### Changed`.
 - **Keep the CHANGELOG current.** Add an entry under `## [Unreleased]` in the
@@ -72,9 +75,21 @@ appended to would be a place debt goes to be forgotten.
 |---|---|---|
 | `layering.txt` | `check_layering.py` | impurity in `mermaid-domain` and `src/render` |
 | `expect_budget.txt` | `check_expect_budget.py` | every `#[expect]` / `#[allow]` of a clippy lint |
+| `exports.txt` | `check_exports.py` | crate-root `pub use` names with no consumer |
+| `clippy_pedantic.txt` | `check_clippy_ratchet.py` | pedantic + nursery warnings, by lint |
 
 Run `just ratchet` and commit the result. The `N keys / M occurrences` header
 line of each file is the debt counter; it should be going down.
+
+`clippy_pedantic.txt` is the exception to that command and to the guard shape.
+Its lints are *tracked*, not blocking — they are taste categories with real
+false-positive rates — so the job runs off the PR critical path
+(`if: github.event_name != 'pull_request'`), because enabling them changes
+clippy's fingerprint and rebuilds the workspace. It gets its own recipes,
+`just clippy-debt` and `just clippy-debt-record`, so `just ratchet` stays
+instant. It also keys on the lint alone rather than `(lint, file)`: per-file
+keys measure 1,390 entries against 85, and every one of them churns when a file
+is split.
 
 ## Commands
 

@@ -102,6 +102,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   *above* `mermaid-runtime`; sharing a name with the crate it wraps is what made
   `crate::runtime::Foo` ambiguous.
 
+- **A crate-root `pub use` must now have a consumer.**
+  `.github/scripts/check_exports.py` fails on a name re-exported from
+  `src/lib.rs` or `crates/*/src/lib.rs` that nothing in the workspace names.
+  This is the one clause of the "no back-compat shims" rule the compiler cannot
+  help with: a `pub` item is reachable by definition, so `-D warnings` never
+  sees it. The measured cost of not having the check was 34 such names — all
+  twelve `*Repo` types in `mermaid-runtime`'s root, six `OUTCOME_*` constants,
+  and a `redact` forward that had drifted asymmetrically, so
+  `crate::utils::redact_json` resolved while `redact_json_text` did not.
+
+  `cargo-public-api` and `cargo-semver-checks` were both considered and
+  declined: they guard an API these crates explicitly do not promise, and
+  `semver-checks` conflicts outright with the delete-cleanly rule.
+
+- **`cargo deny` replaces `cargo audit`; `cargo machete` joins it.** Same
+  RustSec database, and `deny.toml` sets `unmaintained = "workspace"`, which
+  preserves the judgement the old step encoded by declining `--deny warnings`.
+  Added are the three questions `audit` cannot ask: license compatibility
+  (Mermaid ships static binaries under `MIT OR Apache-2.0` and nothing checked
+  for a transitive copyleft dep), bans (`openssl-sys` must never reappear in a
+  deliberately rustls-only build, and `wildcards = "deny"` stops `foo = "*"`),
+  and source provenance.
+
+  `cargo machete` immediately found five dependencies the root manifest
+  declared and never imported: `bytes`, `regex`, `url`, `nucleo-matcher` — the
+  last three left behind when their code moved down to `mermaid-domain` — plus
+  `keyring` and its companion `dbus-secret-service`, whose every call site is
+  in `mermaid-model`. Workspace feature unification is why `cargo build` never
+  noticed. All six removed; `cargo tree --target x86_64-unknown-linux-gnu`
+  confirms `dbus-secret-service/vendored` and all four keyring features still
+  resolve, now sourced from `mermaid-model` alone.
+
+- **Pedantic and nursery lint debt is tracked.** A `clippy-ratchet` job records
+  `pedantic`, `nursery`, `unwrap_used`, `panic`, `wildcard_enum_match_arm`,
+  `string_slice`, `trivially_copy_pass_by_ref` and `many_single_char_names`
+  against `.github/baselines/clippy_pedantic.txt` — 85 lints, 5,378
+  occurrences. It does not run on pull requests: enabling these lints changes
+  clippy's fingerprint, so the job cannot share the blocking `Clippy` job's
+  cache and rebuilds the workspace, and the answer does not change PR-to-PR.
+  The survey uses `--force-warn` rather than `-W`, because a `deny` in
+  `mermaid-runtime` aborts the build before the crates above it are linted —
+  which is how the first `too_many_lines` count of this workspace came back as
+  3 when the real number was 59.
+
 ### Fixed
 
 - **`cargo doc` accepted broken intra-doc links.** The CI step ran without

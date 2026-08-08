@@ -1,0 +1,6 @@
+# Ratchet baseline: crate-root re-exports
+#
+# Debt that predates the guard. This file may only SHRINK.
+# Regenerate with: just ratchet
+#
+# 0 keys / 0 occurrences
