@@ -27,6 +27,7 @@
 //!     queued-message auto-submit) without self-invoking the
 //!     reducer.
 
+use crate::domain::{ProgressEvent, SubagentPhase};
 use crate::prompts::get_system_prompt;
 use mermaid_model::models::{ChatMessage, MessageRole, ProviderContinuation, TokenUsage};
 use mermaid_runtime::TaskStatus;
@@ -5402,9 +5403,8 @@ fn handle_tool_progress(
     _cmds: &mut Vec<Cmd>,
     turn: TurnId,
     call_id: mermaid_model::ids::ToolCallId,
-    event: crate::providers::ProgressEvent,
+    event: crate::domain::ProgressEvent,
 ) {
-    use crate::providers::{ProgressEvent, SubagentPhase};
     use base64::{Engine as _, engine::general_purpose};
 
     match event {
@@ -7591,7 +7591,7 @@ mod tests {
     /// output lands in chat only when the tool finishes.
     #[test]
     fn tool_progress_output_does_not_append_message() {
-        use crate::providers::ProgressEvent;
+        use crate::domain::ProgressEvent;
         let mut state = fresh_state();
         state.turn = start_generating(TurnId(1), std::time::SystemTime::now());
         let turn = state.current_turn_id().unwrap();
@@ -15698,7 +15698,6 @@ mod tests {
 
     #[test]
     fn subagent_progress_feeds_live_status_and_finish_clears_it() {
-        use crate::providers::{ProgressEvent, SubagentPhase};
         let (state, call_id) = state_executing_agent_call();
 
         // A child tool starting shows as "<tool>…" on the parent call.

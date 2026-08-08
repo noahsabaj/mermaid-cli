@@ -40,7 +40,7 @@ pub fn parse_diff_line(line: &str) -> DiffLineKind {
 /// A rendered display diff plus its change counts. Produced by
 /// [`generate_display_diff`] and carried on tool metadata for the renderer.
 #[derive(Debug, Clone)]
-pub(crate) struct DisplayDiff {
+pub struct DisplayDiff {
     pub display_diff: String,
     pub added: usize,
     pub removed: usize,
@@ -50,14 +50,14 @@ pub(crate) struct DisplayDiff {
 /// Lines of unchanged context shown around a change.
 const DIFF_CONTEXT_LINES: usize = 3;
 /// Hard cap on rendered diff lines so a huge edit can't flood the transcript.
-pub(crate) const MAX_DISPLAY_DIFF_LINES: usize = 220;
+pub const MAX_DISPLAY_DIFF_LINES: usize = 220;
 
 /// Render a line-numbered display diff of `old` → `new`. Emits only changed
 /// lines plus a few lines of surrounding context, each as
 /// `{num:>4}{marker}{content}` using the shared markers so [`parse_diff_line`]
 /// colors it. No unified-diff header lines. Shared by `write_file` and
 /// `apply_patch`.
-pub(crate) fn generate_display_diff(old: &str, new: &str) -> DisplayDiff {
+pub fn generate_display_diff(old: &str, new: &str) -> DisplayDiff {
     let old_lines: Vec<&str> = old.lines().collect();
     let new_lines: Vec<&str> = new.lines().collect();
     let mut prefix = 0usize;

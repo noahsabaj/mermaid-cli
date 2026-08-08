@@ -212,7 +212,7 @@ pub enum Msg {
     ToolProgress {
         turn: TurnId,
         call_id: ToolCallId,
-        event: crate::providers::ProgressEvent,
+        event: crate::domain::ProgressEvent,
     },
     /// Tool finished (one of Finished / Error / Cancelled).
     ToolFinished {

@@ -7,6 +7,7 @@
 //! calls can quote `screenshot_id` to lock their coordinates to this
 //! specific capture.
 
+use crate::domain::ProgressEvent;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -14,7 +15,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::domain::{ToolDefinition, ToolOutcome};
-use crate::providers::ctx::{ExecContext, ProgressEvent};
+use crate::providers::ctx::ExecContext;
 
 use super::super::ToolExecutor;
 use super::computer_use_success;

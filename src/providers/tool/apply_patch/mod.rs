@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 
 use crate::domain::{ToolDefinition, ToolMetadata, ToolOutcome, ToolRunMetadata};
-use crate::render::diff::{DisplayDiff, MAX_DISPLAY_DIFF_LINES, generate_display_diff};
 use mermaid_model::constants::MAX_PATCH_FILE_BYTES;
+use mermaid_model::diff::{DisplayDiff, MAX_DISPLAY_DIFF_LINES, generate_display_diff};
 // The pure patch engine (parser + graduated fuzzy matcher + applier) lives in
 // the runtime crate so the approval-replay path can reuse it without duplication.
 use mermaid_runtime::apply_patch::{Hunk, UpdateFileChunk, derive_new_contents, parse_patch};

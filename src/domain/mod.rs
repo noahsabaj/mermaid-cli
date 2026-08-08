@@ -17,6 +17,7 @@ pub mod file_mention;
 pub mod image_token;
 pub mod msg;
 pub mod plan;
+pub mod progress;
 pub mod reducer;
 pub mod run_event;
 pub mod runtime;
@@ -49,6 +50,7 @@ pub use mermaid_model::tool_run::{
 pub use msg::{
     ClipboardRead, ContextCmd, Key, KeyCode, KeyMods, Msg, MsgKind, Paste, SlashCmd, StartupConfig,
 };
+pub use progress::{ProgressEvent, SubagentPhase};
 pub use reducer::{build_chat_request, update};
 pub use run_event::{RUN_EVENT_PROTOCOL_VERSION, RunEvent};
 pub use runtime::{

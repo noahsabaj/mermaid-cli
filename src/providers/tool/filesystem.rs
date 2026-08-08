@@ -12,6 +12,7 @@
 //! shapes — just wrapped in the new trait so future tools only have
 //! to learn this surface.
 
+use crate::domain::ProgressEvent;
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
@@ -19,7 +20,7 @@ use async_trait::async_trait;
 use crate::domain::{ToolDefinition, ToolMetadata, ToolOutcome, ToolRunMetadata};
 use mermaid_model::constants::MAX_RESPONSE_CHARS as MAX_FILE_READ_BYTES;
 
-use super::super::ctx::{ExecContext, ProgressEvent};
+use super::super::ctx::ExecContext;
 use super::ToolExecutor;
 use super::path_safety::{
     AllowedRoots, ResolvedInRoot, relative_within, resolve_in_roots, resolve_path_within,
@@ -643,7 +644,7 @@ fn write_one_blocking(root: &Path, rel: &Path, content: &str) -> std::io::Result
 struct WriteResult {
     line_count: usize,
     created: bool,
-    diff: crate::render::diff::DisplayDiff,
+    diff: mermaid_model::diff::DisplayDiff,
 }
 
 /// Write `content` and build the display diff against the prior file in ONE
@@ -669,7 +670,7 @@ fn write_with_diff_blocking(
             Err(_) => (String::new(), false, true),
         };
     let diff = if elide_diff {
-        crate::render::diff::DisplayDiff {
+        mermaid_model::diff::DisplayDiff {
             display_diff: format!(
                 "[diff preview skipped: existing file exceeds the {}-byte cap]",
                 MAX_FILE_READ_BYTES
@@ -679,7 +680,7 @@ fn write_with_diff_blocking(
             truncated: true,
         }
     } else {
-        crate::render::diff::generate_display_diff(&old_content, content)
+        mermaid_model::diff::generate_display_diff(&old_content, content)
     };
     let line_count = write_one_blocking(root, rel, content)?;
     Ok(WriteResult {

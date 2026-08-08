@@ -14,7 +14,6 @@
 //! cache, scroll position, theme choice) — it never affects
 //! reducer outcomes or persisted state.
 
-pub mod diff;
 pub mod markdown;
 pub mod theme;
 pub mod widgets;

@@ -23,8 +23,8 @@ pub mod tool;
 pub use approval::{ApprovalBroker, ApprovalDecision, allowlist_key};
 pub use auto_classifier::{AutoClassifier, ModelAutoClassifier, VetRequest, VetVerdict};
 pub use ctx::{
-    ExecContext, FinalResponse, ProgressEvent, StreamContext, StreamEvent, SubagentPhase,
-    clone_messages, test_exec_context, test_stream_context,
+    ExecContext, FinalResponse, StreamContext, StreamEvent, clone_messages, test_exec_context,
+    test_stream_context,
 };
 pub use discovery::{
     ConfiguredProvider, ProviderCatalog, ProviderProblem, configured_remote_providers,

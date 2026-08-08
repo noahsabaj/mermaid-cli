@@ -764,7 +764,7 @@ fn tool_progress_artifact_routes_image_to_assistant_message() {
     // during ExecutingTools should land base64-encoded on the last
     // assistant message's `images` field so the chat widget renders
     // it without waiting for ToolFinished.
-    use mermaid_cli::providers::ProgressEvent;
+    use mermaid_cli::domain::ProgressEvent;
 
     // Build a state with a committed assistant message and
     // ExecutingTools turn state (the shape a tool runs inside).

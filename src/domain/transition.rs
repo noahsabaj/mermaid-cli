@@ -521,10 +521,10 @@ fn diff_counts(diff: &str) -> (usize, usize) {
     let mut added = 0usize;
     let mut removed = 0usize;
     for line in diff.lines() {
-        match crate::render::diff::parse_diff_line(line) {
-            crate::render::diff::DiffLineKind::Added => added += 1,
-            crate::render::diff::DiffLineKind::Removed => removed += 1,
-            crate::render::diff::DiffLineKind::Context => {},
+        match mermaid_model::diff::parse_diff_line(line) {
+            mermaid_model::diff::DiffLineKind::Added => added += 1,
+            mermaid_model::diff::DiffLineKind::Removed => removed += 1,
+            mermaid_model::diff::DiffLineKind::Context => {},
         }
     }
     (added, removed)

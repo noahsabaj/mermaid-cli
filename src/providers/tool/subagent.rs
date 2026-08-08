@@ -36,6 +36,7 @@
 //!   user message, so a follow-up question reuses the context the child
 //!   already built instead of re-exploring from scratch.
 
+use crate::domain::{ProgressEvent, SubagentPhase};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -53,7 +54,7 @@ use crate::domain::{
 };
 use crate::effect::{EffectRunner, MSG_CHANNEL_CAPACITY};
 use crate::providers::ProviderFactory;
-use crate::providers::ctx::{ExecContext, ProgressEvent, SubagentPhase};
+use crate::providers::ctx::ExecContext;
 use mermaid_model::models::MessageRole;
 use mermaid_runtime::SafetyMode;
 

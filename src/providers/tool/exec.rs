@@ -20,6 +20,7 @@
 //! (`rm -rf /`, fork bombs, dd to device, etc.) are cheap to catch
 //! upfront.
 
+use crate::domain::ProgressEvent;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -32,7 +33,7 @@ use crate::app::{FilesystemPolicy, NetworkPolicy};
 use crate::domain::{ManagedProcess, ToolDefinition, ToolMetadata, ToolOutcome, ToolRunMetadata};
 use mermaid_model::constants::{COMMAND_MAX_TIMEOUT_SECS, COMMAND_TIMEOUT_SECS};
 
-use super::super::ctx::{ExecContext, ProgressEvent};
+use super::super::ctx::ExecContext;
 use super::ToolExecutor;
 
 /// `execute_command` — spawn a shell, run a command, capture output.
@@ -2651,7 +2652,7 @@ mod tests {
     /// Pipe-mode context: `[exec] pty = false` pins the pipe spawn path.
     fn pipes_ctx() -> (
         crate::providers::ctx::ExecContext,
-        tokio::sync::mpsc::Receiver<crate::providers::ctx::ProgressEvent>,
+        tokio::sync::mpsc::Receiver<crate::domain::ProgressEvent>,
     ) {
         let mut config = crate::app::Config::default();
         config.safety.mode = mermaid_runtime::SafetyMode::FullAccess;

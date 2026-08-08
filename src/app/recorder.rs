@@ -882,7 +882,7 @@ mod tests {
             Msg::ToolProgress {
                 turn: TurnId(1),
                 call_id: ToolCallId(1),
-                event: crate::providers::ProgressEvent::Artifact {
+                event: crate::domain::ProgressEvent::Artifact {
                     mime: "image/png".to_string(),
                     data: vec![1, 2, 3],
                     caption: Some("shot".to_string()),

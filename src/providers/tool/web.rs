@@ -7,6 +7,7 @@
 //! tool layer owns cancellation plumbing, snapshots, and multi-query fan-out;
 //! the backend owns the transport and destination policy.
 
+use crate::domain::ProgressEvent;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -16,7 +17,7 @@ use futures::{StreamExt, stream};
 use crate::app::{FetchBackend, SearchBackend, WebConfig};
 use crate::domain::{ToolDefinition, ToolMetadata, ToolOutcome, ToolRunMetadata};
 
-use super::super::ctx::{ExecContext, ProgressEvent};
+use super::super::ctx::ExecContext;
 use super::ToolExecutor;
 use super::web_client::{
     FetchProvider, ManagedSearxngBackend, NativeFetchClient, OllamaWebClient, SearchProvider,

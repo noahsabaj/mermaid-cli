@@ -13,9 +13,9 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::domain::{
     ActionDetails, ActionDisplay, ActionResult, QuestionAnswer, ToolMetadata, format_compact_count,
 };
-use crate::render::diff::{DiffLineKind, parse_diff_line};
 use crate::render::markdown::parse_markdown;
 use crate::render::theme::Theme;
+use mermaid_model::diff::{DiffLineKind, parse_diff_line};
 use mermaid_model::models::ChatMessageKind;
 use mermaid_model::models::{ChatMessage, MessageRole};
 use mermaid_model::utils::format_relative_timestamp;
@@ -2170,7 +2170,7 @@ mod tests {
         // left the red/green diff bar short by one column per tab — a ragged
         // "staircase" down the right edge. After expand_tabs, every column of a
         // diff row must carry the background.
-        use crate::render::diff::{DIFF_ADDED_MARKER, DIFF_REMOVED_MARKER};
+        use mermaid_model::diff::{DIFF_ADDED_MARKER, DIFF_REMOVED_MARKER};
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 

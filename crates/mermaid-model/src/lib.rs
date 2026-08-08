@@ -25,6 +25,7 @@
 
 pub mod action;
 pub mod constants;
+pub mod diff;
 pub mod ids;
 pub mod models;
 pub mod question;

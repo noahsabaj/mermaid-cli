@@ -31,12 +31,13 @@ pub mod screenshot;
 pub mod scroll;
 pub mod type_text;
 
+use crate::domain::ProgressEvent;
 use std::process::Command;
 
 use serde_json::Value;
 
 use crate::domain::{ToolMetadata, ToolOutcome, ToolRunMetadata};
-use crate::providers::ctx::{ExecContext, ProgressEvent};
+use crate::providers::ctx::ExecContext;
 
 pub use click::ClickTool;
 pub use driver::ComputerUseDriver;
