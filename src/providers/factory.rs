@@ -14,8 +14,7 @@ use crate::models::config::BackendConfig;
 use crate::models::{ModelError, Result, lookup_provider};
 use crate::utils::{resolve_api_key, resolve_provider_key, resolve_provider_key_with_fallback};
 
-const GEMINI_API_KEY_ENV: &str = "GOOGLE_API_KEY";
-const GEMINI_LEGACY_API_KEY_ENV: &str = "GEMINI_API_KEY";
+use super::model::{anthropic, gemini, meta};
 
 /// Resolve an API key (env first, then the OS keyring via
 /// `mermaid login <provider>`) or return a clear `ModelError`. A
@@ -40,6 +39,252 @@ fn require_key_with_fallback(
                  `mermaid login {provider}`)"
         ))
     })
+}
+
+/// Which env var supplied a key, or `None` when the keyring did.
+///
+/// Mirrors [`resolve_provider_key`]'s precedence exactly — it must, because the
+/// two are asked the same question by different callers and a disagreement
+/// would show up as `status` naming a var the factory never read.
+fn key_env_source(default_env: &str, override_env: Option<&str>) -> Option<String> {
+    // Only ever called after a key resolved, so "not in this env var" means the
+    // keyring supplied it. An explicit override is authoritative and never
+    // reaches the keyring, so for that case this always matches.
+    let env = override_env.unwrap_or(default_env);
+    resolve_api_key(env, None).map(|_| env.to_string())
+}
+
+/// [`key_env_source`] for the one legacy-fallback provider (Gemini).
+fn key_env_source_with_fallback(default_env: &str, fallback_env: &str) -> Option<String> {
+    if resolve_api_key(default_env, None).is_some() {
+        return Some(default_env.to_string());
+    }
+    if resolve_api_key(fallback_env, None).is_some() {
+        return Some(fallback_env.to_string());
+    }
+    None
+}
+
+/// What `build_provider` resolves before it constructs anything: the endpoint it
+/// would dial and the credential it would send.
+///
+/// This exists so that "which providers can this machine actually talk to" has
+/// exactly ONE definition. It used to have four — `build_provider`'s dispatch
+/// chain plus three hand-rolled walks in `doctor`, `status`, and startup model
+/// resolution — and all four disagreed about custom providers. Everything that
+/// wants the answer now reads it through `providers::discovery`, which calls
+/// this and treats `Err` as "not usable".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProviderEndpoint {
+    /// The base URL the adapter would be built with, overrides applied.
+    pub(crate) base_url: String,
+    /// `None` only where a keyless endpoint is legal: a loopback/LAN host
+    /// running an unauthenticated OpenAI-compatible server.
+    pub(crate) api_key: Option<String>,
+    /// Env var the key came from. `None` means the keyring supplied it, or the
+    /// endpoint is keyless.
+    pub(crate) key_env: Option<String>,
+}
+
+impl ProviderEndpoint {
+    /// The key, for the bespoke adapters that cannot run keyless.
+    ///
+    /// Total in practice: [`resolve_provider_endpoint`] has already failed with
+    /// the provider's own actionable message if a required key was missing.
+    /// This exists so those branches need no `expect`.
+    fn require_key(&self, provider: &str) -> Result<String> {
+        self.api_key
+            .clone()
+            .ok_or_else(|| ModelError::Authentication(format!("{provider} requires an API key")))
+    }
+}
+
+/// True when Mermaid knows how to build `provider` at all — before asking
+/// whether this machine has the credentials for it.
+fn is_known_provider(config: &Config, provider_lc: &str) -> bool {
+    matches!(provider_lc, "anthropic" | "gemini" | "meta")
+        || lookup_provider(provider_lc).is_some()
+        || config.providers.contains_key(provider_lc)
+}
+
+/// Resolve `provider`'s endpoint and credential exactly as `build_provider`
+/// would, without constructing an adapter or touching the network.
+///
+/// `Err` is the honest answer to "can this machine use this provider": a missing
+/// key, a Cloudflare account id that was never set, a custom provider with no
+/// `base_url`. The error text is the same one the user would hit on a real
+/// request, so `status` and `doctor` can print it verbatim.
+pub(crate) fn resolve_provider_endpoint(
+    config: &Config,
+    provider: &str,
+) -> Result<ProviderEndpoint> {
+    let provider_lc = provider.to_lowercase();
+    let user_cfg = config.providers.get(&provider_lc);
+    let override_env = user_cfg.and_then(|c| c.api_key_env.as_deref());
+    let override_url = user_cfg.and_then(|c| c.base_url.clone());
+
+    // Bespoke adapters (Anthropic, Gemini, Meta). All three are public
+    // endpoints with no keyless deployment story, so the key is required.
+    let bespoke = match provider_lc.as_str() {
+        "anthropic" => Some((
+            anthropic::DEFAULT_API_KEY_ENV,
+            None,
+            anthropic::DEFAULT_BASE_URL,
+        )),
+        "gemini" => Some((
+            gemini::DEFAULT_API_KEY_ENV,
+            Some(gemini::LEGACY_API_KEY_ENV),
+            gemini::DEFAULT_BASE_URL,
+        )),
+        "meta" => Some((meta::DEFAULT_API_KEY_ENV, None, meta::DEFAULT_BASE_URL)),
+        _ => None,
+    };
+    if let Some((default_env, legacy_env, default_url)) = bespoke {
+        let base_url = resolve_overridable_base_url(&provider_lc, override_url, default_url)?;
+        let (api_key, key_env) = match legacy_env {
+            // The legacy var is consulted only when the user has NOT pointed at
+            // a specific one (matches `require_key_with_fallback`).
+            Some(legacy) if override_env.is_none() => (
+                require_key_with_fallback(&provider_lc, default_env, legacy)?,
+                key_env_source_with_fallback(default_env, legacy),
+            ),
+            _ => (
+                require_key(&provider_lc, default_env, override_env)?,
+                key_env_source(default_env, override_env),
+            ),
+        };
+        return Ok(ProviderEndpoint {
+            base_url,
+            api_key: Some(api_key),
+            key_env,
+        });
+    }
+
+    // Cloudflare Workers AI — OpenAI-compatible, but the endpoint URL embeds a
+    // per-account id, so the base_url is synthesized at runtime from
+    // CLOUDFLARE_ACCOUNT_ID (or a full [providers.cloudflare].base_url override,
+    // e.g. AI Gateway). Must precede the generic registry branch, which would
+    // otherwise route it through the placeholder profile.base_url.
+    if provider_lc == "cloudflare" {
+        let profile = lookup_provider("cloudflare").expect("cloudflare is in the registry");
+        let api_key_env = override_env.unwrap_or(profile.api_key_env);
+        let base_url = match override_url {
+            // Override present (AI Gateway / proxy): validate + warn like any
+            // built-in override. The account id isn't needed in this case.
+            Some(url) => {
+                validate_provider_base_url(&url)?;
+                warn_overridden_provider_host("cloudflare", &url);
+                url
+            },
+            // Standard path: synthesize the account-scoped endpoint from env. A
+            // fresh setup missing the token as well gets one error naming both
+            // vars, not two fix-and-retry round-trips.
+            None => match require_cloudflare_account_id() {
+                Ok(id) => cloudflare_base_url(&id),
+                Err(_)
+                    if resolve_provider_key("cloudflare", profile.api_key_env, override_env)
+                        .is_none() =>
+                {
+                    return Err(ModelError::Authentication(format!(
+                        "cloudflare requires env vars {api_key_env} and CLOUDFLARE_ACCOUNT_ID — \
+                         create a token at https://dash.cloudflare.com/profile/api-tokens; the \
+                         account id is on your Cloudflare dashboard (or set \
+                         [providers.cloudflare].base_url)"
+                    )));
+                },
+                Err(e) => return Err(e),
+            },
+        };
+        let api_key = resolve_optional_key(
+            &provider_lc,
+            profile.api_key_env,
+            override_env,
+            &base_url,
+            profile.key_hint,
+        )?;
+        let key_env = api_key
+            .is_some()
+            .then(|| key_env_source(profile.api_key_env, override_env))
+            .flatten();
+        return Ok(ProviderEndpoint {
+            base_url,
+            api_key,
+            key_env,
+        });
+    }
+
+    // The OpenAI-compatible registry.
+    if let Some(profile) = lookup_provider(&provider_lc) {
+        let base_url = resolve_overridable_base_url(&provider_lc, override_url, profile.base_url)?;
+        // Keyless when the key is unset and the endpoint is local (a registry
+        // provider pointed at a loopback/LAN base_url); otherwise a clear,
+        // hint-carrying auth error.
+        let api_key = resolve_optional_key(
+            &provider_lc,
+            profile.api_key_env,
+            override_env,
+            &base_url,
+            profile.key_hint,
+        )?;
+        let key_env = api_key
+            .is_some()
+            .then(|| key_env_source(profile.api_key_env, override_env))
+            .flatten();
+        return Ok(ProviderEndpoint {
+            base_url,
+            api_key,
+            key_env,
+        });
+    }
+
+    // User-custom: no registry entry, but the user has [providers.<name>] in
+    // config. `base_url` is mandatory here — there is no default to fall back on.
+    if user_cfg.is_some() {
+        let base_url = override_url.ok_or_else(|| {
+            ModelError::InvalidRequest(format!(
+                "custom provider '{provider_lc}' requires base_url in config"
+            ))
+        })?;
+        // api_key_env is optional: a local (loopback/LAN) endpoint may run
+        // keyless. When a key IS used, harden the URL so it can't be sent in
+        // cleartext; a keyless endpoint must be local (no secret to leak).
+        // For a CUSTOM provider its api_key_env is the default (not an override
+        // of a registry default), so the keyring may fill the gap; a stored key
+        // alone also works with no api_key_env at all.
+        let resolved = match override_env {
+            Some(env) => resolve_provider_key(&provider_lc, env, None),
+            None => crate::utils::default_store().get(&provider_lc),
+        };
+        let (api_key, key_env) = match resolved {
+            Some(key) => {
+                validate_provider_base_url(&base_url)?;
+                let env = override_env.and_then(|env| key_env_source(env, None));
+                (Some(key), env)
+            },
+            None if base_url_is_local(&base_url) => (None, None),
+            None => {
+                let reason = match override_env {
+                    Some(env) => format!(
+                        "requires env var {env} (or `mermaid login {provider_lc}`, or a \
+                         loopback/LAN base_url)"
+                    ),
+                    None => "requires api_key_env, or a loopback/LAN base_url".to_string(),
+                };
+                return Err(ModelError::Authentication(format!(
+                    "custom provider '{provider_lc}' {reason}"
+                )));
+            },
+        };
+        return Ok(ProviderEndpoint {
+            base_url,
+            api_key,
+            key_env,
+        });
+    }
+
+    Err(ModelError::InvalidRequest(format!(
+        "Unknown provider '{provider}'"
+    )))
 }
 
 /// Resolve an API key, or `None` when the key is absent AND the endpoint is a
@@ -217,55 +462,43 @@ async fn build_provider(config: &Config, model_id: &str) -> Result<Box<dyn Model
         return Ok(Box::new(p));
     }
 
+    // Everything past Ollama is a remote provider, and ONE function decides
+    // where it lives and what credential it takes — the same one `discovery`
+    // asks on behalf of `status`, `doctor`, `list`, and `/model`. The branches
+    // below only turn that answer into the right adapter.
+    if !is_known_provider(config, &provider_lc) {
+        return Err(ModelError::InvalidRequest(format!(
+            "Unknown provider '{}' (model_id: {})",
+            provider, model_id
+        )));
+    }
+    let endpoint = resolve_provider_endpoint(config, &provider_lc)?;
+    let user_cfg = config.providers.get(&provider_lc);
+
     // 2. Anthropic — bespoke API shape.
     if provider_lc == "anthropic" {
-        let user_cfg = config.providers.get("anthropic");
-        let base_url = resolve_overridable_base_url(
-            "anthropic",
-            user_cfg.and_then(|c| c.base_url.clone()),
-            "https://api.anthropic.com/v1",
+        let p = AnthropicProvider::new(
+            endpoint.require_key(&provider_lc)?,
+            model_name.to_string(),
+            endpoint.base_url,
         )?;
-        let api_key = require_key(
-            "anthropic",
-            "ANTHROPIC_API_KEY",
-            user_cfg.and_then(|c| c.api_key_env.as_deref()),
-        )?;
-        let p = AnthropicProvider::new(api_key, model_name.to_string(), base_url)?;
         return Ok(Box::new(p));
     }
 
     // 3. Gemini — GCP AI Studio shape.
     if provider_lc == "gemini" {
-        let user_cfg = config.providers.get("gemini");
-        let base_url = resolve_overridable_base_url(
-            "gemini",
-            user_cfg.and_then(|c| c.base_url.clone()),
-            "https://generativelanguage.googleapis.com/v1beta",
+        let p = GeminiProvider::new(
+            endpoint.require_key(&provider_lc)?,
+            model_name.to_string(),
+            endpoint.base_url,
         )?;
-        let api_key = match user_cfg.and_then(|c| c.api_key_env.as_deref()) {
-            Some(api_key_env) => require_key("gemini", GEMINI_API_KEY_ENV, Some(api_key_env))?,
-            None => {
-                require_key_with_fallback("gemini", GEMINI_API_KEY_ENV, GEMINI_LEGACY_API_KEY_ENV)?
-            },
-        };
-        let p = GeminiProvider::new(api_key, model_name.to_string(), base_url)?;
         return Ok(Box::new(p));
     }
 
     // 4. Meta — Responses is required for encrypted reasoning continuity across
     // Mermaid's tool loop even though Meta also exposes Chat Completions.
     if provider_lc == "meta" {
-        let user_cfg = config.providers.get("meta");
-        let base_url = resolve_overridable_base_url(
-            "meta",
-            user_cfg.and_then(|cfg| cfg.base_url.clone()),
-            super::model::meta::DEFAULT_BASE_URL,
-        )?;
-        let api_key = require_key(
-            "meta",
-            super::model::meta::DEFAULT_API_KEY_ENV,
-            user_cfg.and_then(|cfg| cfg.api_key_env.as_deref()),
-        )?;
+        let api_key = endpoint.require_key(&provider_lc)?;
         let mut extra_headers = std::collections::HashMap::new();
         if let Some(cfg) = user_cfg {
             extra_headers.extend(cfg.extra_headers.clone());
@@ -275,150 +508,40 @@ async fn build_provider(config: &Config, model_id: &str) -> Result<Box<dyn Model
                 }
             }
         }
-        let p = MetaProvider::new(api_key, model_name.to_string(), base_url, extra_headers)?;
-        return Ok(Box::new(p));
-    }
-
-    // 4.5. Cloudflare Workers AI — OpenAI-compatible, but the endpoint URL embeds a
-    // per-account id, so the base_url is synthesized at runtime from
-    // CLOUDFLARE_ACCOUNT_ID (or a full [providers.cloudflare].base_url override, e.g.
-    // AI Gateway). Must precede the generic registry branch below, which would
-    // otherwise route it through the placeholder profile.base_url.
-    if provider_lc == "cloudflare" {
-        let user_cfg = config.providers.get("cloudflare");
-        let profile = lookup_provider("cloudflare").expect("cloudflare is in the registry");
-        let override_env = user_cfg.and_then(|c| c.api_key_env.as_deref());
-        let api_key_env = override_env.unwrap_or(profile.api_key_env);
-        let base_url = match user_cfg.and_then(|c| c.base_url.clone()) {
-            // Override present (AI Gateway / proxy): validate + warn like any built-in
-            // override. The account id isn't needed in this case.
-            Some(url) => {
-                validate_provider_base_url(&url)?;
-                warn_overridden_provider_host("cloudflare", &url);
-                url
-            },
-            // Standard path: synthesize the account-scoped endpoint from env. A fresh
-            // setup missing the token as well gets one error naming both vars, not
-            // two fix-and-retry round-trips.
-            None => match require_cloudflare_account_id() {
-                Ok(id) => cloudflare_base_url(&id),
-                Err(_)
-                    if resolve_provider_key("cloudflare", profile.api_key_env, override_env)
-                        .is_none() =>
-                {
-                    return Err(ModelError::Authentication(format!(
-                        "cloudflare requires env vars {api_key_env} and CLOUDFLARE_ACCOUNT_ID — \
-                         create a token at https://dash.cloudflare.com/profile/api-tokens; the \
-                         account id is on your Cloudflare dashboard (or set \
-                         [providers.cloudflare].base_url)"
-                    )));
-                },
-                Err(e) => return Err(e),
-            },
-        };
-        let api_key = resolve_optional_key(
-            &provider_lc,
-            profile.api_key_env,
-            override_env,
-            &base_url,
-            profile.key_hint,
-        )?;
-        let extra_headers = merged_headers(profile, user_cfg);
-        let p = OpenAICompatProvider::new(
-            profile,
-            base_url,
+        let p = MetaProvider::new(
             api_key,
             model_name.to_string(),
+            endpoint.base_url,
             extra_headers,
         )?;
         return Ok(Box::new(p));
     }
 
-    // 5 + 6. OpenAI-compatible registry or user-custom.
-    if let Some(profile) = lookup_provider(&provider_lc) {
-        let user_cfg = config.providers.get(&provider_lc);
-        let base_url = resolve_overridable_base_url(
-            &provider_lc,
-            user_cfg.and_then(|c| c.base_url.clone()),
-            profile.base_url,
-        )?;
-        // Keyless when the key is unset and the endpoint is local (a registry
-        // provider pointed at a loopback/LAN base_url); otherwise a clear,
-        // hint-carrying auth error.
-        let api_key = resolve_optional_key(
-            &provider_lc,
-            profile.api_key_env,
-            user_cfg.and_then(|c| c.api_key_env.as_deref()),
-            &base_url,
-            profile.key_hint,
-        )?;
-        let extra_headers = merged_headers(profile, user_cfg);
-        let p = OpenAICompatProvider::new(
-            profile,
-            base_url,
-            api_key,
-            model_name.to_string(),
-            extra_headers,
-        )?;
-        return Ok(Box::new(p));
-    }
-
-    // User-custom: no registry entry, but the user has [providers.<name>]
-    // in config with a declared `compat` field.
-    if let Some(user_cfg) = config.providers.get(&provider_lc)
-        && let Some(profile) = user_profile_to_static(&provider_lc, user_cfg)
-    {
-        let base_url = user_cfg.base_url.clone().ok_or_else(|| {
-            ModelError::InvalidRequest(format!(
-                "custom provider '{}' requires base_url in config",
-                provider_lc
-            ))
-        })?;
-        // api_key_env is optional: a local (loopback/LAN) endpoint may run
-        // keyless. When a key IS used, harden the URL so it can't be sent in
-        // cleartext; a keyless endpoint must be local (no secret to leak).
-        // For a CUSTOM provider its api_key_env is the default (not an
-        // override of a registry default), so the keyring may fill the gap;
-        // a stored key alone also works with no api_key_env at all.
-        let api_key_env = user_cfg.api_key_env.as_deref();
-        let resolved = match api_key_env {
-            Some(env) => resolve_provider_key(&provider_lc, env, None),
-            None => crate::utils::default_store().get(&provider_lc),
-        };
-        let api_key = match resolved {
-            Some(key) => {
-                validate_provider_base_url(&base_url)?;
-                Some(key)
-            },
-            None if base_url_is_local(&base_url) => None,
-            None => {
-                let reason = match api_key_env {
-                    Some(env) => format!(
-                        "requires env var {env} (or `mermaid login {provider_lc}`, or a \
-                         loopback/LAN base_url)"
-                    ),
-                    None => "requires api_key_env, or a loopback/LAN base_url".to_string(),
-                };
-                return Err(ModelError::Authentication(format!(
-                    "custom provider '{provider_lc}' {reason}"
-                )));
-            },
-        };
-        let extra_headers = merged_headers(profile, Some(user_cfg));
-        let p = OpenAICompatProvider::new(
-            profile,
-            base_url,
-            api_key,
-            model_name.to_string(),
-            extra_headers,
-        )?;
-        return Ok(Box::new(p));
-    }
-
-    Err(ModelError::InvalidRequest(format!(
-        "Unknown provider '{}' (model_id: {})",
-        provider, model_id
-    )))
+    // 5 + 6. Everything else is OpenAI-compatible: the built-in registry
+    // (Cloudflare's account-scoped URL included — `resolve_provider_endpoint`
+    // synthesized it) or a user-defined `[providers.<name>]`.
+    let profile = match lookup_provider(&provider_lc) {
+        Some(profile) => profile,
+        // `is_known_provider` already proved the config entry exists, and
+        // `user_profile_to_static` is total, so this cannot fall through.
+        None => user_cfg
+            .and_then(|cfg| user_profile_to_static(&provider_lc, cfg))
+            .ok_or_else(|| {
+                ModelError::InvalidRequest(format!(
+                    "Unknown provider '{}' (model_id: {})",
+                    provider, model_id
+                ))
+            })?,
+    };
+    let extra_headers = merged_headers(profile, user_cfg);
+    let p = OpenAICompatProvider::new(
+        profile,
+        endpoint.base_url,
+        endpoint.api_key,
+        model_name.to_string(),
+        extra_headers,
+    )?;
+    Ok(Box::new(p))
 }
 
 /// Cache key for a model id: the provider segment lowercased (matching

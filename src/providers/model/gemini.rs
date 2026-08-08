@@ -15,6 +15,13 @@ use super::super::capabilities::Capabilities;
 use super::super::ctx::{FinalResponse, StreamContext, StreamEvent};
 use super::{ContextSizing, ModelProvider, resolve_limits_cached};
 
+/// Gemini's AI Studio root, and the env vars its key lives in. `LEGACY_API_KEY_ENV`
+/// predates Google's rename and is still accepted when `GOOGLE_API_KEY` is unset —
+/// but only when the user has not pointed at a specific var themselves.
+pub const DEFAULT_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
+pub const DEFAULT_API_KEY_ENV: &str = "GOOGLE_API_KEY";
+pub const LEGACY_API_KEY_ENV: &str = "GEMINI_API_KEY";
+
 pub struct GeminiProvider {
     adapter: GeminiAdapter,
     capabilities: Capabilities,

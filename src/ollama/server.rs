@@ -56,6 +56,30 @@ pub enum AutostartError {
     Unhealthy(String),
 }
 
+/// The [`LocalServerRecovery`] the model layer is handed when the user's config
+/// allows autostart.
+///
+/// This is the whole inversion: `ensure_running` — process discovery, spawning,
+/// health-polling — lives here, in the module that owns the Ollama process, and
+/// the wire adapter receives it as a capability instead of reaching up for it.
+/// An adapter constructed without one cannot start anything, which is what makes
+/// the enumeration verbs (`list`, `status`, `doctor`, `/model`) read-only by
+/// construction rather than by a `bool` they remember to pass.
+pub struct OllamaAutostart;
+
+#[async_trait::async_trait]
+impl crate::models::adapters::ollama::LocalServerRecovery for OllamaAutostart {
+    async fn ensure_running(
+        &self,
+        base_url: &str,
+        notify: Option<&(dyn for<'a> Fn(&'a str) + Sync)>,
+    ) -> std::result::Result<(), Option<String>> {
+        // `hint()` already encodes "nothing useful to say" as `None` for the
+        // pass-through cases (NotLocal / Disabled), so the mapping is total.
+        ensure_running(base_url, notify).await.map_err(|e| e.hint())
+    }
+}
+
 impl AutostartError {
     /// Human hint to append to the caller's connection error, or `None` when
     /// the error should pass through untouched (`NotLocal` / `Disabled`).
@@ -113,7 +137,7 @@ pub const STARTING_NOTICE: &str =
 /// detached process, and file-only tracing are otherwise all silent.
 pub async fn ensure_running(
     base_url: &str,
-    notify: Option<&(dyn Fn(&str) + Sync)>,
+    notify: Option<&(dyn for<'a> Fn(&'a str) + Sync)>,
 ) -> Result<(), AutostartError> {
     let authority = authority_of(base_url).to_string();
     if !classify_host(host_of(&authority)).is_loopback() {
@@ -160,7 +184,7 @@ async fn start_and_wait(
     client: &reqwest::Client,
     base_url: &str,
     authority: &str,
-    notify: Option<&(dyn Fn(&str) + Sync)>,
+    notify: Option<&(dyn for<'a> Fn(&'a str) + Sync)>,
 ) -> Result<(), AutostartError> {
     let Some(binary) = find_binary() else {
         return Err(AutostartError::NotInstalled);

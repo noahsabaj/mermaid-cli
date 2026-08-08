@@ -91,7 +91,7 @@ where
 /// and processes restarting at the same time — don't retry in lockstep (a
 /// thundering herd). `pub(crate)` so the effect-layer retry middleware shares
 /// this single impl rather than duplicating a weaker clock-based one (#87).
-pub(crate) fn jitter(delay_ms: u64) -> u64 {
+pub fn jitter(delay_ms: u64) -> u64 {
     let span = delay_ms / 5;
     if span == 0 {
         return delay_ms;

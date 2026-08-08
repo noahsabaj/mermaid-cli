@@ -11,7 +11,7 @@
 /// Await a sibling relay task's handle, logging a panic (but not a normal
 /// post-cancellation abort). Awaiting the handle keeps a stray panic from
 /// vanishing the way a bare `let _ = handle.await` would.
-pub(crate) async fn join_logged(handle: tokio::task::JoinHandle<()>, what: &str) {
+pub async fn join_logged(handle: tokio::task::JoinHandle<()>, what: &str) {
     if let Err(e) = handle.await
         && !e.is_cancelled()
     {
@@ -23,10 +23,10 @@ pub(crate) async fn join_logged(handle: tokio::task::JoinHandle<()>, what: &str)
 /// detached task: if the parent is dropped before it `take()`s the handle for
 /// [`join_logged`], the guard aborts the task on drop. On the normal path the
 /// handle is taken and awaited, so the drop is a no-op.
-pub(crate) struct AbortOnDrop(Option<tokio::task::JoinHandle<()>>);
+pub struct AbortOnDrop(Option<tokio::task::JoinHandle<()>>);
 
 impl AbortOnDrop {
-    pub(crate) fn take(mut self) -> tokio::task::JoinHandle<()> {
+    pub fn take(mut self) -> tokio::task::JoinHandle<()> {
         self.0.take().expect("AbortOnDrop::take called once")
     }
 }
@@ -40,7 +40,7 @@ impl Drop for AbortOnDrop {
 }
 
 /// `tokio::spawn` a relay, wrapped in an [`AbortOnDrop`] so the parent owns it.
-pub(crate) fn spawn_guarded<F>(fut: F) -> AbortOnDrop
+pub fn spawn_guarded<F>(fut: F) -> AbortOnDrop
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {

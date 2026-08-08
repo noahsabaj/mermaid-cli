@@ -14,6 +14,7 @@ pub mod approval;
 pub mod auto_classifier;
 pub mod capabilities;
 pub mod ctx;
+pub mod discovery;
 pub mod factory;
 pub mod model;
 pub mod questions;
@@ -26,6 +27,10 @@ pub use capabilities::Capabilities;
 pub use ctx::{
     ExecContext, FinalResponse, ProgressEvent, StreamContext, StreamEvent, SubagentPhase,
     clone_messages, test_exec_context, test_stream_context,
+};
+pub use discovery::{
+    ConfiguredProvider, ProviderCatalog, ProviderProblem, configured_remote_providers,
+    provider_catalogs, provider_problems,
 };
 pub use factory::ProviderFactory;
 pub use model::{

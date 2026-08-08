@@ -2357,6 +2357,7 @@ dependencies = [
  "insta",
  "jsonschema",
  "keyring",
+ "mermaid-model",
  "mermaid-runtime",
  "mime",
  "nucleo-matcher",
@@ -2389,6 +2390,31 @@ dependencies = [
  "unicode-width",
  "vt100",
  "which",
+]
+
+[[package]]
+name = "mermaid-model"
+version = "0.20.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64",
+ "chrono",
+ "clap",
+ "futures",
+ "getrandom 0.4.3",
+ "keyring",
+ "mermaid-runtime",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "temp-env",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

@@ -159,9 +159,25 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2
+      # `rustsec/audit-check` compiled cargo-audit from source on every run:
+      # 221s in a single step, on a job whose actual work is reading
+      # Cargo.lock against an advisory database. That made it 94% as long as
+      # the Windows leg — the critical path — for no reason a prebuilt binary
+      # doesn't solve. `taiki-e/install-action` downloads one (the same action
+      # already used for nextest), and `cargo audit` is the same tool reading
+      # the same RustSec database, so the verdict is unchanged.
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          toolchain: stable
+      - uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad # v2.85.10
+        with:
+          tool: cargo-audit
+      # Plain `cargo audit`, not `--deny warnings`: the action failed on
+      # vulnerabilities and only annotated unmaintained/unsound advisories, and
+      # this job is meant to run exactly as strict as it did before, not one
+      # notch stricter.
+      - name: Audit dependencies
+        run: cargo audit
 
   # Dependency-free source guards: no emoji in user-facing output, and the pure
   # `src/domain` MVU core stays free of I/O + the wall clock.

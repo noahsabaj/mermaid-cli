@@ -1447,6 +1447,58 @@ mod tests {
         assert!(s.current_turn_id().is_none());
     }
 
+    fn state_for(settings: Config, model_id: &str) -> State {
+        State::new(
+            settings,
+            PathBuf::from("/tmp/project"),
+            model_id.to_string(),
+            chrono::Local::now(),
+        )
+    }
+
+    /// The user's configured reasoning level must survive session bootstrap —
+    /// without this it silently reverts to the enum default on every start.
+    ///
+    /// These assertions used to sit on `ModelConfig::from_app_config`, a
+    /// byte-identical copy of this rule that nothing ever called. Deleting the
+    /// duplicate left the live rule — right here in `State::new` — with no
+    /// coverage at all, so the tests moved to it rather than going away.
+    #[test]
+    fn session_reasoning_comes_from_the_global_default() {
+        let mut settings = Config::default();
+        settings.default_model.reasoning = ReasoningLevel::High;
+        let state = state_for(settings, "ollama/qwen3-coder:30b");
+        assert_eq!(state.session.reasoning, ReasoningLevel::High);
+        assert_eq!(state.session.model_id, "ollama/qwen3-coder:30b");
+    }
+
+    #[test]
+    fn session_reasoning_falls_back_to_the_enum_default_when_unset() {
+        let state = state_for(Config::default(), "ollama/qwen3-coder:30b");
+        assert_eq!(
+            state.session.reasoning,
+            Config::default().default_model.reasoning
+        );
+    }
+
+    /// A per-model preference beats the global default: `/reasoning high` on
+    /// one model sticks for that model without touching any other.
+    #[test]
+    fn session_reasoning_prefers_the_per_model_entry() {
+        let mut settings = Config::default();
+        settings.default_model.reasoning = ReasoningLevel::Low;
+        settings.reasoning_per_model.insert(
+            "anthropic/claude-sonnet-4-6".to_string(),
+            ReasoningLevel::High,
+        );
+
+        let pinned = state_for(settings.clone(), "anthropic/claude-sonnet-4-6");
+        assert_eq!(pinned.session.reasoning, ReasoningLevel::High);
+
+        let other = state_for(settings, "ollama/foo");
+        assert_eq!(other.session.reasoning, ReasoningLevel::Low);
+    }
+
     #[test]
     fn snapshot_and_seed_round_trip_restores_meters_and_safety() {
         // Move the live session state away from its `State::new` defaults, then

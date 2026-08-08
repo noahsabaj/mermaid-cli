@@ -129,3 +129,35 @@ fn slash_model_opens_a_picker_and_escape_dismisses_it() {
         term.frame_text()
     );
 }
+
+/// The picker enumerated only Ollama and the OpenAI-compatible registry, so a
+/// bespoke provider's models — Meta's `muse-spark-*` among them — never showed
+/// up no matter how many turns the user had run on one. Typing the provider
+/// name must narrow to real rows from its catalog.
+///
+/// Listing a catalog costs no tokens, but it does need a key, so this skips
+/// (loudly) without one.
+#[test]
+fn the_picker_lists_a_bespoke_providers_models() {
+    if std::env::var("MODEL_API_KEY").is_err() {
+        eprintln!("skipping: MODEL_API_KEY is not set");
+        return;
+    }
+    let mut term = Terminal::launch("pty-model-meta");
+    term.type_text("/model");
+    term.press(ENTER);
+    assert!(
+        term.wait_for_text("Select model", Duration::from_secs(20)),
+        "/model did not open a picker. Screen:\n{}",
+        term.frame_text()
+    );
+
+    // Filter to the provider so its rows survive the pane's window regardless
+    // of how many local models sit above them.
+    term.type_text("meta/");
+    assert!(
+        term.wait_for_text("meta/muse-spark", Duration::from_secs(30)),
+        "the picker never listed a meta model. Screen:\n{}",
+        term.frame_text()
+    );
+}

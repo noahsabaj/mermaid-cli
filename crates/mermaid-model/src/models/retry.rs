@@ -1,14 +1,21 @@
-//! Cross-cutting wrappers over effect handlers.
+//! The transient-HTTP retry policy every provider adapter shares.
 //!
-//! Retry-on-5xx, tracing, rate-limiting — all concerns that would
-//! otherwise be re-implemented per-adapter. Living here means any
-//! new effect handler picks them up uniformly; 500ms→3s exponential
-//! backoff (429s use a slower 2s→5s schedule), 3-attempt cap, same
-//! classification function for every provider.
+//! Retry-on-5xx, backoff, rate-limit classification — concerns that would
+//! otherwise be re-implemented per-adapter. One home means a new adapter picks
+//! them up uniformly: 500ms→3s exponential backoff (429s use a slower 2s→5s
+//! schedule), a 3-attempt cap, and the same classification function for every
+//! provider.
+//!
+//! This lives beside the adapters rather than in `effect` because the adapters
+//! are its only callers and it needs nothing from the effect runner — only
+//! `models`' own error types and `utils::jitter`. It sat under `effect` while
+//! `models` reached up to call it, which is the layering inversion that let a
+//! connection-refused retry hide inside a listing path for as long as it did.
+//! `crate::effect` re-exports it, so the historical path still resolves.
 
 use std::time::Duration;
 
-use crate::models::{BackendError, ModelError, Result};
+use super::{BackendError, ModelError, Result};
 
 /// Total attempts (initial + retries). 3 attempts means up to 2
 /// retries on top of the first request, costing at most ~1.5s of
@@ -44,6 +51,38 @@ where
     retry_transient_http_with(
         RetryPolicy {
             max_attempts: DEFAULT_MAX_ATTEMPTS,
+            retry_connection_failures: true,
+        },
+        &mut build_and_send,
+    )
+    .await
+}
+
+/// [`retry_transient_http`], but a refused connection returns immediately
+/// instead of consuming the retry budget.
+///
+/// For a caller that has its own answer to "the server isn't there" — Ollama's
+/// `with_local_recovery`, which starts a dead local server — retrying first is
+/// pure latency: nothing changes between attempts, and the recovery that WOULD
+/// change something is delayed by the whole backoff. It is expensive latency
+/// too. A refused connection to a closed local port is not instant on Windows
+/// (the loopback SYN is retransmitted for ~2s before `WSAECONNREFUSED`), so
+/// three attempts plus backoff cost ~9s of dead wait before anything useful
+/// happened.
+///
+/// 5xx and 429 still retry normally: those come from a server that IS running
+/// and may genuinely recover on its own.
+pub async fn retry_transient_http_no_connect_retry<F, Fut>(
+    mut build_and_send: F,
+) -> Result<reqwest::Response>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<reqwest::Response>>,
+{
+    retry_transient_http_with(
+        RetryPolicy {
+            max_attempts: DEFAULT_MAX_ATTEMPTS,
+            retry_connection_failures: false,
         },
         &mut build_and_send,
     )
@@ -63,7 +102,12 @@ where
 
     loop {
         let result = build_and_send().await;
-        let transience = classify(&result);
+        let mut transience = classify(&result);
+        // A caller that recovers from a dead server itself treats "refused" as
+        // terminal here, so the recovery runs instead of the backoff.
+        if !policy.retry_connection_failures && transience.reason() == "connection_failed" {
+            transience = Transience::Terminal;
+        }
 
         // A server-provided `Retry-After` is the authoritative wait for ANY
         // retryable status — a 503 (or other 5xx) can carry it just like a 429,
@@ -196,6 +240,10 @@ fn parse_retry_after_ms(headers: &reqwest::header::HeaderMap) -> Option<u64> {
 #[derive(Debug, Clone, Copy)]
 struct RetryPolicy {
     max_attempts: usize,
+    /// Whether a refused connection counts as retryable. `false` for callers
+    /// that recover from a dead server themselves — see
+    /// [`retry_transient_http_no_connect_retry`].
+    retry_connection_failures: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -388,17 +436,23 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let cc = Arc::clone(&calls);
         let start = std::time::Instant::now();
-        let result = retry_transient_http_with(RetryPolicy { max_attempts: 2 }, &mut move || {
-            let c = Arc::clone(&cc);
-            async move {
-                let n = c.fetch_add(1, Ordering::SeqCst);
-                if n == 0 {
-                    Ok(fake_response_with_retry_after(503, 1).await)
-                } else {
-                    Ok(fake_response(200).await)
+        let result = retry_transient_http_with(
+            RetryPolicy {
+                max_attempts: 2,
+                retry_connection_failures: true,
+            },
+            &mut move || {
+                let c = Arc::clone(&cc);
+                async move {
+                    let n = c.fetch_add(1, Ordering::SeqCst);
+                    if n == 0 {
+                        Ok(fake_response_with_retry_after(503, 1).await)
+                    } else {
+                        Ok(fake_response(200).await)
+                    }
                 }
-            }
-        })
+            },
+        )
         .await;
         let elapsed = start.elapsed();
         assert!(result.is_ok());
@@ -415,14 +469,20 @@ mod tests {
     async fn retries_5xx_then_succeeds() {
         let calls = Arc::new(AtomicUsize::new(0));
         let cc = Arc::clone(&calls);
-        let result = retry_transient_http_with(RetryPolicy { max_attempts: 3 }, &mut move || {
-            let c = Arc::clone(&cc);
-            async move {
-                let n = c.fetch_add(1, Ordering::SeqCst);
-                let status = if n < 2 { 500 } else { 200 };
-                Ok(fake_response(status).await)
-            }
-        })
+        let result = retry_transient_http_with(
+            RetryPolicy {
+                max_attempts: 3,
+                retry_connection_failures: true,
+            },
+            &mut move || {
+                let c = Arc::clone(&cc);
+                async move {
+                    let n = c.fetch_add(1, Ordering::SeqCst);
+                    let status = if n < 2 { 500 } else { 200 };
+                    Ok(fake_response(status).await)
+                }
+            },
+        )
         .await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap().status().as_u16(), 200);
@@ -433,13 +493,19 @@ mod tests {
     async fn does_not_retry_4xx_client_errors() {
         let calls = Arc::new(AtomicUsize::new(0));
         let cc = Arc::clone(&calls);
-        let result = retry_transient_http_with(RetryPolicy { max_attempts: 3 }, &mut move || {
-            let c = Arc::clone(&cc);
-            async move {
-                c.fetch_add(1, Ordering::SeqCst);
-                Ok(fake_response(400).await)
-            }
-        })
+        let result = retry_transient_http_with(
+            RetryPolicy {
+                max_attempts: 3,
+                retry_connection_failures: true,
+            },
+            &mut move || {
+                let c = Arc::clone(&cc);
+                async move {
+                    c.fetch_add(1, Ordering::SeqCst);
+                    Ok(fake_response(400).await)
+                }
+            },
+        )
         .await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap().status().as_u16(), 400);
@@ -450,13 +516,19 @@ mod tests {
     async fn retries_429_then_surfaces_rate_limit() {
         let calls = Arc::new(AtomicUsize::new(0));
         let cc = Arc::clone(&calls);
-        let result = retry_transient_http_with(RetryPolicy { max_attempts: 2 }, &mut move || {
-            let c = Arc::clone(&cc);
-            async move {
-                c.fetch_add(1, Ordering::SeqCst);
-                Ok(fake_response(429).await)
-            }
-        })
+        let result = retry_transient_http_with(
+            RetryPolicy {
+                max_attempts: 2,
+                retry_connection_failures: true,
+            },
+            &mut move || {
+                let c = Arc::clone(&cc);
+                async move {
+                    c.fetch_add(1, Ordering::SeqCst);
+                    Ok(fake_response(429).await)
+                }
+            },
+        )
         .await;
         // A persistent 429 retries, then surfaces as a typed RateLimit (#2).
         assert!(matches!(result, Err(ModelError::RateLimit { .. })));
@@ -467,7 +539,7 @@ mod tests {
     async fn exhausted_429_carries_body_message_and_retry_after() {
         // The provider's 429 body names the real limit (quota vs burst) — the
         // typed RateLimit must carry it, plus the Retry-After when present.
-        let result = retry_transient_http_with(RetryPolicy { max_attempts: 1 }, &mut || async {
+        let result = retry_transient_http_with(RetryPolicy { max_attempts: 1, retry_connection_failures: true }, &mut || async {
             Ok(fake_response_with_body(
                 429,
                 r#"{"errors":[{"message":"you have used up your daily free allocation of 10,000 neurons","code":4006}]}"#,
@@ -499,17 +571,23 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let cc = Arc::clone(&calls);
         let start = std::time::Instant::now();
-        let result = retry_transient_http_with(RetryPolicy { max_attempts: 2 }, &mut move || {
-            let c = Arc::clone(&cc);
-            async move {
-                let n = c.fetch_add(1, Ordering::SeqCst);
-                if n == 0 {
-                    Ok(fake_response(429).await)
-                } else {
-                    Ok(fake_response(200).await)
+        let result = retry_transient_http_with(
+            RetryPolicy {
+                max_attempts: 2,
+                retry_connection_failures: true,
+            },
+            &mut move || {
+                let c = Arc::clone(&cc);
+                async move {
+                    let n = c.fetch_add(1, Ordering::SeqCst);
+                    if n == 0 {
+                        Ok(fake_response(429).await)
+                    } else {
+                        Ok(fake_response(200).await)
+                    }
                 }
-            }
-        })
+            },
+        )
         .await;
         let elapsed = start.elapsed();
         assert!(result.is_ok());
@@ -526,23 +604,80 @@ mod tests {
     async fn retries_connection_failed_error() {
         let calls = Arc::new(AtomicUsize::new(0));
         let cc = Arc::clone(&calls);
-        let result = retry_transient_http_with(RetryPolicy { max_attempts: 3 }, &mut move || {
-            let c = Arc::clone(&cc);
-            async move {
-                let n = c.fetch_add(1, Ordering::SeqCst);
-                if n < 2 {
-                    Err(ModelError::Backend(BackendError::ConnectionFailed {
-                        backend: "test".to_string(),
-                        url: "http://nope".to_string(),
-                        reason: "dns".to_string(),
-                    }))
-                } else {
-                    Ok(fake_response(200).await)
+        let result = retry_transient_http_with(
+            RetryPolicy {
+                max_attempts: 3,
+                retry_connection_failures: true,
+            },
+            &mut move || {
+                let c = Arc::clone(&cc);
+                async move {
+                    let n = c.fetch_add(1, Ordering::SeqCst);
+                    if n < 2 {
+                        Err(ModelError::Backend(BackendError::ConnectionFailed {
+                            backend: "test".to_string(),
+                            url: "http://nope".to_string(),
+                            reason: "dns".to_string(),
+                        }))
+                    } else {
+                        Ok(fake_response(200).await)
+                    }
                 }
-            }
-        })
+            },
+        )
         .await;
         assert!(result.is_ok());
         assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    /// The opt-out: one attempt, no backoff, error straight back — so Ollama's
+    /// `with_local_recovery` can start the dead server instead of asking a
+    /// closed port twice more. A refused loopback connect costs ~2s on Windows,
+    /// so the three attempts this replaces were ~9s of dead wait.
+    #[tokio::test]
+    async fn no_connect_retry_returns_a_refused_connection_immediately() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let cc = Arc::clone(&calls);
+        let started = std::time::Instant::now();
+        let result = retry_transient_http_no_connect_retry(move || {
+            let c = Arc::clone(&cc);
+            async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                Err(ModelError::Backend(BackendError::ConnectionFailed {
+                    backend: "ollama".to_string(),
+                    url: "http://localhost:11434".to_string(),
+                    reason: "refused".to_string(),
+                }))
+            }
+        })
+        .await;
+        assert!(matches!(
+            result,
+            Err(ModelError::Backend(BackendError::ConnectionFailed { .. }))
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "must not retry");
+        assert!(
+            started.elapsed() < Duration::from_millis(400),
+            "must not sleep on the backoff schedule, took {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// The opt-out is narrow: a server that IS running and returns 5xx may
+    /// genuinely recover, so those still retry under the same policy.
+    #[tokio::test]
+    async fn no_connect_retry_still_retries_5xx() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let cc = Arc::clone(&calls);
+        let result = retry_transient_http_no_connect_retry(move || {
+            let c = Arc::clone(&cc);
+            async move {
+                let n = c.fetch_add(1, Ordering::SeqCst);
+                Ok(fake_response(if n < 1 { 503 } else { 200 }).await)
+            }
+        })
+        .await;
+        assert_eq!(result.expect("recovered").status(), 200);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 }

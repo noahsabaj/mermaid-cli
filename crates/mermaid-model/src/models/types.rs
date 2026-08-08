@@ -1,4 +1,4 @@
-use crate::domain::ActionDisplay;
+use crate::action::ActionDisplay;
 use serde::{Deserialize, Serialize};
 
 /// Opaque provider-owned state that must be replayed with a committed assistant

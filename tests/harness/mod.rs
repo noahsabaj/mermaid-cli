@@ -46,6 +46,24 @@ pub const COLS: u16 = 100;
 /// reaches the network.
 const TEST_MODEL: &str = "anthropic/pty-visual-test";
 
+/// How `settled_frame` decides a repaint has finished. Polling for a grid that
+/// stopped changing beats sleeping a fixed span twice over: it is ~4x faster
+/// when the app repaints promptly, and on a loaded runner it keeps waiting
+/// instead of snapshotting a half-applied diff.
+const SETTLE_POLL: Duration = Duration::from_millis(40);
+/// Consecutive identical reads that count as settled. Three at 40ms is 120ms of
+/// provable quiet — ratatui writes a frame in one burst, so a gap that long
+/// mid-repaint does not happen.
+const SETTLE_STABLE_POLLS: u8 = 3;
+/// Hard cap, equal to the flat 500ms + 200ms this replaced: the slow path is no
+/// less settled than it used to be.
+const SETTLE_MAX: Duration = Duration::from_millis(700);
+/// Gap between `wait_for_*` polls. Purely how late a wait notices a condition
+/// that is ALREADY true, so shortening it cannot make a wait give up sooner —
+/// the deadline is wall-clock — it only stops each satisfied wait from paying
+/// up to 100ms of nothing.
+const WAIT_POLL: Duration = Duration::from_millis(25);
+
 pub struct Terminal {
     output: Arc<Mutex<Vec<u8>>>,
     writer: Box<dyn Write + Send>,
@@ -217,13 +235,33 @@ impl Terminal {
 
     /// Repaint, settle, and read. Every snapshot goes through this so a frame
     /// is never a half-applied diff.
+    ///
+    /// Settling is observed rather than assumed: poll until the grid stops
+    /// changing for [`SETTLE_STABLE_POLLS`] consecutive reads, then snapshot.
+    /// This replaced a flat 500ms + 200ms sleep, which was both slower than it
+    /// needed to be on a fast machine and — the part that matters — a fixed bet
+    /// that a loaded CI runner would finish painting inside 700ms. The cap is
+    /// that same 700ms, so the slow case is no worse than before and the common
+    /// case is ~150ms.
     fn settled_frame(&mut self) -> Vec<String> {
         self.press(CTRL_L);
-        std::thread::sleep(Duration::from_millis(500));
-        let raw = self.raw();
-        self.answer_cursor_queries(&raw);
-        std::thread::sleep(Duration::from_millis(200));
-        self.frame()
+        let deadline = Instant::now() + SETTLE_MAX;
+        let mut previous = Vec::new();
+        let mut stable: u8 = 0;
+        loop {
+            std::thread::sleep(SETTLE_POLL);
+            // Keep answering cursor-position queries while we wait: the app can
+            // be blocked on a reply, in which case the grid never changes until
+            // we send one.
+            let raw = self.raw();
+            self.answer_cursor_queries(&raw);
+            let frame = self.frame();
+            stable = if frame == previous { stable + 1 } else { 0 };
+            previous = frame;
+            if stable >= SETTLE_STABLE_POLLS || Instant::now() >= deadline {
+                return previous;
+            }
+        }
     }
 
     // ── Snapshots ───────────────────────────────────────────────────────
@@ -255,7 +293,7 @@ impl Terminal {
             if squash(&self.frame_text()).contains(&squashed_needle) {
                 return true;
             }
-            std::thread::sleep(Duration::from_millis(100));
+            std::thread::sleep(WAIT_POLL);
         }
         false
     }
@@ -270,7 +308,7 @@ impl Terminal {
             if !squash(&self.frame_text()).contains(&squashed_needle) {
                 return true;
             }
-            std::thread::sleep(Duration::from_millis(100));
+            std::thread::sleep(WAIT_POLL);
         }
         false
     }

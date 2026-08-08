@@ -225,6 +225,199 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `TZ=Pacific/Kiritimati` set, it fails alongside every scene carrying a user
   message.
 
+- **CI: the security job stopped building its own tooling, and pty snapshots
+  settle on observation instead of a stopwatch.** Following #301's finding that
+  ~90% of a leg is compilation, the remaining time was measured rather than
+  guessed at. Two things were not compilation.
+
+  `rustsec/audit-check` compiled cargo-audit from source on every run — **221s
+  in a single step**, on a job whose real work is reading `Cargo.lock` against
+  an advisory database, and 94% as long as the Windows leg that gates the
+  merge. It now installs a prebuilt binary through the same
+  `taiki-e/install-action` already used for nextest and runs `cargo audit`
+  directly: same tool, same RustSec database, same strictness (plain `cargo
+  audit`, not `--deny warnings`, so the gate is exactly as tight as it was).
+
+  The pty harness slept a flat 500ms + 200ms before every golden-frame
+  snapshot. That is two bets in one: too slow when the app has already
+  repainted, and — the half that actually matters — a fixed wager that a loaded
+  runner finishes painting inside 700ms. `settled_frame` now polls until the
+  grid stops changing for three consecutive reads, capped at that same 700ms,
+  so the slow path is no less settled than before and the common one is ~150ms.
+  `safety_mode_footers` went 4.98s -> 1.62s, `assistant_markdown_frame` 1.64s ->
+  0.41s, the three pty suites together 5.37s -> 4.07s. Eight consecutive runs
+  produced no snapshot mismatch and no `.snap.new`.
+
+  Two candidates were measured and **rejected**, which is the more useful half
+  of the result. Linking with `rust-lld` instead of `link.exe`: 35.0s vs 35.7s
+  on the exact rebuild CI pays — the compile is codegen-bound, not link-bound.
+  Merging the 19 integration-test binaries into one: a single test binary
+  rebuilds in 1.9s, not the ~8.3s a contended `--timings` report implies, so
+  the whole idea is worth a few seconds and not the disruption to
+  `--test <name>` selectors. Dependencies were confirmed fully cached — only
+  `mermaid-cli` and `mermaid-runtime` compile on a CI leg.
+
+- **`mermaid-model`: the model layer is now a crate, and the compiler enforces
+  it.** Five dependency edges pointed the wrong way — the wire adapters reached
+  up into the application. `models` read `app::Config`, borrowed `prompts`'
+  system prompt, borrowed `domain::ActionDisplay`, called the retry middleware
+  up in `effect`, and invoked `ollama::ensure_running` to spawn a server. Each
+  was invisible in review because `crate::` makes every module equidistant.
+
+  All five are gone, and the new crate boundary makes them unrepresentable:
+  adding `use crate::app::Config` back to `models/config.rs` is now an
+  `unresolved import`, not a code-review conversation.
+
+  The one that mattered was Ollama autostart. A wire adapter that can spawn a
+  process has no way to tell a caller "this path must not mutate anything" —
+  which is exactly how a connection-refused retry lived unnoticed inside a
+  read-only listing path. Recovery is now an injected capability
+  (`LocalServerRecovery`), supplied by the layer that owns the process. The
+  enumeration verbs are read-only *by construction* rather than by a `bool`
+  each one has to remember to pass.
+
+  `mermaid-cli` re-exports every moved module under its historical path — the
+  same shim `crate::runtime` already used for `mermaid-runtime` — so **not one
+  of the ~645 `crate::models::…` / `crate::utils::…` / `crate::constants::…`
+  call sites changed.**
+
+  Along the way, two things fell out that were bugs rather than layering:
+
+  - `ModelConfig::from_app_config` was **dead code duplicating a live rule**.
+    Nothing had ever called it, while `State::new` carried a byte-identical
+    copy of the same per-model reasoning resolution — and its three tests were
+    the only coverage that rule had anywhere, aimed at the copy that didn't
+    run. The duplicate is deleted and the tests now assert against
+    `State::new`, so the rule that actually executes is the one under test.
+  - `ModelConfig::default()` cloned a multi-KB system prompt on **every**
+    construction, including every `..Default::default()`, and every production
+    path overwrote it a line later. Now `None`. All 2136 tests passed without
+    modification, which is the evidence that nothing ever observed it.
+
+  Honest about the payoff: this is an **architecture** change, not a speed one.
+  A dependency chain preserves total frontend time, and the measurement agrees
+  — `cargo test --no-run` is 45s against 46s before. The earlier "88% of the
+  build is frontend" figure was wrong; it came from a `cargo check` run that
+  had to build `.rmeta` for all 327 dependencies from scratch. Steady state,
+  the lib's serial frontend is ~11s of a ~46s build.
+
+- **CI's no-emoji guard stopped silently shrinking.** It scanned `src/**` only,
+  which was correct while that held every line of Rust in the repo and quietly
+  wrong the moment a module moved into a workspace crate — it would have kept
+  passing over a smaller and smaller share of the code without ever saying so.
+  It now walks `crates/*/src` too: 194 files instead of 135, including
+  `mermaid-runtime`, which it had never covered at all.
+
+### Fixed
+
+- **Ollama is no longer a prerequisite for starting Mermaid.** A fresh install
+  with `ANTHROPIC_API_KEY` set and no Ollama on the machine died at startup
+  with "Ollama is not installed. See instructions above." plus a download
+  guide — Mermaid reads as requiring Ollama even though every remote provider
+  works without it. The dead end was startup model resolution: with no
+  `--model`, no `last_used_model`, and no `[default_model]`, the last resort
+  was Ollama's model list, and a missing Ollama was fatal there.
+
+  Resolution now falls through to a remote provider. `[providers.<name>]
+  .default_model` — a field that has been documented since it was added but
+  never read by anything — becomes the startup model when its provider's key
+  resolves, so `mermaid` with no arguments works on a machine that has never
+  seen Ollama. Ollama still wins when it has a model: local stays the default,
+  it just stopped being the requirement.
+
+  Mermaid still never invents a vendor's model name, so the no-model-at-all
+  error had to earn its keep instead: it now names the providers whose keys
+  already resolve, shows the `--model` and `default_model` forms for the first
+  of them, and mentions Ollama as the *local* option rather than as the thing
+  you must install. `mermaid status` matches — a missing Ollama is `[INFO]`,
+  not `[ERROR]`, when a remote provider is configured.
+
+  One consequence worth naming: "which remote providers are configured" was
+  computed in three places and all three missed Anthropic, Gemini, and (in
+  two of them) Meta, because those have bespoke adapters and so are absent
+  from the OpenAI-compatible registry that the loops walked. `doctor`,
+  `status`, and startup resolution now share `providers::discovery`, which
+  knows about all of them and mirrors `resolve_provider_key`'s precedence
+  exactly — override env var, documented env var, Gemini's legacy
+  `GEMINI_API_KEY`, then the keyring. An Anthropic-only machine used to report
+  "Remote providers: none".
+
+- **`/model` and `mermaid list` show every provider's models, not just
+  Ollama's.** The same registry-only blind spot ran one level deeper: model
+  *enumeration* walked the local Ollama daemon and the OpenAI-compatible
+  registry, and nothing else. A user who had spent days on
+  `meta/muse-spark-1.2-contributor` opened the picker and saw local models
+  only — the model they were talking to was not in the list.
+
+  `providers::discovery::provider_catalogs` now asks every configured
+  provider what it serves, concurrently, speaking each one's dialect:
+  `x-api-key` plus `anthropic-version` for Anthropic, `x-goog-api-key` and the
+  `models[].name` shape for Gemini (filtered to `generateContent`, so its
+  embedders stay out of a chat-model picker), and bearer auth over the
+  OpenAI-compatible `data[].id` shape for Meta and the registry. Each request
+  is best-effort with a 6s timeout, so one slow provider costs a late group
+  rather than a stalled picker.
+
+  `mermaid list` used to print provider *names* and stop; it now prints each
+  provider's models under it, and says so explicitly when a catalog cannot be
+  read instead of leaving a bare name that reads as "nothing here". The picker
+  skips an unreadable catalog entirely — every row there is selectable, and a
+  placeholder row would switch to a model id that does not exist.
+
+- **"Which providers can this machine use" has one definition instead of
+  four.** `mermaid status` printed a "Remote providers" block twice, in two
+  different formats, separated by MCP servers and project instructions —
+  because two of the four walks that answered the question both ran in it.
+  Each walk approximated a rule that `ProviderFactory` defines, and each
+  approximated it differently.
+
+  [`ProviderFactory::resolve_provider_endpoint`] now owns that rule: it
+  resolves the endpoint and credential exactly as `build_provider` would,
+  without constructing an adapter or touching the network, and `build_provider`
+  itself goes through it. `providers::discovery` asks it and treats `Err` as
+  "not usable", so a provider is listed **iff** the factory can build one — an
+  invariant a test now pins across the configs that used to split the two
+  apart. `status`, `doctor`, `list`, `/model`, and startup model resolution are
+  all views over that one answer.
+
+  Two real configurations were invisible to every previous walk. A keyless
+  loopback endpoint — `[providers.llamacpp] base_url = "http://127.0.0.1:8080/v1"`
+  with no key, which the factory has always accepted — was dropped because no
+  key resolved. A custom provider with a key but no `base_url` was reported as
+  configured by one walk and not the other, when the factory rejects it
+  outright. It now gets a **problem row** instead: providers you evidently
+  meant to set up but that still cannot be built are listed with the factory's
+  own error, on all three of `status`, `doctor`, and `list`. Cloudflare with a
+  token and no `CLOUDFLARE_ACCOUNT_ID` is the canonical case.
+
+  The status block also names each provider's endpoint, which is the one thing
+  a bare provider name never told you when requests were quietly going to a
+  proxy. `show_provider_status` is gone, and the Anthropic and Gemini base URLs
+  and key env vars live next to their providers — one definition each, the way
+  Meta's already did.
+
+- **A dead Ollama server no longer costs ~9 seconds of silence.** With Ollama
+  installed but stopped, `mermaid status` took 9.4s and `mermaid list` 9.0s
+  before printing a word. The retry middleware classifies a refused connection
+  as transient, so the probe ran three times with 500ms + 1000ms backoff — and
+  a refused loopback connect is not free on Windows, where the SYN is
+  retransmitted for ~2s before `WSAECONNREFUSED`. Three attempts plus backoff
+  is the whole nine seconds.
+
+  Retrying a refused connection could never have worked: nothing changes
+  between attempts. `retry_transient_http_no_connect_retry` returns it
+  immediately instead, and Ollama's `with_local_recovery` uses it for the first
+  round — the round whose only useful outcome is to hand off to
+  `ensure_running`. 5xx and 429 still retry under the same policy, there and in
+  the post-recovery round, because those come from a server that IS running and
+  may recover on its own.
+
+  `status` is now 3.1s and `list` 2.6s, both dominated by the single connect the
+  OS makes us wait for. The chat path gains the same time in a place that
+  matters more: a user whose Ollama is down used to wait through the full
+  backoff before the "Starting the local Ollama server…" notice appeared at
+  all, and now reaches the autostart in one attempt.
+
 ## [0.20.0] - 2026-08-07
 
 ### Changed

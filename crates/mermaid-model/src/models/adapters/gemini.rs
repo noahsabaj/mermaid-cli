@@ -524,7 +524,7 @@ impl GeminiAdapter {
     /// POST to `:generateContent` (sync) or `:streamGenerateContent`
     /// (streaming) and return the raw response.
     /// Transparently retries on 5xx, 429, or reqwest connect failures
-    /// via `crate::effect::retry_transient_http`.
+    /// via `crate::models::retry::retry_transient_http`.
     async fn send_chat(&self, body: &Value, stream: bool) -> Result<reqwest::Response> {
         let method = if stream {
             "streamGenerateContent?alt=sse"
@@ -537,7 +537,7 @@ impl GeminiAdapter {
             self.model_name,
             method
         );
-        crate::effect::retry_transient_http(|| async {
+        crate::models::retry::retry_transient_http(|| async {
             self.client
                 .post(&url)
                 .header("x-goog-api-key", &self.api_key)

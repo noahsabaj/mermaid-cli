@@ -61,7 +61,17 @@ impl OllamaProvider {
         backend: Arc<BackendConfig>,
         config: Arc<crate::app::Config>,
     ) -> Result<Self> {
+        let autostart = backend.ollama_autostart;
         let adapter = OllamaAdapter::new(model_name, backend).await?;
+        // The chat path is an *intent* path: a dead local server is mermaid's
+        // problem, not the user's, so hand the adapter the means to revive one.
+        // Enumeration verbs deliberately construct the adapter without this —
+        // see `LocalServerRecovery`.
+        let adapter = if autostart {
+            adapter.with_recovery(Arc::new(crate::ollama::OllamaAutostart))
+        } else {
+            adapter
+        };
         let capabilities = Capabilities::from_legacy(adapter.capabilities());
         Ok(Self {
             adapter,

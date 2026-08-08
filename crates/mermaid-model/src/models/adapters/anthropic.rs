@@ -772,10 +772,10 @@ impl AnthropicAdapter {
 
     /// POST `/v1/messages` and return the raw response.
     /// Transparently retries on 5xx, 429, or reqwest connect failures
-    /// via `crate::effect::retry_transient_http`.
+    /// via `crate::models::retry::retry_transient_http`.
     async fn send_chat(&self, body: &Value) -> Result<reqwest::Response> {
         let url = format!("{}/messages", self.base_url.trim_end_matches('/'));
-        crate::effect::retry_transient_http(|| async {
+        crate::models::retry::retry_transient_http(|| async {
             self.client
                 .post(&url)
                 .header("x-api-key", &self.api_key)

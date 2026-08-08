@@ -5,7 +5,6 @@
 
 use crate::constants::DEFAULT_TEMPERATURE;
 use crate::models::reasoning::ReasoningLevel;
-use crate::prompts;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -95,7 +94,13 @@ impl Default for ModelConfig {
             model: String::new(),
             temperature: default_temperature(),
             max_tokens: default_max_tokens(),
-            system_prompt: Some(prompts::get_system_prompt()),
+            // No prompt by default. Every production path builds this from
+            // `ChatRequest.system_prompt` (see each `providers::model::*`
+            // wrapper's `build_model_config`), so reaching up into `prompts`
+            // here only ever produced a multi-KB string that was immediately
+            // overwritten — and made the model layer depend on the app layer's
+            // prompt text to do it.
+            system_prompt: None,
             dynamic_system_suffix: None,
             reasoning: ReasoningLevel::default(),
             hide_reasoning_trace: false,
@@ -151,44 +156,6 @@ impl ModelConfig {
             (_, Some(suffix)) if !suffix.is_empty() => Some(suffix.to_string()),
             _ => None,
         }
-    }
-
-    /// Build a ModelConfig from user-facing app Config for a given model ID.
-    ///
-    /// Centralizes the wiring of temperature, max_tokens, reasoning level,
-    /// and Ollama hardware options that was previously scattered across
-    /// orchestrator.rs and model.rs.
-    ///
-    /// Reasoning resolution: per-model preference
-    /// (`config.reasoning_per_model[model_id]`) wins, then falls back to
-    /// the global `default_model.reasoning`. Set per-model via Alt+T or
-    /// `/reasoning <level>` while using the model in question.
-    pub fn from_app_config(config: &crate::app::Config, model_id: &str) -> Self {
-        let reasoning = config
-            .reasoning_per_model
-            .get(model_id)
-            .copied()
-            .unwrap_or(config.default_model.reasoning);
-        let mut mc = Self {
-            model: model_id.to_string(),
-            temperature: config.default_model.temperature,
-            max_tokens: config.default_model.max_tokens,
-            reasoning,
-            ..Self::default()
-        };
-        if let Some(v) = config.ollama.num_gpu {
-            mc.set_backend_option("ollama".into(), "num_gpu".into(), v.to_string());
-        }
-        if let Some(v) = config.ollama.num_ctx {
-            mc.set_backend_option("ollama".into(), "num_ctx".into(), v.to_string());
-        }
-        if let Some(v) = config.ollama.num_thread {
-            mc.set_backend_option("ollama".into(), "num_thread".into(), v.to_string());
-        }
-        if let Some(v) = config.ollama.numa {
-            mc.set_backend_option("ollama".into(), "numa".into(), v.to_string());
-        }
-        mc
     }
 
     /// Extract Ollama-specific options
@@ -299,45 +266,5 @@ mod tests {
         .expect("parse");
         assert!(cfg.ollama_autostart);
         assert!(BackendConfig::default().ollama_autostart);
-    }
-
-    /// Step 4 wires `default_model.reasoning` from app config into the
-    /// per-call ModelConfig. Without this, the user's config-file choice
-    /// would silently revert to `Medium` on every session bootstrap.
-    #[test]
-    fn from_app_config_propagates_reasoning_from_settings() {
-        let mut cfg = crate::app::Config::default();
-        cfg.default_model.reasoning = ReasoningLevel::High;
-
-        let mc = ModelConfig::from_app_config(&cfg, "ollama/qwen3-coder:30b");
-        assert_eq!(mc.reasoning, ReasoningLevel::High);
-        assert_eq!(mc.model, "ollama/qwen3-coder:30b");
-    }
-
-    #[test]
-    fn from_app_config_uses_medium_default_when_unset() {
-        let cfg = crate::app::Config::default();
-        let mc = ModelConfig::from_app_config(&cfg, "ollama/qwen3-coder:30b");
-        assert_eq!(mc.reasoning, ReasoningLevel::Medium);
-    }
-
-    /// Per-model preference wins over the global default. This is the
-    /// Step 5b semantic: setting `/reasoning high` on Sonnet sticks for
-    /// Sonnet without affecting other models.
-    #[test]
-    fn from_app_config_uses_per_model_preference() {
-        let mut cfg = crate::app::Config::default();
-        cfg.default_model.reasoning = ReasoningLevel::Low;
-        cfg.reasoning_per_model.insert(
-            "anthropic/claude-sonnet-4-6".to_string(),
-            ReasoningLevel::High,
-        );
-
-        let mc_per_model = ModelConfig::from_app_config(&cfg, "anthropic/claude-sonnet-4-6");
-        assert_eq!(mc_per_model.reasoning, ReasoningLevel::High);
-
-        // Falls back to default for other models.
-        let mc_default = ModelConfig::from_app_config(&cfg, "ollama/foo");
-        assert_eq!(mc_default.reasoning, ReasoningLevel::Low);
     }
 }
