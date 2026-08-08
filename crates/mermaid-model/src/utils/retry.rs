@@ -1,80 +1,11 @@
-use anyhow::Result;
-use std::time::Duration;
-use tracing::debug;
-
-/// Retry configuration
-pub struct RetryConfig {
-    pub max_attempts: usize,
-    pub initial_delay_ms: u64,
-    pub max_delay_ms: u64,
-    pub backoff_multiplier: f64,
-}
-
-impl Default for RetryConfig {
-    fn default() -> Self {
-        Self {
-            max_attempts: 3,
-            initial_delay_ms: 100,
-            max_delay_ms: 10_000,
-            backoff_multiplier: 2.0,
-        }
-    }
-}
-
-/// Retry an async operation with exponential backoff, but only while
-/// `is_retryable` returns true for the error. A terminal error (e.g. an HTTP
-/// 4xx on a non-idempotent POST) is surfaced immediately instead of being
-/// retried `max_attempts` times (#85).
-pub async fn retry_async_if<F, Fut, T, P>(
-    operation: F,
-    config: &RetryConfig,
-    is_retryable: P,
-) -> Result<T>
-where
-    F: Fn() -> Fut,
-    Fut: std::future::Future<Output = Result<T>>,
-    P: Fn(&anyhow::Error) -> bool,
-{
-    let mut attempt = 0;
-    let mut delay_ms = config.initial_delay_ms;
-
-    loop {
-        attempt += 1;
-
-        match operation().await {
-            Ok(result) => return Ok(result),
-            // Terminal error, or attempts exhausted: stop retrying.
-            Err(e) if attempt >= config.max_attempts || !is_retryable(&e) => {
-                if attempt >= config.max_attempts {
-                    return Err(anyhow::anyhow!(
-                        "Operation failed after {} attempts: {}",
-                        config.max_attempts,
-                        e
-                    ));
-                }
-                // Non-retryable: surface the original error unwrapped.
-                return Err(e);
-            },
-            Err(e) => {
-                debug!(
-                    attempt = attempt,
-                    max_attempts = config.max_attempts,
-                    delay_ms = delay_ms,
-                    "Retry attempt failed: {}",
-                    e
-                );
-
-                // Sleep with jittered exponential backoff (the jitter de-syncs
-                // concurrent clients so they don't retry in lockstep).
-                tokio::time::sleep(Duration::from_millis(jitter(delay_ms))).await;
-
-                // Calculate next delay
-                delay_ms = ((delay_ms as f64) * config.backoff_multiplier) as u64;
-                delay_ms = delay_ms.min(config.max_delay_ms);
-            },
-        }
-    }
-}
+//! Jittered backoff, shared by the one retry ladder.
+//!
+//! This file used to hold a second, weaker ladder: `retry_async` (zero
+//! callers) and `retry_async_if` (one caller, `web_client`, using it at the
+//! wrong scope — the whole request pipeline was inside the retry closure, so a
+//! JSON parse failure cost three attempts and every attempt re-acquired the
+//! download permits). Both are gone; `models::retry::retry_transient_http` is
+//! the single ladder now, and `jitter` is what it shares with nothing else.
 
 /// Apply ±20% jitter to `delay_ms` using real entropy so concurrent clients —
 /// and processes restarting at the same time — don't retry in lockstep (a
@@ -95,39 +26,9 @@ pub fn jitter(delay_ms: u64) -> u64 {
     let offset = entropy % (2 * span + 1);
     delay_ms - span + offset
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    #[tokio::test]
-    async fn retry_async_if_skips_nonretryable_errors() {
-        // #85: a non-retryable error returns immediately (one attempt), not
-        // after max_attempts.
-        let config = RetryConfig {
-            max_attempts: 5,
-            initial_delay_ms: 1,
-            ..Default::default()
-        };
-        let calls = Arc::new(AtomicUsize::new(0));
-        let cc = Arc::clone(&calls);
-        let result: Result<i32> = retry_async_if(
-            move || {
-                let c = Arc::clone(&cc);
-                async move {
-                    c.fetch_add(1, Ordering::SeqCst);
-                    Err(anyhow::anyhow!("terminal"))
-                }
-            },
-            &config,
-            |_| false,
-        )
-        .await;
-        assert!(result.is_err());
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-    }
 
     #[test]
     fn jitter_stays_within_band() {
