@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The tracked `clippy::unwrap_used` count now measures shipped code, not the
+  test suite.** It stood at 1,353 — 26% of all tracked debt and the single
+  largest entry. Splitting the measurement showed what it was actually
+  counting: against `--lib --bins`, which excludes `#[cfg(test)]` modules and
+  the `tests/` targets, the same workspace reports **6**.
+
+  So the number was never a risk measure. `unwrap()` in a test *is* the
+  assertion — the panic is the failure being reported — and a metric that
+  large and that test-shaped tracks how many tests exist. It had also begun
+  charging new tests against a budget, which is a tax on the thing the repo
+  wants more of.
+
+  `allow-unwrap-in-tests = true` in `.clippy.toml` fixes it, alongside the
+  `allow-dbg-in-tests` that was already there for the same reason. Nothing is
+  suppressed that was ever enforced: `unwrap_used` is force-warned by the
+  ratchet script alone and appears in no manifest's `[lints.clippy]`, so this
+  changes what is counted, not what is allowed.
+
+  Of the 6 in shipped code, 5 are `clap` `default_value_t` expansions where
+  the `unwrap()` belongs to the derive macro. The sixth was real, in
+  `ask_user_question`, and is gone: the remembered-answers path checked
+  `all(|q| …is_some_and(…))` and then indexed `prefs[key.unwrap()]` three lines
+  later, trusting a guard at a distance. It is one `remembered_answers` pass
+  now, where the lookup that decides a question is settled is the lookup that
+  builds its answer, so the two cannot disagree. That path had no direct test;
+  it has four, including the no-`memory_key` case the old `unwrap()` was
+  leaning on the guard to prevent.
+
 - **`clippy::use_self` paid off entirely: 508 occurrences down to zero, and
   the key is gone from `clippy_pedantic.txt`.** The second-largest entry in the
   file, and the first tracked lint to be eliminated rather than reduced —

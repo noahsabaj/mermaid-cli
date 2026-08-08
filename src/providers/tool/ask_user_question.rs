@@ -237,6 +237,32 @@ fn save_prefs(map: &HashMap<String, StoredAnswer>) {
     }
 }
 
+/// The remembered answer for every question, or `None` if any one of them is
+/// still unsettled.
+///
+/// One pass, rather than an `all(...)` check followed by a lookup that trusts
+/// it: the lookup that decides whether a question is already answered is the
+/// same lookup that builds its answer, so the two cannot disagree and no arm
+/// can panic. All-or-nothing is the point — a partially remembered set still
+/// has to be asked.
+fn remembered_answers(
+    questions: &[Question],
+    prefs: &HashMap<String, StoredAnswer>,
+) -> Option<Vec<QuestionAnswer>> {
+    questions
+        .iter()
+        .map(|q| {
+            let stored = prefs.get(q.memory_key.as_ref()?)?;
+            Some(QuestionAnswer {
+                header: q.header.clone(),
+                question: q.question.clone(),
+                selected: stored.selected.clone(),
+                note: stored.note.clone(),
+            })
+        })
+        .collect()
+}
+
 #[async_trait]
 impl ToolExecutor for AskUserQuestionTool {
     fn name(&self) -> &'static str {
@@ -344,22 +370,7 @@ impl ToolExecutor for AskUserQuestionTool {
         // answer, return them without prompting (works interactively and
         // headlessly) so settled decisions aren't re-asked every session.
         let prefs = load_prefs();
-        if questions
-            .iter()
-            .all(|q| q.memory_key.as_ref().is_some_and(|k| prefs.contains_key(k)))
-        {
-            let answers: Vec<QuestionAnswer> = questions
-                .iter()
-                .map(|q| {
-                    let stored = &prefs[q.memory_key.as_ref().unwrap()];
-                    QuestionAnswer {
-                        header: q.header.clone(),
-                        question: q.question.clone(),
-                        selected: stored.selected.clone(),
-                        note: stored.note.clone(),
-                    }
-                })
-                .collect();
+        if let Some(answers) = remembered_answers(&questions, &prefs) {
             return ToolOutcome::success(
                 format_answers(&answers),
                 format!("{} (remembered)", summarize_answers(&answers)),
@@ -513,5 +524,69 @@ mod tests {
             Some(vec!["pnpm".to_string()])
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn keyed(header: &str, memory_key: Option<&str>) -> Question {
+        Question {
+            header: header.to_string(),
+            question: format!("Which {header}?"),
+            kind: QuestionKind::Select,
+            options: Vec::new(),
+            memory_key: memory_key.map(str::to_string),
+        }
+    }
+
+    fn stored(selected: &str) -> StoredAnswer {
+        StoredAnswer {
+            selected: vec![selected.to_string()],
+            note: None,
+        }
+    }
+
+    #[test]
+    fn every_question_remembered_answers_without_asking() {
+        let questions = vec![keyed("Database", Some("db")), keyed("Runtime", Some("rt"))];
+        let prefs = HashMap::from([
+            ("db".to_string(), stored("PostgreSQL")),
+            ("rt".to_string(), stored("tokio")),
+        ]);
+
+        let answers = remembered_answers(&questions, &prefs).expect("both keys are remembered");
+
+        assert_eq!(answers.len(), 2);
+        assert_eq!(answers[0].header, "Database");
+        assert_eq!(answers[0].selected, vec!["PostgreSQL".to_string()]);
+        assert_eq!(answers[1].selected, vec!["tokio".to_string()]);
+    }
+
+    #[test]
+    fn one_unremembered_question_asks_the_whole_set() {
+        let questions = vec![keyed("Database", Some("db")), keyed("Runtime", Some("rt"))];
+        let prefs = HashMap::from([("db".to_string(), stored("PostgreSQL"))]);
+
+        // All-or-nothing: a partially settled set is still worth asking about,
+        // and answering only half of it would be worse than asking twice.
+        assert!(remembered_answers(&questions, &prefs).is_none());
+    }
+
+    /// The case that used to be load-bearing for a distant `unwrap()`: a
+    /// question carrying no `memory_key` at all. The old code checked for it
+    /// three lines above the indexing that assumed the check had run.
+    #[test]
+    fn a_question_without_a_memory_key_asks_rather_than_panicking() {
+        let questions = vec![keyed("Database", Some("db")), keyed("Runtime", None)];
+        let prefs = HashMap::from([("db".to_string(), stored("PostgreSQL"))]);
+
+        assert!(remembered_answers(&questions, &prefs).is_none());
+    }
+
+    #[test]
+    fn an_empty_question_set_is_vacuously_remembered() {
+        // Unreachable through the tool (an empty `questions` array is rejected
+        // earlier), but pinned so the fold's identity cannot drift silently.
+        assert_eq!(
+            remembered_answers(&[], &HashMap::new()).map(|a| a.len()),
+            Some(0)
+        );
     }
 }
