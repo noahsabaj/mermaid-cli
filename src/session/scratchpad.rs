@@ -113,6 +113,14 @@ pub fn session_dir(root: &Path, project: &Path, session_id: &str) -> PathBuf {
 /// lock and returns the same path. If another live process holds the
 /// lock (the same conversation open twice), the directory is shared and
 /// that process's lock protects it.
+///
+/// # Errors
+///
+/// Creating the directory chain, creating the lock file, and a lock attempt
+/// that fails for an I/O reason. Losing the lock to another live process is
+/// not an error — that is the shared-directory case above. Tightening each
+/// level to `0700` is best-effort, so an `Ok` path is not proof it is
+/// owner-only.
 pub fn ensure(project: &Path, session_id: &str) -> io::Result<PathBuf> {
     ensure_in(&scratch_root(), project, session_id)
 }
@@ -176,6 +184,10 @@ fn lock_is_held(dir: &Path) -> bool {
 /// number of session directories removed. Runs on session startup (the
 /// `EnsureScratchpad` effect, with [`RETENTION_DAYS`]) and on mermaidd
 /// startup (with the daemon's configured retention) — no separate timer.
+///
+/// # Errors
+///
+/// Only [`sweep_stale_in`]'s.
 pub fn sweep_stale(retention_days: u64) -> io::Result<u64> {
     sweep_stale_in(&scratch_root(), retention_days)
 }
@@ -183,6 +195,13 @@ pub fn sweep_stale(retention_days: u64) -> io::Result<u64> {
 /// [`sweep_stale`] against an explicit root. Public so mermaidd's tests (a
 /// separate bin target that can't see `pub(crate)`) can drive the sweep
 /// against a fixture directory, mirroring its bg-log sweep tests.
+///
+/// # Errors
+///
+/// Reading `root` or any project directory under it, and stat'ing an entry. A
+/// root that does not exist is `Ok(0)`, a directory that will not delete is
+/// skipped, and a directory whose lock is held or whose mtime reads as fresh
+/// is deliberately kept — the count is what was removed, not what was old.
 pub fn sweep_stale_in(root: &Path, retention_days: u64) -> io::Result<u64> {
     if !root.exists() {
         return Ok(0);
@@ -228,6 +247,12 @@ pub fn sweep_stale_in(root: &Path, retention_days: u64) -> io::Result<u64> {
 /// directory whose lock is held by a live process is left alone (that
 /// session is still open, possibly in another mermaid); the sweep reaps
 /// it later.
+///
+/// # Errors
+///
+/// Removing the directory tree. A session with no scratchpad, and one whose
+/// lock a live process holds, are both `Ok` — so an `Ok` does not mean the
+/// directory is gone.
 pub fn remove(project: &Path, session_id: &str) -> io::Result<()> {
     remove_in(&scratch_root(), project, session_id)
 }

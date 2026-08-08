@@ -65,6 +65,15 @@ pub enum Enforcement {
 /// Enforce `policy` for the command `argv`. Called from single-threaded
 /// launcher code. Any `Err` means the requested confinement could not be
 /// applied — the caller MUST fail closed (exit 126), never run unconfined.
+///
+/// # Errors
+///
+/// The platform refusing to install a *requested* restriction: on Linux a
+/// Landlock or seccomp setup failure, on macOS a profile that
+/// `sandbox-exec` will not take. An empty policy is `Ok` everywhere, and a
+/// kernel too old for write-confinement is `Ok` with `fs_enforced: false`
+/// rather than an error — that one case is the documented best-effort, and it
+/// is why `Ok` alone is not proof the filesystem is confined.
 pub fn enforce(policy: &SandboxPolicy, argv: &[OsString]) -> anyhow::Result<Enforcement> {
     if !policy.deny_network && policy.allowed_writes.is_empty() {
         // Nothing requested: nothing to enforce, on any platform.

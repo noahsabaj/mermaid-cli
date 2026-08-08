@@ -9,6 +9,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`clippy::missing_errors_doc` is at zero: the remaining 153 got real
+  prose.** The previous pass stopped at 153 on the argument that a long tail
+  across ~40 files has no shared contract to state, and that emitting 153
+  sentences of "Returns an error if the operation fails" would satisfy the lint
+  and make the docs worse. Both halves were right; the conclusion did not
+  follow. No shared contract means each site needs its own, not that none
+  exists.
+
+  What the sections mostly say is what is NOT an error, because that is the
+  part a caller gets wrong. A missing row, a lost claim race, a cancelled
+  screenshot, a daemon that is not running, a project config that will not
+  load, a message-less conversation, and a compaction that declines to run are
+  all `Ok`. So is a `git` predicate exiting nonzero, a Wayland tool that is
+  simply absent for a `has_command` check, and a scratchpad whose lock another
+  live session holds.
+
+  Three shapes recur. Every adapter and provider `new` contacts nothing: the
+  only fallible step is the reqwest client build, so a bad key or an
+  unreachable host still constructs and fails on the first request. Best-effort
+  work never fails the call, which makes `Ok` weaker than it looks — a returned
+  `private_temp_dir` path is not proof the directory is 0700, a GC's count is
+  what it removed rather than what was eligible, and `run_plugin_hooks`
+  dispatched rather than succeeded. And where a failure leaves the caller
+  matters more than that it failed: `write_atomic` and the config writers leave
+  the previous file intact, `AgentWorktree::create` destroys a half-seeded
+  checkout before returning, `restore_checkpoint` rolls back best-effort (the
+  "normally" in its doc is that best-effort, stated), and
+  `merge_into_project` names the single path that can leave the project partly
+  changed.
+
+  `credentials.rs` also carried an unclosed `<label>` HTML tag in a doc
+  comment. It never failed CI because the documentation job builds only the
+  root crate — a workspace-wide `cargo doc` fails on it and on four other
+  pre-existing broken intra-doc links in the sub-crates. Only the one in a file
+  this branch already touched is fixed here.
+
 - **`clippy::unwrap_used` is down to five, and none of the five is ours.** The
   `allow-unwrap-in-tests` change left a residue of 15: `unwrap()` in `tests/`
   *helper* functions, which carry no `#[test]` attribute for the allowance to

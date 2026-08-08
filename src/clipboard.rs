@@ -383,6 +383,15 @@ pub fn has_image() -> bool {
 
 /// Read image bytes from the clipboard.
 /// Returns `(bytes, format)` where format is the attachment's file extension.
+///
+/// # Errors
+///
+/// No clipboard backend on `PATH` (`xclip`, `wl-paste`, `pbpaste`, or
+/// PowerShell), and a clipboard holding no image in any format this knows —
+/// which is the ordinary case when the user copied text, so callers fall back
+/// to [`read_text`] rather than surfacing it. A backend command that fails or
+/// times out is treated as "this format is not available" and the next one is
+/// tried.
 #[expect(
     clippy::too_many_lines,
     reason = "predates the lint; see .github/baselines/expect_budget.txt"
@@ -526,6 +535,13 @@ exit 1",
 }
 
 /// Read text from the clipboard (fallback when no image is found).
+///
+/// # Errors
+///
+/// No clipboard backend on `PATH`, the backend command failing to run or
+/// timing out, and a nonzero exit — reported as "clipboard does not contain
+/// text", which is what a nonzero exit means for every backend here. Invalid
+/// UTF-8 is not an error: it is replaced lossily.
 pub fn read_text() -> Result<String> {
     let backend = detect_backend()
         .context("No clipboard backend detected (need xclip, wl-paste, pbpaste, or PowerShell)")?;
@@ -560,6 +576,13 @@ pub fn read_text() -> Result<String> {
 /// detection and shells out to the platform tool (no extra dependency):
 /// `wl-copy` / `xclip` / `pbcopy` / PowerShell `Set-Clipboard`. Used by the
 /// in-app drag-select copy path.
+///
+/// # Errors
+///
+/// No clipboard backend on `PATH`, the backend command failing to run or
+/// timing out, and a nonzero exit. On Wayland and X11 the tool forks a
+/// background process to keep serving the selection, so an `Ok` means the
+/// handoff succeeded — not that the selection outlives that fork.
 pub fn write_text(text: &str) -> Result<()> {
     let backend =
         detect_backend().context("No clipboard backend detected (need xclip/wl-copy/pbcopy)")?;

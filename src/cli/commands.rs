@@ -28,6 +28,14 @@ use super::{Commands, GitHost, OutputFormat, PairCommand, PluginCommand, PrComma
 /// Handle CLI subcommands
 /// Returns Ok(true) if the command was handled and we should exit
 /// Returns Ok(false) if we should continue to the main application
+///
+/// # Errors
+///
+/// Whatever the dispatched subcommand fails with — there is no shared failure
+/// mode across them, since this arm-matches every verb from `init` to the
+/// daemon and plugin trees. A subcommand that ran and reported bad news (no
+/// models installed, no daemon running) is `Ok(true)`: the `Err` path is for a
+/// verb that could not do its job, and it becomes the process exit code.
 #[expect(
     clippy::too_many_lines,
     reason = "predates the lint; see .github/baselines/expect_budget.txt"
@@ -2079,6 +2087,14 @@ fn show_ports() -> Result<()> {
 /// Read-only: a dead local server is reported, never resurrected — a
 /// cloud-model user who stopped Ollama on purpose must be able to
 /// enumerate without a surprise VRAM grab.
+///
+/// # Errors
+///
+/// Only writing to stdout. Every "nothing to list" case — Ollama not
+/// installed, installed but stopped, installed with no models, no configured
+/// remote providers — is `Ok` and prints what it found, because a listing verb
+/// that exits nonzero because the answer is empty is answering a different
+/// question.
 pub async fn list_models(config: &Config) -> Result<()> {
     match list_ollama_models(config).await {
         None if is_ollama_installed() => {

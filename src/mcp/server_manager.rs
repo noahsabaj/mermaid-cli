@@ -80,6 +80,15 @@ impl McpServerManager {
     /// Spawn + initialize + `list_tools` for one server, bounded by
     /// [`MCP_STARTUP_TIMEOUT`]; inserts the runtime and returns the
     /// sanitized specs for the reducer's `Msg::McpServerReady`.
+    ///
+    /// # Errors
+    ///
+    /// Spawning or connecting to the server, the `initialize` handshake, the
+    /// `list_tools` discovery, and the whole sequence exceeding
+    /// [`MCP_STARTUP_TIMEOUT`]. On timeout the in-flight future is dropped,
+    /// which reaps the child — no stray process survives a failed start. One
+    /// server failing here never blocks the others; the caller reports it and
+    /// carries on.
     pub async fn start_server(
         &self,
         name: &str,
@@ -257,6 +266,15 @@ impl McpServerManager {
             .is_some_and(|s| s.read_only_hint)
     }
 
+    /// Dispatch a tool call to `server`, resolving both the alias and the raw
+    /// tool name.
+    ///
+    /// # Errors
+    ///
+    /// A `server` that is neither a running raw name nor a known alias, a
+    /// server that has been stopped, and whatever the call itself fails with
+    /// (transport, timeout). A tool that runs and reports failure is not an
+    /// error — that is `isError` on the returned [`McpToolResult`].
     pub async fn call_tool(
         &self,
         server: &str,

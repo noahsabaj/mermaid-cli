@@ -29,6 +29,13 @@ pub enum CappedLine {
 /// without ever sending `\n` cannot drive unbounded allocation here: once the
 /// pending line passes `max_bytes` the buffered bytes are dropped and we only
 /// scan forward for the next newline to resync.
+///
+/// # Errors
+///
+/// Only the underlying reader's I/O errors. Exceeding the cap is not one of
+/// them: that is `Ok(CappedLine::TooLong)`, and so is a clean EOF
+/// (`CappedLine::Eof`), because both are states a caller resumes from rather
+/// than a broken stream.
 pub async fn read_line_capped<R>(reader: &mut R, max_bytes: usize) -> std::io::Result<CappedLine>
 where
     R: AsyncBufRead + Unpin,
@@ -91,6 +98,11 @@ fn strip_trailing_cr(mut v: Vec<u8>) -> Vec<u8> {
 ///
 /// Unlike [`std::fs::read`], a multi-gigabyte file never pulls more than
 /// `max_bytes` (+1 probe byte) into memory.
+///
+/// # Errors
+///
+/// Opening `path` (missing, not readable, a directory), then any read error.
+/// A file longer than the cap is not an error — that is the `truncated` flag.
 pub fn read_file_capped(
     path: &std::path::Path,
     max_bytes: usize,
@@ -104,6 +116,11 @@ pub fn read_file_capped(
 /// open (e.g. [`mermaid_runtime::open_beneath`]) and must read the *same* inode
 /// the check resolved — feeding a path back to [`read_file_capped`] would reopen
 /// by name and reintroduce the symlink TOCTOU (#77).
+///
+/// # Errors
+///
+/// Only read errors on the handle the caller already opened. A file longer
+/// than the cap is not an error — that is the `truncated` flag.
 pub fn read_capped(file: std::fs::File, max_bytes: usize) -> std::io::Result<(Vec<u8>, bool)> {
     let mut buf = Vec::new();
     // Read one byte past the cap so we can distinguish "exactly at cap" from

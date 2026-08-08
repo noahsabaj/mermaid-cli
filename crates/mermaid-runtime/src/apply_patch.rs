@@ -78,6 +78,15 @@ fn is_file_marker(line: &str) -> bool {
 
 /// Parse a complete patch into its hunks. Strict: requires the Begin/End markers
 /// (tolerating surrounding blank lines) and rejects stray lines.
+///
+/// # Errors
+///
+/// [`ParseError::Invalid`] when the `Begin Patch` / `End Patch` markers are
+/// missing or a line inside the body belongs to no hunk, and
+/// [`ParseError::InvalidHunk`] — which carries the offending line number —
+/// when a hunk's own body is malformed. Purely textual: no path here is
+/// opened or checked
+/// for existence, so a patch against a file that is not there still parses.
 pub fn parse_patch(patch: &str) -> Result<Vec<Hunk>, ParseError> {
     let raw: Vec<&str> = patch.lines().collect();
     let start = raw
@@ -322,6 +331,15 @@ pub struct AppliedFile {
 }
 
 /// Apply `chunks` to `original`, returning the new file contents.
+///
+/// # Errors
+///
+/// [`ApplyError::ContextNotFound`] when a chunk's `@@` anchor is nowhere in
+/// the file, and [`ApplyError::LinesNotFound`] when its `old_lines` span is
+/// not locatable from the current position. Both are searched
+/// whitespace/Unicode-normalized before failing, so an `Err` means the region
+/// is genuinely absent, not merely reformatted — a fuzzy match succeeds and
+/// reports itself through `AppliedFile::fuzzy`.
 pub fn derive_new_contents(
     original: &str,
     chunks: &[UpdateFileChunk],

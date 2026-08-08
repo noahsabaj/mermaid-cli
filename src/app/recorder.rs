@@ -73,6 +73,12 @@ pub struct Recorder {
 
 impl Recorder {
     /// Open `path` for append. Creates the file if it doesn't exist.
+    ///
+    /// # Errors
+    ///
+    /// Opening `path` for append: a missing parent directory, no permission, a
+    /// directory in the way. Tightening an existing recording to 0600 is
+    /// best-effort, so an `Ok` recorder is not proof the file is owner-only.
     pub fn open(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
         let mut opts = OpenOptions::new();
@@ -109,6 +115,12 @@ impl Recorder {
     /// Write the session header. Called once, before the first `record_msg`,
     /// and flushed immediately — a replay of a crashed session should still
     /// find a parseable header.
+    ///
+    /// # Errors
+    ///
+    /// Serializing `header`, writing the line, and the immediate flush. The
+    /// flush is part of the contract, not an optimization: without it a
+    /// crashed session leaves a recording `Replay::open` refuses.
     pub fn record_header(&mut self, header: &SessionHeader) -> Result<()> {
         let mut value = serde_json::to_value(header).context("serialize session header")?;
         mermaid_model::utils::redact_json(&mut value);
@@ -127,6 +139,12 @@ impl Recorder {
     /// this — if Tick ever grows state effects, that test fails and ticks
     /// must be recorded again. Old logs containing Tick entries still fold
     /// fine (a no-op replays as a no-op).
+    ///
+    /// # Errors
+    ///
+    /// Serializing `msg` and writing the line. The write is buffered, so an
+    /// `Ok` means the line is queued, not that it reached disk — a full disk
+    /// surfaces at the next [`Self::flush`] or on drop, where it is ignored.
     pub fn record_msg(&mut self, now: DateTime<Local>, msg: &Msg) -> Result<()> {
         if matches!(msg, Msg::Tick) {
             return Ok(());
@@ -162,6 +180,12 @@ impl Recorder {
     /// a future `--replay` can verify its fold reproduces what this live
     /// session actually saw (not merely that the fold is self-consistent).
     /// Written on clean exit; a crashed session simply has no trailer.
+    ///
+    /// # Errors
+    ///
+    /// Serializing the trailer, writing the line, and the flush. A failure
+    /// leaves the recording unsealed, which replay reports as "no trailer to
+    /// compare against" rather than as a corrupt log.
     pub fn record_trailer(&mut self, now: DateTime<Local>, session: &Session) -> Result<()> {
         let trailer = SessionTrailer {
             ts: now,
@@ -172,6 +196,12 @@ impl Recorder {
         self.flush()
     }
 
+    /// Push buffered lines to the file.
+    ///
+    /// # Errors
+    ///
+    /// The underlying write: a full disk, a closed handle. This is where a
+    /// failed [`Self::record_msg`] write actually surfaces.
     pub fn flush(&mut self) -> Result<()> {
         self.writer.flush().context("flush recorder")
     }
@@ -230,6 +260,12 @@ impl ReplayEntry {
     /// Reconstruct the reducer input. The error names the recorded `kind` so
     /// a replay report can say what it skipped (e.g. a variant this build
     /// doesn't know because the log came from a newer mermaid).
+    ///
+    /// # Errors
+    ///
+    /// The recorded payload not deserializing into a [`Msg`] this build
+    /// knows. Replay treats that as a skipped line rather than a failed
+    /// replay, which is why the message names the recorded `kind`.
     pub fn to_msg(&self) -> Result<Msg> {
         serde_json::from_value(self.msg.clone())
             .with_context(|| format!("reconstruct recorded {} msg", self.kind))
@@ -262,6 +298,14 @@ impl Replay {
     /// Open a recording and parse its leading [`SessionHeader`]. Refuses
     /// files without one (pre-v1 logs) and format versions this build
     /// doesn't understand.
+    ///
+    /// # Errors
+    ///
+    /// Opening `path`, an empty file, an unreadable or unparseable first line
+    /// — a pre-v1 log, or one truncated at byte 0 — and a `format` version
+    /// this build does not read. Nothing past the header is touched here, so a
+    /// log that is corrupt further down still opens; those lines come back as
+    /// `RecordLine::Malformed`.
     pub fn open(path: impl Into<PathBuf>) -> Result<(SessionHeader, Self)> {
         let path = path.into();
         let file =

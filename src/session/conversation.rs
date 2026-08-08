@@ -192,6 +192,13 @@ pub struct ConversationManager {
 
 impl ConversationManager {
     /// Create a new conversation manager for a project directory
+    ///
+    /// # Errors
+    ///
+    /// Creating `.mermaid/conversations` or `.mermaid/compactions` under
+    /// `project_dir` — a read-only or unwritable project. Both are created
+    /// here, so the later load and list paths can treat an unreadable
+    /// directory as "no conversations" rather than a failure.
     pub fn new(project_dir: impl AsRef<Path>) -> Result<Self> {
         let mermaid_dir = project_dir.as_ref().join(".mermaid");
         let conversations_dir = mermaid_dir.join("conversations");
@@ -233,6 +240,16 @@ impl ConversationManager {
     }
 
     /// Save a conversation to disk
+    ///
+    /// # Errors
+    ///
+    /// An `id` that would escape the conversations dir, serializing the
+    /// conversation, and the atomic 0600 write. Two cases that look like
+    /// failures are `Ok`: a message-less conversation is deliberately not
+    /// persisted, and a concurrent writer detected through the `(mtime, len)`
+    /// baseline diverts this copy to a `.conflict` sibling and warns instead
+    /// of overwriting. The `.meta` sidecar is best-effort and never fails the
+    /// save.
     pub fn save_conversation(&self, conversation: &ConversationHistory) -> Result<()> {
         // The id field is persisted and round-trips through (potentially
         // tampered) on-disk state; validate it before it drives the write path,
@@ -319,6 +336,14 @@ impl ConversationManager {
     /// Save the raw messages removed by a compaction. Archives live
     /// outside the hot conversation JSON so `/load` and `/list` don't
     /// parse old transcripts on every startup.
+    ///
+    /// # Errors
+    ///
+    /// A conversation id or archive id that would traverse, creating the
+    /// per-conversation archive directory, serializing the archive, and the
+    /// atomic 0600 write. Nothing here is best-effort: this is the only
+    /// durable copy of the compacted-out messages, so a failed write must
+    /// reach the caller rather than silently drop them.
     pub fn save_compaction_archive(&self, archive: &CompactionArchive) -> Result<PathBuf> {
         // Both the conversation id (a directory component) and the archive id
         // (a file component) come from persisted state and must not traverse.
@@ -353,6 +378,13 @@ impl ConversationManager {
     }
 
     /// Load a specific conversation by ID
+    ///
+    /// # Errors
+    ///
+    /// An `id` that would escape the conversations dir, a file that is
+    /// missing, unreadable, or past the size cap, JSON that does not parse,
+    /// and a parsed `id` that would itself traverse — checked separately,
+    /// because that field is on-disk state that drives later saves.
     pub fn load_conversation(&self, id: &str) -> Result<ConversationHistory> {
         validate_conversation_id(id)?;
         let filename = format!("{id}.json");
@@ -378,6 +410,14 @@ impl ConversationManager {
     /// unparseable, or traversing-id file. Mirrors `list_conversations`'s
     /// tolerance so one corrupt/partial file (e.g. a crash mid-write) can't make
     /// `--continue` hard-fail; it falls back to the next-newest valid conversation.
+    ///
+    /// # Errors
+    ///
+    /// In practice none: an unreadable conversations dir and every unreadable,
+    /// oversized, unparseable, or traversing-id file are skipped with a
+    /// warning, and running out of candidates is `Ok(None)`. The `Result` is
+    /// kept for callers that already handle one and so this can grow a real
+    /// failure later.
     pub fn load_last_conversation(&self) -> Result<Option<ConversationHistory>> {
         let Ok(entries) = fs::read_dir(&self.conversations_dir) else {
             return Ok(None);
@@ -422,6 +462,12 @@ impl ConversationManager {
     }
 
     /// List all conversations in the project
+    ///
+    /// # Errors
+    ///
+    /// In practice none, and deliberately: an unreadable directory yields an
+    /// empty list, and any file that will not read or parse is skipped, so one
+    /// corrupt transcript cannot empty the picker.
     pub fn list_conversations(&self) -> Result<Vec<ConversationHistory>> {
         let mut conversations = Vec::new();
 
@@ -451,6 +497,13 @@ impl ConversationManager {
     /// lacks a (valid) one — older, or written by a pre-sidecar build — fall
     /// back to fully parsing its `<id>.json`. Message-less sessions are skipped.
     /// Newest-first. Cheaper than [`Self::list_conversations`] for display-only paths.
+    ///
+    /// # Errors
+    ///
+    /// In practice none, matching [`Self::list_conversations`]: an unreadable
+    /// directory yields an empty list, and a sidecar that will not read or
+    /// parse falls through to parsing its `<id>.json`, which is itself skipped
+    /// if that fails too.
     pub fn list_conversation_metas(&self) -> Result<Vec<ConversationMeta>> {
         let mut metas = Vec::new();
         let mut seen = std::collections::HashSet::new();
@@ -486,6 +539,13 @@ impl ConversationManager {
     }
 
     /// Delete a conversation (and its metadata sidecar).
+    ///
+    /// # Errors
+    ///
+    /// An `id` that would escape the conversations dir, and removing the
+    /// `<id>.json` itself. An id with no file is `Ok`, and the `.meta` sidecar
+    /// and the session scratch dir are cleaned up best-effort — neither can
+    /// fail the delete.
     pub fn delete_conversation(&self, id: &str) -> Result<()> {
         validate_conversation_id(id)?;
         let path = self.conversations_dir.join(format!("{id}.json"));

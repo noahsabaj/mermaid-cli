@@ -23,10 +23,22 @@ pub trait CredentialStore: Send + Sync {
     /// reports no key, exactly like an unset env var.
     fn get(&self, provider: &str) -> Option<String>;
     /// Store (or replace) `provider`'s key.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the backend reports: no Secret Service on a headless Linux
+    /// box, a locked keychain, a denied write. Unlike [`Self::get`], a write
+    /// failure is surfaced rather than read as "no key" — silently discarding
+    /// a key the user just typed would look like success.
     fn set(&self, provider: &str, key: &str) -> Result<()>;
     /// Delete `provider`'s key; `Ok(false)` when nothing was stored.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the backend reports (unavailable, locked, denied). A key that
+    /// was not there is `Ok(false)`, not an error.
     fn delete(&self, provider: &str) -> Result<bool>;
-    /// Human name for confirmations ("Stored key for groq in <label>").
+    /// Human name for confirmations ("Stored key for groq in `<label>`").
     fn label(&self) -> &'static str;
 }
 

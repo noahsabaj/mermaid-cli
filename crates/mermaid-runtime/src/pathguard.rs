@@ -127,6 +127,14 @@ pub enum OpenIntent {
 /// non-Linux targets it falls back to `contain_within_canonical` + a plain open
 /// (documented best-effort: the lexical check still holds, but the open is by
 /// path).
+///
+/// # Errors
+///
+/// A `rel` that resolves outside `root` — via `..`, an absolute path, or an
+/// escaping symlink — comes back as `EXDEV` from the kernel on Linux and as a
+/// confinement rejection on the fallback path. Otherwise the ordinary open
+/// errors for `intent`: not found for `Read`, permission, a directory in place
+/// of a file. `ENOSYS` is never returned: a pre-5.6 kernel falls back instead.
 pub fn open_beneath(root: &Path, rel: &Path, intent: OpenIntent) -> io::Result<File> {
     #[cfg(target_os = "linux")]
     {
@@ -142,6 +150,12 @@ pub fn open_beneath(root: &Path, rel: &Path, intent: OpenIntent) -> io::Result<F
 /// missing component beneath `root`, refusing to descend through a symlink that
 /// escapes (#77). On Linux: `mkdirat` + `openat2(RESOLVE_BENEATH)` per
 /// component; otherwise the `contain_within_canonical` + `std::fs` fallback.
+///
+/// # Errors
+///
+/// A `rel` that resolves outside `root`, and the ordinary `mkdir` errors on
+/// any component: permission, a non-directory already in the way, a full
+/// filesystem. Like `mkdir -p`, a directory that already exists is not one.
 pub fn create_dir_all_beneath(root: &Path, rel: &Path) -> io::Result<()> {
     #[cfg(target_os = "linux")]
     {
@@ -156,6 +170,11 @@ pub fn create_dir_all_beneath(root: &Path, rel: &Path) -> io::Result<()> {
 /// Confined unlink of a `root`-relative file (#77): opens the parent under
 /// `RESOLVE_BENEATH` and `unlinkat`s the leaf, so a swapped-in symlink parent
 /// can't redirect the delete outside `root`.
+///
+/// # Errors
+///
+/// A `rel` that resolves outside `root`, and the ordinary unlink errors: not
+/// found, permission, `rel` naming a directory.
 pub fn remove_file_beneath(root: &Path, rel: &Path) -> io::Result<()> {
     #[cfg(target_os = "linux")]
     {
@@ -176,6 +195,13 @@ pub fn remove_file_beneath(root: &Path, rel: &Path) -> io::Result<()> {
 /// `WriteTruncate` gives the first guarantee but not the second. Falls back to
 /// `contain_within_canonical` + by-path [`crate::write_atomic`] on non-Linux /
 /// pre-`openat2` kernels (the same best-effort posture as the other helpers).
+///
+/// # Errors
+///
+/// A `rel` that resolves outside `root`, then creating or writing the temp
+/// sibling, the fsync, and the rename. A failure leaves the previous file
+/// intact — that is the guarantee this has over `open_beneath` +
+/// `WriteTruncate`.
 pub fn write_atomic_beneath(root: &Path, rel: &Path, bytes: &[u8]) -> io::Result<()> {
     #[cfg(target_os = "linux")]
     {

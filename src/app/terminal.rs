@@ -45,6 +45,16 @@ pub struct TerminalGuard {
 }
 
 impl TerminalGuard {
+    /// Take over the terminal: raw mode, alternate screen, mouse, bracketed
+    /// paste, focus events.
+    ///
+    /// # Errors
+    ///
+    /// Enabling raw mode, entering the alternate screen and enabling the input
+    /// modes, and building the backing `Terminal`. A failure after raw mode is
+    /// on restores the terminal before returning, so an `Err` never leaves the
+    /// shell in raw mode. A terminal without the kitty keyboard protocol is
+    /// not an error — that probe degrades to the legacy encoding.
     pub fn setup() -> Result<Self> {
         enable_raw_mode().context("failed to enable raw mode")?;
         TERMINAL_NEEDS_RESTORE.store(true, Ordering::SeqCst);

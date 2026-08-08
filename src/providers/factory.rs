@@ -421,6 +421,13 @@ impl ProviderFactory {
     /// Resolve (or lazily construct) a provider for the given model
     /// ID. Hits the cache on the second and subsequent calls for the
     /// same ID.
+    ///
+    /// # Errors
+    ///
+    /// Whatever building the provider fails with: an unknown provider prefix,
+    /// a provider whose API key does not resolve, or the adapter's own client
+    /// build. A failed build is deliberately not cached, so a transient error
+    /// is retried on the next call rather than pinned for the session.
     pub async fn resolve(&self, model_id: &str) -> Result<Arc<dyn ModelProvider>> {
         let key = normalize_cache_key(model_id);
         // Get-or-insert the per-key cell under a brief lock, then initialize it

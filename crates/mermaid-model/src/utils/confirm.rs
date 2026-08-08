@@ -27,6 +27,14 @@ pub fn should_refuse_noninteractive(is_tty: bool, assume_yes: bool) -> bool {
 /// flag) is the explicit opt-in for scripted use; without it a non-interactive
 /// session refuses rather than proceeding silently. `prompt` is printed
 /// verbatim, followed by ` [y/N]: `.
+///
+/// # Errors
+///
+/// Returns an error when there is no TTY to confirm at and `assume_yes` was
+/// not passed — the refusal itself, not an I/O failure — and when writing the
+/// prompt or reading the reply fails. A declined action is `Ok(false)`, so a
+/// caller that treats every `Err` as "user said no" would silently swallow a
+/// broken terminal.
 pub fn confirm_or_refuse(prompt: &str, assume_yes: bool) -> Result<bool> {
     if assume_yes {
         return Ok(true);

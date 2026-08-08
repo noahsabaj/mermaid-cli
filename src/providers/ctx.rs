@@ -70,6 +70,12 @@ impl WebByteBudget {
     // fulfil, so an expectation would itself become the warning on the
     // toolchain that matters most. Delete both of these once `try_update`
     // reaches the MSRV.
+    /// # Errors
+    ///
+    /// `Err(limit)` — the fixed per-turn cap — when this charge would cross
+    /// it, or when it was already reached. The counter is saturated either
+    /// way, so once one charge fails every later one does too; the `Err`
+    /// payload is the limit, not the amount over it.
     #[allow(deprecated, reason = "try_update is not stable yet; see above")]
     pub fn charge(&self, bytes: usize) -> Result<usize, usize> {
         let limit = mermaid_model::constants::MAX_WEB_TURN_BYTES;
@@ -313,6 +319,11 @@ impl ExecContext {
 
     /// Charge decoded web bytes to this turn without ever crossing the fixed
     /// aggregate limit. Returns the new total on success.
+    ///
+    /// # Errors
+    ///
+    /// [`WebByteBudget::charge`]'s: `Err(limit)` once this turn's aggregate
+    /// web budget is spent.
     pub fn charge_web_bytes(&self, bytes: usize) -> Result<usize, usize> {
         self.web_budget().charge(bytes)
     }

@@ -43,6 +43,13 @@ const RATE_LIMIT_DELAYS_MS: [u64; 2] = [2_000, 5_000];
 /// The closure takes nothing and must rebuild the request internally
 /// because `reqwest::RequestBuilder::send` consumes the builder — so
 /// each attempt needs a fresh one.
+///
+/// # Errors
+///
+/// Propagates the closure's own error verbatim — this adds no error of its
+/// own. A transient one (5xx, 429, connection refused) is only returned after
+/// the attempt budget is spent, and it is the *last* attempt's error, not the
+/// first.
 pub async fn retry_transient_http<F, Fut>(mut build_and_send: F) -> Result<reqwest::Response>
 where
     F: FnMut() -> Fut,
@@ -72,6 +79,12 @@ where
 ///
 /// 5xx and 429 still retry normally: those come from a server that IS running
 /// and may genuinely recover on its own.
+///
+/// # Errors
+///
+/// Propagates the closure's own error verbatim. A refused connection comes
+/// back on the first attempt, un-retried and un-delayed; 5xx and 429 come back
+/// only after the attempt budget is spent.
 pub async fn retry_transient_http_no_connect_retry<F, Fut>(
     mut build_and_send: F,
 ) -> Result<reqwest::Response>

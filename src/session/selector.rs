@@ -46,6 +46,14 @@ pub struct SessionEntry {
 /// Show the searchable resume picker and return the chosen conversation, or
 /// `None` if the user cancelled. `now` is injected so the relative-time labels
 /// are testable and match the caller's clock.
+///
+/// # Errors
+///
+/// Entering raw mode and the alternate screen, drawing, reading events, and
+/// restoring the terminal afterwards — plus a delete performed from inside the
+/// picker. An empty `entries` list and a user who cancels are both
+/// `Ok(None)`. The terminal is restored before any error from the picker body
+/// is returned, so an `Err` never leaves the shell in raw mode.
 pub fn select_conversation(
     entries: Vec<SessionEntry>,
     manager: &ConversationManager,

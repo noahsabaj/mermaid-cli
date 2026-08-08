@@ -168,6 +168,15 @@ type FetchResult<T> = std::result::Result<T, WebFetchError>;
 pub struct ValidatedWebUrl(reqwest::Url);
 
 impl ValidatedWebUrl {
+    /// Parse and vet `raw` against the lexical web-destination policy.
+    ///
+    /// # Errors
+    ///
+    /// [`WebFetchError::InvalidUrl`] for anything the policy refuses: a URL
+    /// that will not parse, a scheme other than `http`/`https`, embedded
+    /// userinfo credentials, a URL past 8192 bytes, and a blocked host. This
+    /// is lexical only — nothing is resolved or connected to, so passing here
+    /// is not permission to reach the destination.
     pub fn parse(raw: &str) -> FetchResult<Self> {
         let url = reqwest::Url::parse(raw)
             .map_err(|error| WebFetchError::InvalidUrl(error.to_string()))?;
@@ -347,6 +356,14 @@ pub struct OllamaWebClient {
 }
 
 impl OllamaWebClient {
+    /// Build the client. `api_key` is used as a bearer token per request.
+    ///
+    /// # Errors
+    ///
+    /// Only the HTTP client build, which is fail-closed: this client disables
+    /// redirects and the referer header, so a builder that cannot honor that
+    /// must not degrade into a permissive default. The key is not validated
+    /// here — that surfaces on the first request.
     pub fn new(api_key: String) -> Result<Self> {
         let client = Client::builder()
             .redirect(reqwest::redirect::Policy::none())
@@ -577,6 +594,15 @@ pub struct SearxngClient {
 }
 
 impl SearxngClient {
+    /// Build a client against the user's own SearXNG instance.
+    ///
+    /// # Errors
+    ///
+    /// A `base_url` that will not parse, uses a scheme other than
+    /// `http`/`https`, carries userinfo credentials, or carries a query — the
+    /// base is a prefix the search params are appended to, so a query here
+    /// would be silently dropped. Also the HTTP client build. The instance is
+    /// not contacted, so an `Ok` client does not mean SearXNG is running.
     pub fn new(base_url: String) -> Result<Self> {
         Self::build(base_url, false)
     }
@@ -709,6 +735,13 @@ pub struct NativeFetchClient {
 impl NativeFetchClient {
     /// Build the hardened native client. Construction is fail-closed: losing
     /// the resolver, proxy policy, timeout, or redirect policy is an error.
+    ///
+    /// # Errors
+    ///
+    /// Only the HTTP client build — but deliberately not softened: the
+    /// vetting DNS resolver, the disabled proxy and redirect policies, and the
+    /// timeout are what confine every fetch, so a builder that cannot install
+    /// them must fail rather than hand back a client without them.
     pub fn new() -> Result<Self> {
         let client = native_client_builder()
             .dns_resolver(std::sync::Arc::new(VettingResolver))

@@ -48,6 +48,10 @@ impl OllamaProvider {
     /// Backward-compatible constructor that uses a default app config.
     /// Call `with_app_config` instead when you have one available so
     /// Ollama hardware options actually reach the adapter.
+    ///
+    /// # Errors
+    ///
+    /// Only [`Self::with_app_config`]'s.
     pub async fn new(model_name: &str, backend: Arc<BackendConfig>) -> Result<Self> {
         Self::with_app_config(
             model_name,
@@ -61,6 +65,13 @@ impl OllamaProvider {
     /// `ProviderFactory::build_provider` so `config.ollama.{num_gpu,
     /// num_ctx, num_thread, numa}` make it into the Ollama request's
     /// `options` block.
+    ///
+    /// # Errors
+    ///
+    /// Only [`OllamaAdapter::new`]'s — the HTTP client build. The server is
+    /// not contacted here: the model probe is lazy, so a stopped Ollama still
+    /// constructs, and with `ollama_autostart` set the recovery hook revives
+    /// it on the first request instead.
     pub async fn with_app_config(
         model_name: &str,
         backend: Arc<BackendConfig>,

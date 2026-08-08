@@ -51,6 +51,11 @@ pub struct CheckpointManifest {
     pub created_at: String,
 }
 
+/// Snapshot `paths` under a fresh checkpoint id, with no task/session anchor.
+///
+/// # Errors
+///
+/// Exactly [`create_checkpoint_for_task`]'s.
 pub fn create_checkpoint(
     project_path: &Path,
     paths: &[PathBuf],
@@ -64,6 +69,17 @@ pub fn create_checkpoint(
     )
 }
 
+/// Snapshot `paths` under a fresh checkpoint id, anchored to `origin`.
+///
+/// # Errors
+///
+/// Resolving the data dir, creating the checkpoint directory, copying any
+/// existing file into it, and writing the manifest. Then the DB row: an insert
+/// failure removes the on-disk checkpoint and is returned, because a manifest
+/// with no row is a checkpoint restore can never find. A path in `paths` that
+/// does not exist is not an error — it is recorded as `existed: false` so
+/// restore knows to delete it. The shadow-git snapshot and the plugin hook are
+/// best-effort and cannot fail the call.
 pub fn create_checkpoint_for_task(
     project_path: &Path,
     paths: &[PathBuf],
@@ -176,6 +192,17 @@ pub fn create_checkpoint_for_task(
     Ok(manifest)
 }
 
+/// Restore the tree recorded by checkpoint `id`.
+///
+/// # Errors
+///
+/// An `id` that escapes the checkpoints dir (`..`, absolute) is rejected
+/// before anything is read; then a missing or unparseable `manifest.json`, an
+/// unusable project root, and any manifest entry whose target escapes that
+/// root or resolves through a symlink. Failures during apply are rolled back
+/// best-effort from a staging dir before returning, so an `Err` normally means
+/// the tree is untouched — "normally" because the rollback is itself
+/// best-effort and a failure inside it leaves the project partly restored.
 pub fn restore_checkpoint(id: &str) -> Result<CheckpointManifest> {
     // Confine the checkpoint id to the checkpoints dir: reject `..`/absolute
     // traversal that would read a manifest from anywhere on disk.
@@ -543,6 +570,14 @@ pub(crate) fn project_hash(path: &Path) -> String {
 /// missing manifest. Deleting the row keeps `checkpoints().list()` and the
 /// on-disk directories in agreement. The store is opened once, best-effort: if it
 /// can't be opened we still GC the directories.
+///
+/// # Errors
+///
+/// Only resolving the data dir. Everything after that is best-effort: an
+/// unreadable checkpoints dir returns `Ok(0)`, and an entry that cannot be
+/// stat'd, removed, or whose DB row will not delete is skipped (the row
+/// failure is logged), so the returned count is what was actually removed,
+/// not what was eligible.
 pub fn gc_old_checkpoint_dirs(retention_days: i64) -> Result<usize> {
     let dir = data_dir()?.join("checkpoints");
     let Ok(entries) = std::fs::read_dir(&dir) else {

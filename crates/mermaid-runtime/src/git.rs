@@ -115,6 +115,14 @@ impl GitCommand {
     }
 
     /// Run and require success, discarding output.
+    ///
+    /// # Errors
+    ///
+    /// `git` not being spawnable (not installed, not on `PATH`), a failure
+    /// while feeding stdin or collecting output, and a nonzero exit — the
+    /// message carries the command line and git's trimmed stderr. Use
+    /// [`Self::success`] where a nonzero exit is an answer rather than a
+    /// failure.
     pub fn run(self) -> Result<()> {
         let display = self.display.join(" ");
         let (ok, _, stderr) = self.capture()?;
@@ -125,12 +133,23 @@ impl GitCommand {
     /// Run and report whether it exited zero, discarding output. For the
     /// predicate forms (`diff --quiet`, `rev-parse`) where a nonzero exit is
     /// an answer rather than a failure.
+    ///
+    /// # Errors
+    ///
+    /// Only failures to *run* git: not spawnable, or stdin/output handling
+    /// failed. The exit status never produces an `Err` here — that is the
+    /// `bool`.
     pub fn success(self) -> Result<bool> {
         let (ok, _, _) = self.capture()?;
         Ok(ok)
     }
 
     /// Run and return trimmed stdout, requiring success.
+    ///
+    /// # Errors
+    ///
+    /// Exactly [`Self::output_bytes`]'s. Invalid UTF-8 is not among them: it
+    /// is replaced lossily, so use `output_bytes` when the exact bytes matter.
     pub fn output(self) -> Result<String> {
         let raw = self.output_bytes()?;
         Ok(String::from_utf8_lossy(&raw).trim().to_string())
@@ -138,6 +157,13 @@ impl GitCommand {
 
     /// Run and return raw stdout, requiring success. Use for `diff --binary`
     /// and anything else that need not be valid UTF-8.
+    ///
+    /// # Errors
+    ///
+    /// `git` not being spawnable, a failure while feeding stdin or collecting
+    /// output, and a nonzero exit — the message carries the command line and
+    /// git's trimmed stderr. Stdout written before a nonzero exit is
+    /// discarded.
     pub fn output_bytes(self) -> Result<Vec<u8>> {
         let display = self.display.join(" ");
         let (ok, stdout, stderr) = self.capture()?;

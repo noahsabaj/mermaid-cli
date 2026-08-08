@@ -125,6 +125,15 @@ impl AgentWorktree {
     /// path inside the worktree, so a session running in `crates/foo` gives
     /// its children a `crates/foo` too and relative paths in the prompt
     /// still mean what they say.
+    ///
+    /// # Errors
+    ///
+    /// `workdir` not being inside a git repository, and a repository whose
+    /// HEAD is unborn — there is no commit to branch a checkout from. Then any
+    /// git or filesystem step: locating the top level, `worktree add`, the
+    /// checkout, and seeding the uncommitted state. A seeding failure destroys
+    /// the checkout before returning, so a failed `create` never leaves a
+    /// half-seeded worktree for a child to work against.
     pub fn create(workdir: &Path, agent_id: &str) -> Result<Self> {
         anyhow::ensure!(
             is_work_tree(workdir),
@@ -220,6 +229,11 @@ impl AgentWorktree {
     /// Sorted and deduplicated, so a caller can feed them straight to a
     /// multi-path lock acquisition without risking a deadlock against
     /// another caller holding the same paths in a different order.
+    ///
+    /// # Errors
+    ///
+    /// Only computing the pending patch — a git invocation against the
+    /// checkout. A child that has changed nothing yields `Ok(vec![])`.
     pub fn pending_files(&self) -> Result<Vec<PathBuf>> {
         let patch = self.pending_patch()?;
         let mut absolute: Vec<PathBuf> = patch_paths(&patch)
@@ -238,6 +252,15 @@ impl AgentWorktree {
     /// Callers must serialize this across concurrent children — two patches
     /// applying at once reintroduce exactly the interleaving the worktree
     /// exists to prevent.
+    ///
+    /// # Errors
+    ///
+    /// Computing the patch, running the dry-run `git apply --check`, saving a
+    /// rejected patch, and the real apply. A patch that does not apply is not
+    /// among them — that is `MergeOutcome::Conflicted`, with the project
+    /// untouched. An `Err` from the real apply is the one case where the
+    /// project may be partly changed: the dry run passed, so it should not
+    /// happen, and the message says so.
     pub fn merge_into_project(&mut self) -> Result<MergeOutcome> {
         let patch = self.pending_patch()?;
         if patch.is_empty() {
@@ -482,6 +505,12 @@ fn patch_paths(patch: &[u8]) -> Vec<PathBuf> {
 /// per-session, so nothing ever reclaims one by name after a restart; this
 /// is the sweep that keeps the data dir bounded. Returns how many were
 /// removed. Never fails the caller — a directory it cannot read is skipped.
+///
+/// # Errors
+///
+/// Only resolving the data dir. An absent or unreadable `worktrees` directory
+/// is `Ok(0)`, and an entry that cannot be stat'd or removed is skipped, so
+/// the count is what was actually removed, not what was eligible.
 pub fn gc_orphaned_worktrees(max_age_days: i64) -> Result<usize> {
     let root = data_dir()?.join("worktrees");
     let Ok(projects) = std::fs::read_dir(&root) else {

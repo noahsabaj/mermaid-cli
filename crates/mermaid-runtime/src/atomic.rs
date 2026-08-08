@@ -26,6 +26,13 @@ const STALE_TEMP_SECS: u64 = 3600;
 /// Write `bytes` to `path` atomically: temp file in the same directory →
 /// `sync_all` → rename over the destination. The rename is atomic on the same
 /// filesystem (and replaces an existing target on both Unix and Windows).
+///
+/// # Errors
+///
+/// Creating the parent directory, creating or writing the temp sibling,
+/// `sync_all`, and the rename. On a rename failure the temp file is removed
+/// and the destination is left exactly as it was — a failed call never leaves
+/// a truncated target, which is the whole point of the helper.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     write_atomic_inner(path, bytes, None)
 }
@@ -34,6 +41,11 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 /// permission `mode` (e.g. `0o600`) so the renamed destination is never even
 /// briefly world-readable. `mode` is ignored on non-Unix, where directory ACLs
 /// scope the file. Use this for secret-bearing files such as the config.
+///
+/// # Errors
+///
+/// Exactly [`write_atomic`]'s, plus the `mode` being rejected when the temp
+/// file is created on Unix.
 pub fn write_atomic_with_mode(path: &Path, bytes: &[u8], mode: u32) -> std::io::Result<()> {
     write_atomic_inner(path, bytes, Some(mode))
 }

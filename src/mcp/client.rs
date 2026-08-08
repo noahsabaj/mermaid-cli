@@ -129,6 +129,14 @@ impl McpClient {
     ///
     /// Sends `initialize` request with our client info and protocol version,
     /// then sends `notifications/initialized` to signal readiness.
+    ///
+    /// # Errors
+    ///
+    /// The `initialize` request failing — transport, timeout, or a JSON-RPC
+    /// error from the server — and the `notifications/initialized` send. A
+    /// server that omits `serverInfo` or negotiates down to an older
+    /// `protocolVersion` is not an error: the name falls back to `"unknown"`
+    /// and whatever version it names is what subsequent requests carry.
     pub async fn initialize(&mut self) -> Result<ServerInfo> {
         let result = self
             .transport
@@ -184,6 +192,14 @@ impl McpClient {
     /// pagination so a server that pages its tool list isn't silently truncated
     /// to page one. Bounded by a page cap so a server that echoes a stuck cursor
     /// can't loop forever.
+    ///
+    /// # Errors
+    ///
+    /// Any page's `tools/list` request failing, and a response with no
+    /// `tools` array. A tool entry that does not parse is skipped rather than
+    /// failing the discovery, and hitting the page cap returns what was
+    /// collected — so a short list is not necessarily the server's whole
+    /// catalog.
     pub async fn list_tools(&self) -> Result<Vec<McpToolDef>> {
         const MAX_PAGES: usize = 100;
         let mut tools = Vec::new();
@@ -221,6 +237,12 @@ impl McpClient {
         clippy::too_many_lines,
         reason = "predates the lint; see .github/baselines/expect_budget.txt"
     )]
+    /// # Errors
+    ///
+    /// The `tools/call` request failing: transport, the tool-call timeout, or
+    /// a JSON-RPC error. A tool that runs and reports failure is not among
+    /// them — that is `isError` on the returned [`McpToolResult`], which the
+    /// model is meant to see and react to.
     pub async fn call_tool(&self, name: &str, arguments: &Value) -> Result<McpToolResult> {
         let params = json!({
             "name": name,

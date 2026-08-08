@@ -71,6 +71,13 @@ fn resolve_profile_layer(
 /// session layers). This is the view persistence baselines, the daemon, and
 /// runtime re-reads use — anything that must not observe another repo's
 /// project config or a one-off CLI flag.
+///
+/// # Errors
+///
+/// Resolving (and creating) the config dir, reading the user file, and
+/// deserializing the merged table into a typed [`Config`]. An absent config
+/// file is not an error — that is the defaults. Unknown keys are not either;
+/// they are collected as warnings, which this view discards.
 pub fn load_config() -> Result<Config> {
     let config_path = get_config_path()?;
     let mut table = read_config_table(&config_path)?;
@@ -95,6 +102,14 @@ pub struct LayeredLoad {
 /// defaults < user file < project file < session flags.
 /// `cwd` locates the project layer (`<git-root>/.mermaid/config.toml`,
 /// sanitized + safety-clamped); pass `None` to skip it (daemon, tests).
+///
+/// # Errors
+///
+/// Everything [`load_config`] reports, plus a `flags.profile` that names no
+/// `[profiles.*]` table. A project layer that is missing, unreadable, or
+/// carries keys the sanitizer strips is not an error — the layer is skipped or
+/// clamped and the reason comes back in `warnings`, because a repo's config
+/// must never be able to abort someone's session.
 pub fn load_layered_config(
     cwd: Option<&std::path::Path>,
     flags: &SessionFlags,
@@ -432,6 +447,12 @@ pub fn get_config_path() -> Result<PathBuf> {
 }
 
 /// Get the configuration directory
+///
+/// # Errors
+///
+/// Creating the directory, and — only on the fallback path, when the platform
+/// reports no config location — neither `HOME` nor `USERPROFILE` being set.
+/// The directory is created here, so an `Ok` path exists.
 pub fn get_config_dir() -> Result<PathBuf> {
     if let Some(proj_dirs) = ProjectDirs::from("", "", "mermaid") {
         let config_dir = proj_dirs.config_dir();
@@ -484,6 +505,12 @@ fn write_config_bytes(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
 }
 
 /// Create a default configuration file if it doesn't exist
+///
+/// # Errors
+///
+/// Resolving the config dir, serializing the defaults, and the write. An
+/// existing config is not an error and is never overwritten — the file is only
+/// written when it is absent.
 pub fn init_config() -> Result<()> {
     let config_file = get_config_path()?;
 
@@ -533,6 +560,14 @@ fn update_user_config_table_at(
 /// Set one key (pre-split path segments, so map keys containing dots — e.g.
 /// `reasoning_per_model."ollama/qwen3:8b"` — address correctly) in the USER
 /// config file, leaving every other key untouched.
+///
+/// # Errors
+///
+/// The read-modify-write of the user file: resolving the config dir, reading
+/// and parsing the existing TOML, re-serializing it, and the write. The write
+/// is atomic and 0600, so a failure leaves the previous config intact rather
+/// than a truncated or world-readable one. This is the error surface every
+/// `persist_*` helper below inherits.
 pub fn update_user_config_key(path: &[&str], value: toml::Value) -> Result<()> {
     update_user_config_table(|table| deep_set_segments(table, path, value))
 }
@@ -541,12 +576,21 @@ pub fn update_user_config_key(path: &[&str], value: toml::Value) -> Result<()> {
 /// user set through the picker are explicit choices, so writing them —
 /// including ones that currently match defaults — is correct; unset Options
 /// stay absent via `skip_serializing_if`.
+///
+/// # Errors
+///
+/// Serializing `plan` to TOML, then [`update_user_config_key`]'s.
 pub fn persist_plan_config(plan: &PlanConfig) -> Result<()> {
     update_user_config_key(&["plan"], toml::Value::try_from(plan)?)
 }
 
 /// Remove one key (pre-split path segments) from the USER config file.
 /// Returns whether the key existed.
+///
+/// # Errors
+///
+/// [`update_user_config_key`]'s. A key that was not there is `Ok(false)`, not
+/// an error.
 pub fn remove_user_config_key(path: &[&str]) -> Result<bool> {
     let mut removed = false;
     update_user_config_table(|table| {
@@ -557,11 +601,19 @@ pub fn remove_user_config_key(path: &[&str]) -> Result<bool> {
 }
 
 /// Persist the last used model to the user config file.
+///
+/// # Errors
+///
+/// [`update_user_config_key`]'s.
 pub fn persist_last_model(model: &str) -> Result<()> {
     update_user_config_key(&["last_used_model"], toml::Value::String(model.to_string()))
 }
 
 /// Persist the TUI theme choice (`/theme dark|light`).
+///
+/// # Errors
+///
+/// [`update_user_config_key`]'s.
 pub fn persist_ui_theme(theme: ThemeChoice) -> Result<()> {
     update_user_config_key(
         &["ui", "theme"],
@@ -571,6 +623,10 @@ pub fn persist_ui_theme(theme: ThemeChoice) -> Result<()> {
 
 /// Persist the user's default reasoning level. Used by the `/reasoning` slash
 /// command and the Alt+T cycle handler so the choice survives across sessions.
+///
+/// # Errors
+///
+/// Serializing `level`, then [`update_user_config_key`]'s.
 pub fn persist_default_reasoning(level: ReasoningLevel) -> Result<()> {
     update_user_config_key(
         &["default_model", "reasoning"],
@@ -583,6 +639,10 @@ pub fn persist_default_reasoning(level: ReasoningLevel) -> Result<()> {
 /// `/reasoning <level>`, and the does-not-support-thinking auto-snap so
 /// the choice sticks per-model rather than bleeding into other models on
 /// next session start.
+///
+/// # Errors
+///
+/// Serializing `level`, then [`update_user_config_key`]'s.
 pub fn persist_reasoning_for_model(model_id: &str, level: ReasoningLevel) -> Result<()> {
     update_user_config_key(
         &["reasoning_per_model", model_id],
@@ -592,6 +652,12 @@ pub fn persist_reasoning_for_model(model_id: &str, level: ReasoningLevel) -> Res
 
 /// Persist (or clear) a per-model Ollama `num_ctx` override. `Some(n)` sets it,
 /// `None` removes the entry (returning that model to auto-fit).
+///
+/// # Errors
+///
+/// [`update_user_config_key`]'s for `Some`, [`remove_user_config_key`]'s for
+/// `None` — the same read-modify-write either way. Clearing an entry that was
+/// not set is not an error.
 pub fn persist_ollama_num_ctx_for_model(model_id: &str, num_ctx: Option<u32>) -> Result<()> {
     match num_ctx {
         Some(n) => update_user_config_key(
@@ -603,6 +669,10 @@ pub fn persist_ollama_num_ctx_for_model(model_id: &str, num_ctx: Option<u32>) ->
 }
 
 /// Persist the Ollama RAM-offload toggle (`/context offload on|off`).
+///
+/// # Errors
+///
+/// [`update_user_config_key`]'s.
 pub fn persist_ollama_allow_ram_offload(enabled: bool) -> Result<()> {
     update_user_config_key(
         &["ollama", "allow_ram_offload"],
@@ -612,6 +682,14 @@ pub fn persist_ollama_allow_ram_offload(enabled: bool) -> Result<()> {
 
 /// Resolve which model to use: CLI arg > `last_used` > `[default_model]` > a
 /// local Ollama model > a configured provider's `default_model`.
+///
+/// # Errors
+///
+/// An alias that cannot be resolved, and the terminal case where nothing is
+/// pinned, no local Ollama model is installed, and no configured provider
+/// carries a `default_model` — that message offers both routes rather than
+/// demanding an Ollama install. A stopped or absent Ollama is not an error on
+/// its own: the local probe simply contributes nothing.
 pub async fn resolve_model_id(cli_model: Option<&str>, config: &Config) -> anyhow::Result<String> {
     if let Some(model) = cli_model {
         if let Some(resolved) = resolve_model_alias(model, config)? {

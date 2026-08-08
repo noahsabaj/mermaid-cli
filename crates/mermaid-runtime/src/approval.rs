@@ -13,6 +13,16 @@ pub struct ApprovalReplayResult {
     pub summary: String,
 }
 
+/// Approve pending action `id`, replay its effect, then mark it approved.
+///
+/// # Errors
+///
+/// Opening the runtime store, no approval with that `id`, an approval already
+/// decided or archived, losing the atomic claim to a concurrent `approve`, and
+/// any failure while replaying the action itself. On every failure after the
+/// claim, the claim is released and the approval stays undecided — a caller
+/// seeing `Err` may retry, and must not assume the effect did not run: a
+/// replay that half-applied and then failed reports `Err` too.
 pub fn approve_and_replay(id: &str) -> Result<ApprovalReplayResult> {
     let store = RuntimeStore::open_default()?;
     approve_and_replay_with(&store, id)
@@ -134,6 +144,14 @@ fn replay_after_claim(
     })
 }
 
+/// Mark pending action `id` denied. Nothing is replayed.
+///
+/// # Errors
+///
+/// Opening the runtime store, and the `decide` write itself — which rejects an
+/// `id` that does not exist or was already decided. The plugin hook and the
+/// task event afterwards are best-effort and cannot fail the call, so an `Ok`
+/// means the denial is recorded, not that either of those was delivered.
 pub fn deny_approval(id: &str) -> Result<ApprovalReplayResult> {
     let store = RuntimeStore::open_default()?;
     store.approvals().decide(id, "denied")?;

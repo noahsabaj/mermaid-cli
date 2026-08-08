@@ -570,6 +570,12 @@ pub enum OutputFormat {
 /// - No prompt (or `-`): use stdin; error if nothing was piped.
 /// - A prompt plus piped stdin: append the stdin as a fenced block.
 /// - A prompt alone: use it. Empty results are rejected with a usage error.
+///
+/// # Errors
+///
+/// The usage message to print: no prompt (or `-`) with nothing piped, and an
+/// explicitly empty or whitespace-only prompt. Whitespace-only piped stdin
+/// counts as nothing piped.
 pub fn resolve_run_prompt(prompt: Option<&str>, stdin: Option<String>) -> Result<String, String> {
     let piped = stdin
         .map(|s| s.trim().to_string())
