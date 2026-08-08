@@ -16,10 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   could not be built" from "the assertion failed" — the distinction that
   `a368c1b` argued for when it made the same change to one test.
 
-  What is left is the five `clap` `default_value_t` expansions, where the
-  `unwrap()` belongs to the derive macro. So the count of unwraps this repo
-  actually wrote is **zero**, and any rise in the number is now real by
-  construction rather than needing triage.
+  That takes the tracked count from 21 to 6. Five of the six are the `clap`
+  `default_value_t` expansions, where the `unwrap()` belongs to the derive
+  macro. The sixth is in `#[cfg(unix)]` code, which a Windows run does not
+  compile and so cannot locate — it is counted, not identified, and worth a
+  look from a unix machine.
 
 - **The two biggest `Result` families got real `# Errors` sections:
   `missing_errors_doc` 265 down to 153.** The only entry near the top of

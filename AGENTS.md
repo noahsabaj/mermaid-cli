@@ -106,10 +106,10 @@ Its `clippy::unwrap_used` count measures **shipped code**, via
 all but a handful of them tests — `unwrap()` in a test *is* the assertion, and
 the panic is the failure being reported. A number that large and that
 test-shaped tracks how many tests exist, not how much risk ships, and it had
-started charging new tests against a budget. What remains is five `clap`
+started charging new tests against a budget. Six remain. Five are `clap`
 `default_value_t` expansions under `src/cli/args.rs`, where the `unwrap()` is
-the derive macro's and not ours — so the count of unwraps *this repo wrote* is
-zero, and any rise in it is real.
+the derive macro's and not ours; the sixth is somewhere under `#[cfg(unix)]`,
+counted by the Linux job and not locatable from a Windows checkout.
 
 ## Commands
 
