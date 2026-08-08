@@ -2049,7 +2049,18 @@ mod tests {
         }
         std::fs::write(project.join("seed.txt"), "seed\n").unwrap();
         git(&project).args(["add", "-A"]).run().unwrap();
-        git(&project).args(["commit", "-qm", "init"]).run().unwrap();
+        // Unique per repo, so two seeded in the same second do not land on the
+        // same commit hash. Identical trees and messages did, which is what
+        // kept a hash-sensitive failure reproducing on retry -- see
+        // worktree.rs::init_project.
+        let seed_id = project
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("repo");
+        git(&project)
+            .args(["commit", "-qm", &format!("init {seed_id}")])
+            .run()
+            .unwrap();
 
         // Point the child at a provider that cannot answer, so the drive
         // fails without a model: what is under test is the workspace

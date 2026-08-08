@@ -349,7 +349,15 @@ mod tests {
         }
         std::fs::write(dir.join("app.rs"), "fn main() {}\n").unwrap();
         git(&dir).args(["add", "-A"]).run().unwrap();
-        git(&dir).args(["commit", "-qm", "init"]).run().unwrap();
+        // Unique per repo, so two seeded in the same second do not land on the
+        // same commit hash. Identical trees and messages did, which is what
+        // kept a hash-sensitive failure reproducing on retry -- see
+        // worktree.rs::init_project.
+        let seed_id = dir.file_name().and_then(|n| n.to_str()).unwrap_or("repo");
+        git(&dir)
+            .args(["commit", "-qm", &format!("init {seed_id}")])
+            .run()
+            .unwrap();
 
         let mut config = mermaid_domain::Config::default();
         config.safety.checkpoint_on_mutation = false;
