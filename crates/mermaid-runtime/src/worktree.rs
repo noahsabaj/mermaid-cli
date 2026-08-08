@@ -522,6 +522,57 @@ mod tests {
         dir
     }
 
+    /// `git worktree list --porcelain` for `project`.
+    ///
+    /// Porcelain, never the plain form, and this is the whole reason:
+    /// `git worktree list` prints `<path> <abbrev-hash> [<branch>]`, so any
+    /// substring test over its output is also testing the commit hash.
+    /// `destroy_leaves_no_checkout_and_no_git_bookkeeping` asserted
+    /// `!listed.contains("a1")` and a 7-hex-char abbreviated hash contains
+    /// "a1" about once in 43 commits — measured at 7 of 300, and 6/256 by
+    /// construction — so it failed that often against bookkeeping that had in
+    /// fact been pruned.
+    ///
+    /// It did not even self-clear on retry. `init_project` commits identical
+    /// content under an identical message and git stamps commits to the
+    /// second, so a nextest retry landing in the same second rebuilds the
+    /// *same* commit and fails identically; only a job re-run minutes later
+    /// drew a new hash. Two CI failures on 2026-08-08 looked like a race in
+    /// `destroy` and were this.
+    ///
+    /// The porcelain form puts one `worktree <path>` line per checkout and no
+    /// hash on those lines.
+    fn porcelain(project: &Path) -> String {
+        git(project)
+            .args(["worktree", "list", "--porcelain"])
+            .output()
+            .unwrap()
+    }
+
+    /// The checkout directory's own name — `a1-<pid>-<seq>`, see
+    /// `WORKTREE_SEQ`. Specific enough that no abbreviated hash can spell it,
+    /// which is what the bare agent id was not.
+    fn leaf_of(top: &Path) -> String {
+        top.file_name()
+            .expect("a checkout path always has a final component")
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    /// Whether git still holds bookkeeping for the checkout at `top`.
+    ///
+    /// Compares the final path component rather than the whole path: git
+    /// prints its own normalization of the path (forward slashes, resolved
+    /// symlinks), which does not match a `PathBuf` byte for byte on Windows or
+    /// under a symlinked `TMPDIR`.
+    fn is_listed(project: &Path, top: &Path) -> bool {
+        let leaf = leaf_of(top);
+        porcelain(project)
+            .lines()
+            .filter_map(|line| line.strip_prefix("worktree "))
+            .any(|path| path.ends_with(&leaf))
+    }
+
     /// A project with one commit and one tracked file. `false` when git is
     /// missing, which no-ops every test here.
     fn init_project(dir: &Path) -> bool {
@@ -780,11 +831,33 @@ mod tests {
         let top = wt.top.clone();
         wt.destroy();
         assert!(!top.exists());
-        let listed = git(&project).args(["worktree", "list"]).output().unwrap();
+
         assert!(
-            !listed.contains("a1"),
-            "worktree bookkeeping should be pruned: {listed}"
+            !is_listed(&project, &top),
+            "worktree bookkeeping should be pruned; {} still listed in:\n{}",
+            leaf_of(&top),
+            porcelain(&project)
         );
+    }
+
+    /// The matched positive control for
+    /// `destroy_leaves_no_checkout_and_no_git_bookkeeping`. Without it, that
+    /// test would keep passing if `is_listed` were silently matching nothing —
+    /// a query that never finds anything proves nothing by not finding this.
+    #[test]
+    fn a_live_checkout_is_listed_in_the_bookkeeping() {
+        let project = unique_dir("listed");
+        if !init_project(&project) {
+            return;
+        }
+        let wt = AgentWorktree::create(&project, "a1").unwrap();
+        let top = wt.top.clone();
+        assert!(
+            is_listed(&project, &top),
+            "a live checkout must appear in the bookkeeping:\n{}",
+            porcelain(&project)
+        );
+        wt.destroy();
     }
 
     #[test]
