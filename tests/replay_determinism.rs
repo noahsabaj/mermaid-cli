@@ -18,7 +18,7 @@ use mermaid_model::models::{FinishReason, MessageRole, TokenUsage};
 
 fn fixed_ts(offset_secs: i64) -> chrono::DateTime<chrono::Local> {
     chrono::DateTime::parse_from_rfc3339("2026-07-02T09:30:00.250+00:00")
-        .unwrap()
+        .expect("the pinned fixture timestamp is valid RFC 3339")
         .with_timezone(&chrono::Local)
         + chrono::Duration::seconds(offset_secs)
 }

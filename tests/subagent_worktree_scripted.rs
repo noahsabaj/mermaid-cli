@@ -36,12 +36,16 @@ const STUB: &str = "stub/scripted";
 fn project(tag: &str) -> Option<PathBuf> {
     let dir = std::env::temp_dir().join(format!("mermaid_wts_{tag}_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir_all(&dir).expect("the fixture needs its own temp directory");
     if git(&dir).args(["init", "-q"]).run().is_err() {
         return None;
     }
-    std::fs::write(dir.join("app.rs"), "fn main() {}\n").unwrap();
-    git(&dir).args(["add", "-A"]).run().unwrap();
+    std::fs::write(dir.join("app.rs"), "fn main() {}\n")
+        .expect("seeding the project needs a tracked file");
+    git(&dir)
+        .args(["add", "-A"])
+        .run()
+        .expect("staging the seed file must succeed");
     // Unique per repo, so two seeded in the same second do not land on the
     // same commit hash. Identical trees and messages did, which is what
     // kept a hash-sensitive failure reproducing on retry -- see
@@ -50,7 +54,7 @@ fn project(tag: &str) -> Option<PathBuf> {
     git(&dir)
         .args(["commit", "-qm", &format!("init {seed_id}")])
         .run()
-        .unwrap();
+        .expect("the seed commit must succeed");
     Some(dir)
 }
 
@@ -80,7 +84,9 @@ fn spawner(models: Vec<Arc<ScriptedModel>>) -> Arc<SubagentSpawner> {
 }
 
 fn read(path: &Path) -> String {
-    std::fs::read_to_string(path).unwrap().replace("\r\n", "\n")
+    std::fs::read_to_string(path)
+        .expect("reading a fixture file back must succeed")
+        .replace("\r\n", "\n")
 }
 
 /// Script for a child that writes `content` to `path` and reports.

@@ -47,12 +47,16 @@ fn have_key() -> bool {
 fn project(tag: &str) -> Option<PathBuf> {
     let dir = std::env::temp_dir().join(format!("mermaid_wt_e2e_{tag}_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir_all(&dir).expect("the fixture needs its own temp directory");
     if git(&dir).args(["init", "-q"]).run().is_err() {
         return None;
     }
-    std::fs::write(dir.join("greeting.txt"), "hello\n").unwrap();
-    git(&dir).args(["add", "-A"]).run().unwrap();
+    std::fs::write(dir.join("greeting.txt"), "hello\n")
+        .expect("seeding the project needs a tracked file");
+    git(&dir)
+        .args(["add", "-A"])
+        .run()
+        .expect("staging the seed file must succeed");
     // Unique per repo, so two seeded in the same second do not land on the
     // same commit hash. Identical trees and messages did, which is what
     // kept a hash-sensitive failure reproducing on retry -- see
@@ -61,7 +65,7 @@ fn project(tag: &str) -> Option<PathBuf> {
     git(&dir)
         .args(["commit", "-qm", &format!("init {seed_id}")])
         .run()
-        .unwrap();
+        .expect("the seed commit must succeed");
     Some(dir)
 }
 
@@ -81,7 +85,9 @@ fn tool_and_ctx(workdir: &Path) -> (SubagentTool, ExecContext) {
 }
 
 fn read(path: &Path) -> String {
-    std::fs::read_to_string(path).unwrap().replace("\r\n", "\n")
+    std::fs::read_to_string(path)
+        .expect("reading a fixture file back must succeed")
+        .replace("\r\n", "\n")
 }
 
 #[tokio::test]
