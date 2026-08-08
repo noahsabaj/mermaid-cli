@@ -196,7 +196,7 @@ fn load_seed_conversation(
     continue_session: bool,
     resume: &Option<Option<String>>,
     interactive: bool,
-) -> Result<Option<mermaid_cli::session::ConversationHistory>> {
+) -> Result<Option<mermaid_cli::domain::ConversationHistory>> {
     if continue_session {
         return ConversationManager::new(cwd)?.load_last_conversation();
     }

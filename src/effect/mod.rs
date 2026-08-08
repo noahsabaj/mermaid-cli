@@ -110,7 +110,7 @@ fn compaction_row(
 
 #[derive(Clone)]
 enum PersistenceJob {
-    Conversation(Box<crate::session::ConversationHistory>),
+    Conversation(Box<crate::domain::ConversationHistory>),
     Compaction(Box<PendingCompactionSave>),
 }
 
@@ -118,7 +118,7 @@ enum PersistenceJob {
 struct PendingCompactionSave {
     archive: crate::domain::CompactionArchive,
     record: crate::domain::CompactionEvent,
-    conversation: crate::session::ConversationHistory,
+    conversation: crate::domain::ConversationHistory,
     task_id: Option<String>,
 }
 
@@ -3850,7 +3850,7 @@ mod tests {
     async fn dispatch_save_emits_session_saved() {
         let (mut r, mut rx) = runner();
         r.dispatch(Cmd::SaveConversation(
-            crate::session::ConversationHistory::new(
+            crate::domain::ConversationHistory::new(
                 "/p".to_string(),
                 "m".to_string(),
                 chrono::Local::now(),
@@ -4161,7 +4161,7 @@ mod tests {
         let (mut r, _rx) = runner();
         for _ in 0..5 {
             r.dispatch(Cmd::SaveConversation(
-                crate::session::ConversationHistory::new(
+                crate::domain::ConversationHistory::new(
                     "/p".to_string(),
                     "m".to_string(),
                     chrono::Local::now(),
@@ -4177,9 +4177,9 @@ mod tests {
     fn persistence_fixture(
         root: &std::path::Path,
         archive_id: &str,
-    ) -> (crate::session::ConversationHistory, PendingCompactionSave) {
+    ) -> (crate::domain::ConversationHistory, PendingCompactionSave) {
         let now = chrono::Local::now();
-        let mut full = crate::session::ConversationHistory::new(
+        let mut full = crate::domain::ConversationHistory::new(
             root.display().to_string(),
             "test/model".to_string(),
             now,

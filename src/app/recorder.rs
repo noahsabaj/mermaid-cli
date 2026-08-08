@@ -40,8 +40,8 @@ use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 
 use crate::app::Config;
+use crate::domain::ConversationHistory;
 use crate::domain::{Msg, Session};
-use crate::session::ConversationHistory;
 
 /// Bumped when the wire shape changes incompatibly. Replay refuses logs
 /// written by a different version rather than folding garbage.

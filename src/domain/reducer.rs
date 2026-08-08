@@ -2113,7 +2113,7 @@ fn fork_conversation_at(state: &mut State, cmds: &mut Vec<Cmd>, message_index: u
     // 2. Mint the fork from the injected clock — the new id is a pure
     //    function of `state.now` (replay-exact; the `/clear` handler is the
     //    precedent).
-    let mut fork = crate::session::ConversationHistory::new(
+    let mut fork = crate::domain::ConversationHistory::new(
         original.project_path.clone(),
         original.model_name.clone(),
         state.now,
@@ -2122,7 +2122,7 @@ fn fork_conversation_at(state: &mut State, cmds: &mut Vec<Cmd>, message_index: u
     // the original would share its id — and its save file. Deterministic
     // 1ms bump keeps the fork pure while guaranteeing a distinct file.
     if fork.id == original.id {
-        fork = crate::session::ConversationHistory::new(
+        fork = crate::domain::ConversationHistory::new(
             original.project_path.clone(),
             original.model_name.clone(),
             state.now + chrono::Duration::milliseconds(1),
@@ -4306,7 +4306,7 @@ fn handle_confirm_accepted(state: &mut State, cmds: &mut Vec<Cmd>) {
             // same working tree.
             let git_branch = state.session.conversation.git_branch.clone();
             state.session.conversation =
-                crate::session::ConversationHistory::new(project_path, model_name, state.now);
+                crate::domain::ConversationHistory::new(project_path, model_name, state.now);
             state.session.conversation.git_branch = git_branch;
             state.session.last_token_usage = None;
             state.session.cumulative_token_usage = TokenUsageTotals::default();
@@ -6791,7 +6791,7 @@ fn handoff_plan_mode(
     // BEFORE swapping (the fork_conversation_at ordering).
     cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
     let original = &state.session.conversation;
-    let mut next = crate::session::ConversationHistory::new(
+    let mut next = crate::domain::ConversationHistory::new(
         original.project_path.clone(),
         original.model_name.clone(),
         state.now,
@@ -6799,7 +6799,7 @@ fn handoff_plan_mode(
     // Millisecond-derived ids: bump deterministically on collision (the
     // rewind-fork precedent) so the two sessions never share a save file.
     if next.id == original.id {
-        next = crate::session::ConversationHistory::new(
+        next = crate::domain::ConversationHistory::new(
             original.project_path.clone(),
             original.model_name.clone(),
             state.now + chrono::Duration::milliseconds(1),
@@ -8183,7 +8183,7 @@ mod tests {
     #[test]
     fn resume_continues_image_numbering_past_transcript_max() {
         let mut state = fresh_state();
-        let mut history = crate::session::ConversationHistory::new(
+        let mut history = crate::domain::ConversationHistory::new(
             "proj".to_string(),
             "model".to_string(),
             state.now,
@@ -9346,7 +9346,7 @@ mod tests {
     #[test]
     fn seeding_a_conversation_preserves_the_saved_checklist() {
         use crate::domain::ChecklistStatus::{Completed, Pending};
-        let mut history = crate::session::ConversationHistory::new(
+        let mut history = crate::domain::ConversationHistory::new(
             "/tmp/project".to_string(),
             "ollama/test".to_string(),
             chrono::Local::now(),
@@ -9365,7 +9365,7 @@ mod tests {
             "a saved checklist survives resume; only run end retires one",
         );
         // And an unfinished list still resumes intact.
-        let mut history = crate::session::ConversationHistory::new(
+        let mut history = crate::domain::ConversationHistory::new(
             "/tmp/project".to_string(),
             "ollama/test".to_string(),
             chrono::Local::now(),

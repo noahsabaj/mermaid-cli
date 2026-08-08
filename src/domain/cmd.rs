@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::app::McpServerConfig;
-use crate::session::ConversationHistory;
+use crate::domain::ConversationHistory;
 use mermaid_model::models::ChatMessage;
 use mermaid_model::models::ReasoningLevel;
 use mermaid_model::models::tool_call::ToolCall as ModelToolCall;

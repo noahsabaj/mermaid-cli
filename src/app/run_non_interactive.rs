@@ -65,7 +65,7 @@ pub struct RunOptions {
     /// Saved conversation to seed the session with (`--resume <id>` /
     /// `--continue`). The run appends to the SAME session id, so repeated
     /// `--resume <id>` invocations chain naturally.
-    pub seed: Option<crate::session::ConversationHistory>,
+    pub seed: Option<crate::domain::ConversationHistory>,
     /// `--output-schema`: JSON Schema the final answer must conform to. The
     /// agentic loop runs normally; one extra FORMATTING turn (no tools,
     /// native constrained output where supported) reshapes the final answer,

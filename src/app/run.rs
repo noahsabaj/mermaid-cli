@@ -30,11 +30,11 @@ use crate::app::event_source::coalesce_key_burst;
 use crate::app::lifecycle::RuntimeLifecycle;
 use crate::app::recorder::{RECORDING_FORMAT_VERSION, Recorder, SessionHeader};
 use crate::app::terminal::TerminalGuard;
+use crate::domain::ConversationHistory;
 use crate::domain::{Cmd, Msg, RuntimeSignal, State, update};
 use crate::effect::EffectRunner;
 use crate::providers::ToolRegistry;
 use crate::render::{RenderCache, render};
-use crate::session::ConversationHistory;
 
 /// Options for `run_interactive_with`. Added so new flags land without
 /// reshuffling positional args.

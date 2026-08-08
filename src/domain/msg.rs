@@ -293,7 +293,7 @@ pub enum Msg {
     /// `save_conversation` finished.
     SessionSaved,
     /// `/load <id>` — a saved conversation has been read off disk.
-    ConversationLoaded(crate::session::ConversationHistory),
+    ConversationLoaded(crate::domain::ConversationHistory),
     /// Response to `Cmd::ListConversations`. Populates the `/load`
     /// picker's candidate list.
     ConversationsListed(Vec<ConversationSummary>),

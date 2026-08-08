@@ -23,7 +23,7 @@ use chrono::{DateTime, Local};
 
 use crate::app::instructions::LoadedInstructions;
 use crate::app::{Config, McpServerConfig};
-use crate::session::ConversationHistory;
+use crate::domain::ConversationHistory;
 use mermaid_model::models::ChatMessage;
 use mermaid_model::models::tool_call::ToolCall as ModelToolCall;
 use mermaid_model::models::{ProviderContinuation, ReasoningLevel, TokenUsage, TokenUsageSource};

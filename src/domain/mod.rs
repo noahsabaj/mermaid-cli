@@ -13,6 +13,7 @@
 pub mod checklist;
 pub mod cmd;
 pub mod compaction;
+pub mod conversation;
 pub mod file_mention;
 pub mod image_token;
 pub mod msg;
@@ -38,6 +39,7 @@ pub use compaction::{
     compaction_receipt, context_exceeds_hard_limit, format_compact_count, normalize_summary,
     prepare_compaction, should_auto_compact, validate_summary_structure,
 };
+pub use conversation::ConversationHistory;
 pub use mermaid_model::action::{ActionDetails, ActionDisplay, ActionResult};
 pub use mermaid_model::ids::{ToolCallId, TurnId};
 pub use mermaid_model::question::{
