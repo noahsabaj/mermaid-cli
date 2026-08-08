@@ -148,6 +148,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Windows: hardening the data directory locked Mermaid out of its own
+  runtime database.** The one-shot `icacls <dir> /inheritance:r /grant:r
+  <user>:(OI)(CI)F /T` did exactly what it was told, and what it was told was
+  wrong: `(OI)(CI)` are *inheritance* flags describing what the children of a
+  container inherit, and `/T` applied that ACE string verbatim to every
+  existing file underneath. On a leaf file those flags grant nothing, so the
+  inherited ACE was stripped and nothing replaced it. Measured on a fresh
+  directory, every file came out with an **empty DACL** and every directory was
+  correct.
+
+  SQLite then returned SQLITE_CANTOPEN (14) on every open, so `/runtime tasks`,
+  approvals, checkpoints, process listing and the `mermaidd` daemon were all
+  unavailable — and a `.acl-hardened` sentinel, written on `icacls` exit 0,
+  meant it never ran again. No data was lost (an owner always keeps
+  `WRITE_DAC`) but nothing took the access back.
+
+  Hardening now targets the **directory only** and lets Windows propagate to
+  children, which is what keeps subdirectories' `(OI)(CI)` flags intact so
+  files created later inherit correctly too. The sentinel is written only after
+  the database is confirmed openable, not on `icacls` exit 0 — those are
+  different claims, and the gap between them is the whole bug. Machines already
+  in this state repair themselves: a SQLITE_CANTOPEN on a file that exists
+  restores owner access once, logs that it did, and retries.
+
 - **`cargo doc` accepted broken intra-doc links.** The CI step ran without
   `-D warnings`, so rustdoc printed unresolved links and exited 0. Twenty had
   accumulated, including `TaskBroker::note_tokens` — a method renamed to
