@@ -10,7 +10,15 @@ tests hold the detail; this is what's easy to get wrong.
   wildcard `_ =>` arms that hide new `Msg`s, no I/O, no wall clock (it reads
   `state.now`, injected, so `--replay` is deterministic). Effects are **data**
   (`Cmd`); the impure shell (`src/effect/`) executes them. `render(&State)` is
-  pure. CI enforces this via `.github/scripts/check_domain_purity.py`.
+  pure too — a function of domain state and nothing else.
+  `.github/scripts/check_layering.py` enforces both properties for
+  `src/domain`, `src/render`, and `src/prompts.rs`: they may only reach
+  *downward*, and none of them may touch the filesystem, the network, a
+  process, an async runtime, or the wall clock. Dependency **direction** is the
+  half the old guard could not see — `use crate::app::Config` contains no
+  forbidden token — and it is how the "pure" core came to hold 34 upward edges,
+  two of them cycles. That debt is recorded in
+  `.github/baselines/layering.txt`, which may only shrink.
 - One `TurnId` = one model call + its tools; an agentic run spans many turns.
   Tool outcomes gate through `Vec<Option<ToolOutcome>>` plus a stale-turn drop —
   don't bypass it.
@@ -20,8 +28,14 @@ tests hold the detail; this is what's easy to get wrong.
 - **No emojis / pictographs** in any user-facing output, ever. CI enforces it
   (`.github/scripts/check_no_emoji.py`). Box-drawing, arrows, and the middot are
   fine — they sit below the flagged ranges.
-- **No back-compat shims.** Mermaid has no released users yet: delete cleanly
-  rather than deprecate — no renamed `_vars`, no "removed" tombstone comments.
+- **No back-compat shims.** The product is the `mermaid` binary. The published
+  crates (`mermaid-cli`, `mermaid-model`, `mermaid-runtime`) carry **no
+  API-stability promise** — they are on crates.io only because `cargo publish`
+  cannot resolve an unpublished path dependency. So delete cleanly rather than
+  deprecate: no renamed `_vars`, no "removed" tombstone comments, and no
+  `pub use` kept alive for a hypothetical downstream. Breaking a library
+  signature is free; breaking a CLI flag or an on-disk format needs a CHANGELOG
+  entry under `### Changed`.
 - **Keep the CHANGELOG current.** Add an entry under `## [Unreleased]` in the
   same PR as the change.
 - **Never leak secrets.** Redact via `redact_secrets` / `redact_json` before any
@@ -30,12 +44,29 @@ tests hold the detail; this is what's easy to get wrong.
   functions at 100 lines).
 - UI surfaces get coverage; keep the render/reducer tests green.
 
+## Ratchets
+
+The source guards record their known violations in `.github/baselines/*.txt`
+and fail CI if the set grows. They also fail if it *shrinks without the file
+being updated* — so fixing something puts the new, smaller number in your diff,
+which is the only reason a baseline ever moves. A baseline that could only be
+appended to would be a place debt goes to be forgotten.
+
+| baseline | guard | what it counts |
+|---|---|---|
+| `layering.txt` | `check_layering.py` | upward imports + impurity in `domain`/`render`/`prompts` |
+
+Run `just ratchet` and commit the result. The `N keys / M occurrences` header
+line of each file is the debt counter; it should be going down.
+
 ## Commands
 
-`just check` is the exact pre-PR gate (also what CI runs):
+`just check` is the exact pre-PR gate (also what CI's blocking jobs run):
 
 ```
-just check    # fmt --check + clippy -D warnings + nextest run
+just check    # fmt --check + clippy -D warnings + guards + nextest run
+just guards   # the dependency-free source guards on their own
+just ratchet  # re-record the guard baselines after you fix something
 just fmt      # format the workspace
 just fix      # clippy --fix, then format
 ```

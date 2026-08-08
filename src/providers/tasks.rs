@@ -16,11 +16,11 @@
 //! the snapshot, drop the guard, then publish.
 //!
 //! Cost stamps: the broker reads the wall clock (impure side — fine) and the
-//! latest token reading pushed by the effect runner via [`note_tokens`].
+//! latest token reading pushed by the effect runner via [`add_tokens`].
 //! Stamps flow into the domain as plain data on the snapshot, so `--replay`
 //! reproduces them from the recorded `Msg` instead of recomputing.
 //!
-//! [`note_tokens`]: TaskBroker::note_tokens
+//! [`add_tokens`]: TaskBroker::add_tokens
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};

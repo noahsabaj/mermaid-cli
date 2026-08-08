@@ -151,6 +151,22 @@ jobs:
       # Only check documentation on stable Linux
       - name: Check documentation
         if: matrix.rust == 'stable' && matrix.os == 'ubuntu-latest'
+        # `-D warnings` is what makes this step mean something. Without it
+        # rustdoc prints broken intra-doc links and exits 0, so a rename that
+        # orphaned a `[`Foo::bar`]` has always passed silently. It found 20 on
+        # its first run, including `TaskBroker::note_tokens` — a method renamed
+        # to `add_tokens` with the docs left pointing at the old name. This
+        # codebase leans hard on intra-doc links (every module has a `//!`
+        # header), so they are exactly what rots on a refactor. Same reasoning
+        # as the `-D warnings` on the clippy job.
+        #
+        # `private_intra_doc_links` is allowed, and only because of the
+        # `--document-private-items` on the very next line: that flag is what
+        # this job builds, so a public doc linking to a private item renders a
+        # working link here. The lint is about a doc set that omits private
+        # items, which is not the one being produced.
+        env:
+          RUSTDOCFLAGS: -D warnings -A rustdoc::private_intra_doc_links
         run: cargo doc --no-deps --document-private-items
 
   # Security audit
@@ -225,8 +241,12 @@ jobs:
             echo "::endgroup::"
           done
 
-  # Dependency-free source guards: no emoji in user-facing output, and the pure
-  # `src/domain` MVU core stays free of I/O + the wall clock.
+  # Dependency-free source guards: no emoji in user-facing output; the pure
+  # `src/domain` / `src/render` / `src/prompts.rs` layers only reach downward
+  # and stay free of I/O and the wall clock.
+  #
+  # The layering guard ratchets against `.github/baselines/layering.txt`, which
+  # may only shrink — see `.github/scripts/ratchet.py`.
   guards:
     name: Source Guards
     runs-on: ubuntu-latest
@@ -234,8 +254,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: No emoji in source
         run: python3 .github/scripts/check_no_emoji.py
-      - name: domain/ purity (no I/O, no wall clock)
-        run: python3 .github/scripts/check_domain_purity.py
+      - name: Layering + purity (domain, render, prompts)
+        run: python3 .github/scripts/check_layering.py
 
   # Heavier integration coverage that CI's default suite skips: the daemon
   # `#[ignore]`d tests (spawn a real mermaidd) and the deterministic, model-free

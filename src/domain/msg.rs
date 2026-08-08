@@ -362,7 +362,7 @@ pub enum Msg {
     },
 
     /// Ephemeral confirmation of a manual action (clipboard copy), shown just
-    /// above the input for [`crate::domain::TOAST_TTL`] and then gone. The
+    /// above the input for [`crate::domain::state::TOAST_TTL`] and then gone. The
     /// sibling of `TransientStatus` for feedback that must NOT become a
     /// permanent transcript row.
     Toast {

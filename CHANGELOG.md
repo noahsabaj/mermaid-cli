@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The purity guard now checks dependency direction, not just I/O tokens.**
+  `check_domain_purity.py` scanned `src/domain` for seven strings —
+  `std::fs`, `tokio::`, `reqwest`, and friends. `use crate::app::Config`
+  contains none of them, so the guard reported OK while the "pure" MVU core
+  accumulated 34 production edges into `app`, `session`, `providers`, and
+  `render`. Two of those are cycles: `app::CompactionConfig::policy()` returns
+  a `domain::CompactionPolicy`, and `app::stamp_session_provenance` takes
+  `&mut domain::State` — which `state.rs` opens by declaring that nothing
+  outside `update()` may hold one.
+
+  It also read less of the tree than it appeared to. It truncated each file at
+  the first `#[cfg(test)]`, so it scanned 43% of `reducer.rs`; and its `ROOT`
+  was `src/domain` alone, so `src/render` was never scanned at all despite
+  AGENTS.md claiming CI enforced its purity. `src/render` is not pure:
+  `chrono::Local::now()` sits in a render cache key and `std::env::var` is read
+  per frame.
+
+  `.github/scripts/check_layering.py` replaces it. It covers `src/domain`,
+  `src/render`, and `src/prompts.rs`; enforces a declared layer table so an
+  upward import fails with the rationale attached; blanks each `#[cfg(test)]`
+  item by brace matching instead of truncating; resolves
+  `#[cfg(test)] mod foo;` to whole test-only files; and lexes comments, string
+  literals, and nesting-aware block comments out before matching. The
+  forbidden-token list gains `std::env`, `std::io`, `std::thread`,
+  `Command::new`, `rusqlite`, `.await`, `Local::now`/`Utc::now`, and `unsafe`.
+
+  Pre-existing debt is recorded in `.github/baselines/layering.txt` — 16 keys,
+  47 occurrences — via a shared ratchet (`.github/scripts/ratchet.py`) that
+  fails CI when the count *rises* and equally when it *falls without the file
+  being updated*. A baseline that could only be appended to is a place debt
+  goes to be forgotten; requiring it to be edited down puts the number in the
+  diff.
+
+- **`just check` runs the source guards.** AGENTS.md called it "the exact
+  pre-PR gate (also what CI runs)" while CI ran two guards it did not.
+
+### Fixed
+
+- **`cargo doc` accepted broken intra-doc links.** The CI step ran without
+  `-D warnings`, so rustdoc printed unresolved links and exited 0. Twenty had
+  accumulated, including `TaskBroker::note_tokens` — a method renamed to
+  `add_tokens` with three doc references left pointing at the old name — plus
+  `<provider>/<model>` placeholders that rustdoc parsed as unclosed HTML tags.
+  All fixed, and the gate is now `RUSTDOCFLAGS: -D warnings`.
+
 ## [0.21.1] - 2026-08-07
 
 ### Fixed

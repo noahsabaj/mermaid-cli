@@ -164,7 +164,7 @@ impl ComputerUseDriver {
         }
     }
 
-    /// Async form of [`ensure_alive`]. The X11 display probe spawns a
+    /// Async form of [`Self::ensure_alive`]. The X11 display probe spawns a
     /// `xdpyinfo`/`xdotool` subprocess and blocks on its exit; on the async
     /// tool path that would block a worker, so run it on the blocking pool (#34).
     pub async fn ensure_alive_async(&self) -> Result<(), String> {

@@ -1,0 +1,22 @@
+# Ratchet baseline: layering + purity
+#
+# Debt that predates the guard. This file may only SHRINK.
+# Regenerate with: just ratchet
+#
+# 16 keys / 47 occurrences
+impure|src/domain/state.rs|std::env 1
+impure|src/render/mod.rs|std::env 4
+impure|src/render/widgets/chat.rs|chrono now 1
+layer|src/domain/cmd.rs|app 4
+layer|src/domain/cmd.rs|session 1
+layer|src/domain/msg.rs|app 3
+layer|src/domain/msg.rs|providers 1
+layer|src/domain/msg.rs|session 1
+layer|src/domain/reducer.rs|app 8
+layer|src/domain/reducer.rs|providers 2
+layer|src/domain/reducer.rs|session 5
+layer|src/domain/state.rs|app 5
+layer|src/domain/state.rs|session 1
+layer|src/domain/transition.rs|render 4
+layer|src/render/mod.rs|app 3
+layer|src/render/widgets/plan_config.rs|app 3

@@ -413,7 +413,7 @@ static CONFLICT_COUNTER: AtomicU64 = AtomicU64::new(0);
 #[derive(Clone)]
 pub struct ConversationManager {
     /// The project directory the manager was built for — keys the
-    /// scratchpad cascade in [`delete_conversation`].
+    /// scratchpad cascade in [`ConversationManager::delete_conversation`].
     project_dir: PathBuf,
     conversations_dir: PathBuf,
     compactions_dir: PathBuf,
@@ -685,7 +685,7 @@ impl ConversationManager {
     /// Fast session list: read each `<id>.meta` sidecar; for a session that
     /// lacks a (valid) one — older, or written by a pre-sidecar build — fall
     /// back to fully parsing its `<id>.json`. Message-less sessions are skipped.
-    /// Newest-first. Cheaper than [`list_conversations`] for display-only paths.
+    /// Newest-first. Cheaper than [`Self::list_conversations`] for display-only paths.
     pub fn list_conversation_metas(&self) -> Result<Vec<ConversationMeta>> {
         let mut metas = Vec::new();
         let mut seen = std::collections::HashSet::new();

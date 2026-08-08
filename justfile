@@ -4,11 +4,28 @@
 default:
     @just --list
 
-# One-command gate: format check, lint (deny warnings), full test suite.
+# `python3` is a Microsoft Store stub on Windows; `python` is the real one.
+python := if os() == "windows" { "python" } else { "python3" }
+
+# One-command gate: format check, lint (deny warnings), source guards, tests.
 check:
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
+    just guards
     cargo nextest run --workspace
+
+# Dependency-free source guards. CI runs exactly these.
+#
+# `just check` used to skip them while claiming to be "what CI runs" — CI has
+# always run guards this recipe did not.
+guards:
+    {{python}} .github/scripts/check_no_emoji.py
+    {{python}} .github/scripts/check_layering.py
+
+# Re-record every guard's baseline. Review the diff: the `N keys / M
+# occurrences` header line is the debt counter, and it should be going down.
+ratchet:
+    {{python}} .github/scripts/check_layering.py --write-baseline
 
 # Format the whole workspace.
 fmt:

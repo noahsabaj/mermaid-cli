@@ -56,7 +56,7 @@ pub enum AutostartError {
     Unhealthy(String),
 }
 
-/// The [`LocalServerRecovery`] the model layer is handed when the user's config
+/// The [`mermaid_model::models::adapters::ollama::LocalServerRecovery`] the model layer is handed when the user's config
 /// allows autostart.
 ///
 /// This is the whole inversion: `ensure_running` — process discovery, spawning,

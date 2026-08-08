@@ -162,7 +162,7 @@ pub enum Commands {
     Models,
     /// Show static and cached capability info for a model id
     ModelInfo {
-        /// Model id, e.g. <provider>/<model>
+        /// Model id, e.g. `<provider>/<model>`
         model: String,
     },
     /// Start a chat session (default)
@@ -190,7 +190,7 @@ pub enum Commands {
     /// (names and booleans only), recent trace events, and the log tail.
     /// Nothing is uploaded — the file stays on this machine.
     Feedback {
-        /// Print to stdout instead of writing mermaid-feedback-<ts> in the
+        /// Print to stdout instead of writing `mermaid-feedback-<ts>` in the
         /// current directory
         #[arg(long)]
         stdout: bool,

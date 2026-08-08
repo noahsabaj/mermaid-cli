@@ -280,7 +280,7 @@ impl StdioTransport {
             .await
     }
 
-    /// Like [`send_request`], but with an explicit response-wait budget. Used by
+    /// Like [`Self::send_request`], but with an explicit response-wait budget. Used by
     /// `tools/call`, whose work can legitimately outrun the fast-control budget.
     pub async fn send_request_with_timeout(
         &self,
@@ -411,7 +411,7 @@ impl StdioTransport {
     /// exit cleanly on stdin close; the SIGTERM/SIGKILL steps are a safety net
     /// for misbehaving servers.
     ///
-    /// On Unix, SIGTERM is delivered by [`terminate`] (shelling out to `kill`,
+    /// On Unix, SIGTERM is delivered by `terminate` (shelling out to `kill`,
     /// matching `runtime::client::kill_pid`) so a well-behaved server can run its
     /// signal handler before we escalate to SIGKILL via `start_kill`. On non-Unix
     /// there is no SIGTERM, so we go straight to `start_kill` (the platform's
