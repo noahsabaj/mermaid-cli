@@ -165,8 +165,8 @@ enum PlannedOp {
 impl PlannedOp {
     fn display(&self) -> &str {
         match self {
-            PlannedOp::Add { display, .. } | PlannedOp::Delete { display, .. } => display,
-            PlannedOp::Update { dst_display, .. } => dst_display,
+            Self::Add { display, .. } | Self::Delete { display, .. } => display,
+            Self::Update { dst_display, .. } => dst_display,
         }
     }
 }

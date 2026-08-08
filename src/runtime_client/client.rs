@@ -25,8 +25,8 @@ pub enum RuntimeClientSource {
 impl RuntimeClientSource {
     pub fn as_str(self) -> &'static str {
         match self {
-            RuntimeClientSource::Daemon => "daemon",
-            RuntimeClientSource::Local => "local",
+            Self::Daemon => "daemon",
+            Self::Local => "local",
         }
     }
 }

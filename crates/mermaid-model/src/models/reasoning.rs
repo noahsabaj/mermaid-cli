@@ -94,16 +94,16 @@ impl ReasoningLevel {
     /// Medium < High < Max`.
     fn rank(self) -> u8 {
         match self {
-            ReasoningLevel::None => 0,
-            ReasoningLevel::Minimal => 1,
-            ReasoningLevel::Low => 2,
-            ReasoningLevel::Medium => 3,
-            ReasoningLevel::High => 4,
+            Self::None => 0,
+            Self::Minimal => 1,
+            Self::Low => 2,
+            Self::Medium => 3,
+            Self::High => 4,
             // XHigh sits between High and Max (one provider-specific tier
             // above High, below the provider's nominal "max" where one
             // exists). OpenRouter-style "max" is strictly higher.
-            ReasoningLevel::XHigh => 5,
-            ReasoningLevel::Max => 6,
+            Self::XHigh => 5,
+            Self::Max => 6,
         }
     }
 
@@ -112,13 +112,13 @@ impl ReasoningLevel {
     /// round-trip through serde.
     pub fn as_str(self) -> &'static str {
         match self {
-            ReasoningLevel::None => "none",
-            ReasoningLevel::Minimal => "minimal",
-            ReasoningLevel::Low => "low",
-            ReasoningLevel::Medium => "medium",
-            ReasoningLevel::High => "high",
-            ReasoningLevel::Max => "max",
-            ReasoningLevel::XHigh => "xhigh",
+            Self::None => "none",
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Max => "max",
+            Self::XHigh => "xhigh",
         }
     }
 }

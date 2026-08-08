@@ -255,14 +255,14 @@ enum Transience {
 
 impl Transience {
     fn is_transient(self) -> bool {
-        matches!(self, Transience::Retryable(_))
+        matches!(self, Self::Retryable(_))
     }
 
     fn reason(self) -> &'static str {
         match self {
-            Transience::Success => "success",
-            Transience::Terminal => "terminal",
-            Transience::Retryable(r) => r,
+            Self::Success => "success",
+            Self::Terminal => "terminal",
+            Self::Retryable(r) => r,
         }
     }
 }

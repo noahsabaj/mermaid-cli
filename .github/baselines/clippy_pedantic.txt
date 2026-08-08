@@ -10,7 +10,7 @@
 # the guard prints in full on failure.
 # Regenerate with: just clippy-debt-record
 #
-# 81 keys / 4717 occurrences
+# 80 keys / 4209 occurrences
 clippy::assigning_clones 31
 clippy::bool_to_int_with_if 2
 clippy::borrow_as_ptr 2
@@ -87,7 +87,6 @@ clippy::unreadable_literal 2
 clippy::unused_async 4
 clippy::unused_self 3
 clippy::unwrap_used 1353
-clippy::use_self 508
 clippy::used_underscore_binding 16
 clippy::useless_let_if_seq 2
 clippy::wildcard_enum_match_arm 175

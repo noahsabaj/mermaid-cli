@@ -137,18 +137,18 @@ impl MemoryScope {
     /// Kebab token used in frontmatter and the `scope` tool argument.
     pub fn as_str(self) -> &'static str {
         match self {
-            MemoryScope::Global => "global",
-            MemoryScope::ProjectPrivate => "project-private",
-            MemoryScope::ProjectShared => "project-shared",
+            Self::Global => "global",
+            Self::ProjectPrivate => "project-private",
+            Self::ProjectShared => "project-shared",
         }
     }
 
     /// Human label for the index section header.
     pub fn label(self) -> &'static str {
         match self {
-            MemoryScope::Global => "Global (all projects)",
-            MemoryScope::ProjectPrivate => "Project (private)",
-            MemoryScope::ProjectShared => "Project (shared)",
+            Self::Global => "Global (all projects)",
+            Self::ProjectPrivate => "Project (private)",
+            Self::ProjectShared => "Project (shared)",
         }
     }
 }
@@ -168,9 +168,9 @@ impl SkillSource {
     /// transcript) can see where each playbook comes from.
     pub fn label(self) -> &'static str {
         match self {
-            SkillSource::Project => "project",
-            SkillSource::User => "user",
-            SkillSource::Plugin => "plugin",
+            Self::Project => "project",
+            Self::User => "user",
+            Self::Plugin => "plugin",
         }
     }
 }

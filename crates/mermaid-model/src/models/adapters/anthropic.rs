@@ -1331,7 +1331,7 @@ struct AnthropicModelInfo {
 
 impl From<AnthropicModelInfo> for ModelLimits {
     fn from(info: AnthropicModelInfo) -> Self {
-        ModelLimits {
+        Self {
             max_context_tokens: info.max_input_tokens,
             max_output_tokens: info.max_tokens,
         }

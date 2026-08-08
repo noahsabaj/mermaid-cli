@@ -226,20 +226,20 @@ impl RunEvent {
     /// metadata rather than correlated across messages, so no projector state
     /// is required. The wildcard arm is intentional here (this is a lossy
     /// projection, not the reducer — most `Msg`s are deliberately dropped).
-    pub fn from_msg(msg: &Msg) -> Option<RunEvent> {
+    pub fn from_msg(msg: &Msg) -> Option<Self> {
         Some(match msg {
-            Msg::StreamText { chunk, .. } => RunEvent::Text {
+            Msg::StreamText { chunk, .. } => Self::Text {
                 delta: chunk.clone(),
             },
-            Msg::StreamReasoning { chunk, .. } => RunEvent::Reasoning {
+            Msg::StreamReasoning { chunk, .. } => Self::Reasoning {
                 delta: chunk.text.clone(),
             },
-            Msg::ToolStarted { call_id, .. } => RunEvent::ToolStarted {
+            Msg::ToolStarted { call_id, .. } => Self::ToolStarted {
                 call_id: call_id.to_string(),
             },
             Msg::ToolFinished {
                 call_id, outcome, ..
-            } => RunEvent::ToolFinished {
+            } => Self::ToolFinished {
                 call_id: call_id.to_string(),
                 name: tool_name(&outcome.metadata.detail),
                 status: status_str(outcome.status).to_string(),
@@ -268,7 +268,7 @@ impl RunEvent {
                 risk,
                 prompt,
                 ..
-            } => RunEvent::ApprovalRequired {
+            } => Self::ApprovalRequired {
                 call_id: call_id.to_string(),
                 tool: tool.clone(),
                 risk: risk.clone(),
@@ -276,18 +276,18 @@ impl RunEvent {
             },
             Msg::TasksUpdated { store } => {
                 let (completed, total) = store.counts();
-                RunEvent::TasksUpdated {
+                Self::TasksUpdated {
                     tasks: store.visible().map(TaskLine::from).collect(),
                     completed: completed as u32,
                     total: total as u32,
                 }
             },
-            Msg::UpstreamError { error, .. } => RunEvent::Error {
+            Msg::UpstreamError { error, .. } => Self::Error {
                 message: error.message.clone(),
             },
             Msg::StreamDone {
                 usage, stop_reason, ..
-            } => RunEvent::TurnDone {
+            } => Self::TurnDone {
                 total_tokens: usage.as_ref().map(|u| u.total_tokens() as u64),
                 stop_reason: stop_reason.as_ref().map(finish_reason_str),
             },

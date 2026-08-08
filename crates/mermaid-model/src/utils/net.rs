@@ -33,7 +33,7 @@ impl HostClass {
     /// True for any non-public host. Used by the web-fetch SSRF blocklist
     /// (block everything that isn't clearly routable).
     pub fn is_internal(self) -> bool {
-        !matches!(self, HostClass::Public)
+        !matches!(self, Self::Public)
     }
 
     /// True only for loopback. Used by the provider `base_url` gate: plaintext
@@ -41,7 +41,7 @@ impl HostClass {
     /// API key over `http` to any other host — even a LAN/private one — leaks
     /// it in cleartext.
     pub fn is_loopback(self) -> bool {
-        matches!(self, HostClass::Loopback)
+        matches!(self, Self::Loopback)
     }
 }
 

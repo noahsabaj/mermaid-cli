@@ -1359,7 +1359,7 @@ pub struct ModelListing {
 impl From<ModelInfo> for ModelListing {
     fn from(m: ModelInfo) -> Self {
         let top = m.top_provider.as_ref();
-        ModelListing {
+        Self {
             max_context_tokens: m
                 .context_length
                 .or(m.context_window)
@@ -1425,7 +1425,7 @@ impl From<CfModelEntry> for ModelListing {
             .find(|p| p.property_id == "context_window")
             .and_then(|p| p.value.as_str())
             .and_then(|s| s.parse().ok());
-        ModelListing {
+        Self {
             id: m.name,
             max_context_tokens,
             max_output_tokens: None,

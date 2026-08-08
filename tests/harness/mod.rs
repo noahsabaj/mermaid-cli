@@ -164,7 +164,7 @@ impl Terminal {
         let child = pair.slave.spawn_command(cmd).expect("spawn mermaid in pty");
         let writer = pair.master.take_writer().expect("take pty writer");
 
-        let mut term = Terminal {
+        let mut term = Self {
             output,
             writer,
             child,
