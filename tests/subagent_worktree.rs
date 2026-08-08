@@ -86,7 +86,7 @@ fn tool_and_ctx(workdir: &Path) -> (SubagentTool, ExecContext) {
 
 fn read(path: &Path) -> String {
     std::fs::read_to_string(path)
-        .unwrap_or_else(|e| panic!("reading {} failed: {e}", path.display()))
+        .expect("reading a fixture file back must succeed")
         .replace("\r\n", "\n")
 }
 
