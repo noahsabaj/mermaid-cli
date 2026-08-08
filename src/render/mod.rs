@@ -97,6 +97,7 @@ impl RenderCache {
     /// a pure function of `State`. The shell resolves them once at startup
     /// (`app::run::host_identity`); the snapshot and bench rigs pass pinned
     /// literals, which is how their frames stay byte-stable across machines.
+    #[must_use]
     pub fn new(hostname: String, username: String) -> Self {
         Self {
             chat: ChatState::new(),

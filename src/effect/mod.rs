@@ -343,6 +343,7 @@ pub struct EffectRunner {
 
 impl EffectRunner {
     /// Create an unused runner. Pair with `msg_rx` from `channel()`.
+    #[must_use]
     pub fn new(msg_tx: MsgSender, workdir: PathBuf) -> Self {
         let persistence_state = Arc::new(Mutex::new(PersistenceState::new(workdir.clone())));
         Self {
@@ -368,6 +369,7 @@ impl EffectRunner {
     /// Enable inline approval prompts (interactive TUI only). The gate then
     /// pauses gated tools and routes the user's decision through the
     /// `ApprovalBroker` instead of writing an out-of-band DB approval row.
+    #[must_use]
     pub fn with_interactive_approvals(mut self) -> Self {
         self.approval = Some(crate::providers::ApprovalBroker::new(self.msg_tx.clone()));
         self
@@ -376,6 +378,7 @@ impl EffectRunner {
     /// Enable inline `ask_user_question` prompts (interactive TUI only). The tool
     /// then parks on the `QuestionBroker` and routes the user's answers back
     /// through it instead of proceeding without asking.
+    #[must_use]
     pub fn with_interactive_questions(mut self) -> Self {
         self.questions = Some(crate::providers::QuestionBroker::new(self.msg_tx.clone()));
         self
@@ -397,12 +400,14 @@ impl EffectRunner {
 
     /// Attach a durable runtime task id so tool runs, approvals,
     /// checkpoints, compactions, and background processes can be linked.
+    #[must_use]
     pub fn with_task_id(mut self, task_id: Option<String>) -> Self {
         self.task_id = task_id;
         self
     }
 
     /// Disable terminal-title writes for non-interactive callers.
+    #[must_use]
     pub fn without_terminal_title(mut self) -> Self {
         self.terminal_title_enabled = false;
         self
@@ -410,6 +415,7 @@ impl EffectRunner {
 
     /// Leave the process-global MCP manager alone on `shutdown`. Child
     /// (subagent) runners share it with the parent and must not reap it.
+    #[must_use]
     pub fn without_global_mcp_shutdown(mut self) -> Self {
         self.owns_global_mcp = false;
         self
@@ -432,6 +438,7 @@ impl EffectRunner {
     /// Pair-constructor: returns both the runner and the receiving
     /// end of the Msg channel. Preferred for production wiring
     /// because it keeps the channel capacity constant in one place.
+    #[must_use]
     pub fn pair(workdir: PathBuf) -> (Self, mpsc::Receiver<Msg>) {
         let (tx, rx) = mpsc::channel(MSG_CHANNEL_CAPACITY);
         (Self::new(tx, workdir), rx)
@@ -439,6 +446,7 @@ impl EffectRunner {
 
     /// Pair constructor that also wires the real provider factory +
     /// tool registry. Used by `app::run_interactive`.
+    #[must_use]
     pub fn pair_with_bindings(
         workdir: PathBuf,
         config: Config,
@@ -569,6 +577,7 @@ impl EffectRunner {
 
     /// Number of active per-turn scopes. Tests use this to observe
     /// lifecycle without racing on internal state.
+    #[must_use]
     pub fn scope_count(&self) -> usize {
         self.scopes.len()
     }

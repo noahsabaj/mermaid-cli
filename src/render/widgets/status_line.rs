@@ -43,6 +43,7 @@ pub struct AgentPanelRow {
     clippy::too_many_lines,
     reason = "predates the lint; see .github/baselines/expect_budget.txt"
 )]
+#[must_use]
 pub fn build_status_lines(
     status: GenerationStatus,
     elapsed_secs: u64,

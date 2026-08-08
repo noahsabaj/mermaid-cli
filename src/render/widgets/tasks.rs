@@ -35,6 +35,7 @@ const MAX_ROWS: usize = 8;
 /// work stays visible only while unfinished work remains). Collapsed with no
 /// status widget above (`attached` false) renders nothing — the state
 /// persists and the one-liner reappears when the next run starts.
+#[must_use]
 pub fn tasks_visible(
     store: &ChecklistStore,
     turn: &TurnState,
@@ -54,6 +55,7 @@ pub fn tasks_visible(
 /// one-line form. `attached` means the status zone renders above, so the
 /// first row carries the `⎿` connector; detached rows sit flush-left.
 /// `width` is the zone's inner width in cells.
+#[must_use]
 pub fn build_task_lines(
     store: &ChecklistStore,
     collapsed: bool,
@@ -102,6 +104,7 @@ pub fn build_task_lines(
 }
 
 /// Height the layout should reserve for the checklist zone.
+#[must_use]
 pub fn tasks_height(store: &ChecklistStore, collapsed: bool) -> u16 {
     if collapsed {
         return 1;

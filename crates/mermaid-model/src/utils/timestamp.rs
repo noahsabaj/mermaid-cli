@@ -14,6 +14,7 @@ use chrono::{DateTime, Datelike, Local, NaiveDate, Timelike};
 /// from the injected `state.now` (see `ChatWidget::today`), which is what lets
 /// a frame be reproduced — under `--replay`, or by the snapshot suite, or on
 /// another machine — instead of being relabelled by whatever day it is now.
+#[must_use]
 pub fn format_relative_timestamp(timestamp: DateTime<Local>, today: NaiveDate) -> String {
     let msg_date = timestamp.date_naive();
 

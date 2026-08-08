@@ -33,6 +33,7 @@ fn get_log_file_path() -> Option<PathBuf> {
 }
 
 /// The log file path, if resolvable — `mermaid feedback` tails it.
+#[must_use]
 pub fn log_file_path() -> Option<PathBuf> {
     get_log_file_path()
 }
@@ -65,6 +66,7 @@ impl TraceRing {
     }
 
     /// Copy of the ring contents, oldest first.
+    #[must_use]
     pub fn snapshot(&self) -> Vec<String> {
         self.inner
             .lock()

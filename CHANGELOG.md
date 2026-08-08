@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`clippy::must_use_candidate` paid off entirely: 395 down to zero, and it
+  took `return_self_not_must_use` from 30 to 6 with it.** Two keys' worth of
+  movement from one machine-applicable pass — 80 keys become 79, and tracked
+  debt falls from 2,877 occurrences to 2,458.
+
+  Unlike the previous payoffs this one only adds: 395 lines inserted, none
+  removed, no expression touched. The lint is worth honoring rather than
+  dismissing as pedantic noise, because what it fires on is `pub fn` that
+  returns a value and does nothing else — `is_busy`, `current_turn_id`,
+  `input_total_tokens`, `TokenUsageTotals::new` — where calling and discarding
+  the result is a bug by construction. `#[must_use]` makes the compiler say
+  so. Builder methods returning `Self` are the overlap that carried
+  `return_self_not_must_use` down as a side effect.
+
 - **Two seeded test repos no longer share a base commit, which is what made
   the worktree flake stick.** `4b3133b` already found the real cause of that
   failure — `!listed.contains("a1")` matched the abbreviated commit hash in

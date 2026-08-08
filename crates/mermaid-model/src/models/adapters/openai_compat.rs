@@ -885,6 +885,7 @@ fn derive_capabilities(profile: &ProviderProfile, model_name: &str) -> ModelCapa
 impl OpenAICompatAdapter {
     /// The registry/profile name of the provider this adapter targets (e.g.
     /// `"cloudflare"`), for cache keys and diagnostics.
+    #[must_use]
     pub fn provider_name(&self) -> &str {
         self.profile.name
     }

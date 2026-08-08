@@ -34,6 +34,7 @@ pub struct QuestionBroker {
 }
 
 impl QuestionBroker {
+    #[must_use]
     pub fn new(msg_tx: mpsc::Sender<Msg>) -> Self {
         Self {
             pending: Arc::new(Mutex::new(HashMap::new())),

@@ -35,6 +35,7 @@ pub enum FetchBackend {
 }
 
 impl FetchBackend {
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Native => "native",
@@ -57,6 +58,7 @@ pub enum ExtractionMode {
 }
 
 impl ExtractionMode {
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Readability => "readability",
@@ -128,6 +130,7 @@ pub enum WebFetchError {
 }
 
 impl WebFetchError {
+    #[must_use]
     pub fn kind(&self) -> &'static str {
         match self {
             Self::InvalidUrl(_) => "invalid_url",
@@ -147,6 +150,7 @@ impl WebFetchError {
         }
     }
 
+    #[must_use]
     pub fn status(&self) -> Option<u16> {
         match self {
             Self::HttpStatus { status, .. } => Some(*status),
@@ -219,10 +223,12 @@ impl ValidatedWebUrl {
         Self::from_url_with_policy(url, fixture_blocked)
     }
 
+    #[must_use]
     pub fn as_url(&self) -> &reqwest::Url {
         &self.0
     }
 
+    #[must_use]
     pub fn as_str(&self) -> &str {
         self.0.as_str()
     }
@@ -318,6 +324,7 @@ pub struct HttpStatusError {
 }
 
 impl HttpStatusError {
+    #[must_use]
     pub fn status(&self) -> u16 {
         self.status
     }
@@ -1308,6 +1315,7 @@ fn map_search_results(
 ///
 /// Pure data -- no behavioral instructions. Citation rules live in the system
 /// prompt (src/prompts.rs), which is the SSOT for all model behavior.
+#[must_use]
 pub fn format_results(results: &[SearchResult]) -> String {
     let mut formatted = String::from("[SEARCH_RESULTS]\n");
 

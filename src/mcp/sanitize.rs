@@ -38,6 +38,7 @@ const HASH_SUFFIX_LEN: usize = 6;
 /// to a single `_`, and trim leading/trailing `_`. Collapsing is what
 /// makes the `mcp__<server>__<tool>` split round-trip: a sanitized
 /// segment can never contain `__`. Empty results fall back to `"x"`.
+#[must_use]
 pub fn sanitize_segment(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     let mut last_underscore = false;
@@ -126,6 +127,7 @@ where
 /// Sanitize one server's tool list into advertised specs plus the
 /// sanitized-full-name -> raw-tool-name dispatch map. Collisions are
 /// resolved in `tools` order (the server's own `list_tools` order).
+#[must_use]
 pub fn sanitize_server_tools(
     sanitized_server: &str,
     tools: &[McpToolDef],
@@ -170,6 +172,7 @@ const REF_INLINE_DEPTH: usize = 8;
 ///   one branch flatten to that branch (the pervasive "nullable" pattern)
 /// - single-element `allOf` flattened
 /// - draft-4 boolean `exclusiveMinimum`/`exclusiveMaximum` dropped
+#[must_use]
 pub fn sanitize_schema(schema: &Value) -> Value {
     let defs = collect_defs(schema);
     sanitize_node(schema, &defs, 0)

@@ -118,6 +118,7 @@ impl Cli {
     /// flags (`--no-network`/`--confine-fs`/`--sandbox`, and `run`'s
     /// `--max-tokens`/`--allow-untrusted-tools`). Prompt flags and
     /// `--reasoning` stay outside the layer merge — see `apply_prompt_flags`.
+    #[must_use]
     pub fn session_flags(&self) -> mermaid_domain::SessionFlags {
         let (max_tokens, allow_untrusted_tools) = match &self.command {
             Some(Commands::Run {

@@ -167,6 +167,7 @@ pub struct Config {
 
 impl Config {
     /// Effective value of [`Config::mcp_defer_tools`]: unset means ON.
+    #[must_use]
     pub fn mcp_deferral_enabled(&self) -> bool {
         self.mcp_defer_tools.unwrap_or(true)
     }
@@ -188,6 +189,7 @@ pub struct ExecConfig {
 
 impl ExecConfig {
     /// Effective value of [`ExecConfig::pty`]: unset means ON.
+    #[must_use]
     pub fn pty_enabled(&self) -> bool {
         self.pty.unwrap_or(true)
     }
@@ -214,6 +216,7 @@ pub enum ThemeChoice {
 
 impl ThemeChoice {
     /// The lowercase config-file spelling (`/theme` echo + persistence).
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Dark => "dark",
@@ -229,6 +232,7 @@ pub struct PromptConfig {
 }
 
 impl PromptConfig {
+    #[must_use]
     pub fn render_system_prompt(&self, default_prompt: &str) -> String {
         self.append_extras(self.base_prompt(default_prompt))
     }
@@ -240,11 +244,13 @@ impl PromptConfig {
     /// sections out of it) can do so before the extras are appended. Rewriting
     /// the rendered string instead let a section splice run past the end of
     /// the base and delete the user's appended instructions.
+    #[must_use]
     pub fn base_prompt<'a>(&'a self, default_prompt: &'a str) -> &'a str {
         self.system_prompt.as_deref().unwrap_or(default_prompt)
     }
 
     /// Append the configured extras to an already-chosen base.
+    #[must_use]
     pub fn append_extras(&self, base: &str) -> String {
         let mut rendered = base.trim_end().to_string();
 
@@ -262,6 +268,7 @@ impl PromptConfig {
         rendered
     }
 
+    #[must_use]
     pub fn is_customized(&self) -> bool {
         self.system_prompt.is_some() || !self.append_system_prompt.is_empty()
     }
@@ -428,6 +435,7 @@ pub enum PlanPermLevel {
 }
 
 impl PlanPermLevel {
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Allow => "allow",
@@ -475,6 +483,7 @@ impl Default for PlanPermissions {
 impl PlanPermissions {
     /// The top-level picker presets; `None` when the current values match
     /// none of them (the picker shows "custom").
+    #[must_use]
     pub fn preset_name(&self) -> Option<&'static str> {
         if *self == Self::default() {
             Some("default")
@@ -488,6 +497,7 @@ impl PlanPermissions {
     }
 
     /// Everything denied: pure read-only exploration plus the plan file.
+    #[must_use]
     pub fn strict() -> Self {
         Self {
             builds: PlanPermLevel::Deny,
@@ -498,6 +508,7 @@ impl PlanPermissions {
     }
 
     /// Everything allowed (the working tree stays read-only regardless).
+    #[must_use]
     pub fn open() -> Self {
         Self {
             builds: PlanPermLevel::Allow,
@@ -650,6 +661,7 @@ impl CompactionConfig {
     /// failure mode that motivated it is a `min_response_reserve` above
     /// `max_response_reserve`, which would make `response_reserve` return the
     /// smaller *maximum* and quietly under-reserve on every turn.
+    #[must_use]
     pub fn policy(&self) -> crate::CompactionPolicy {
         let defaults = crate::CompactionPolicy::default();
         let min_reserve = self.min_response_reserve_tokens;
@@ -896,6 +908,7 @@ impl McpServerConfig {
     /// Whether `tool_name` should be exposed to the model: hidden when listed in
     /// `disabled_tools` (which wins), else allowed when `enabled_tools` is empty
     /// (allow-all) or names it.
+    #[must_use]
     pub fn tool_allowed(&self, tool_name: &str) -> bool {
         if self.disabled_tools.iter().any(|t| t == tool_name) {
             return false;
@@ -1154,6 +1167,7 @@ pub enum ConfigLayer {
 
 impl ConfigLayer {
     /// Human name used in unknown-key warnings ("in user config (…)").
+    #[must_use]
     pub fn name(self) -> &'static str {
         match self {
             Self::Defaults => "defaults",

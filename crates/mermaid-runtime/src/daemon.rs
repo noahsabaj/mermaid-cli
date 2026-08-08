@@ -18,6 +18,7 @@ pub const DEFAULT_PAIRING_TTL_DAYS: i64 = 30;
 /// RFC3339 expiry `ttl_days` from now, or `None` when `ttl_days <= 0`
 /// (never expires). Shared by the daemon `pair` command and the local CLI so
 /// both honor the same TTL semantics.
+#[must_use]
 pub fn pairing_expiry_from_now(ttl_days: i64) -> Option<String> {
     (ttl_days > 0).then(|| (chrono::Utc::now() + chrono::Duration::days(ttl_days)).to_rfc3339())
 }
@@ -27,6 +28,7 @@ pub fn pairing_expiry_from_now(ttl_days: i64) -> Option<String> {
 /// the default TTL, positive values pass through. The local `mermaid pair` CLI
 /// deliberately does **not** call this — its `--ttl-days 0` "never expires"
 /// opt-out is an owner-only choice with no privilege boundary (#65).
+#[must_use]
 pub fn clamp_pairing_ttl_days(ttl_days: i64) -> i64 {
     if ttl_days <= 0 {
         DEFAULT_PAIRING_TTL_DAYS
@@ -48,6 +50,7 @@ pub fn generate_pairing_token() -> Result<(String, String)> {
     Ok((token, hash))
 }
 
+#[must_use]
 pub fn hash_pairing_token(token: &str) -> String {
     let digest = Sha256::digest(token.as_bytes());
     crate::hex_lower(&digest)
@@ -173,6 +176,7 @@ pub fn subscribe_daemon_lines(
 /// user's SID so two users on one machine get distinct pipes (the analog of
 /// the unix socket living in a per-user data dir) — the ACL from
 /// [`pipe_sddl`] then enforces that separation, rather than merely naming it.
+#[must_use]
 pub fn pipe_name_for_sid(sid: &str) -> String {
     format!(r"\\.\pipe\mermaidd-{sid}")
 }
@@ -183,6 +187,7 @@ pub fn pipe_name_for_sid(sid: &str) -> String {
 /// This is the named-pipe analog of the 0600 unix socket + uid peer check
 /// (#66). Remote access is separately refused via
 /// `PIPE_REJECT_REMOTE_CLIENTS` on the server, not the DACL.
+#[must_use]
 pub fn pipe_sddl(sid: &str) -> String {
     format!("D:P(A;;GA;;;SY)(A;;GA;;;{sid})")
 }

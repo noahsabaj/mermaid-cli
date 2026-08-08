@@ -45,19 +45,23 @@ pub struct Question {
 
 impl Question {
     /// Choice kinds present a list of options.
+    #[must_use]
     pub fn is_choice(&self) -> bool {
         matches!(
             self.kind,
             QuestionKind::Select | QuestionKind::MultiSelect | QuestionKind::Rank
         )
     }
+    #[must_use]
     pub fn is_multi(&self) -> bool {
         matches!(self.kind, QuestionKind::MultiSelect)
     }
+    #[must_use]
     pub fn is_rank(&self) -> bool {
         matches!(self.kind, QuestionKind::Rank)
     }
     /// Input kinds present a single typed value field.
+    #[must_use]
     pub fn is_input(&self) -> bool {
         !self.is_choice()
     }
@@ -237,6 +241,7 @@ pub struct QuestionSelection {
 }
 
 impl PendingQuestionSet {
+    #[must_use]
     pub fn new(turn: TurnId, call_id: ToolCallId, questions: Vec<Question>) -> Self {
         let selections = questions
             .iter()
@@ -258,23 +263,27 @@ impl PendingQuestionSet {
     /// question, where picking an option is the whole answer (Claude Code
     /// resolves it immediately). Every other shape (multi-question, or any
     /// multi-select) confirms via the Submit/review screen.
+    #[must_use]
     pub fn skips_review(&self) -> bool {
         self.questions.len() == 1 && !self.questions[0].is_multi()
     }
 
     /// Number of navigable rows for a Select/MultiSelect question at `idx`:
     /// options, the Other row, and (multi-select only) the Submit row.
+    #[must_use]
     pub fn row_count(&self, idx: usize) -> usize {
         let q = &self.questions[idx];
         q.options.len() + 1 + usize::from(q.is_multi())
     }
 
     /// Row index of the "Other" free-text row for the question at `idx`.
+    #[must_use]
     pub fn other_row(&self, idx: usize) -> usize {
         self.questions[idx].options.len()
     }
 
     /// Row index of the Submit row for a multi-select question, if any.
+    #[must_use]
     pub fn submit_row(&self, idx: usize) -> Option<usize> {
         let q = &self.questions[idx];
         q.is_multi().then_some(q.options.len() + 1)
@@ -284,6 +293,7 @@ impl PendingQuestionSet {
     /// selected option labels plus any typed "Other" text; a question left
     /// untouched yields an empty `selected` (surfaced to the model as "(no
     /// selection)").
+    #[must_use]
     pub fn build_answers(&self) -> Vec<QuestionAnswer> {
         self.questions
             .iter()
@@ -327,6 +337,7 @@ impl PendingQuestionSet {
 
 /// The current ranked ordering for a Rank question: the selection's `order`,
 /// or the default `0..n` when it hasn't been reordered yet.
+#[must_use]
 pub fn rank_order(q: &Question, sel: &QuestionSelection) -> Vec<usize> {
     if sel.order.is_empty() {
         (0..q.options.len()).collect()

@@ -43,6 +43,7 @@ pub enum MemoryReloadOutcome {
 
 /// Walk UP from `start` to the nearest directory containing a `.git` entry
 /// (file or dir, so worktrees resolve), or `None` if not inside a repo.
+#[must_use]
 pub fn find_git_root(start: &Path) -> Option<PathBuf> {
     let mut current = start.to_path_buf();
     for _ in 0..MAX_WALK_DEPTH {
@@ -60,6 +61,7 @@ pub fn find_git_root(start: &Path) -> Option<PathBuf> {
 /// The memory roots for `cwd`, in injection order (global → private → shared).
 /// Shared is omitted when `cwd` isn't in a git repo. Returns an empty vec only
 /// if the machine data dir can't be resolved.
+#[must_use]
 pub fn memory_roots(cwd: &Path) -> Vec<(PathBuf, MemoryScope)> {
     let Ok(data) = mermaid_runtime::data_dir() else {
         return Vec::new();
@@ -90,6 +92,7 @@ pub fn memory_roots(cwd: &Path) -> Vec<(PathBuf, MemoryScope)> {
 }
 
 /// Resolve the on-disk directory for a scope at `cwd`, if available.
+#[must_use]
 pub fn dir_for(scope: MemoryScope, cwd: &Path) -> Option<PathBuf> {
     memory_roots(cwd)
         .into_iter()
@@ -125,6 +128,7 @@ fn project_key(path: &Path) -> String {
 }
 
 /// kebab-case slug for a memory name → filename stem.
+#[must_use]
 pub fn slugify(name: &str) -> String {
     let mut out = String::new();
     let mut prev_dash = false;
@@ -279,6 +283,7 @@ fn render_index(entries: &[MemoryEntry], cap: usize) -> (String, bool) {
 }
 
 /// Load all memory for `cwd` into a snapshot, or `None` when disabled or empty.
+#[must_use]
 pub fn load(cwd: &Path, cfg: &MemoryConfig) -> Option<LoadedMemory> {
     if !cfg.enabled {
         return None;
@@ -301,6 +306,7 @@ pub fn load(cwd: &Path, cfg: &MemoryConfig) -> Option<LoadedMemory> {
 /// Per-turn refresh: re-scan the roots (cheap — a few `read_dir`s + stats) and
 /// report whether anything changed since `current`. Picks up the agent's own
 /// mid-session writes and hand edits with no filesystem watcher.
+#[must_use]
 pub fn refresh(
     current: Option<LoadedMemory>,
     cwd: &Path,
@@ -401,6 +407,7 @@ pub fn write_memory(
 }
 
 /// Find a memory by name or file-stem id across all scopes.
+#[must_use]
 pub fn find(cwd: &Path, id_or_name: &str) -> Option<MemoryEntry> {
     for (dir, scope) in memory_roots(cwd) {
         for entry in load_root(&dir, scope) {
@@ -427,6 +434,7 @@ pub fn delete_memory(cwd: &Path, id_or_name: &str) -> std::io::Result<Option<Pat
 
 /// Load every memory's index entry paired with its full body text, across all
 /// scopes. Consolidation needs the bodies to judge duplicates/staleness.
+#[must_use]
 pub fn entries_with_bodies(cwd: &Path) -> Vec<(MemoryEntry, String)> {
     let mut out = Vec::new();
     for (dir, scope) in memory_roots(cwd) {
@@ -453,6 +461,7 @@ pub struct MemorySearchHit {
 /// (matches Mermaid's stated stance); a plain scan over the already-bounded
 /// memory corpus. Bodies on disk are redacted at write time, so snippets are
 /// safe to surface. Returns an empty vec for a blank query.
+#[must_use]
 pub fn search(cwd: &Path, query: &str) -> Vec<MemorySearchHit> {
     search_entries(entries_with_bodies(cwd), query)
 }

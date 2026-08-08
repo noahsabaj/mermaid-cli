@@ -23,6 +23,7 @@ pub enum RuntimeClientSource {
 }
 
 impl RuntimeClientSource {
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Daemon => "daemon",
@@ -242,6 +243,7 @@ pub struct RuntimeService {
 }
 
 impl RuntimeClient {
+    #[must_use]
     pub fn auto() -> Self {
         Self {
             mode: RuntimeClientMode::PreferDaemon,
@@ -249,6 +251,7 @@ impl RuntimeClient {
         }
     }
 
+    #[must_use]
     pub fn daemon() -> Self {
         Self {
             mode: RuntimeClientMode::DaemonOnly,
@@ -263,6 +266,7 @@ impl RuntimeClient {
         }
     }
 
+    #[must_use]
     pub fn local() -> Self {
         Self {
             mode: RuntimeClientMode::LocalOnly,
@@ -1243,6 +1247,7 @@ struct RawRuntimeHygienePreview {
     checkpoints: Vec<CheckpointRecord>,
 }
 
+#[must_use]
 pub fn runtime_hygiene_reason() -> &'static str {
     "runtime hygiene: test/dev artifact"
 }
@@ -1287,11 +1292,13 @@ pub fn record_static_provider_probes(
     }
 }
 
+#[must_use]
 pub fn parse_optional_json(raw: Option<&str>) -> Value {
     raw.and_then(|value| serde_json::from_str(value).ok())
         .unwrap_or(Value::Null)
 }
 
+#[must_use]
 pub fn affected_paths_from_json(pending_action: &Value, changed_files: &Value) -> Vec<String> {
     let mut paths = Vec::new();
     collect_path_like_strings(changed_files, &mut paths);

@@ -58,6 +58,7 @@ fn allowed_tools(entry: &McpServerEntry) -> impl Iterator<Item = &McpToolSpec> {
 }
 
 /// Deferred tools not yet promoted, as (server name, spec) in stable order.
+#[must_use]
 pub fn deferred_unpromoted(state: &State) -> Vec<(&String, &McpToolSpec)> {
     ready_servers(state)
         .into_iter()
@@ -70,6 +71,7 @@ pub fn deferred_unpromoted(state: &State) -> Vec<(&String, &McpToolSpec)> {
 /// The MCP portion of `ChatRequest.tools`: non-deferred servers' tools plus
 /// promoted tools, with one `tool_search` definition LAST while any
 /// deferred tool remains unpromoted. The effect runner prepends built-ins.
+#[must_use]
 pub fn mcp_tool_definitions(state: &State) -> Vec<ToolDefinition> {
     let mut defs = Vec::new();
     for (_, entry) in ready_servers(state) {
@@ -92,6 +94,7 @@ pub fn mcp_tool_definitions(state: &State) -> Vec<ToolDefinition> {
 
 /// Build the `tool_search` definition, its description enumerating the
 /// deferred servers so the model knows what is discoverable.
+#[must_use]
 pub fn tool_search_definition(state: &State) -> ToolDefinition {
     let deferred = deferred_unpromoted(state);
     let mut per_server: Vec<(String, usize)> = Vec::new();
@@ -140,6 +143,7 @@ pub struct SearchOutcome {
 /// Execute a `tool_search` query purely against state. `args` is the raw
 /// tool-call argument value; a missing/non-string `query` is treated as
 /// empty (list mode) rather than an error.
+#[must_use]
 pub fn run_tool_search(state: &State, args: &serde_json::Value) -> SearchOutcome {
     let query = args
         .get("query")

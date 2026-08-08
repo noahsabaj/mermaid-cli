@@ -60,6 +60,7 @@ pub struct WebCapabilities {
 }
 
 impl WebCapabilities {
+    #[must_use]
     pub fn resolve(web: &WebConfig) -> Self {
         let needs_ollama_key = web.fetch_backend == FetchBackend::Ollama
             || web.search_backend == SearchBackend::Ollama;
@@ -151,6 +152,7 @@ impl WebCapabilities {
     /// them. Lets disclosure tests assert formatting for viability combinations
     /// the test host cannot actually produce (e.g. a missing SearXNG bundle).
     #[cfg(test)]
+    #[must_use]
     pub fn from_statuses_for_test(fetch: WebCapabilityStatus, search: WebCapabilityStatus) -> Self {
         Self {
             fetch,
@@ -160,12 +162,14 @@ impl WebCapabilities {
         }
     }
 
+    #[must_use]
     pub fn fetch_tool(&self) -> Option<WebFetchTool> {
         self.fetch_backend
             .clone()
             .map(|backend| WebFetchTool::new(backend, self.fetch.backend))
     }
 
+    #[must_use]
     pub fn search_tool(&self) -> Option<WebSearchTool> {
         self.search_backend.clone().map(|backend| WebSearchTool {
             backend,

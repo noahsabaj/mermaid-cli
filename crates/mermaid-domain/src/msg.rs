@@ -499,6 +499,7 @@ impl KeyMods {
         shift: false,
     };
 
+    #[must_use]
     pub const fn ctrl() -> Self {
         Self {
             ctrl: true,
@@ -506,6 +507,7 @@ impl KeyMods {
         }
     }
 
+    #[must_use]
     pub const fn alt() -> Self {
         Self {
             alt: true,
@@ -513,6 +515,7 @@ impl KeyMods {
         }
     }
 
+    #[must_use]
     pub fn is_empty(self) -> bool {
         !self.ctrl && !self.alt && !self.shift
     }
@@ -652,6 +655,7 @@ impl Msg {
     /// for variants that aren't turn-scoped (user intent,
     /// housekeeping, MCP lifecycle). The reducer uses this to
     /// short-circuit stale events.
+    #[must_use]
     pub fn turn_id(&self) -> Option<TurnId> {
         match self {
             Self::StreamText { turn, .. }
@@ -675,6 +679,7 @@ impl Msg {
 
     /// Classification for telemetry / replay tooling. Cheaper than a
     /// full `Debug` string and stable across refactors.
+    #[must_use]
     pub fn kind(&self) -> MsgKind {
         match self {
             Self::Key(_) => MsgKind::Key,

@@ -107,6 +107,7 @@ pub fn enforce(policy: &SandboxPolicy, argv: &[OsString]) -> anyhow::Result<Enfo
 /// `/usr/bin/sandbox-exec` exists, `false` everywhere else (Windows
 /// AppContainer is a follow-up). Used by `mermaid self-test` and the exec
 /// tool as a safe, fork-free probe — it installs nothing.
+#[must_use]
 pub fn network_killswitch_available() -> bool {
     #[cfg(target_os = "linux")]
     {
@@ -128,6 +129,7 @@ pub fn network_killswitch_available() -> bool {
 /// [`network_killswitch_available`]: a safe probe that restricts nothing.
 /// (On Linux enforcement remains best-effort at apply time — a pre-Landlock
 /// kernel builds the ruleset but cannot enforce it.)
+#[must_use]
 pub fn fs_confinement_available() -> bool {
     #[cfg(target_os = "linux")]
     {

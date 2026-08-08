@@ -19,6 +19,7 @@
 ///
 /// Empty values are treated as unset (matches the existing
 /// `get_cloud_api_key` semantics).
+#[must_use]
 pub fn resolve_api_key(default_env: &str, override_env: Option<&str>) -> Option<String> {
     let env_var = override_env.unwrap_or(default_env);
     match std::env::var(env_var) {
@@ -29,6 +30,7 @@ pub fn resolve_api_key(default_env: &str, override_env: Option<&str>) -> Option<
 
 /// Resolve a provider's API key: env (default or authoritative override)
 /// first, then the OS keyring (`mermaid login <provider>`).
+#[must_use]
 pub fn resolve_provider_key(
     provider: &str,
     default_env: &str,
@@ -59,6 +61,7 @@ pub(crate) fn resolve_provider_key_in(
 }
 
 /// [`resolve_provider_key`] for the one legacy-fallback-env case (Gemini).
+#[must_use]
 pub fn resolve_provider_key_with_fallback(
     provider: &str,
     default_env: &str,
@@ -74,6 +77,7 @@ pub fn resolve_provider_key_with_fallback(
 
 /// Where a provider's key would come from right now: `"env"`, `"keyring"`,
 /// or `"none"`. Drives `doctor` / `mermaid login` / feedback reporting.
+#[must_use]
 pub fn provider_key_source(
     provider: &str,
     default_env: &str,
@@ -93,6 +97,7 @@ pub fn provider_key_source(
 /// If `override_env` is set, it remains authoritative and no fallback
 /// is attempted. Without an override, `default_env` is checked first
 /// and `fallback_env` is accepted only when the default is unset.
+#[must_use]
 pub fn resolve_api_key_with_fallback(
     default_env: &str,
     fallback_env: &str,

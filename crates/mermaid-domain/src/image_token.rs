@@ -23,6 +23,7 @@ fn token_re() -> &'static Regex {
 /// Inline text inserted at paste time for image `n`, e.g. `"[Image #7] "`. The
 /// trailing space lets the user keep typing and makes the pill delete in two
 /// predictable keystrokes (space, then pill).
+#[must_use]
 pub fn render_token(n: u64) -> String {
     format!("[Image #{n}] ")
 }
@@ -31,6 +32,7 @@ pub fn render_token(n: u64) -> String {
 /// `(token_start, N)`. Drives atomic Backspace: the whole pill (and its image)
 /// go together. A number that overflows `u64` is treated as a non-match (falls
 /// back to a normal character delete).
+#[must_use]
 pub fn token_ending_at(buf: &str, cursor: usize) -> Option<(usize, u64)> {
     token_re().captures_iter(buf).find_map(|c| {
         let whole = c.get(0)?;
@@ -44,6 +46,7 @@ pub fn token_ending_at(buf: &str, cursor: usize) -> Option<(usize, u64)> {
 
 /// If a complete `[Image #N]` token starts exactly at byte offset `cursor`,
 /// return `(token_end, N)`. Symmetric to [`token_ending_at`] for forward-Delete.
+#[must_use]
 pub fn token_starting_at(buf: &str, cursor: usize) -> Option<(usize, u64)> {
     token_re().captures_iter(buf).find_map(|c| {
         let whole = c.get(0)?;
@@ -58,6 +61,7 @@ pub fn token_starting_at(buf: &str, cursor: usize) -> Option<(usize, u64)> {
 /// Image numbers referenced by `[Image #N]` tokens in `text`, in
 /// first-appearance order, de-duplicated. Drives which attachments are sent, and
 /// in what order, at submit time. Numbers that overflow `u64` are skipped.
+#[must_use]
 pub fn numbers_in_order(text: &str) -> Vec<u64> {
     let mut out = Vec::new();
     for c in token_re().captures_iter(text) {

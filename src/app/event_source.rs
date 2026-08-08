@@ -23,6 +23,7 @@ use mermaid_domain::{Key, KeyCode, KeyMods, Msg, Paste};
 /// Translate one crossterm event into `Msg`. Returns `None` for
 /// events the reducer doesn't care about (focus gained/lost, unknown
 /// media keys, key repeats, etc.).
+#[must_use]
 pub fn event_to_msg(event: CtEvent) -> Option<Msg> {
     match event {
         CtEvent::Key(key) => {

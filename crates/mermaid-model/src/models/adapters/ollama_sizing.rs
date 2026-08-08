@@ -40,6 +40,7 @@ pub enum NumCtxSource {
 
 impl NumCtxSource {
     /// Human label for `/context` and hints.
+    #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Self::Override => "override",
@@ -52,6 +53,7 @@ impl NumCtxSource {
 
     /// Whether the window was auto-fitted (vs an explicit user/config value) —
     /// drives whether the quick-fix offers to raise it.
+    #[must_use]
     pub fn is_auto(self) -> bool {
         matches!(self, Self::Auto | Self::AutoFallback)
     }
@@ -82,6 +84,7 @@ pub struct ModelDims {
 /// `head_dim = embedding_length / head_count`. Using `head_count_kv` (not
 /// `head_count`) accounts for grouped-query attention, which most modern models
 /// use to shrink the KV cache.
+#[must_use]
 pub fn kv_bytes_per_token(dims: &ModelDims) -> Option<usize> {
     if dims.block_count == 0
         || dims.head_count == 0
@@ -104,6 +107,7 @@ pub fn kv_bytes_per_token(dims: &ModelDims) -> Option<usize> {
 /// Largest number of tokens whose KV cache fits `budget_bytes` after reserving a
 /// headroom fraction and subtracting the model weights. `None` if
 /// `kv_bytes_per_token` is zero.
+#[must_use]
 pub fn max_tokens_for_memory(
     budget_bytes: u64,
     model_weight_bytes: u64,
@@ -132,6 +136,7 @@ pub fn max_tokens_for_memory(
 /// When it does return a value it is strictly `< current` *and* genuinely clears
 /// the overflow, so feeding it back each turn converges to the largest
 /// fully-resident window.
+#[must_use]
 pub fn converge_num_ctx(
     current: usize,
     size_vram_bytes: u64,
@@ -272,6 +277,7 @@ fn round_down_to(v: usize, step: usize) -> usize {
 /// known — local Ollama imposes none, but Ollama Cloud maps `num_predict` →
 /// `max_tokens` and 400s above the model's cap (learned from such a 400 and
 /// cached). It bounds both AUTO and explicit asks.
+#[must_use]
 pub fn default_ollama_num_predict(
     max_tokens: usize,
     num_ctx: Option<usize>,

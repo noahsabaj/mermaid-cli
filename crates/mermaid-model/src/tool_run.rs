@@ -295,12 +295,14 @@ pub struct OllamaPlacement {
 
 impl OllamaPlacement {
     /// True when the model didn't fully fit VRAM and spilled to CPU/RAM (slow).
+    #[must_use]
     pub fn offloaded(&self) -> bool {
         self.size_vram_bytes < self.total_bytes
     }
 
     /// Rough percentage of the model running on CPU/RAM (0–100). Integer math;
     /// `0` when the footprint is unknown or fully resident.
+    #[must_use]
     pub fn percent_on_cpu(&self) -> u8 {
         if self.total_bytes == 0 {
             return 0;

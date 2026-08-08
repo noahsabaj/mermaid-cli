@@ -13,6 +13,7 @@ pub const BUNDLE_VERSION: &str = "v0.3.0";
 /// sha256 (lowercase hex) of `mermaid-searxng-<target>.tar.zst` for
 /// [`BUNDLE_VERSION`], or `None` on a platform with no published bundle
 /// (Windows: SearXNG needs Unix-only modules).
+#[must_use]
 pub fn bundle_sha256(target: &str) -> Option<&'static str> {
     Some(match target {
         "linux-x86_64" => "1d315ab5235cac5182021585cea6567ebc6e90e6c39474e29004974044e06822",

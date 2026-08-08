@@ -589,6 +589,7 @@ fn build_result(state: &State) -> RunResult {
 }
 
 /// Render a `RunResult` in the requested output format.
+#[must_use]
 pub fn format_result(result: &RunResult, format: OutputFormat) -> String {
     match format {
         OutputFormat::Text => {

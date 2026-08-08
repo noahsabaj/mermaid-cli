@@ -192,17 +192,20 @@ impl AgentWorktree {
     }
 
     /// Where the child should run.
+    #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
     }
 
     /// Top level of the project this work merges back into. Callers
     /// serializing merges key their lock on this.
+    #[must_use]
     pub fn project_root(&self) -> &Path {
         &self.project_top
     }
 
     /// The commit the child's work is currently measured against.
+    #[must_use]
     pub fn base(&self) -> &str {
         &self.base
     }

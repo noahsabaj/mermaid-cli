@@ -35,6 +35,7 @@ use mermaid_model::ids::TurnId;
 use super::reducer::*;
 use super::reports::*;
 
+#[must_use]
 pub fn build_chat_request(state: &State) -> ChatRequest {
     // Project instructions + the always-loaded memory index + any pending
     // hook context compose into the single dynamic suffix. Each block carries

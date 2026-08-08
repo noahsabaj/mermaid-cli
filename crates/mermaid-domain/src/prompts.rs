@@ -173,6 +173,7 @@ genuinely handled. Do not stop at a proposal when the user asked for implementat
 /// ends at the next `\n## ` heading and falls back to end-of-string when
 /// there is none, so running it on the rendered prompt deleted the user's
 /// appended instructions along with the section.
+#[must_use]
 pub fn adapt_prompt_for_plan_mode(rendered: &str) -> String {
     let mut prompt = rendered.to_string();
     if let Some(start) = prompt.find(TASK_PLANNING_ANCHOR) {

@@ -35,6 +35,7 @@ pub const PLAN_DENIAL_MARKER: &str = "plan mode";
 ///
 /// The subcommand tables are curatable the same way `READ_ONLY_BINARIES` is —
 /// additions need the audit tests below.
+#[must_use]
 pub fn is_plan_safe_build_command(command: &str) -> bool {
     let split = split_command(command);
     // Build/test invocations have no legitimate heredoc shape — refusing them
@@ -71,6 +72,7 @@ pub fn is_plan_safe_build_command(command: &str) -> bool {
 /// the plan file. Lexical normalization only — the plan file may not exist
 /// yet (the first write creates it), so `canonicalize` is not an option, and
 /// `..`/`.` components must not smuggle a different file past the exemption.
+#[must_use]
 pub fn is_plan_file_path(workdir: &Path, raw: &str, plan_file: &Path) -> bool {
     fn normalize(p: &Path) -> std::path::PathBuf {
         use std::path::Component;
@@ -127,6 +129,7 @@ pub(crate) const CWD_CHANGING_BUILTINS: &[&str] = &["cd", "pushd", "popd"];
 ///
 /// Residual power is content-level only: arbitrary bytes into the plan file,
 /// which `write_file`'s carve-out already grants.
+#[must_use]
 pub fn is_plan_file_only_write(command: &str, workdir: &Path, plan_file: &Path) -> bool {
     let split = split_command(command);
     if split.segments.is_empty() {

@@ -17,6 +17,7 @@ pub struct InputState {
 
 impl InputState {
     /// Create a new input state
+    #[must_use]
     pub fn new() -> Self {
         Self { cursor_position: 0 }
     }
@@ -31,6 +32,7 @@ impl InputState {
     /// Uses the shared `layout_rows` helper so the wrapping decisions match
     /// `wrap_input_with_prompt` exactly (the two would silently drift
     /// otherwise — `cursor_and_wrap_agree_on_line_structure` guards this).
+    #[must_use]
     pub fn calculate_cursor_position(
         input: &str,
         cursor_pos: usize,

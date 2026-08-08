@@ -50,6 +50,7 @@ struct AgentBundle {
 /// empty on store/parse failure (the skills precedent — a broken plugin
 /// must not kill startup). Plugins are visited in sorted-name order so
 /// plugin-vs-plugin collisions resolve deterministically.
+#[must_use]
 pub fn load() -> PluginAssets {
     let mut assets = PluginAssets::default();
     let Ok(store) = mermaid_runtime::RuntimeStore::open_default() else {

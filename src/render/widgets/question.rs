@@ -586,6 +586,7 @@ fn build_preview_lines(preview: &OptionPreview, theme: &Theme) -> Vec<Line<'stat
 
 /// Total rendered height including the border, so `render::mod` can size the
 /// bottom zone to fit the modal — the taller of the option list and its preview.
+#[must_use]
 pub fn question_modal_height(set: &PendingQuestionSet, theme: &Theme, total_width: u16) -> u16 {
     let left = build_question_lines(set, theme, question_column_width(set, total_width)).len();
     let content = if active_question_has_preview(set) {

@@ -98,6 +98,7 @@ pub struct ConversationHistory {
 
 impl ConversationHistory {
     /// Read the committed transcript.
+    #[must_use]
     pub fn messages(&self) -> &[ChatMessage] {
         &self.messages
     }
@@ -122,6 +123,7 @@ impl ConversationHistory {
 
     /// Monotonic counter identifying the current transcript contents. Changes
     /// whenever `messages` is touched; never serialized.
+    #[must_use]
     pub fn revision(&self) -> u64 {
         self.revision
     }
@@ -133,6 +135,7 @@ impl ConversationHistory {
     /// `State::new` mints the initial one): the id and title are a
     /// deterministic function of the caller's clock, so `--replay` reproduces
     /// them exactly.
+    #[must_use]
     pub fn new(project_path: String, model_name: String, now: DateTime<Local>) -> Self {
         // Include subsecond precision to avoid ID collisions within the same second
         let id = format!("{}", now.format("%Y%m%d_%H%M%S_%3f"));
@@ -234,6 +237,7 @@ impl ConversationHistory {
     }
 
     /// Get a summary for display
+    #[must_use]
     pub fn summary(&self) -> String {
         let message_count = self.messages.len();
         let duration = self.updated_at.signed_duration_since(self.created_at);

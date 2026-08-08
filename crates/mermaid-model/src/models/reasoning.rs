@@ -110,6 +110,7 @@ impl ReasoningLevel {
     /// Lowercase string form (matches the serde representation). Provided
     /// as a method so call sites that want a `&'static str` don't have to
     /// round-trip through serde.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::None => "none",
@@ -173,6 +174,7 @@ pub struct ReasoningChunk {
 ///   3. If every supported level is above the requested rank, fall back
 ///      to the lowest supported level. Better to honor the user's intent
 ///      to enable reasoning than to silently disable it.
+#[must_use]
 pub fn nearest_effort(
     requested: ReasoningLevel,
     supported: &[ReasoningLevel],

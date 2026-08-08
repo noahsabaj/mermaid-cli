@@ -83,6 +83,7 @@ impl mermaid_model::models::adapters::ollama::LocalServerRecovery for OllamaAuto
 impl AutostartError {
     /// Human hint to append to the caller's connection error, or `None` when
     /// the error should pass through untouched (`NotLocal` / `Disabled`).
+    #[must_use]
     pub fn hint(&self) -> Option<String> {
         match self {
             Self::NotLocal | Self::Disabled => None,

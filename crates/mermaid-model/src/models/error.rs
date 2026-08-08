@@ -162,6 +162,7 @@ impl ModelError {
         clippy::too_many_lines,
         reason = "predates the lint; see .github/baselines/expect_budget.txt"
     )]
+    #[must_use]
     pub fn to_user_facing(&self) -> UserFacingError {
         match self {
             Self::Backend(BackendError::ConnectionFailed { backend, url, .. }) => UserFacingError {
@@ -433,6 +434,7 @@ impl ResponseDebugContext {
         captured
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.request_id.is_none() && self.cf_ray.is_none()
     }

@@ -115,16 +115,19 @@ impl Default for ModelConfig {
 
 impl ModelConfig {
     /// Get a backend-specific option
+    #[must_use]
     pub fn get_backend_option(&self, backend: &str, key: &str) -> Option<&String> {
         self.backend_options.get(backend)?.get(key)
     }
 
     /// Get backend option as integer
+    #[must_use]
     pub fn get_backend_option_i32(&self, backend: &str, key: &str) -> Option<i32> {
         self.get_backend_option(backend, key)?.parse::<i32>().ok()
     }
 
     /// Get backend option as boolean
+    #[must_use]
     pub fn get_backend_option_bool(&self, backend: &str, key: &str) -> Option<bool> {
         self.get_backend_option(backend, key)?.parse::<bool>().ok()
     }
@@ -144,6 +147,7 @@ impl ModelConfig {
     /// helper — it emits two separately-cached typed-text blocks.
     ///
     /// Returns `None` only when both fields are empty/unset.
+    #[must_use]
     pub fn combined_system_prompt(&self) -> Option<String> {
         match (
             self.system_prompt.as_deref(),
@@ -159,6 +163,7 @@ impl ModelConfig {
     }
 
     /// Extract Ollama-specific options
+    #[must_use]
     pub fn ollama_options(&self) -> OllamaOptions {
         OllamaOptions {
             num_gpu: self.get_backend_option_i32("ollama", "num_gpu"),

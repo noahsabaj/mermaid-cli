@@ -3,6 +3,7 @@
 /// installer's default locations), so the startup preflight can never reject
 /// a user the autostart would have healed — e.g. a fresh install whose PATH
 /// edit hasn't reached this shell yet.
+#[must_use]
 pub fn is_installed() -> bool {
     super::server::find_binary().is_some()
 }

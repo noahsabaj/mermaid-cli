@@ -2293,6 +2293,7 @@ pub(crate) fn switch_model(state: &mut State, cmds: &mut Vec<Cmd>, new_model: St
 /// `anthropic/claude-opus-4-5`. A provider can return 200 ids, so filtering is
 /// what makes the list usable at all — the difference between this picker and
 /// the fixed four-row ones it is modeled on.
+#[must_use]
 pub fn filter_model_choices<'a>(
     candidates: &'a [crate::state::ModelChoice],
     query: &str,

@@ -376,6 +376,7 @@ fn detect_backend() -> Option<ClipboardBackend> {
 /// [`read_image_bytes`] by construction. The two used to answer different
 /// questions on Windows — `ContainsImage()` here, `GetImage()` there — which is
 /// how a PNG-only clipboard could report `true` and then fail to read.
+#[must_use]
 pub fn has_image() -> bool {
     probe_image_source() != ImageSource::None
 }

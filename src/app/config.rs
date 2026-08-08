@@ -155,6 +155,7 @@ pub fn load_layered_config(
 /// runtime re-reads keyed to a workdir — e.g. the memory settings consulted
 /// per operation. Never fails and never prints; warnings/notices were already
 /// surfaced by the startup load.
+#[must_use]
 pub fn load_project_scoped_config(cwd: &std::path::Path) -> Config {
     fn load(cwd: &std::path::Path) -> Result<Config> {
         let config_path = get_config_path()?;
@@ -181,6 +182,7 @@ pub fn load_project_scoped_config(cwd: &std::path::Path) -> Config {
 /// Like [`load_config`] (user scope, no session flags) but never fails: on a
 /// malformed config, warn on stderr (secret-redacted, #F13) and fall back to
 /// defaults (#111). For standalone subcommands that only read user settings.
+#[must_use]
 pub fn load_config_or_warn() -> Config {
     load_config().unwrap_or_else(|e| {
         eprintln!(
@@ -395,6 +397,7 @@ pub(crate) fn deep_remove_segments(table: &mut toml::Table, path: &[&str]) -> bo
 /// malformed layer, warns (secret-redacted, #F13) and degrades: the session
 /// flags are re-applied over bare defaults so `--no-network`/`-c` survive a
 /// corrupt user file rather than being silently dropped with it.
+#[must_use]
 pub fn load_layered_config_or_warn(cwd: Option<&std::path::Path>, flags: &SessionFlags) -> Config {
     match load_layered_config(cwd, flags) {
         Ok(load) => {

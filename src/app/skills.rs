@@ -27,6 +27,7 @@ const MAX_SKILL_FILE_BYTES: usize = 8 * 1024;
 /// Discover every skill visible from `cwd`, or `None` when there are none.
 /// Never errors: an unreadable root or file is skipped (per-file tolerance) —
 /// a broken skill must not take down startup.
+#[must_use]
 pub fn load(cwd: &Path) -> Option<LoadedSkills> {
     let project_root = crate::app::memory::find_git_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
     let project = discover_dir(
@@ -216,6 +217,7 @@ fn plugin_entries() -> Vec<SkillEntry> {
 /// Merge discovery groups (given in precedence order, highest first) into one
 /// list, deduplicating by name — the first occurrence wins, so a project skill
 /// shadows a same-named user or plugin skill. Pure; unit-testable.
+#[must_use]
 pub fn merge_by_precedence(groups: Vec<Vec<SkillEntry>>) -> Vec<SkillEntry> {
     let mut seen = std::collections::HashSet::new();
     let mut merged = Vec::new();
@@ -234,6 +236,7 @@ pub fn merge_by_precedence(groups: Vec<Vec<SkillEntry>>) -> Vec<SkillEntry> {
 /// [`MAX_INDEX_BYTES`] bytes with a `(+N more not listed)` overflow line.
 /// Entries arrive precedence-ordered, so overflow drops plugin/user tails
 /// before any project skill. Pure; unit-testable.
+#[must_use]
 pub fn render_index(entries: &[SkillEntry]) -> String {
     let mut out = String::from(
         "# Skills\n\nTask-specific playbooks available on this machine. When a skill's \

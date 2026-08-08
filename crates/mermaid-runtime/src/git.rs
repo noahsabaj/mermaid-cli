@@ -60,6 +60,7 @@ pub struct GitCommand {
 impl GitCommand {
     /// Start a hardened `git` invocation. Add a working directory with
     /// [`Self::cwd`]; without one the command inherits the process's.
+    #[must_use]
     pub fn new() -> Self {
         let mut cmd = Command::new("git");
         cmd.args(HARDENING)
@@ -77,6 +78,7 @@ impl GitCommand {
     }
 
     /// Run in `dir`.
+    #[must_use]
     pub fn cwd(mut self, dir: &Path) -> Self {
         self.cmd.current_dir(dir);
         self.cwd = Some(dir.to_path_buf());
@@ -106,6 +108,7 @@ impl GitCommand {
     /// Feed `data` to the command's stdin. Lets `git apply` take a patch
     /// without staging it through a temp file whose lifetime we'd have to
     /// manage (and whose contents would briefly sit on disk unredacted).
+    #[must_use]
     pub fn stdin_bytes(mut self, data: Vec<u8>) -> Self {
         self.stdin = Some(data);
         self
@@ -195,12 +198,14 @@ impl Default for GitCommand {
 }
 
 /// Start a hardened `git` invocation in `dir`. The common shape.
+#[must_use]
 pub fn git(dir: &Path) -> GitCommand {
     GitCommand::new().cwd(dir)
 }
 
 /// Whether `dir` sits inside a git work tree. False when git is missing
 /// entirely, which is the same practical answer for every caller here.
+#[must_use]
 pub fn is_work_tree(dir: &Path) -> bool {
     git(dir)
         .args(["rev-parse", "--is-inside-work-tree"])

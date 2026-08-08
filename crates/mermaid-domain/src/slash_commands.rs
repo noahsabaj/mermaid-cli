@@ -34,6 +34,7 @@ pub enum SlashCommandGroup {
 }
 
 impl SlashCommandGroup {
+    #[must_use]
     pub fn title(self) -> &'static str {
         match self {
             Self::Everyday => "Everyday",
@@ -419,6 +420,7 @@ pub enum PaletteEntry<'a> {
 }
 
 impl PaletteEntry<'_> {
+    #[must_use]
     pub fn name(&self) -> &str {
         match self {
             PaletteEntry::Builtin(c) => c.name,
@@ -427,6 +429,7 @@ impl PaletteEntry<'_> {
     }
 
     /// Palette/hint description; plugin rows carry their origin.
+    #[must_use]
     pub fn description(&self) -> String {
         match self {
             PaletteEntry::Builtin(c) => c.description.to_string(),
@@ -440,6 +443,7 @@ impl PaletteEntry<'_> {
         }
     }
 
+    #[must_use]
     pub fn arg_hint(&self) -> Option<&'static str> {
         match self {
             PaletteEntry::Builtin(c) => c.arg_hint,
@@ -474,6 +478,7 @@ pub fn filter_entries<'a>(
 /// `/`). An empty prefix returns the full registry. Matches against the
 /// canonical name AND any aliases — typing `/q` finds `quit` because
 /// `q` is a `quit` alias. Result preserves registry order (stable).
+#[must_use]
 pub fn filter_by_prefix(typed: &str) -> Vec<&'static SlashCommand> {
     let needle = typed.to_lowercase();
     if needle.is_empty() {

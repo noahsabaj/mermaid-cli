@@ -111,6 +111,7 @@ impl CredentialStore for NoopStore {
 /// The process-wide store: the OS keyring, or the no-op store when
 /// `MERMAID_NO_KEYRING` is set (non-empty). Resolved once — env is
 /// process-static.
+#[must_use]
 pub fn default_store() -> &'static dyn CredentialStore {
     static KEYRING: KeyringStore = KeyringStore;
     static NOOP: NoopStore = NoopStore;

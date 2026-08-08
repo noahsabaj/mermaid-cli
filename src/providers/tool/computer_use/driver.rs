@@ -64,6 +64,7 @@ pub struct ScreenshotRegistry {
 }
 
 impl ScreenshotRegistry {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             entries: VecDeque::new(),
@@ -77,18 +78,22 @@ impl ScreenshotRegistry {
         self.entries.push_back(meta);
     }
 
+    #[must_use]
     pub fn get(&self, id: u64) -> Option<&ScreenshotMetadata> {
         self.entries.iter().find(|m| m.id == id)
     }
 
+    #[must_use]
     pub fn latest(&self) -> Option<&ScreenshotMetadata> {
         self.entries.back()
     }
 
+    #[must_use]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -135,6 +140,7 @@ pub struct ComputerUseDriver {
 }
 
 impl ComputerUseDriver {
+    #[must_use]
     pub fn new(backend: Backend) -> Self {
         Self {
             backend,

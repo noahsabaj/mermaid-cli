@@ -70,6 +70,7 @@ pub struct VetVerdict {
 }
 
 impl VetVerdict {
+    #[must_use]
     pub fn allow() -> Self {
         Self {
             allow: true,
