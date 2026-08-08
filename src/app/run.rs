@@ -284,10 +284,10 @@ pub async fn run_interactive_with(
                                 None
                             },
                             MEK::ScrollUp => Some(Msg::MouseScroll {
-                                delta: crate::constants::UI_MOUSE_SCROLL_LINES as i16,
+                                delta: mermaid_model::constants::UI_MOUSE_SCROLL_LINES as i16,
                             }),
                             MEK::ScrollDown => Some(Msg::MouseScroll {
-                                delta: -(crate::constants::UI_MOUSE_SCROLL_LINES as i16),
+                                delta: -(mermaid_model::constants::UI_MOUSE_SCROLL_LINES as i16),
                             }),
                             _ => None,
                         }
@@ -512,10 +512,10 @@ fn web_capabilities_notice(
         let reason = status
             .reason
             .as_deref()
-            .map(crate::utils::redact_secrets)
+            .map(mermaid_model::utils::redact_secrets)
             .unwrap_or_else(|| "backend initialization failed".to_string());
         let reason = reason.split_whitespace().collect::<Vec<_>>().join(" ");
-        let reason = crate::utils::truncate_middle_bytes(&reason, 240)
+        let reason = mermaid_model::utils::truncate_middle_bytes(&reason, 240)
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ");

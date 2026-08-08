@@ -57,7 +57,7 @@ impl ToolExecutor for MouseMoveTool {
         if let Some(blocked) = super::super::policy_gate::gate_external(
             &ctx,
             "mouse_move",
-            crate::runtime::ToolCategory::ComputerUse,
+            mermaid_runtime::ToolCategory::ComputerUse,
             "computer-use: mouse_move".to_string(),
             &args,
         )

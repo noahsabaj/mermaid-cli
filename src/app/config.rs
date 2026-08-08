@@ -1,8 +1,10 @@
-use crate::constants::{DEFAULT_OLLAMA_PORT, DEFAULT_TEMPERATURE, LEGACY_DEFAULT_MAX_TOKENS};
-use crate::models::ReasoningLevel;
-use crate::runtime::{PolicyOverride, SafetyMode};
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
+use mermaid_model::constants::{
+    DEFAULT_OLLAMA_PORT, DEFAULT_TEMPERATURE, LEGACY_DEFAULT_MAX_TOKENS,
+};
+use mermaid_model::models::ReasoningLevel;
+use mermaid_runtime::{PolicyOverride, SafetyMode};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -302,7 +304,7 @@ pub struct SafetyConfig {
     /// (aligned runs silently, off-task escalates). `allow` restores the old
     /// unconditional-allow behavior.
     #[serde(default)]
-    pub external_writes: crate::runtime::FloorLevel,
+    pub external_writes: mermaid_runtime::FloorLevel,
     /// Enforcement floor for machine-scoped package operations (`npm -g`,
     /// `cargo install`, `pip install`, `brew`/`apt`/`winget` installs) —
     /// same levels and default as `external_writes`. They mutate the
@@ -310,7 +312,7 @@ pub struct SafetyConfig {
     /// full_access vets them. Project-local installs (`npm install`,
     /// `cargo add`) are untouched.
     #[serde(default)]
-    pub system_installs: crate::runtime::FloorLevel,
+    pub system_installs: mermaid_runtime::FloorLevel,
     /// Model id the `Auto`-mode safety classifier uses to vet borderline
     /// actions. `None` ⇒ vet with the session's active model. Set this to
     /// point the vet at a cheaper/faster model than the one driving the work.
@@ -341,8 +343,8 @@ impl Default for SafetyConfig {
             network: NetworkPolicy::default(),
             filesystem: FilesystemPolicy::default(),
             overrides: Vec::new(),
-            external_writes: crate::runtime::FloorLevel::default(),
-            system_installs: crate::runtime::FloorLevel::default(),
+            external_writes: mermaid_runtime::FloorLevel::default(),
+            system_installs: mermaid_runtime::FloorLevel::default(),
             auto_classifier_model: None,
             allow_untrusted_headless_tools: false,
             allow_readonly_web: false,
@@ -524,7 +526,7 @@ pub struct PlanConfig {
     pub model: Option<String>,
     /// Plan-phase reasoning override, same swap/restore contract as `model`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub reasoning: Option<crate::models::ReasoningLevel>,
+    pub reasoning: Option<mermaid_model::models::ReasoningLevel>,
 }
 
 /// Durable semantic memory settings (v0.10.0).
@@ -542,7 +544,7 @@ impl Default for MemoryConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            index_cap_bytes: crate::constants::MAX_MEMORY_INDEX_BYTES,
+            index_cap_bytes: mermaid_model::constants::MAX_MEMORY_INDEX_BYTES,
         }
     }
 }
@@ -614,7 +616,8 @@ impl Default for CompactionConfig {
     fn default() -> Self {
         let policy = crate::domain::CompactionPolicy::default();
         Self {
-            max_truncation_recoveries: crate::constants::COMPACTION_MAX_TRUNCATION_RECOVERIES,
+            max_truncation_recoveries:
+                mermaid_model::constants::COMPACTION_MAX_TRUNCATION_RECOVERIES,
             auto_enabled: policy.auto_enabled,
             auto_threshold_percent: policy.auto_threshold_percent,
             tail_turns: policy.tail_turns,
@@ -864,7 +867,7 @@ impl McpServerConfig {
                 let host = parsed.host_str().unwrap_or("");
                 match parsed.scheme() {
                     "https" => Ok(TransportKind::Http),
-                    "http" if crate::utils::classify_host(host).is_loopback() => {
+                    "http" if mermaid_model::utils::classify_host(host).is_loopback() => {
                         Ok(TransportKind::Http)
                     },
                     "http" => Err(anyhow::anyhow!(
@@ -914,7 +917,7 @@ impl std::fmt::Debug for McpServerConfig {
                 &self
                     .args
                     .iter()
-                    .map(|a| crate::utils::redact_secrets(a))
+                    .map(|a| mermaid_model::utils::redact_secrets(a))
                     .collect::<Vec<_>>(),
             )
             .field("env", &debug_masked_map(&self.env))
@@ -1396,7 +1399,7 @@ pub fn load_config_or_warn() -> Config {
     load_config().unwrap_or_else(|e| {
         eprintln!(
             "mermaid: {}",
-            crate::utils::redact_secrets(&format!("{e:#}"))
+            mermaid_model::utils::redact_secrets(&format!("{e:#}"))
         );
         Config::default()
     })
@@ -1623,7 +1626,7 @@ pub fn load_layered_config_or_warn(cwd: Option<&std::path::Path>, flags: &Sessio
             // credential-shaped content before it reaches stderr (#F13).
             eprintln!(
                 "mermaid: {}",
-                crate::utils::redact_secrets(&format!("{e:#}"))
+                mermaid_model::utils::redact_secrets(&format!("{e:#}"))
             );
             flags
                 .to_table()
@@ -1684,10 +1687,10 @@ fn save_config(config: &Config, path: Option<PathBuf>) -> Result<()> {
 /// file replaces the old one). Windows relies on the per-user profile ACL.
 fn write_config_bytes(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
     #[cfg(unix)]
-    crate::runtime::write_atomic_with_mode(path, bytes, 0o600)
+    mermaid_runtime::write_atomic_with_mode(path, bytes, 0o600)
         .with_context(|| format!("Failed to write config to {}", path.display()))?;
     #[cfg(not(unix))]
-    crate::runtime::write_atomic(path, bytes)
+    mermaid_runtime::write_atomic(path, bytes)
         .with_context(|| format!("Failed to write config to {}", path.display()))?;
     Ok(())
 }
@@ -2985,7 +2988,9 @@ port = 11434
         temp_env::with_vars([("ANTHROPIC_API_KEY", None::<&str>)], || {
             // The keyring is the machine's, so only assert the env-var half:
             // with no key in the environment there is nothing to prefer.
-            if crate::utils::provider_key_source("anthropic", "ANTHROPIC_API_KEY", None) == "none" {
+            if mermaid_model::utils::provider_key_source("anthropic", "ANTHROPIC_API_KEY", None)
+                == "none"
+            {
                 assert_eq!(configured_provider_default_model(&config), None);
             }
         });
@@ -3039,7 +3044,7 @@ port = 11434
         .iter()
         .map(|env| (*env, None))
         .chain(
-            crate::models::PROVIDER_REGISTRY
+            mermaid_model::models::PROVIDER_REGISTRY
                 .iter()
                 .map(|profile| (profile.api_key_env, None)),
         )

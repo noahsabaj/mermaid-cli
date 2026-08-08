@@ -1,7 +1,7 @@
-use crate::utils::{RetryConfig, classify_host, retry_async_if, truncate_content};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use encoding_rs::{Encoding, UTF_8, UTF_16BE, UTF_16LE};
+use mermaid_model::utils::{RetryConfig, classify_host, retry_async_if, truncate_content};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -423,13 +423,13 @@ impl OllamaWebClient {
                         let status = response.status();
                         let body = read_body_capped(
                             response,
-                            crate::constants::MAX_WEB_BODY_BYTES.min(64 * 1024),
+                            mermaid_model::constants::MAX_WEB_BODY_BYTES.min(64 * 1024),
                             &budget,
                         )
                         .await
                         .map(|body| String::from_utf8_lossy(&body).into_owned())
                         .unwrap_or_else(|_| "<unavailable>".to_string());
-                        let body = crate::utils::redact_secrets(&body);
+                        let body = mermaid_model::utils::redact_secrets(&body);
                         return Err(anyhow::Error::new(HttpStatusError {
                             status: status.as_u16(),
                         })
@@ -439,9 +439,12 @@ impl OllamaWebClient {
                         )));
                     }
 
-                    let body =
-                        read_body_capped(response, crate::constants::MAX_WEB_BODY_BYTES, &budget)
-                            .await?;
+                    let body = read_body_capped(
+                        response,
+                        mermaid_model::constants::MAX_WEB_BODY_BYTES,
+                        &budget,
+                    )
+                    .await?;
                     drop(download_permits);
                     serde_json::from_slice::<OllamaSearchResponse>(&body)
                         .map_err(|e| anyhow!("Failed to parse Ollama search response: {}", e))
@@ -485,7 +488,7 @@ impl OllamaWebClient {
                 let url = url_owned.clone();
                 let budget = budget.clone();
                 async move {
-                    let safe_url = crate::utils::sanitize_url_for_display(&url);
+                    let safe_url = mermaid_model::utils::sanitize_url_for_display(&url);
                     let endpoint =
                         reqwest::Url::parse(&format!("{}/web_fetch", OLLAMA_API_BASE))
                             .map_err(|e| anyhow!("invalid Ollama web fetch endpoint: {e}"))?;
@@ -509,9 +512,12 @@ impl OllamaWebClient {
                         .context(format!("Failed to fetch {safe_url}: HTTP {status}")));
                     }
 
-                    let body =
-                        read_body_capped(response, crate::constants::MAX_WEB_BODY_BYTES, &budget)
-                            .await?;
+                    let body = read_body_capped(
+                        response,
+                        mermaid_model::constants::MAX_WEB_BODY_BYTES,
+                        &budget,
+                    )
+                    .await?;
                     drop(download_permits);
                     let source_bytes = body.len();
                     let parsed = serde_json::from_slice::<OllamaFetchResponse>(&body)
@@ -576,13 +582,13 @@ fn map_cloud_fetch_error(error: anyhow::Error, requested_url: &str) -> WebFetchE
     if let Some(status) = error.downcast_ref::<HttpStatusError>() {
         return WebFetchError::HttpStatus {
             status: status.status(),
-            url: crate::utils::sanitize_url_for_display(requested_url),
+            url: mermaid_model::utils::sanitize_url_for_display(requested_url),
         };
     }
     if let Some(error) = error.downcast_ref::<reqwest::Error>() {
-        return WebFetchError::Transport(crate::utils::redact_secrets(&error.to_string()));
+        return WebFetchError::Transport(mermaid_model::utils::redact_secrets(&error.to_string()));
     }
-    WebFetchError::Backend(crate::utils::redact_secrets(&format!("{error:#}")))
+    WebFetchError::Backend(mermaid_model::utils::redact_secrets(&format!("{error:#}")))
 }
 
 /// `web_search` backed by a self-hosted SearXNG instance's JSON API. Keyless —
@@ -642,7 +648,7 @@ impl SearchProvider for SearxngClient {
         count: usize,
         budget: WebByteBudget,
     ) -> Result<Vec<SearchResult>> {
-        let safe_base = crate::utils::sanitize_url_for_display(&self.base_url);
+        let safe_base = mermaid_model::utils::sanitize_url_for_display(&self.base_url);
         let request_url = reqwest::Url::parse_with_params(
             &format!("{}/search", self.base_url),
             &[("q", query), ("format", "json")],
@@ -673,8 +679,12 @@ impl SearchProvider for SearxngClient {
             ));
         }
 
-        let body =
-            read_body_capped(response, crate::constants::MAX_WEB_BODY_BYTES, &budget).await?;
+        let body = read_body_capped(
+            response,
+            mermaid_model::constants::MAX_WEB_BODY_BYTES,
+            &budget,
+        )
+        .await?;
         drop(download_permits);
         let parsed: SearxngResponse = serde_json::from_slice(&body).map_err(|e| {
             anyhow!("Failed to parse SearXNG response (is `format=json` enabled?): {e}")
@@ -741,7 +751,7 @@ impl NativeFetchClient {
         self.fetch_with_validator(
             requested,
             ValidatedWebUrl::from_url,
-            crate::constants::MAX_WEB_BODY_BYTES,
+            mermaid_model::constants::MAX_WEB_BODY_BYTES,
             budget,
         )
         .await
@@ -795,7 +805,7 @@ impl NativeFetchClient {
             if !status.is_success() {
                 return Err(WebFetchError::HttpStatus {
                     status: status.as_u16(),
-                    url: crate::utils::sanitize_url_for_display(current.as_str()),
+                    url: mermaid_model::utils::sanitize_url_for_display(current.as_str()),
                 });
             }
 
@@ -882,8 +892,8 @@ fn validated_redirect_destination(
     if current.as_url().scheme() == "https" && next.as_url().scheme() != "https" {
         return Err(WebFetchError::RedirectDenied(format!(
             "HTTPS-to-HTTP redirect from {} to {}",
-            crate::utils::sanitize_url_for_display(current.as_str()),
-            crate::utils::sanitize_url_for_display(next.as_str())
+            mermaid_model::utils::sanitize_url_for_display(current.as_str()),
+            mermaid_model::utils::sanitize_url_for_display(next.as_str())
         )));
     }
     Ok(next)
@@ -949,9 +959,9 @@ fn map_native_transport_error(error: reqwest::Error, requested_url: &str) -> Web
         }
         source = current.source();
     }
-    WebFetchError::Transport(crate::utils::redact_secrets(&format!(
+    WebFetchError::Transport(mermaid_model::utils::redact_secrets(&format!(
         "{}: {error}",
-        crate::utils::sanitize_url_for_display(requested_url)
+        mermaid_model::utils::sanitize_url_for_display(requested_url)
     )))
 }
 
@@ -1021,8 +1031,8 @@ impl DownloadLimiter {
 fn download_limiter() -> &'static DownloadLimiter {
     DOWNLOAD_LIMITER.get_or_init(|| {
         DownloadLimiter::new(
-            crate::constants::MAX_WEB_DOWNLOAD_CONCURRENCY,
-            crate::constants::MAX_WEB_PER_ORIGIN_CONCURRENCY,
+            mermaid_model::constants::MAX_WEB_DOWNLOAD_CONCURRENCY,
+            mermaid_model::constants::MAX_WEB_PER_ORIGIN_CONCURRENCY,
         )
     })
 }
@@ -1031,7 +1041,7 @@ pub(super) fn extraction_semaphore() -> Arc<Semaphore> {
     EXTRACTION_SEMAPHORE
         .get_or_init(|| {
             Arc::new(Semaphore::new(
-                crate::constants::MAX_WEB_EXTRACTION_CONCURRENCY,
+                mermaid_model::constants::MAX_WEB_EXTRACTION_CONCURRENCY,
             ))
         })
         .clone()
@@ -1314,7 +1324,8 @@ fn map_search_results(
 ) -> Vec<SearchResult> {
     hits.take(count)
         .map(|(title, url, content)| {
-            let full_content = truncate_content(&content, crate::constants::WEB_CONTENT_MAX_CHARS);
+            let full_content =
+                truncate_content(&content, mermaid_model::constants::WEB_CONTENT_MAX_CHARS);
             let snippet = content.chars().take(200).collect();
             SearchResult {
                 title,
@@ -1334,7 +1345,7 @@ pub fn format_results(results: &[SearchResult]) -> String {
     let mut formatted = String::from("[SEARCH_RESULTS]\n");
 
     for (i, result) in results.iter().enumerate() {
-        let url = crate::utils::sanitize_url_for_display(&result.url);
+        let url = mermaid_model::utils::sanitize_url_for_display(&result.url);
         formatted.push_str(&format!(
             "[{}] Title: {}\nURL: {}\nContent:\n{}\n---\n",
             i + 1,
@@ -1349,7 +1360,7 @@ pub fn format_results(results: &[SearchResult]) -> String {
     // Source list for citation (behavior governed by system prompt)
     formatted.push_str("Sources:\n");
     for (i, result) in results.iter().enumerate() {
-        let url = crate::utils::sanitize_url_for_display(&result.url);
+        let url = mermaid_model::utils::sanitize_url_for_display(&result.url);
         formatted.push_str(&format!("{}. {} - {}\n", i + 1, result.title, url));
     }
 
@@ -1377,12 +1388,12 @@ async fn read_body_capped(
         && usize::try_from(len).is_ok_and(|len| len > budget.remaining())
     {
         return Err(WebFetchError::TurnBudgetExceeded {
-            limit: crate::constants::MAX_WEB_TURN_BYTES,
+            limit: mermaid_model::constants::MAX_WEB_TURN_BYTES,
         });
     }
     if budget.remaining() == 0 {
         return Err(WebFetchError::TurnBudgetExceeded {
-            limit: crate::constants::MAX_WEB_TURN_BYTES,
+            limit: mermaid_model::constants::MAX_WEB_TURN_BYTES,
         });
     }
     let mut stream = response.bytes_stream();
@@ -1394,7 +1405,7 @@ async fn read_body_capped(
         // own cap. Repeated oversized responses must not evade the turn total.
         if budget.charge(chunk.len()).is_err() {
             return Err(WebFetchError::TurnBudgetExceeded {
-                limit: crate::constants::MAX_WEB_TURN_BYTES,
+                limit: mermaid_model::constants::MAX_WEB_TURN_BYTES,
             });
         }
         if chunk.len() > max_bytes.saturating_sub(buf.len()) {
@@ -1684,7 +1695,7 @@ mod tests {
         let page = fixture_fetch(
             &fixture_client(),
             &format!("{base_url}/start#client-fragment"),
-            crate::constants::MAX_WEB_BODY_BYTES,
+            mermaid_model::constants::MAX_WEB_BODY_BYTES,
         )
         .await
         .unwrap();
@@ -1712,7 +1723,7 @@ mod tests {
         let error = fixture_fetch(
             &fixture_client(),
             &start_url,
-            crate::constants::MAX_WEB_BODY_BYTES,
+            mermaid_model::constants::MAX_WEB_BODY_BYTES,
         )
         .await
         .unwrap_err();
@@ -1737,7 +1748,7 @@ mod tests {
         let page = fixture_fetch(
             &fixture_client(),
             &source_url,
-            crate::constants::MAX_WEB_BODY_BYTES,
+            mermaid_model::constants::MAX_WEB_BODY_BYTES,
         )
         .await
         .unwrap();
@@ -1799,7 +1810,12 @@ mod tests {
 
         let page = temp_env::async_with_vars(variables, async {
             let client = fixture_client();
-            fixture_fetch(&client, &target_url, crate::constants::MAX_WEB_BODY_BYTES).await
+            fixture_fetch(
+                &client,
+                &target_url,
+                mermaid_model::constants::MAX_WEB_BODY_BYTES,
+            )
+            .await
         })
         .await
         .unwrap();
@@ -1821,7 +1837,7 @@ mod tests {
         let error = fixture_fetch(
             &fixture_client(),
             &url,
-            crate::constants::MAX_WEB_BODY_BYTES,
+            mermaid_model::constants::MAX_WEB_BODY_BYTES,
         )
         .await
         .unwrap_err();
@@ -1858,7 +1874,7 @@ mod tests {
             "decoded body limit was not enforced: {error:#}"
         );
         assert!(
-            crate::constants::MAX_WEB_TURN_BYTES - budget.remaining() > 1024,
+            mermaid_model::constants::MAX_WEB_TURN_BYTES - budget.remaining() > 1024,
             "the decoded overflow chunk was not charged to the turn budget"
         );
         server.requests().await;
@@ -1870,13 +1886,13 @@ mod tests {
         let url = format!("{}/budget", server.base_url);
         let budget = WebByteBudget::isolated();
         budget
-            .charge(crate::constants::MAX_WEB_TURN_BYTES - 1)
+            .charge(mermaid_model::constants::MAX_WEB_TURN_BYTES - 1)
             .unwrap();
 
         let error = fixture_fetch_with_budget(
             &fixture_client(),
             &url,
-            crate::constants::MAX_WEB_BODY_BYTES,
+            mermaid_model::constants::MAX_WEB_BODY_BYTES,
             budget,
         )
         .await
@@ -1899,13 +1915,13 @@ mod tests {
         let url = format!("{}/budget", server.base_url);
         let budget = WebByteBudget::isolated();
         budget
-            .charge(crate::constants::MAX_WEB_TURN_BYTES - 1)
+            .charge(mermaid_model::constants::MAX_WEB_TURN_BYTES - 1)
             .unwrap();
 
         let first = fixture_fetch_with_budget(
             &fixture_client(),
             &url,
-            crate::constants::MAX_WEB_BODY_BYTES,
+            mermaid_model::constants::MAX_WEB_BODY_BYTES,
             budget.clone(),
         )
         .await
@@ -1922,7 +1938,7 @@ mod tests {
         let second = fixture_fetch_with_budget(
             &fixture_client(),
             &url,
-            crate::constants::MAX_WEB_BODY_BYTES,
+            mermaid_model::constants::MAX_WEB_BODY_BYTES,
             budget.clone(),
         )
         .await
@@ -2052,13 +2068,13 @@ mod tests {
             (
                 format!("t{i}"),
                 format!("https://e{i}.com"),
-                "x".repeat(crate::constants::WEB_CONTENT_MAX_CHARS * 2),
+                "x".repeat(mermaid_model::constants::WEB_CONTENT_MAX_CHARS * 2),
             )
         });
         let out = map_search_results(hits, 3);
         assert_eq!(out.len(), 3, "count cap applied");
         assert!(
-            out[0].full_content.len() <= crate::constants::WEB_CONTENT_MAX_CHARS + 64,
+            out[0].full_content.len() <= mermaid_model::constants::WEB_CONTENT_MAX_CHARS + 64,
             "content truncated"
         );
         assert!(out[0].snippet.chars().count() <= 200);
@@ -2323,12 +2339,12 @@ mod tests {
     #[tokio::test]
     async fn download_limiter_enforces_global_origin_and_cancellation_release() {
         let limiter = DownloadLimiter::new(
-            crate::constants::MAX_WEB_DOWNLOAD_CONCURRENCY,
-            crate::constants::MAX_WEB_PER_ORIGIN_CONCURRENCY,
+            mermaid_model::constants::MAX_WEB_DOWNLOAD_CONCURRENCY,
+            mermaid_model::constants::MAX_WEB_PER_ORIGIN_CONCURRENCY,
         );
 
         let mut global_permits = Vec::new();
-        for index in 0..crate::constants::MAX_WEB_DOWNLOAD_CONCURRENCY {
+        for index in 0..mermaid_model::constants::MAX_WEB_DOWNLOAD_CONCURRENCY {
             let url = reqwest::Url::parse(&format!("https://origin-{index}.example.test/"))
                 .expect("test URL");
             global_permits.push(limiter.acquire(&url).await.expect("global permit"));

@@ -266,6 +266,26 @@ fn sensitive_query_key(key: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// Over-redaction is the quieter failure: a redactor that mangles ordinary
+    /// prose corrupts every log and transcript it touches. These four shapes
+    /// are the ones that bait a secret scanner — a variable named `token`, a
+    /// hex-looking commit sha, and a `path:line` pair with a colon in it.
+    ///
+    /// Migrated from `mermaid-model`'s `utils/redact.rs`, which was a pure
+    /// re-export facade whose tests exercised this file from a crate that only
+    /// forwarded to it. It was the only negative assertion in either suite.
+    #[test]
+    fn ordinary_text_is_left_untouched() {
+        for ordinary in [
+            "the quick brown fox",
+            "let token_count = 42;",
+            "commit a614aa9f deploys the fix",
+            "see src/providers/tool/exec.rs:855",
+        ] {
+            assert_eq!(redact_secrets(ordinary), ordinary);
+        }
+    }
+
     #[test]
     fn serialized_payload_redaction_covers_signed_urls_and_fetched_secrets() {
         let input = serde_json::json!({

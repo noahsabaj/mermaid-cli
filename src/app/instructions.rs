@@ -15,7 +15,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::constants::{INSTRUCTIONS_TRUNCATION_MARKER, MAX_INSTRUCTIONS_BYTES};
+use mermaid_model::constants::{INSTRUCTIONS_TRUNCATION_MARKER, MAX_INSTRUCTIONS_BYTES};
 
 /// Instruction files Mermaid understands, in load order. `AGENTS.md` (the
 /// cross-tool open standard) is read first; `MERMAID.md` (mermaid-specific) is
@@ -219,7 +219,7 @@ pub fn load_from_paths(paths: &[PathBuf]) -> Option<LoadedInstructions> {
         // true on-disk size comes from the stat above, so `byte_len` stays
         // accurate rather than reflecting the capped read.
         let Ok((bytes, _truncated)) =
-            crate::utils::read_file_capped(path, MAX_INSTRUCTIONS_BYTES.saturating_add(1))
+            mermaid_model::utils::read_file_capped(path, MAX_INSTRUCTIONS_BYTES.saturating_add(1))
         else {
             continue;
         };

@@ -23,18 +23,19 @@ use chrono::{DateTime, Local};
 
 use crate::app::instructions::LoadedInstructions;
 use crate::app::{Config, McpServerConfig};
-use crate::models::ChatMessage;
-use crate::models::tool_call::ToolCall as ModelToolCall;
-use crate::models::{ProviderContinuation, ReasoningLevel, TokenUsage, TokenUsageSource};
-use crate::runtime::SafetyMode;
 use crate::session::ConversationHistory;
+use mermaid_model::models::ChatMessage;
+use mermaid_model::models::tool_call::ToolCall as ModelToolCall;
+use mermaid_model::models::{ProviderContinuation, ReasoningLevel, TokenUsage, TokenUsageSource};
+use mermaid_runtime::SafetyMode;
 
 use super::cmd::ChatRequest;
 use super::compaction::CompactionTrigger;
-use super::ids::{IdAllocator, ToolCallId, TurnId};
 use super::msg::Msg;
-use super::question::PendingQuestionSet;
-use super::runtime::{RuntimeState, ToolArtifact, ToolRunMetadata, ToolStatus};
+use super::runtime::RuntimeState;
+use mermaid_model::ids::{IdAllocator, ToolCallId, TurnId};
+use mermaid_model::question::PendingQuestionSet;
+use mermaid_model::tool_run::{ToolArtifact, ToolRunMetadata, ToolStatus};
 
 /// Root state. The reducer takes `State` by value, returns a new
 /// `State`, and emits any side-effects as a `Vec<Cmd>`. No `&mut` — a
@@ -257,7 +258,7 @@ impl State {
             .copied()
             .max()
             .unwrap_or(0);
-        self.ids.image = crate::domain::ids::IdAllocator::starting_at(max_image + 1);
+        self.ids.image = mermaid_model::ids::IdAllocator::starting_at(max_image + 1);
         self.ui.last_title_dispatched = Some(title);
     }
 
@@ -567,7 +568,7 @@ pub struct PlanState {
     /// Reasoning level to restore when plan mode ends. `Some` only when
     /// `[plan] reasoning` overrode it at entry.
     #[serde(default)]
-    pub prev_reasoning: Option<crate::models::ReasoningLevel>,
+    pub prev_reasoning: Option<mermaid_model::models::ReasoningLevel>,
 }
 
 /// The mode-defining facts the model was last told about, snapshotted at

@@ -68,7 +68,7 @@ impl ToolExecutor for ScreenshotTool {
         if let Some(blocked) = super::super::policy_gate::gate_external(
             &ctx,
             "screenshot",
-            crate::runtime::ToolCategory::ComputerUse,
+            mermaid_runtime::ToolCategory::ComputerUse,
             "computer-use: screenshot".to_string(),
             &args,
         )

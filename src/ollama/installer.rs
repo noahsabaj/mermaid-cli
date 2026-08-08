@@ -1,9 +1,9 @@
 use super::detector;
 use super::guide;
 use crate::app::Config;
-use crate::models::adapters::ollama::OllamaAdapter;
-use crate::models::{BackendConfig, Model};
 use anyhow::Result;
+use mermaid_model::models::adapters::ollama::OllamaAdapter;
+use mermaid_model::models::{BackendConfig, Model};
 use std::sync::Arc;
 
 /// List installed Ollama models via the HTTP API using the user's
@@ -22,7 +22,7 @@ async fn list_installed_models(config: &Config) -> Vec<String> {
         // for the whole server start.
         Ok(adapter) => {
             let adapter = adapter.with_status_notify(Arc::new(|ev| {
-                if let crate::models::StreamEvent::Status(text) = ev {
+                if let mermaid_model::models::StreamEvent::Status(text) = ev {
                     eprintln!("{text}");
                 }
             }));

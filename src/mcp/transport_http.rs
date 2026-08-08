@@ -24,7 +24,7 @@ use super::transport::{
     REQUEST_TIMEOUT_SECS, extract_jsonrpc_result, is_response, parse_response_id,
 };
 use crate::app::{McpServerConfig, TransportKind};
-use crate::utils::{HostClass, classify_host, drain_sse_events};
+use mermaid_model::utils::{HostClass, classify_host, drain_sse_events};
 
 /// TCP connect budget. Separate from the response budget: a dead host should
 /// fail in seconds, not eat the whole 30s control-call window.
@@ -542,7 +542,7 @@ impl HttpTransport {
             );
         }
         let body = response.text().await.unwrap_or_default();
-        let snippet = crate::utils::redact_secrets(&body);
+        let snippet = mermaid_model::utils::redact_secrets(&body);
         let end = snippet.floor_char_boundary(ERROR_BODY_SNIPPET_BYTES.min(snippet.len()));
         anyhow!(
             "MCP server returned HTTP {} (method: {}): {}",

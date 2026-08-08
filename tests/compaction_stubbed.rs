@@ -29,10 +29,10 @@ use mermaid_cli::domain::{
     ChatRequest, Cmd, CompactionPolicy, CompactionRequest, Msg, StatusKind, TurnId,
 };
 use mermaid_cli::effect::EffectRunner;
-use mermaid_cli::models::{ChatMessage, ReasoningLevel};
 use mermaid_cli::providers::ProviderFactory;
 use mermaid_cli::providers::model::ModelProvider;
 use mermaid_cli::providers::tool::ToolRegistry;
+use mermaid_model::models::{ChatMessage, ReasoningLevel};
 
 #[path = "harness/stub_model.rs"]
 mod stub_model;

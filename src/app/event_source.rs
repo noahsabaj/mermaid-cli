@@ -49,10 +49,10 @@ pub fn event_to_msg(event: CtEvent) -> Option<Msg> {
             // sets the delta per wheel tick to match the READMEs
             // "mouse wheel scrolls the chat" contract.
             CtMouseKind::ScrollUp => Some(Msg::MouseScroll {
-                delta: crate::constants::UI_MOUSE_SCROLL_LINES as i16,
+                delta: mermaid_model::constants::UI_MOUSE_SCROLL_LINES as i16,
             }),
             CtMouseKind::ScrollDown => Some(Msg::MouseScroll {
-                delta: -(crate::constants::UI_MOUSE_SCROLL_LINES as i16),
+                delta: -(mermaid_model::constants::UI_MOUSE_SCROLL_LINES as i16),
             }),
             _ => None,
         },
@@ -205,7 +205,8 @@ pub fn parse_slash_command(raw: &str) -> crate::domain::SlashCmd {
             Some(level) => {
                 use clap::ValueEnum;
                 SlashCmd::Reasoning(
-                    crate::models::ReasoningLevel::from_str(&level.to_lowercase(), true).ok(),
+                    mermaid_model::models::ReasoningLevel::from_str(&level.to_lowercase(), true)
+                        .ok(),
                 )
             },
         },
@@ -213,7 +214,9 @@ pub fn parse_slash_command(raw: &str) -> crate::domain::SlashCmd {
         Some("safety") => match arg.as_deref() {
             None => SlashCmd::Safety(None),
             // Invalid value ⇒ `None` ⇒ the reducer shows current + options.
-            Some(mode) => SlashCmd::Safety(crate::runtime::SafetyMode::parse(&mode.to_lowercase())),
+            Some(mode) => {
+                SlashCmd::Safety(mermaid_runtime::SafetyMode::parse(&mode.to_lowercase()))
+            },
         },
         Some("plan") => SlashCmd::Plan(arg),
         Some("config") => SlashCmd::Config,
@@ -667,7 +670,7 @@ mod tests {
     fn parse_slash_reasoning_valid_level() {
         assert_eq!(
             parse_slash_command("reasoning high"),
-            SlashCmd::Reasoning(Some(crate::models::ReasoningLevel::High)),
+            SlashCmd::Reasoning(Some(mermaid_model::models::ReasoningLevel::High)),
         );
     }
 
@@ -697,12 +700,12 @@ mod tests {
     fn parse_safety_command() {
         assert_eq!(
             parse_slash_command("safety auto"),
-            SlashCmd::Safety(Some(crate::runtime::SafetyMode::Auto)),
+            SlashCmd::Safety(Some(mermaid_runtime::SafetyMode::Auto)),
         );
         // `/permission` is an alias that routes to the same command.
         assert_eq!(
             parse_slash_command("permission read_only"),
-            SlashCmd::Safety(Some(crate::runtime::SafetyMode::ReadOnly)),
+            SlashCmd::Safety(Some(mermaid_runtime::SafetyMode::ReadOnly)),
         );
         // No arg → show current; bogus value → None (show current + options).
         assert_eq!(parse_slash_command("safety"), SlashCmd::Safety(None));

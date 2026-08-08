@@ -12,12 +12,12 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 
-use crate::constants::MAX_PATCH_FILE_BYTES;
 use crate::domain::{ToolDefinition, ToolMetadata, ToolOutcome, ToolRunMetadata};
 use crate::render::diff::{DisplayDiff, MAX_DISPLAY_DIFF_LINES, generate_display_diff};
+use mermaid_model::constants::MAX_PATCH_FILE_BYTES;
 // The pure patch engine (parser + graduated fuzzy matcher + applier) lives in
 // the runtime crate so the approval-replay path can reuse it without duplication.
-use crate::runtime::apply_patch::{Hunk, UpdateFileChunk, derive_new_contents, parse_patch};
+use mermaid_runtime::apply_patch::{Hunk, UpdateFileChunk, derive_new_contents, parse_patch};
 
 use super::super::ctx::ExecContext;
 use super::ToolExecutor;
@@ -106,7 +106,7 @@ impl ToolExecutor for ApplyPatchTool {
         // the project-rooted subset, and skip entirely when there is none.
         if ctx.config.safety.checkpoint_on_mutation
             && !paths.project.is_empty()
-            && let Err(e) = crate::runtime::create_checkpoint_for_task(
+            && let Err(e) = mermaid_runtime::create_checkpoint_for_task(
                 &ctx.workdir,
                 &paths.project,
                 Some(serde_json::json!({ "tool": "apply_patch" })),
@@ -282,13 +282,13 @@ fn apply_all_blocking(ops: &[PlannedOp]) -> Result<ApplyReport, String> {
                     format!("{contents}\n")
                 };
                 ensure_parent(root, rel)?;
-                crate::runtime::write_atomic_beneath(root, rel, body.as_bytes())
+                mermaid_runtime::write_atomic_beneath(root, rel, body.as_bytes())
                     .map_err(|e| format!("{display}: {e}"))?;
                 report.added.push(display.clone());
                 report.push_diff(&format!("A {display}"), &generate_display_diff("", &body));
             },
             PlannedOp::Delete { root, rel, display } => {
-                crate::runtime::remove_file_beneath(root, rel)
+                mermaid_runtime::remove_file_beneath(root, rel)
                     .map_err(|e| format!("{display}: {e}"))?;
                 report.deleted.push(display.clone());
                 report.push_line(format!("=== D {display} ==="));
@@ -313,7 +313,7 @@ fn apply_all_blocking(ops: &[PlannedOp]) -> Result<ApplyReport, String> {
                     .map_err(|e| format!("{dst_display}: {e}"))?;
                 report.fuzzy |= applied.fuzzy;
                 ensure_parent(dst_root, dst_rel)?;
-                crate::runtime::write_atomic_beneath(
+                mermaid_runtime::write_atomic_beneath(
                     dst_root,
                     dst_rel,
                     applied.new_contents.as_bytes(),
@@ -324,7 +324,7 @@ fn apply_all_blocking(ops: &[PlannedOp]) -> Result<ApplyReport, String> {
                     report.modified.push(dst_display.clone());
                     report.push_diff(&format!("M {dst_display}"), &diff);
                 } else {
-                    crate::runtime::remove_file_beneath(src_root, src_rel)
+                    mermaid_runtime::remove_file_beneath(src_root, src_rel)
                         .map_err(|e| format!("{src_display}: {e}"))?;
                     report
                         .renamed
@@ -341,7 +341,7 @@ fn ensure_parent(root: &Path, rel: &Path) -> Result<(), String> {
     if let Some(parent) = rel.parent()
         && !parent.as_os_str().is_empty()
     {
-        crate::runtime::create_dir_all_beneath(root, parent)
+        mermaid_runtime::create_dir_all_beneath(root, parent)
             .map_err(|e| format!("{}: {e}", rel.display()))?;
     }
     Ok(())
@@ -352,7 +352,7 @@ fn ensure_parent(root: &Path, rel: &Path) -> Result<(), String> {
 /// partially-read file).
 fn read_capped_beneath(root: &Path, rel: &Path, cap: usize) -> std::io::Result<Option<String>> {
     use std::io::Read;
-    let file = crate::runtime::open_beneath(root, rel, crate::runtime::OpenIntent::Read)?;
+    let file = mermaid_runtime::open_beneath(root, rel, mermaid_runtime::OpenIntent::Read)?;
     let mut buf = Vec::new();
     file.take(cap as u64 + 1).read_to_end(&mut buf)?;
     if buf.len() > cap {

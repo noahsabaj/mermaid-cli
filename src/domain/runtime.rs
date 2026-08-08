@@ -107,7 +107,7 @@ fn infer_static_context_window(model: &str) -> Option<usize> {
     // with a models endpoint (Anthropic, Gemini, Ollama, most OpenAI-compat)
     // resolve live via `resolve_context_window`; `None` here means "unknown
     // until discovery", never a guessed fallback.
-    crate::models::catalog::lookup(model).context_window
+    mermaid_model::models::catalog::lookup(model).context_window
 }
 
 pub fn infer_static_context_window_for_model_id(model_id: &str) -> Option<usize> {
@@ -118,12 +118,7 @@ pub fn infer_static_context_window_for_model_id(model_id: &str) -> Option<usize>
     infer_static_context_window(model)
 }
 
-/// Tool-run value types moved to `mermaid_model::tool_run` — re-exported here so
-/// `domain::ToolRunMetadata` and its siblings keep resolving unchanged.
-pub use mermaid_model::tool_run::{
-    ManagedProcess, ManagedProcessStatus, OllamaContextInfo, OllamaPlacement, ToolArtifact,
-    ToolMetadata, ToolRunMetadata, ToolStatus, WebSearchFailure,
-};
+use mermaid_model::tool_run::{ManagedProcess, OllamaContextInfo, OllamaPlacement};
 
 /// A subagent detached from its turn via Ctrl+B: still running in a
 /// spawned task, no longer blocking the parent. Rows render in the live
@@ -390,11 +385,11 @@ mod tests {
             ("openai/gpt-5.6", Some(1_500_000)),
             (
                 "meta/muse-spark-1.1",
-                Some(crate::constants::META_MUSE_SPARK_CONTEXT_WINDOW),
+                Some(mermaid_model::constants::META_MUSE_SPARK_CONTEXT_WINDOW),
             ),
             (
                 "meta/muse-spark-1.2",
-                Some(crate::constants::META_MUSE_SPARK_CONTEXT_WINDOW),
+                Some(mermaid_model::constants::META_MUSE_SPARK_CONTEXT_WINDOW),
             ),
             ("anthropic/claude-sonnet-4-6", None),
             ("gemini/gemini-2.5-pro", None),

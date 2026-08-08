@@ -52,10 +52,10 @@ use crate::domain::{
     TurnState, update,
 };
 use crate::effect::{EffectRunner, MSG_CHANNEL_CAPACITY};
-use crate::models::MessageRole;
 use crate::providers::ProviderFactory;
 use crate::providers::ctx::{ExecContext, ProgressEvent, SubagentPhase};
-use crate::runtime::SafetyMode;
+use mermaid_model::models::MessageRole;
+use mermaid_runtime::SafetyMode;
 
 use super::ToolExecutor;
 use super::ToolRegistry;
@@ -562,7 +562,7 @@ impl ToolExecutor for SubagentTool {
         if let Some(blocked) = super::policy_gate::gate_external(
             &ctx,
             "agent",
-            crate::runtime::ToolCategory::Subagent,
+            mermaid_runtime::ToolCategory::Subagent,
             format!("subagent: {}", description),
             &args,
         )
@@ -1113,7 +1113,7 @@ fn subagent_metadata(
     usage: TokenUsageTotals,
     agent_id: String,
 ) -> ToolRunMetadata {
-    let token_usage = (usage.total_tokens() > 0).then(|| crate::models::TokenUsage {
+    let token_usage = (usage.total_tokens() > 0).then(|| mermaid_model::models::TokenUsage {
         prompt_tokens: usage.prompt_tokens,
         completion_tokens: usage.completion_tokens,
         cached_input_tokens: usage.cached_input_tokens,
@@ -1535,7 +1535,7 @@ fn headless_web_tool_is_executable(
     safety_mode: SafetyMode,
     tool: &'static str,
 ) -> bool {
-    use crate::runtime::{ActionRequest, PolicyDecision, PolicyEngine, ToolCategory};
+    use mermaid_runtime::{ActionRequest, PolicyDecision, PolicyEngine, ToolCategory};
 
     if config.safety.network == crate::app::NetworkPolicy::Deny {
         return false;
@@ -1669,7 +1669,7 @@ mod tests {
         // piggybacks... only once the throttle allows again.
         let done = Msg::StreamDone {
             turn: TurnId(1),
-            usage: Some(crate::models::TokenUsage::provider(10, 5_000)),
+            usage: Some(mermaid_model::models::TokenUsage::provider(10, 5_000)),
             provider_continuation: None,
             stop_reason: None,
         };
@@ -1697,7 +1697,7 @@ mod tests {
         // #2: a subagent must run at the parent's LIVE safety mode, not the
         // static config default `State::new` would otherwise apply — otherwise
         // a downgraded session is escapable by delegating to a subagent.
-        use crate::runtime::SafetyMode;
+        use mermaid_runtime::SafetyMode;
         let mut config = crate::app::Config::default();
         config.safety.mode = SafetyMode::FullAccess; // static config default
         let mut child_state = State::new(
@@ -2037,7 +2037,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_isolated_child_keeps_its_checkout_and_says_where() {
-        use crate::runtime::git::git;
+        use mermaid_runtime::git::git;
         let project = std::env::temp_dir().join(format!("mermaid_sub_keep_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&project);
         std::fs::create_dir_all(&project).unwrap();
@@ -2186,10 +2186,10 @@ mod tests {
     #[test]
     fn child_web_visibility_honors_explicit_policy_overrides() {
         let mut config = crate::app::Config::default();
-        config.safety.overrides = vec![crate::runtime::PolicyOverride {
-            category: Some(crate::runtime::ToolCategory::Web),
-            decision: crate::runtime::PolicyOverrideDecision::Allow,
-            ..crate::runtime::PolicyOverride::default()
+        config.safety.overrides = vec![mermaid_runtime::PolicyOverride {
+            category: Some(mermaid_runtime::ToolCategory::Web),
+            decision: mermaid_runtime::PolicyOverrideDecision::Allow,
+            ..mermaid_runtime::PolicyOverride::default()
         }];
         assert!(headless_web_tool_is_executable(
             &config,
@@ -2197,7 +2197,7 @@ mod tests {
             "web_fetch"
         ));
 
-        config.safety.overrides[0].decision = crate::runtime::PolicyOverrideDecision::Deny;
+        config.safety.overrides[0].decision = mermaid_runtime::PolicyOverrideDecision::Deny;
         assert!(!headless_web_tool_is_executable(
             &config,
             SafetyMode::FullAccess,

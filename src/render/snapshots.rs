@@ -36,7 +36,7 @@ use crate::domain::{
     ActionDetails, ActionDisplay, ActionResult, ApprovalKind, GenPhase, PendingApproval,
     PendingToolCall, QueuedMessage, State, ToolCallId, TurnId, TurnState, UiMode,
 };
-use crate::models::{ChatMessage, ChatMessageKind};
+use mermaid_model::models::{ChatMessage, ChatMessageKind};
 
 /// The two frame sizes every scene is pinned at: the classic minimum and a
 /// roomy modern terminal (exercises wrapping and layout at both extremes).
@@ -170,9 +170,9 @@ fn busy_tools_with_queue() {
             started: std::time::SystemTime::from(fixed_now() - chrono::Duration::seconds(3)),
             calls: vec![PendingToolCall {
                 call_id: ToolCallId(1),
-                source: crate::models::tool_call::ToolCall {
+                source: mermaid_model::models::tool_call::ToolCall {
                     id: Some("c1".to_string()),
-                    function: crate::models::tool_call::FunctionCall {
+                    function: mermaid_model::models::tool_call::FunctionCall {
                         name: "execute_command".to_string(),
                         arguments: serde_json::json!({"command": "npm run dev"}),
                     },
@@ -269,9 +269,9 @@ fn task_run_state() -> State {
         started: std::time::SystemTime::from(fixed_now() - chrono::Duration::seconds(3)),
         calls: vec![PendingToolCall {
             call_id: ToolCallId(1),
-            source: crate::models::tool_call::ToolCall {
+            source: mermaid_model::models::tool_call::ToolCall {
                 id: Some("c1".to_string()),
-                function: crate::models::tool_call::FunctionCall {
+                function: mermaid_model::models::tool_call::FunctionCall {
                     name: "execute_command".to_string(),
                     arguments: serde_json::json!({"command": "cargo check"}),
                 },
@@ -330,9 +330,9 @@ fn busy_agents_panel() {
             .append(ChatMessage::user("audit the codebase (use agents)"), s.now);
         let agent_call = |id: u64, description: &str| PendingToolCall {
             call_id: ToolCallId(id),
-            source: crate::models::tool_call::ToolCall {
+            source: mermaid_model::models::tool_call::ToolCall {
                 id: Some(format!("c{id}")),
-                function: crate::models::tool_call::FunctionCall {
+                function: mermaid_model::models::tool_call::FunctionCall {
                     name: "agent".to_string(),
                     arguments: serde_json::json!({"description": description, "type": "explore"}),
                 },
@@ -388,9 +388,9 @@ fn mixed_exec_and_agent_turn() {
             calls: vec![
                 PendingToolCall {
                     call_id: ToolCallId(1),
-                    source: crate::models::tool_call::ToolCall {
+                    source: mermaid_model::models::tool_call::ToolCall {
                         id: Some("c1".to_string()),
-                        function: crate::models::tool_call::FunctionCall {
+                        function: mermaid_model::models::tool_call::FunctionCall {
                             name: "execute_command".to_string(),
                             arguments: serde_json::json!({"command": "cargo test"}),
                         },
@@ -398,9 +398,9 @@ fn mixed_exec_and_agent_turn() {
                 },
                 PendingToolCall {
                     call_id: ToolCallId(2),
-                    source: crate::models::tool_call::ToolCall {
+                    source: mermaid_model::models::tool_call::ToolCall {
                         id: Some("c2".to_string()),
-                        function: crate::models::tool_call::FunctionCall {
+                        function: mermaid_model::models::tool_call::FunctionCall {
                             name: "agent".to_string(),
                             arguments: serde_json::json!({"description": "Audit deps"}),
                         },
@@ -443,7 +443,7 @@ fn approval_modal() {
 #[test]
 fn question_modal() {
     assert_scene("question_modal", || {
-        use crate::domain::question::{PendingQuestionSet, Question, QuestionOption};
+        use mermaid_model::question::{PendingQuestionSet, Question, QuestionOption};
         let mut s = scene_state();
         s.session
             .append(ChatMessage::user("set up the database"), s.now);
@@ -571,7 +571,7 @@ fn determinism_same_scene_twice() {
 #[test]
 fn fixture_clock_reads_the_pinned_wall_clock() {
     assert_eq!(
-        crate::utils::format_relative_timestamp(fixed_now()),
+        mermaid_model::utils::format_relative_timestamp(fixed_now()),
         "January 2nd, 2026 at 3:04am",
         "the fixture clock must be a fixed LOCAL wall clock, not a fixed instant"
     );

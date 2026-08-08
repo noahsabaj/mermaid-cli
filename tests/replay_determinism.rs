@@ -13,8 +13,8 @@ use std::path::PathBuf;
 
 use mermaid_cli::app::Config;
 use mermaid_cli::domain::{Msg, State, ToolCallId, ToolOutcome, TurnId, start_generating, update};
-use mermaid_cli::models::tool_call::{FunctionCall, ToolCall as ModelToolCall};
-use mermaid_cli::models::{FinishReason, MessageRole, TokenUsage};
+use mermaid_model::models::tool_call::{FunctionCall, ToolCall as ModelToolCall};
+use mermaid_model::models::{FinishReason, MessageRole, TokenUsage};
 
 fn fixed_ts(offset_secs: i64) -> chrono::DateTime<chrono::Local> {
     chrono::DateTime::parse_from_rfc3339("2026-07-02T09:30:00.250+00:00")

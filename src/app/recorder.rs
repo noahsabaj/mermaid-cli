@@ -111,7 +111,7 @@ impl Recorder {
     /// find a parseable header.
     pub fn record_header(&mut self, header: &SessionHeader) -> Result<()> {
         let mut value = serde_json::to_value(header).context("serialize session header")?;
-        crate::utils::redact_json(&mut value);
+        mermaid_model::utils::redact_json(&mut value);
         writeln!(self.writer, "{}", value).context("write header line")?;
         self.flush()
     }
@@ -147,7 +147,7 @@ impl Recorder {
         // every recorded payload before it hits disk. A `read_file .env` result,
         // a pasted token, or an API error echoing a key would otherwise be
         // persisted in cleartext in the `--record` log (#17).
-        crate::utils::redact_json(&mut body);
+        mermaid_model::utils::redact_json(&mut body);
         let entry = serde_json::json!({
             "ts": now,
             "kind": format!("{:?}", msg.kind()),
@@ -633,7 +633,7 @@ mod tests {
             ApprovalKind, ContextUsageSnapshot, Key, KeyCode, KeyMods, PromptTokenBreakdown,
             RuntimeSignal, SlashCmd, StatusKind, ToolCallId, ToolOutcome,
         };
-        use crate::models::ReasoningChunk;
+        use mermaid_model::models::ReasoningChunk;
 
         fn covered(kind: MsgKind) -> bool {
             match kind {
@@ -754,7 +754,7 @@ mod tests {
                 report: "all good".to_string(),
                 success: true,
                 cancelled: false,
-                usage: Some(crate::models::TokenUsage::provider(60_000, 30_000)),
+                usage: Some(mermaid_model::models::TokenUsage::provider(60_000, 30_000)),
                 tokens: 90_000,
                 duration_secs: 132,
             },
@@ -775,9 +775,9 @@ mod tests {
             },
             Msg::StreamToolCall {
                 turn: TurnId(1),
-                call: crate::models::tool_call::ToolCall {
+                call: mermaid_model::models::tool_call::ToolCall {
                     id: Some("call_1".to_string()),
-                    function: crate::models::tool_call::FunctionCall {
+                    function: mermaid_model::models::tool_call::FunctionCall {
                         name: "read_file".to_string(),
                         arguments: serde_json::json!({"path": "src/main.rs"}),
                     },
@@ -842,8 +842,10 @@ mod tests {
                         focus: None,
                         archive_path: None,
                     },
-                    replacement_messages: vec![crate::models::ChatMessage::system("checkpoint")],
-                    archived_messages: vec![crate::models::ChatMessage::user("old")],
+                    replacement_messages: vec![mermaid_model::models::ChatMessage::system(
+                        "checkpoint",
+                    )],
+                    archived_messages: vec![mermaid_model::models::ChatMessage::user("old")],
                     before_snapshot: ContextUsageSnapshot::from_estimate(
                         PromptTokenBreakdown::default(),
                         Some(128_000),
@@ -858,19 +860,19 @@ mod tests {
             },
             Msg::UpstreamError {
                 turn: TurnId(1),
-                error: crate::models::UserFacingError {
+                error: mermaid_model::models::UserFacingError {
                     summary: "Rate limited".to_string(),
                     message: "429 too many requests".to_string(),
                     suggestion: "retry in a moment".to_string(),
-                    category: crate::models::ErrorCategory::Temporary,
+                    category: mermaid_model::models::ErrorCategory::Temporary,
                     recoverable: true,
                 },
             },
             Msg::StreamDone {
                 turn: TurnId(1),
-                usage: Some(crate::models::TokenUsage::provider(10, 5)),
+                usage: Some(mermaid_model::models::TokenUsage::provider(10, 5)),
                 provider_continuation: None,
-                stop_reason: Some(crate::models::FinishReason::Stop),
+                stop_reason: Some(mermaid_model::models::FinishReason::Stop),
             },
             Msg::TurnCancelled(TurnId(3)),
             Msg::ToolStarted {

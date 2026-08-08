@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
-use crate::models::{ReasoningChunk, StreamCallback, StreamEvent as ModelStreamEvent};
+use mermaid_model::models::{ReasoningChunk, StreamCallback, StreamEvent as ModelStreamEvent};
 
 use super::super::ctx::StreamEvent;
 
@@ -36,14 +36,14 @@ pub fn ordered_relay(
     bounded_sink: mpsc::Sender<StreamEvent>,
 ) -> (
     mpsc::UnboundedSender<StreamEvent>,
-    crate::utils::AbortOnDrop,
+    mermaid_model::utils::AbortOnDrop,
 ) {
     let (tx, mut rx) = mpsc::unbounded_channel::<StreamEvent>();
     // Wrap the relay in an AbortOnDrop guard: if the parent `chat` future is
     // dropped (turn cancelled) before it `take()`s the handle to drain, the
     // relay is aborted rather than leaked — otherwise, parked on a full bounded
     // sink, it could outlive the turn.
-    let handle = crate::utils::spawn_guarded(async move {
+    let handle = mermaid_model::utils::spawn_guarded(async move {
         while let Some(event) = rx.recv().await {
             if bounded_sink.send(event).await.is_err() {
                 // Downstream closed — the reducer cancelled or the

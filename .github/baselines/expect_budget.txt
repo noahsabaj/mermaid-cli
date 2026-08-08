@@ -47,5 +47,5 @@ expect|clippy::too_many_lines|src/render/mod.rs 1
 expect|clippy::too_many_lines|src/render/widgets/chat.rs 3
 expect|clippy::too_many_lines|src/render/widgets/question.rs 1
 expect|clippy::too_many_lines|src/render/widgets/status_line.rs 1
-expect|clippy::too_many_lines|src/runtime/protocol.rs 1
+expect|clippy::too_many_lines|src/runtime_client/protocol.rs 1
 expect|clippy::too_many_lines|src/session/selector.rs 1

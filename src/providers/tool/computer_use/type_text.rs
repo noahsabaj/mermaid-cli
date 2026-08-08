@@ -8,9 +8,9 @@ use std::time::Instant;
 use async_trait::async_trait;
 use serde_json::Value;
 
-use crate::constants::POST_TYPE_DELAY_MS;
 use crate::domain::{ToolDefinition, ToolOutcome};
 use crate::providers::ctx::ExecContext;
+use mermaid_model::constants::POST_TYPE_DELAY_MS;
 
 use super::super::ToolExecutor;
 use super::computer_use_success;
@@ -56,7 +56,7 @@ impl ToolExecutor for TypeTextTool {
         if let Some(blocked) = super::super::policy_gate::gate_external(
             &ctx,
             "type_text",
-            crate::runtime::ToolCategory::ComputerUse,
+            mermaid_runtime::ToolCategory::ComputerUse,
             "computer-use: type_text".to_string(),
             &args,
         )

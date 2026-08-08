@@ -8,9 +8,9 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use crate::domain::{ContextUsageSnapshot, format_compact_count};
-use crate::models::{ReasoningLevel, TokenUsageSource};
 use crate::render::theme::Theme;
-use crate::runtime::SafetyMode;
+use mermaid_model::models::{ReasoningLevel, TokenUsageSource};
+use mermaid_runtime::SafetyMode;
 
 /// Props for StatusWidget (stateless widget)
 pub struct StatusWidget<'a> {
@@ -200,7 +200,7 @@ mod tests {
     #[test]
     fn token_status_shows_context_gauge_only() {
         let context = ContextUsageSnapshot::from_usage(
-            &crate::models::TokenUsage::provider(12_000, 456),
+            &mermaid_model::models::TokenUsage::provider(12_000, 456),
             Some(128_000),
         );
         assert_eq!(

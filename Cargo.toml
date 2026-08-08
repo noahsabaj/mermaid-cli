@@ -152,6 +152,11 @@ portable-pty = "0.9"
 dbus-secret-service = { version = "4", features = ["vendored"] }
 
 [dev-dependencies]
+# Integration tests link the library plus dev-deps, NOT `[dependencies]`. Both
+# workspace crates are declared here so `tests/` can name them directly instead
+# of reaching them through `mermaid_cli`'s re-export facades.
+mermaid-model = { path = "crates/mermaid-model", version = "0.21.1" }
+mermaid-runtime = { path = "crates/mermaid-runtime", version = "0.21.1" }
 # Scoped env-var guards — replaces `unsafe { std::env::set_var / remove_var }`
 # patterns in model + auth tests. Safer under `--test-threads > 1`.
 # `async_closure` feature enables `async_with_vars` for tokio-test paths.

@@ -9,13 +9,15 @@
 use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 
-use crate::constants::{
+use mermaid_model::constants::{
     COMPACTION_AUTO_THRESHOLD_PERCENT, COMPACTION_MAX_RESPONSE_RESERVE_TOKENS,
     COMPACTION_MIN_RESPONSE_RESERVE_TOKENS, COMPACTION_SUMMARIZER_INPUT_TOKEN_BUDGET,
     COMPACTION_SUMMARY_MAX_TOKENS, COMPACTION_TAIL_TOKEN_BUDGET, COMPACTION_TAIL_TURNS,
     COMPACTION_TOOL_OUTPUT_MAX_CHARS,
 };
-use crate::models::{ChatMessage, ChatMessageKind, MessageRole, ReasoningLevel, TokenUsage};
+use mermaid_model::models::{
+    ChatMessage, ChatMessageKind, MessageRole, ReasoningLevel, TokenUsage,
+};
 
 use super::cmd::ChatRequest;
 use super::state::ContextUsageSnapshot;
@@ -141,7 +143,7 @@ impl CompactionPolicy {
             request.max_tokens
         } else {
             self.min_response_reserve_tokens
-                + crate::models::adapters::output_budget::reasoning_output_reserve(
+                + mermaid_model::models::adapters::output_budget::reasoning_output_reserve(
                     request.reasoning,
                 )
         };
@@ -611,7 +613,7 @@ pub fn build_replacement_messages(
     // The summary is model-generated from the full conversation and is persisted
     // (replacement message + conversation file). Scrub any credential it echoed
     // back from the archived turns before it's written (#70).
-    let summary = crate::utils::redact_secrets(summary);
+    let summary = mermaid_model::utils::redact_secrets(summary);
     let summary = summary.as_str();
     let checkpoint = format!(
         "# {}\n\nCompaction id: {}\nTrigger: {}\nCreated: {}\nArchived messages: {}\nPreserved messages: {}\n\n{}",
@@ -966,7 +968,7 @@ fn format_history_excerpt(
         if let Some(calls) = &msg.tool_calls {
             for call in calls {
                 let mut arguments = call.function.arguments.clone();
-                crate::utils::redact_json(&mut arguments);
+                mermaid_model::utils::redact_json(&mut arguments);
                 let arguments = truncate_middle(
                     &arguments.to_string(),
                     policy.tool_output_max_chars.saturating_mul(4),
@@ -1253,9 +1255,9 @@ mod tests {
         let mut old = ChatMessage::user("inspect the screenshot");
         old.images = Some(vec!["aGVsbG8=".to_string()]);
         let mut call = ChatMessage::assistant("");
-        call.tool_calls = Some(vec![crate::models::tool_call::ToolCall {
+        call.tool_calls = Some(vec![mermaid_model::models::tool_call::ToolCall {
             id: Some("call_1".to_string()),
-            function: crate::models::tool_call::FunctionCall {
+            function: mermaid_model::models::tool_call::FunctionCall {
                 name: "execute_command".to_string(),
                 arguments: serde_json::json!({
                     "cmd": "cargo test --workspace",
@@ -1528,10 +1530,10 @@ mod tests {
         assert!(validate_summary_structure(with_quoted_heading).is_ok());
     }
 
-    fn tool_call(id: &str, name: &str) -> crate::models::tool_call::ToolCall {
-        crate::models::tool_call::ToolCall {
+    fn tool_call(id: &str, name: &str) -> mermaid_model::models::tool_call::ToolCall {
+        mermaid_model::models::tool_call::ToolCall {
             id: Some(id.to_string()),
-            function: crate::models::tool_call::FunctionCall {
+            function: mermaid_model::models::tool_call::FunctionCall {
                 name: name.to_string(),
                 arguments: serde_json::json!({}),
             },
@@ -1616,22 +1618,23 @@ mod tests {
     fn normalize_history_drops_matching_meta_replay_function_call() {
         let mut orphan = ChatMessage::assistant("calling a tool");
         orphan.tool_calls = Some(vec![tool_call("call_1", "do_thing")]);
-        orphan.provider_continuation = Some(crate::models::ProviderContinuation::MetaResponses {
-            output: vec![crate::models::MetaResponseItem::from_wire(
-                serde_json::json!({
-                    "type": "function_call",
-                    "call_id": "call_1",
-                    "name": "do_thing",
-                    "arguments": "{}"
-                }),
-            )],
-        });
+        orphan.provider_continuation =
+            Some(mermaid_model::models::ProviderContinuation::MetaResponses {
+                output: vec![mermaid_model::models::MetaResponseItem::from_wire(
+                    serde_json::json!({
+                        "type": "function_call",
+                        "call_id": "call_1",
+                        "name": "do_thing",
+                        "arguments": "{}"
+                    }),
+                )],
+            });
         let mut messages = vec![ChatMessage::user("hi"), orphan];
         normalize_history(&mut messages);
         let output = messages[1]
             .provider_continuation
             .as_ref()
-            .and_then(crate::models::ProviderContinuation::meta_output)
+            .and_then(mermaid_model::models::ProviderContinuation::meta_output)
             .unwrap();
         assert!(
             output.is_empty(),
@@ -1679,9 +1682,9 @@ mod tests {
     #[test]
     fn normalize_history_drops_idless_tool_use() {
         let mut asst = ChatMessage::assistant("calling");
-        asst.tool_calls = Some(vec![crate::models::tool_call::ToolCall {
+        asst.tool_calls = Some(vec![mermaid_model::models::tool_call::ToolCall {
             id: None,
-            function: crate::models::tool_call::FunctionCall {
+            function: mermaid_model::models::tool_call::FunctionCall {
                 name: "do_thing".into(),
                 arguments: serde_json::json!({}),
             },

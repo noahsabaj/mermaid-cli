@@ -10,13 +10,13 @@
 
 use std::time::SystemTime;
 
-use crate::models::tool_call::ToolCall as ModelToolCall;
-use crate::models::{ChatMessage, MessageRole, ProviderContinuation};
+use mermaid_model::models::tool_call::ToolCall as ModelToolCall;
+use mermaid_model::models::{ChatMessage, MessageRole, ProviderContinuation};
 
-use super::action::{ActionDetails, ActionDisplay, ActionResult};
-use super::ids::{ToolCallId, TurnId};
-use super::runtime::ToolMetadata;
 use super::state::{GenPhase, PendingToolCall, ToolOutcome, TurnState};
+use mermaid_model::action::{ActionDetails, ActionDisplay, ActionResult};
+use mermaid_model::ids::{ToolCallId, TurnId};
+use mermaid_model::tool_run::ToolMetadata;
 
 /// Flatten `Vec<Option<ToolOutcome>>` into `Vec<ToolOutcome>` iff
 /// every slot is populated. `None` means "still waiting on at least
@@ -121,9 +121,9 @@ pub fn commit_assistant_message(
         Some(partial_reasoning)
     };
     let kind = if continuation {
-        crate::models::ChatMessageKind::Continuation
+        mermaid_model::models::ChatMessageKind::Continuation
     } else {
-        crate::models::ChatMessageKind::Normal
+        mermaid_model::models::ChatMessageKind::Normal
     };
     ChatMessage {
         role: MessageRole::Assistant,
@@ -350,18 +350,18 @@ fn action_details_for(
                 }
                 if let Some(pattern) = pattern {
                     let match_count = match_count.unwrap_or(0);
-                    let pattern = crate::utils::redact_secrets(pattern);
+                    let pattern = mermaid_model::utils::redact_secrets(pattern);
                     detail.push_str(&format!(
                         " · {match_count} {} for {:?}",
                         pluralize("match", match_count),
-                        crate::utils::truncate_middle(&pattern, 48)
+                        mermaid_model::utils::truncate_middle(&pattern, 48)
                     ));
                 }
                 if let Some(final_url) = final_url.as_deref().filter(|final_url| *final_url != url)
                 {
                     detail.push_str(&format!(
                         " · final {}",
-                        crate::utils::truncate_middle(final_url, 96)
+                        mermaid_model::utils::truncate_middle(final_url, 96)
                     ));
                 }
                 if *truncated {
@@ -674,12 +674,12 @@ pub fn display_info_for(call: &PendingToolCall) -> (String, String) {
                 .unwrap_or_default();
             (
                 "Web Search".to_string(),
-                crate::utils::redact_secrets(&target),
+                mermaid_model::utils::redact_secrets(&target),
             )
         },
         "web_fetch" => {
             let target = string_arg("url")
-                .map(|url| crate::utils::sanitize_url_for_display(&url))
+                .map(|url| mermaid_model::utils::sanitize_url_for_display(&url))
                 .or_else(|| string_arg("snapshot_id"))
                 .unwrap_or_default();
             ("Web Fetch".to_string(), target)
@@ -747,7 +747,7 @@ pub fn display_info_for(call: &PendingToolCall) -> (String, String) {
 mod tests {
     use super::*;
     use crate::domain::{ManagedProcess, ManagedProcessStatus, ToolMetadata, ToolRunMetadata};
-    use crate::models::tool_call::{FunctionCall, ToolCall as ModelToolCall};
+    use mermaid_model::models::tool_call::{FunctionCall, ToolCall as ModelToolCall};
 
     fn sample_call(id: u64, name: &str) -> PendingToolCall {
         sample_call_args(id, name, serde_json::json!({}))
@@ -790,7 +790,7 @@ mod tests {
     #[test]
     fn agent_action_reports_child_model_and_tokens() {
         let call = sample_call_args(1, "agent", serde_json::json!({"description": "explore"}));
-        let usage = crate::models::TokenUsage::provider(9_000, 3_300);
+        let usage = mermaid_model::models::TokenUsage::provider(9_000, 3_300);
         let outcome = ToolOutcome::success("the report", "subagent completed", 62.0).with_metadata(
             ToolRunMetadata {
                 detail: ToolMetadata::Subagent {
@@ -1308,7 +1308,7 @@ mod tests {
             false,
         );
         assert!(m.thinking.is_none());
-        assert_eq!(m.kind, crate::models::ChatMessageKind::Normal);
+        assert_eq!(m.kind, mermaid_model::models::ChatMessageKind::Normal);
     }
 
     #[test]
@@ -1321,7 +1321,7 @@ mod tests {
             chrono::Local::now(),
             true,
         );
-        assert_eq!(m.kind, crate::models::ChatMessageKind::Continuation);
+        assert_eq!(m.kind, mermaid_model::models::ChatMessageKind::Continuation);
     }
 
     #[test]

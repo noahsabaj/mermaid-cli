@@ -29,11 +29,11 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
 use crate::app::{FilesystemPolicy, NetworkPolicy};
-use crate::constants::{COMMAND_MAX_TIMEOUT_SECS, COMMAND_TIMEOUT_SECS};
 use crate::domain::{
     ManagedProcess, ManagedProcessStatus, ToolDefinition, ToolMetadata, ToolOutcome,
     ToolRunMetadata,
 };
+use mermaid_model::constants::{COMMAND_MAX_TIMEOUT_SECS, COMMAND_TIMEOUT_SECS};
 
 use super::super::ctx::{ExecContext, ProgressEvent};
 use super::ToolExecutor;
@@ -152,9 +152,9 @@ impl ToolExecutor for ExecuteCommandTool {
 
         let category = match containment {
             CwdContainment::Project | CwdContainment::Scratchpad => {
-                crate::runtime::ToolCategory::Shell
+                mermaid_runtime::ToolCategory::Shell
             },
-            CwdContainment::External => crate::runtime::ToolCategory::ExternalDirectory,
+            CwdContainment::External => mermaid_runtime::ToolCategory::ExternalDirectory,
         };
         // Scratch containment must be PROVEN, fail closed: the cwd sits in
         // the scratchpad AND every token of the command lexically stays there.
@@ -164,7 +164,7 @@ impl ToolExecutor for ExecuteCommandTool {
                 .as_deref()
                 .is_some_and(|scratch| command_provably_in_scratch(command, scratch));
         let mut policy_request =
-            crate::runtime::ActionRequest::new("execute_command", category, command.to_string());
+            mermaid_runtime::ActionRequest::new("execute_command", category, command.to_string());
         policy_request.command = Some(command.to_string());
         // The gate must resolve command-relative paths against the directory
         // this command actually runs in (`cmd.current_dir` below), not the
@@ -201,9 +201,9 @@ impl ToolExecutor for ExecuteCommandTool {
                 // so there is nothing worth snapshotting.
                 if !scratch_contained
                     && ctx.config.safety.checkpoint_on_mutation
-                    && risk != crate::runtime::RiskClass::ReadOnly
+                    && risk != mermaid_runtime::RiskClass::ReadOnly
                 {
-                    let _ = crate::runtime::create_checkpoint_for_task(
+                    let _ = mermaid_runtime::create_checkpoint_for_task(
                         &ctx.workdir,
                         &[],
                         Some(pending_action.clone()),
@@ -225,7 +225,7 @@ impl ToolExecutor for ExecuteCommandTool {
             "command": command,
             "working_dir": effective_workdir.display().to_string(),
         });
-        let _ = crate::runtime::run_plugin_hooks("before_shell", &shell_payload);
+        let _ = mermaid_runtime::run_plugin_hooks("before_shell", &shell_payload);
         if mode == CommandMode::Background {
             let startup_timeout_secs = args
                 .get("startup_timeout_secs")
@@ -251,7 +251,7 @@ impl ToolExecutor for ExecuteCommandTool {
                 ctx,
             )
             .await;
-            let _ = crate::runtime::run_plugin_hooks(
+            let _ = mermaid_runtime::run_plugin_hooks(
                 "after_shell",
                 &serde_json::json!({
                     "command": command,
@@ -356,7 +356,7 @@ impl ToolExecutor for ExecuteCommandTool {
                         sandbox_network,
                         sandbox_fs,
                     );
-                    let _ = crate::runtime::run_plugin_hooks(
+                    let _ = mermaid_runtime::run_plugin_hooks(
                         "after_shell",
                         &serde_json::json!({
                             "command": command,
@@ -439,7 +439,7 @@ impl ToolExecutor for ExecuteCommandTool {
         // authoring instead of only on `write_file`/`apply_patch`.
         outcome.metadata.plan_file_written =
             plan_write && outcome.status == crate::domain::ToolStatus::Success;
-        let _ = crate::runtime::run_plugin_hooks(
+        let _ = mermaid_runtime::run_plugin_hooks(
             "after_shell",
             &serde_json::json!({
                 "command": command,
@@ -640,7 +640,8 @@ async fn run_background_command(
         {
             Ok(startup) => startup,
             Err(BackgroundWaitError::Cancelled) => {
-                crate::utils::terminate_tree(pid, crate::utils::Grace::Graceful).await;
+                mermaid_model::utils::terminate_tree(pid, mermaid_model::utils::Grace::Graceful)
+                    .await;
                 return ToolOutcome::cancelled();
             },
             Err(BackgroundWaitError::ExitedEarly(log_excerpt)) => {
@@ -790,7 +791,7 @@ async fn launch_background_process(
     log_path: &Path,
     scratchpad: Option<&Path>,
 ) -> Result<u32, String> {
-    use crate::utils::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
+    use mermaid_model::utils::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
     let log = std::fs::File::create(log_path).map_err(|e| {
         format!(
             "failed to create background log {}: {e}",
@@ -927,7 +928,7 @@ async fn process_running(pid: u32) -> bool {
         .unwrap_or(false)
 }
 
-// Process-tree termination lives in `crate::utils::terminate_tree` — the single
+// Process-tree termination lives in `mermaid_model::utils::terminate_tree` — the single
 // primitive shared by the Esc-cancel path, the foreground timeout, the
 // Ctrl+B-detached cleanup, and the daemon's `/stop`/`/restart`. It kills the
 // process group (catching grandchildren), not just the direct pid.
@@ -944,7 +945,7 @@ fn background_log_path() -> PathBuf {
         .map(|d| d.as_nanos())
         .unwrap_or_default();
     let name = format!("mermaid-bg-{}-{}.log", std::process::id(), nanos);
-    match crate::utils::private_temp_dir() {
+    match mermaid_model::utils::private_temp_dir() {
         Ok(dir) => dir.join(name),
         Err(_) => std::env::temp_dir().join(name),
     }
@@ -1022,8 +1023,8 @@ fn sandbox_probes() -> (bool, bool) {
     static PROBES: std::sync::OnceLock<(bool, bool)> = std::sync::OnceLock::new();
     *PROBES.get_or_init(|| {
         (
-            crate::runtime::network_killswitch_available(),
-            crate::runtime::fs_confinement_available(),
+            mermaid_runtime::network_killswitch_available(),
+            mermaid_runtime::fs_confinement_available(),
         )
     })
 }
@@ -1686,7 +1687,7 @@ async fn run_command(
     let log =
         create_tee_log_blocking(&log_path).map(|f| std::sync::Arc::new(tokio::sync::Mutex::new(f)));
 
-    let cap = crate::constants::MAX_TOOL_OUTPUT_BYTES;
+    let cap = mermaid_model::constants::MAX_TOOL_OUTPUT_BYTES;
     let stdout_task = tokio::spawn(read_capped(
         stdout,
         cap,
@@ -1743,7 +1744,7 @@ async fn run_command(
             // the child (and any grandchild it forked) alive until it exited on
             // its own. Kill the whole tree/group, abort the driver, drop the log.
             if let Some(p) = pid {
-                crate::utils::terminate_tree(p, crate::utils::Grace::Immediate).await;
+                mermaid_model::utils::terminate_tree(p, mermaid_model::utils::Grace::Immediate).await;
             }
             // This is the one deliberate `JoinHandle::abort` in the codebase.
             // `driver` is a raw (non-scoped) `tokio::spawn` because it must be
@@ -1801,7 +1802,7 @@ async fn run_command(
             // tree leaked despite the "was killed" message. Tree-kill the group,
             // abort the driver, drop the tee log, then report TimedOut.
             if let Some(p) = pid {
-                crate::utils::terminate_tree(p, crate::utils::Grace::Immediate).await;
+                mermaid_model::utils::terminate_tree(p, mermaid_model::utils::Grace::Immediate).await;
             }
             driver.abort();
             let _ = tokio::fs::remove_file(&log_path).await;
@@ -1977,7 +1978,7 @@ async fn run_command_pty(
 
     let drain = tokio::spawn(async move {
         let mut drain = PtyDrain {
-            capture: CappedCapture::new(crate::constants::MAX_TOOL_OUTPUT_BYTES),
+            capture: CappedCapture::new(mermaid_model::constants::MAX_TOOL_OUTPUT_BYTES),
             log,
             logged: 0,
             log_capped: false,
@@ -2046,7 +2047,7 @@ async fn run_command_pty(
             // reads the exit status, so killed-child exit-code quirks on
             // Windows never surface here.
             if let Some(p) = pid {
-                crate::utils::terminate_tree(p, crate::utils::Grace::Immediate).await;
+                mermaid_model::utils::terminate_tree(p, mermaid_model::utils::Grace::Immediate).await;
             }
             driver.abort();
             let _ = tokio::fs::remove_file(&log_path).await;
@@ -2093,7 +2094,7 @@ async fn run_command_pty(
         }
         _ = timeout_fut => {
             if let Some(p) = pid {
-                crate::utils::terminate_tree(p, crate::utils::Grace::Immediate).await;
+                mermaid_model::utils::terminate_tree(p, mermaid_model::utils::Grace::Immediate).await;
             }
             driver.abort();
             let _ = tokio::fs::remove_file(&log_path).await;
@@ -2103,7 +2104,7 @@ async fn run_command_pty(
 }
 
 /// Defense-in-depth pre-check for obviously destructive commands, run before
-/// the policy engine. Delegates to `crate::runtime::is_destructive_command`,
+/// the policy engine. Delegates to `mermaid_runtime::is_destructive_command`,
 /// which segments the command the way `sh -c` would and classifies each head on
 /// the TOKENIZED form — so spacing, case, quoting, flag bundling, and chaining
 /// can't trivially evade it (the substring blocklist this replaced could be
@@ -2111,7 +2112,7 @@ async fn run_command_pty(
 /// security boundary: the real boundary is deny-by-default + the policy engine,
 /// whose hard-deny this mirrors.
 fn contains_dangerous_command(command: &str) -> bool {
-    crate::runtime::is_destructive_command(command)
+    mermaid_runtime::is_destructive_command(command)
 }
 
 #[cfg(test)]
@@ -2421,7 +2422,7 @@ mod tests {
         let mk_ctx = || {
             let (tx, rx) = tokio::sync::mpsc::channel(64);
             let mut config = crate::app::Config::default();
-            config.safety.mode = crate::runtime::SafetyMode::ReadOnly;
+            config.safety.mode = mermaid_runtime::SafetyMode::ReadOnly;
             let ctx = crate::providers::ctx::ExecContext::new(
                 tokio_util::sync::CancellationToken::new(),
                 tx,
@@ -2433,7 +2434,7 @@ mod tests {
                 None,
                 None,
                 None,
-                crate::runtime::SafetyMode::ReadOnly,
+                mermaid_runtime::SafetyMode::ReadOnly,
                 None,
                 None,
                 None,
@@ -2489,7 +2490,7 @@ mod tests {
         let mk_ctx = || {
             let (tx, rx) = tokio::sync::mpsc::channel(64);
             let mut config = crate::app::Config::default();
-            config.safety.mode = crate::runtime::SafetyMode::ReadOnly;
+            config.safety.mode = mermaid_runtime::SafetyMode::ReadOnly;
             config.safety.checkpoint_on_mutation = false;
             let mut ctx = crate::providers::ctx::ExecContext::new(
                 tokio_util::sync::CancellationToken::new(),
@@ -2502,7 +2503,7 @@ mod tests {
                 None,
                 None,
                 None,
-                crate::runtime::SafetyMode::ReadOnly,
+                mermaid_runtime::SafetyMode::ReadOnly,
                 None,
                 None,
                 None,
@@ -2656,7 +2657,7 @@ mod tests {
         tokio::sync::mpsc::Receiver<crate::providers::ctx::ProgressEvent>,
     ) {
         let mut config = crate::app::Config::default();
-        config.safety.mode = crate::runtime::SafetyMode::FullAccess;
+        config.safety.mode = mermaid_runtime::SafetyMode::FullAccess;
         config.exec.pty = Some(false);
         crate::providers::ctx::test_exec_context_with_config(
             TurnId(1),
@@ -3026,7 +3027,7 @@ mod tests {
 
         // Clean up the detached process (and its child ping) via the tree kill.
         if let Some(pid) = parse_pid(&output) {
-            crate::utils::terminate_tree(pid, crate::utils::Grace::Graceful).await;
+            mermaid_model::utils::terminate_tree(pid, mermaid_model::utils::Grace::Graceful).await;
         }
     }
 
@@ -3070,7 +3071,8 @@ mod tests {
 
         // Clean up the still-running detached process (tree kill).
         if let Some(p) = process {
-            crate::utils::terminate_tree(p.pid, crate::utils::Grace::Graceful).await;
+            mermaid_model::utils::terminate_tree(p.pid, mermaid_model::utils::Grace::Graceful)
+                .await;
         }
     }
 
@@ -3240,7 +3242,7 @@ mod tests {
         // ExternalAccess and be denied; a Shell read-only command is allowed.
         let (tx, _rx) = tokio::sync::mpsc::channel(64);
         let mut config = crate::app::Config::default();
-        config.safety.mode = crate::runtime::SafetyMode::ReadOnly;
+        config.safety.mode = mermaid_runtime::SafetyMode::ReadOnly;
         let mut ctx = crate::providers::ctx::ExecContext::new(
             tokio_util::sync::CancellationToken::new(),
             tx,
@@ -3252,7 +3254,7 @@ mod tests {
             None,
             None,
             None,
-            crate::runtime::SafetyMode::ReadOnly,
+            mermaid_runtime::SafetyMode::ReadOnly,
             None,
             None,
             None,

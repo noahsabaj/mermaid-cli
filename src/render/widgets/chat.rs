@@ -13,12 +13,12 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::domain::{
     ActionDetails, ActionDisplay, ActionResult, QuestionAnswer, ToolMetadata, format_compact_count,
 };
-use crate::models::ChatMessageKind;
-use crate::models::{ChatMessage, MessageRole};
 use crate::render::diff::{DiffLineKind, parse_diff_line};
 use crate::render::markdown::parse_markdown;
 use crate::render::theme::Theme;
-use crate::utils::format_relative_timestamp;
+use mermaid_model::models::ChatMessageKind;
+use mermaid_model::models::{ChatMessage, MessageRole};
+use mermaid_model::utils::format_relative_timestamp;
 
 /// Entry in the click map: maps a content line to an image in chat history
 #[derive(Debug, Clone)]
@@ -840,14 +840,14 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                         );
                         self.wrapped_line_cache.insert(cache_key, block.clone());
                         if self.wrapped_line_cache.len()
-                            > crate::constants::MARKDOWN_CACHE_MAX_ENTRIES
+                            > mermaid_model::constants::MARKDOWN_CACHE_MAX_ENTRIES
                         {
                             // Evict down to the cap rather than clearing the whole
                             // cache — a wholesale clear re-rendered every message each
                             // frame once a conversation exceeded the cap. Keep the
                             // entry just inserted.
                             let overflow = self.wrapped_line_cache.len()
-                                - crate::constants::MARKDOWN_CACHE_MAX_ENTRIES;
+                                - mermaid_model::constants::MARKDOWN_CACHE_MAX_ENTRIES;
                             let stale: Vec<u64> = self
                                 .wrapped_line_cache
                                 .keys()

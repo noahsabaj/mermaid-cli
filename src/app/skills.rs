@@ -115,7 +115,7 @@ fn discover_dir(root: &Path, source: SkillSource) -> Vec<SkillEntry> {
 /// Parse one SKILL.md into an entry. `None` when the file is missing or
 /// unreadable — discovery is tolerant so one broken skill never hides the rest.
 fn read_skill_entry(path: &Path, source: SkillSource) -> Option<SkillEntry> {
-    let raw = match crate::utils::read_file_capped(path, MAX_SKILL_FILE_BYTES) {
+    let raw = match mermaid_model::utils::read_file_capped(path, MAX_SKILL_FILE_BYTES) {
         Ok((bytes, _truncated)) => String::from_utf8_lossy(&bytes).into_owned(),
         Err(e) => {
             tracing::warn!(path = %path.display(), error = %e, "skills: skipping unreadable SKILL.md");
@@ -225,7 +225,7 @@ fn plugin_skill_paths(canonical_root: &Path, declared: &[String]) -> Vec<PathBuf
 /// Skills declared by enabled plugins. Store/parse failures degrade to empty —
 /// skills are additive context, never a startup blocker.
 fn plugin_entries() -> Vec<SkillEntry> {
-    let Ok(store) = crate::runtime::RuntimeStore::open_default() else {
+    let Ok(store) = mermaid_runtime::RuntimeStore::open_default() else {
         return Vec::new();
     };
     let Ok(plugins) = store.plugins().list() else {
@@ -239,7 +239,7 @@ fn plugin_entries() -> Vec<SkillEntry> {
             continue;
         }
         let Ok(manifest) =
-            serde_json::from_str::<crate::runtime::PluginManifest>(&plugin.manifest_json)
+            serde_json::from_str::<mermaid_runtime::PluginManifest>(&plugin.manifest_json)
         else {
             continue;
         };

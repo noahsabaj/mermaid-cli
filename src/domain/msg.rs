@@ -23,22 +23,22 @@ use serde::{Deserialize, Serialize};
 
 use crate::app::McpServerConfig;
 use crate::app::instructions::LoadedInstructions;
-use crate::models::tool_call::ToolCall as ModelToolCall;
-use crate::models::{
+use mermaid_model::models::tool_call::ToolCall as ModelToolCall;
+use mermaid_model::models::{
     FinishReason, ProviderContinuation, ReasoningChunk, ReasoningLevel, TokenUsage, UserFacingError,
 };
-use crate::runtime::{
+use mermaid_runtime::{
     ApprovalRecord, CheckpointRecord, PluginInstallRecord, ProcessRecord, SafetyMode, TaskRecord,
     TaskTimelineEvent,
 };
 
-use super::ids::{ToolCallId, TurnId};
-use super::question::Question;
 use super::runtime::RuntimeSignal;
 use super::state::ContextUsageSnapshot;
 use super::state::StatusKind;
 use super::state::{ApprovalKind, ConversationSummary, McpToolSpec, ToolOutcome};
 use super::{CompactionResult, CompactionTrigger};
+use mermaid_model::ids::{ToolCallId, TurnId};
+use mermaid_model::question::Question;
 
 /// Single reducer input. Non-exhaustive is intentional: adding a new
 /// variant is a deliberate act that forces every reducer arm to
@@ -116,7 +116,7 @@ pub enum Msg {
         model_id: String,
         model_max: Option<usize>,
         effective: Option<usize>,
-        source: Option<crate::models::adapters::ollama_sizing::NumCtxSource>,
+        source: Option<mermaid_model::models::adapters::ollama_sizing::NumCtxSource>,
         /// The model's per-response output ceiling when the provider exposes
         /// one (`/models` metadata / documented table). `#[serde(default)]` so
         /// recordings from before this field replay unchanged.
@@ -534,7 +534,7 @@ pub enum ClipboardRead {
     /// A raster image. Bytes serialize as base64 so a recorded session replays
     /// pasted images bit-exactly without a numbers-array blowup in the JSONL.
     Image {
-        #[serde(with = "crate::utils::serde_base64")]
+        #[serde(with = "mermaid_model::utils::serde_base64")]
         bytes: Vec<u8>,
         format: String,
     },

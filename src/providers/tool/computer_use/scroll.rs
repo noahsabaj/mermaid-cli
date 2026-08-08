@@ -9,9 +9,9 @@ use std::time::Instant;
 use async_trait::async_trait;
 use serde_json::Value;
 
-use crate::constants::MAX_SCROLL_AMOUNT;
 use crate::domain::{ToolDefinition, ToolOutcome};
 use crate::providers::ctx::ExecContext;
+use mermaid_model::constants::MAX_SCROLL_AMOUNT;
 
 use super::super::ToolExecutor;
 use super::computer_use_success;
@@ -59,7 +59,7 @@ impl ToolExecutor for ScrollTool {
         if let Some(blocked) = super::super::policy_gate::gate_external(
             &ctx,
             "scroll",
-            crate::runtime::ToolCategory::ComputerUse,
+            mermaid_runtime::ToolCategory::ComputerUse,
             "computer-use: scroll".to_string(),
             &args,
         )

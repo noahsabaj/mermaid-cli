@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
-use crate::models::ReasoningLevel;
+use mermaid_model::models::ReasoningLevel;
 
 #[derive(Parser, Debug)]
 #[command(name = "mermaid")]

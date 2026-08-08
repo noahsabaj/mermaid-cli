@@ -10,7 +10,7 @@
 //! `ModelCapabilities`. Adapters translate via `from_legacy` so the
 //! provider layer doesn't duplicate capability logic.
 
-use crate::models::{ModelCapabilities, ReasoningCapability};
+use mermaid_model::models::{ModelCapabilities, ReasoningCapability};
 
 /// Capabilities of a model as advertised by its provider adapter.
 #[derive(Debug, Clone)]

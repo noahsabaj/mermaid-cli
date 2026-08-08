@@ -151,7 +151,7 @@ impl ToolExecutor for MemoryTool {
         if let Some(blocked) = super::policy_gate::gate_external(
             &ctx,
             "memory",
-            crate::runtime::ToolCategory::Memory,
+            mermaid_runtime::ToolCategory::Memory,
             format!("memory {action}"),
             &args,
         )

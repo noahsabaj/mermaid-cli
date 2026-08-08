@@ -14,8 +14,8 @@
 use serde::{Deserialize, Serialize};
 
 use super::msg::Msg;
-use super::runtime::{ToolMetadata, ToolStatus};
-use crate::models::FinishReason;
+use mermaid_model::models::FinishReason;
+use mermaid_model::tool_run::{ToolMetadata, ToolStatus};
 
 /// Wire-format version of the `RunEvent` stream. Bump only on a breaking change
 /// to an existing variant's shape; additive variants keep version 1.
@@ -432,7 +432,7 @@ fn web_event_details(detail: &ToolMetadata) -> Option<WebEventDetails> {
             output_byte_count: Some(*output_byte_count),
             rendered_byte_count: Some(*byte_count),
             line_count: Some(*line_count),
-            pattern: pattern.as_deref().map(crate::utils::redact_secrets),
+            pattern: pattern.as_deref().map(mermaid_model::utils::redact_secrets),
             context_lines: *context_lines,
             match_count: *match_count,
             query_count: None,
@@ -471,10 +471,10 @@ fn finish_reason_str(reason: &FinishReason) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::ids::{ToolCallId, TurnId};
-    use crate::domain::runtime::ToolRunMetadata;
     use crate::domain::state::ToolOutcome;
-    use crate::models::TokenUsage;
+    use mermaid_model::ids::{ToolCallId, TurnId};
+    use mermaid_model::models::TokenUsage;
+    use mermaid_model::tool_run::ToolRunMetadata;
 
     /// One canonical value per variant, in declaration order.
     fn samples() -> Vec<RunEvent> {

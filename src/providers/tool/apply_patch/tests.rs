@@ -194,7 +194,7 @@ async fn all_scratch_patch_is_ungated() {
     fs::create_dir_all(&scratch).unwrap();
 
     let mut config = crate::app::Config::default();
-    config.safety.mode = crate::runtime::SafetyMode::Ask;
+    config.safety.mode = mermaid_runtime::SafetyMode::Ask;
     let (tx, _rx) = tokio::sync::mpsc::channel(8);
     let mut ctx = crate::providers::ctx::ExecContext::new(
         tokio_util::sync::CancellationToken::new(),
@@ -207,7 +207,7 @@ async fn all_scratch_patch_is_ungated() {
         None,
         None,
         None,
-        crate::runtime::SafetyMode::Ask,
+        mermaid_runtime::SafetyMode::Ask,
         None,
         None,
         None,

@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use super::client::McpClient;
 use super::transport::StdioTransport;
-use crate::utils::{is_affirmative, should_refuse_noninteractive};
+use mermaid_model::utils::{is_affirmative, should_refuse_noninteractive};
 
 /// A resolved MCP server ready for configuration
 pub struct ResolvedServer {

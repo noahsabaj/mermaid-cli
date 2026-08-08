@@ -71,7 +71,7 @@ fn readme_sample_config_parses() {
     let config: mermaid_cli::app::Config =
         toml::from_str(block).expect("README sample config must parse as a valid Config");
     assert!(
-        matches!(config.safety.mode, mermaid_cli::runtime::SafetyMode::Ask),
+        matches!(config.safety.mode, mermaid_runtime::SafetyMode::Ask),
         "sample config's documented default must stay ask"
     );
     assert!(

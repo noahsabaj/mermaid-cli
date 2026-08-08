@@ -15,8 +15,8 @@ use mermaid_cli::domain::{
     PendingToolCall, PromptTokenBreakdown, SlashCmd, State, ToolCallId, ToolOutcome, TurnId,
     TurnState, start_executing_tools, start_generating, update,
 };
-use mermaid_cli::models::tool_call::{FunctionCall, ToolCall as ModelToolCall};
-use mermaid_cli::models::{ChatMessage, ChatMessageKind, MessageRole};
+use mermaid_model::models::tool_call::{FunctionCall, ToolCall as ModelToolCall};
+use mermaid_model::models::{ChatMessage, ChatMessageKind, MessageRole};
 
 fn fresh() -> State {
     State::new(
@@ -168,7 +168,7 @@ fn tool_outcomes_must_all_land_before_followup_call() {
     state.turn = start_executing_tools(TurnId(1), calls, std::time::SystemTime::now());
     // Plant the prior assistant message so action displays attach.
     state.session.append(
-        mermaid_cli::models::ChatMessage::assistant("ok let me call tools"),
+        mermaid_model::models::ChatMessage::assistant("ok let me call tools"),
         state.now,
     );
 
@@ -221,7 +221,7 @@ fn cancelled_tool_produces_placeholder_in_history() {
     };
     state.turn = start_executing_tools(TurnId(3), vec![call], std::time::SystemTime::now());
     state.session.append(
-        mermaid_cli::models::ChatMessage::assistant("calling tool"),
+        mermaid_model::models::ChatMessage::assistant("calling tool"),
         state.now,
     );
 
@@ -322,11 +322,11 @@ fn upstream_error_ends_turn_exactly_once() {
     let mut state = fresh();
     state.turn = start_generating(TurnId(4), std::time::SystemTime::now());
 
-    let err = mermaid_cli::models::UserFacingError {
+    let err = mermaid_model::models::UserFacingError {
         summary: "Server error".to_string(),
         message: "500 internal".to_string(),
         suggestion: "try again".to_string(),
-        category: mermaid_cli::models::ErrorCategory::Temporary,
+        category: mermaid_model::models::ErrorCategory::Temporary,
         recoverable: true,
     };
     let (state, _) = update(
@@ -356,11 +356,11 @@ fn upstream_error_ends_turn_exactly_once() {
 fn upstream_error_from_stale_turn_is_dropped() {
     let mut state = fresh();
     state.turn = start_generating(TurnId(8), std::time::SystemTime::now());
-    let err = mermaid_cli::models::UserFacingError {
+    let err = mermaid_model::models::UserFacingError {
         summary: "late".to_string(),
         message: "".to_string(),
         suggestion: "".to_string(),
-        category: mermaid_cli::models::ErrorCategory::Temporary,
+        category: mermaid_model::models::ErrorCategory::Temporary,
         recoverable: false,
     };
     let (state, _) = update(
@@ -380,7 +380,7 @@ fn upstream_error_from_stale_turn_is_dropped() {
 fn slash_clear_requires_confirmation_before_wiping() {
     let mut state = fresh();
     state.session.append(
-        mermaid_cli::models::ChatMessage::user("priceless"),
+        mermaid_model::models::ChatMessage::user("priceless"),
         state.now,
     );
     let (state, _) = update(state, Msg::Slash(SlashCmd::Clear));
@@ -553,7 +553,7 @@ fn truncation_note_skipped_when_tool_calls_pending() {
             turn: id,
             usage: None,
             provider_continuation: None,
-            stop_reason: Some(mermaid_cli::models::FinishReason::Length),
+            stop_reason: Some(mermaid_model::models::FinishReason::Length),
         },
     );
     assert!(
@@ -583,7 +583,7 @@ fn truncation_note_shown_when_no_tool_calls() {
             turn: id,
             usage: None,
             provider_continuation: None,
-            stop_reason: Some(mermaid_cli::models::FinishReason::Length),
+            stop_reason: Some(mermaid_model::models::FinishReason::Length),
         },
     );
     assert!(matches!(state.turn, TurnState::Idle));
@@ -776,11 +776,11 @@ fn tool_progress_artifact_routes_image_to_assistant_message() {
     // flow and construct the state manually.
     let mut state = state;
     state.session.append(
-        mermaid_cli::models::ChatMessage {
+        mermaid_model::models::ChatMessage {
             role: MessageRole::Assistant,
             content: String::new(),
             timestamp: chrono::Local::now(),
-            kind: mermaid_cli::models::ChatMessageKind::Normal,
+            kind: mermaid_model::models::ChatMessageKind::Normal,
             metadata: None,
             actions: vec![],
             thinking: None,

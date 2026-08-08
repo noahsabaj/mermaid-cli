@@ -22,18 +22,18 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::app::McpServerConfig;
-use crate::models::ChatMessage;
-use crate::models::ReasoningLevel;
-use crate::models::tool_call::ToolCall as ModelToolCall;
-use crate::runtime::{SafetyMode, TaskStatus};
 use crate::session::ConversationHistory;
+use mermaid_model::models::ChatMessage;
+use mermaid_model::models::ReasoningLevel;
+use mermaid_model::models::tool_call::ToolCall as ModelToolCall;
+use mermaid_runtime::{SafetyMode, TaskStatus};
 
-use super::question::QuestionResolution;
 use super::state::ApprovalChoice;
+use mermaid_model::question::QuestionResolution;
 
 use super::compaction::{CompactionArchive, CompactionRecord, CompactionRequest};
-use super::ids::{ToolCallId, TurnId};
-use super::runtime::ManagedProcess;
+use mermaid_model::ids::{ToolCallId, TurnId};
+use mermaid_model::tool_run::ManagedProcess;
 
 /// A single side-effect request. Most variants are one-shot; `CallModel`
 /// and `ExecuteTool` spawn long-running tasks inside a per-turn

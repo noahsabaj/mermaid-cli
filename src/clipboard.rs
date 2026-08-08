@@ -43,7 +43,7 @@ use std::process::Command;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use crate::utils::{output_with_timeout, write_stdin_with_timeout};
+use mermaid_model::utils::{output_with_timeout, write_stdin_with_timeout};
 
 /// `which` existence probes and clipboard *metadata* queries (offered MIME
 /// types, `osascript` clipboard info) — tiny payloads, so a slow answer means
@@ -424,7 +424,8 @@ pub fn read_image_bytes() -> Result<(Vec<u8>, String)> {
             // Use osascript to save clipboard image to a temp file, then read it
             // 0700 per-user scratch dir, not a world-readable shared /tmp path
             // another local user could read or pre-create/symlink (#11).
-            let temp_path = crate::utils::private_temp_dir()?.join("mermaid-clipboard-paste.png");
+            let temp_path =
+                mermaid_model::utils::private_temp_dir()?.join("mermaid-clipboard-paste.png");
             let temp_str = temp_path.to_string_lossy();
             let script = format!(
                 "set theFile to POSIX file \"{}\"\n\
@@ -464,7 +465,8 @@ pub fn read_image_bytes() -> Result<(Vec<u8>, String)> {
         ClipboardBackend::Windows => {
             // 0700 per-user scratch dir, not a world-readable shared /tmp path
             // another local user could read or pre-create/symlink (#11).
-            let temp_path = crate::utils::private_temp_dir()?.join("mermaid-clipboard-paste.png");
+            let temp_path =
+                mermaid_model::utils::private_temp_dir()?.join("mermaid-clipboard-paste.png");
             let _ = std::fs::remove_file(&temp_path);
             // Two ways in, in this order:
             //

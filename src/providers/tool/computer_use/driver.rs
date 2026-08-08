@@ -29,7 +29,7 @@ use base64::{Engine as _, engine::general_purpose};
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
-use crate::constants::{SCREENSHOT_MAX_WIDTH, SCREENSHOT_REGISTRY_CAPACITY};
+use mermaid_model::constants::{SCREENSHOT_MAX_WIDTH, SCREENSHOT_REGISTRY_CAPACITY};
 
 use super::Backend;
 
@@ -268,8 +268,8 @@ impl ComputerUseDriver {
         // Write screenshots into the 0700 per-user scratch dir, not a
         // world-readable fixed path in shared /tmp where another local user
         // could read the captured frame (#33).
-        let temp_path =
-            crate::utils::private_temp_dir()?.join(format!("mermaid-screenshot-{}.png", seq));
+        let temp_path = mermaid_model::utils::private_temp_dir()?
+            .join(format!("mermaid-screenshot-{}.png", seq));
         let temp_str = temp_path.to_string_lossy().to_string();
         let _guard = TempFileGuard(temp_path.clone());
 
@@ -447,7 +447,7 @@ impl ComputerUseDriver {
     /// `TYPE_KEY_DELAY_MS` — empirically needed for slow Electron /
     /// web targets that drop characters at lower rates.
     pub async fn type_text(&self, text: &str, token: &CancellationToken) -> Result<()> {
-        let delay = crate::constants::TYPE_KEY_DELAY_MS.to_string();
+        let delay = mermaid_model::constants::TYPE_KEY_DELAY_MS.to_string();
         match self.backend {
             Backend::X11 => {
                 run_cmd_cancellable(
@@ -750,7 +750,7 @@ async fn dispatch_capture(
             )
             .await?;
             tokio::time::sleep(std::time::Duration::from_millis(
-                crate::constants::WINDOW_FOCUS_DELAY_MS,
+                mermaid_model::constants::WINDOW_FOCUS_DELAY_MS,
             ))
             .await;
             let (wx, wy) = get_window_geometry_x11(&wid)
@@ -801,7 +801,7 @@ pub(crate) async fn run_cmd_cancellable(
     run_cmd_cancellable_with_timeout(
         cmd,
         token,
-        std::time::Duration::from_secs(crate::constants::COMPUTER_USE_CMD_TIMEOUT_SECS),
+        std::time::Duration::from_secs(mermaid_model::constants::COMPUTER_USE_CMD_TIMEOUT_SECS),
     )
     .await
 }
@@ -838,7 +838,7 @@ async fn run_cmd_cancellable_with_timeout(
 async fn run_cmd_stdout(cmd: &mut Command) -> Result<String> {
     run_cmd_stdout_with_timeout(
         cmd,
-        std::time::Duration::from_secs(crate::constants::COMPUTER_USE_CMD_TIMEOUT_SECS),
+        std::time::Duration::from_secs(mermaid_model::constants::COMPUTER_USE_CMD_TIMEOUT_SECS),
     )
     .await
 }
@@ -984,7 +984,7 @@ async fn downscale_if_needed(path: &str, max_width: u32) -> Result<f64> {
     // encoder and finally to the full-resolution fallback below — preserving the
     // existing graceful degradation rather than hanging the agent loop.
     let downscale_timeout =
-        std::time::Duration::from_secs(crate::constants::SCREENSHOT_DOWNSCALE_TIMEOUT_SECS);
+        std::time::Duration::from_secs(mermaid_model::constants::SCREENSHOT_DOWNSCALE_TIMEOUT_SECS);
 
     let convert = tokio::time::timeout(
         downscale_timeout,

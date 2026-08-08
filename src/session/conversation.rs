@@ -1,7 +1,7 @@
 use crate::domain::CompactionArchive;
-use crate::models::{ChatMessage, MessageRole};
 use anyhow::Result;
 use chrono::{DateTime, Local};
+use mermaid_model::models::{ChatMessage, MessageRole};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::fs;
@@ -122,7 +122,7 @@ pub struct ConversationHistory {
     /// `#[serde(default)]`: sessions saved before these existed omit them, and
     /// a `None` safety mode falls back to the config default on resume.
     #[serde(default)]
-    pub safety_mode: Option<crate::runtime::SafetyMode>,
+    pub safety_mode: Option<mermaid_runtime::SafetyMode>,
     /// Plan-mode-in-progress (see `domain::PlanState`): `Some` only when the
     /// session was saved mid-planning, so `--resume` re-enters plan mode with
     /// the same plan file and restore target.
@@ -498,7 +498,7 @@ impl ConversationManager {
             },
             None => serde_json::to_value(conversation)?,
         };
-        crate::utils::redact_json(&mut value);
+        mermaid_model::utils::redact_json(&mut value);
         let json = serde_json::to_string_pretty(&value)?;
 
         // Optimistic-concurrency guard (F73). Without this, two processes (e.g. a
@@ -519,7 +519,7 @@ impl ConversationManager {
         {
             let sibling = self.conflict_sibling_path(&conversation.id);
             // Keep the existing atomic-write for the preserved copy too (owner-only).
-            crate::runtime::write_atomic_with_mode(&sibling, json.as_bytes(), 0o600)?;
+            mermaid_runtime::write_atomic_with_mode(&sibling, json.as_bytes(), 0o600)?;
             tracing::warn!(
                 id = %conversation.id,
                 main = %path.display(),
@@ -532,7 +532,7 @@ impl ConversationManager {
         // Atomic write: a crash mid-save must not empty/corrupt the session
         // file (this is the hot path, rewritten after nearly every message).
         // Owner-only (0o600): the transcript can carry secrets in cleartext.
-        crate::runtime::write_atomic_with_mode(&path, json.as_bytes(), 0o600)?;
+        mermaid_runtime::write_atomic_with_mode(&path, json.as_bytes(), 0o600)?;
         // Refresh our baseline to the file we just wrote so the NEXT save by this
         // process compares against our own write, not the pre-save state.
         self.record_stamp(&conversation.id, &path);
@@ -545,7 +545,8 @@ impl ConversationManager {
             let meta_path = self
                 .conversations_dir
                 .join(format!("{}.meta", conversation.id));
-            let _ = crate::runtime::write_atomic_with_mode(&meta_path, meta_json.as_bytes(), 0o600);
+            let _ =
+                mermaid_runtime::write_atomic_with_mode(&meta_path, meta_json.as_bytes(), 0o600);
         }
 
         Ok(())
@@ -579,11 +580,11 @@ impl ConversationManager {
             },
             None => serde_json::to_value(archive)?,
         };
-        crate::utils::redact_json(&mut value);
+        mermaid_model::utils::redact_json(&mut value);
         let json = serde_json::to_string_pretty(&value)?;
         // Atomic write: the archive is the ONLY durable copy of messages
         // dropped by a compaction — a partial write would lose them. Owner-only.
-        crate::runtime::write_atomic_with_mode(&path, json.as_bytes(), 0o600)?;
+        mermaid_runtime::write_atomic_with_mode(&path, json.as_bytes(), 0o600)?;
         Ok(path)
     }
 
@@ -822,7 +823,7 @@ mod tests {
         let mut fresh = touched("/tmp/proj");
         fresh.advertised_context = Some(crate::domain::AdvertisedContext {
             plan_path: Some(std::path::PathBuf::from("/tmp/proj/.mermaid/plans/x.md")),
-            safety_mode: crate::runtime::SafetyMode::Ask,
+            safety_mode: mermaid_runtime::SafetyMode::Ask,
             model_id: "ollama/test".to_string(),
         });
         let round: ConversationHistory =
@@ -860,7 +861,7 @@ mod tests {
     #[test]
     fn session_state_round_trips_through_json() {
         let mut conv = ConversationHistory::new("/tmp/p".into(), "m".into(), Local::now());
-        conv.safety_mode = Some(crate::runtime::SafetyMode::FullAccess);
+        conv.safety_mode = Some(mermaid_runtime::SafetyMode::FullAccess);
         conv.cumulative_token_usage = crate::domain::TokenUsageTotals {
             prompt_tokens: 777,
             ..Default::default()
@@ -869,7 +870,7 @@ mod tests {
             serde_json::from_str(&serde_json::to_string(&conv).unwrap()).unwrap();
         assert_eq!(
             round.safety_mode,
-            Some(crate::runtime::SafetyMode::FullAccess)
+            Some(mermaid_runtime::SafetyMode::FullAccess)
         );
         assert_eq!(round.cumulative_token_usage.total_tokens(), 777);
     }

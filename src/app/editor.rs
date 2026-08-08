@@ -27,7 +27,7 @@ fn resolve_editor() -> Option<String> {
 /// Stage the draft in the private (0700) scratch dir with owner-only mode —
 /// drafts can contain anything the user was about to send.
 fn write_compose_file(text: &str) -> std::io::Result<PathBuf> {
-    let dir = crate::utils::private_temp_dir()?;
+    let dir = mermaid_model::utils::private_temp_dir()?;
     let path = dir.join(format!("compose-{}.md", std::process::id()));
     std::fs::write(&path, text)?;
     #[cfg(unix)]

@@ -273,7 +273,7 @@ mod tests {
             None,
             None,
             None,
-            crate::runtime::SafetyMode::FullAccess,
+            mermaid_runtime::SafetyMode::FullAccess,
             None,
             None,
             None,

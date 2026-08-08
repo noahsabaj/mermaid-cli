@@ -81,7 +81,10 @@ impl Drop for Running {
         // it after `try_wait` reaps the child. This is the last-resort guard for
         // panics or future refactors: a dropped owner must not orphan Granian's
         // process group.
-        crate::utils::terminate_tree_blocking(self.child.id(), crate::utils::Grace::Immediate);
+        mermaid_model::utils::terminate_tree_blocking(
+            self.child.id(),
+            mermaid_model::utils::Grace::Immediate,
+        );
         let deadline = Instant::now() + DROP_REAP_TIMEOUT;
         while Instant::now() < deadline {
             match self.child.try_wait() {
@@ -188,7 +191,8 @@ impl SearxngManager {
                 .then(|| bundle::invalidate_runtime(&runtime))
                 .transpose()
                 .err();
-            let cleanup = terminate_owned(&mut running, crate::utils::Grace::Immediate).await;
+            let cleanup =
+                terminate_owned(&mut running, mermaid_model::utils::Grace::Immediate).await;
             let mut message = format!("SearXNG did not become ready: {error}");
             if let Some(rejection_error) = rejection {
                 message.push_str(&format!(
@@ -216,7 +220,9 @@ impl SearxngManager {
         // Keep the record in the manager across every await. Cancellation can
         // interrupt shutdown, but it cannot discard the only child handle; a
         // later shutdown or ensure call can finish the reap.
-        if let Err(error) = terminate_owned(&mut running, crate::utils::Grace::Graceful).await {
+        if let Err(error) =
+            terminate_owned(&mut running, mermaid_model::utils::Grace::Graceful).await
+        {
             tracing::warn!(%error, "could not fully reap managed SearXNG");
         }
     }
@@ -300,7 +306,7 @@ async fn reconcile_existing(running: &mut Option<Running>) -> Result<Option<Stri
             let rejection = invalidate
                 .map(|runtime| bundle::invalidate_runtime(&runtime))
                 .transpose();
-            let cleanup = terminate_owned(running, crate::utils::Grace::Immediate).await;
+            let cleanup = terminate_owned(running, mermaid_model::utils::Grace::Immediate).await;
             match (rejection, cleanup) {
                 (Ok(_), Ok(())) => Ok(None),
                 (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
@@ -312,7 +318,10 @@ async fn reconcile_existing(running: &mut Option<Running>) -> Result<Option<Stri
     }
 }
 
-async fn terminate_owned(running: &mut Option<Running>, grace: crate::utils::Grace) -> Result<()> {
+async fn terminate_owned(
+    running: &mut Option<Running>,
+    grace: mermaid_model::utils::Grace,
+) -> Result<()> {
     let Some(process) = running.as_mut() else {
         return Ok(());
     };
@@ -328,7 +337,7 @@ async fn terminate_owned(running: &mut Option<Running>, grace: crate::utils::Gra
             ));
         },
     };
-    crate::utils::terminate_tree(pid, grace).await;
+    mermaid_model::utils::terminate_tree(pid, grace).await;
 
     let deadline = Instant::now() + REAP_TIMEOUT;
     loop {
@@ -433,7 +442,9 @@ fn spawn_granian(
         use std::os::windows::process::CommandExt;
         // CREATE_NO_WINDOW, never DETACHED_PROCESS: the latter leaves a
         // visible console window on Windows 11 (see utils::proc).
-        cmd.creation_flags(crate::utils::CREATE_NO_WINDOW | crate::utils::CREATE_NEW_PROCESS_GROUP);
+        cmd.creation_flags(
+            mermaid_model::utils::CREATE_NO_WINDOW | mermaid_model::utils::CREATE_NEW_PROCESS_GROUP,
+        );
     }
     // Granian has no stable inherited-listener interface in the pinned bundle.
     // Release as late as possible; `wait_ready` additionally requires a live
@@ -750,7 +761,7 @@ mod tests {
         // console window on every test run, and killing the child orphaned it
         // on the developer's desktop.
         command.creation_flags(
-            crate::utils::CREATE_NO_WINDOW | crate::utils::CREATE_NEW_PROCESS_GROUP,
+            mermaid_model::utils::CREATE_NO_WINDOW | mermaid_model::utils::CREATE_NEW_PROCESS_GROUP,
         );
         command
             .stdin(Stdio::null())
@@ -982,7 +993,7 @@ mod tests {
         );
         drop(reserved);
 
-        terminate_owned(&mut running, crate::utils::Grace::Immediate)
+        terminate_owned(&mut running, mermaid_model::utils::Grace::Immediate)
             .await
             .unwrap();
         assert!(running.is_none());
@@ -998,7 +1009,8 @@ mod tests {
         ));
         let settings = write_settings_in(&root).unwrap();
         let mut child = sleeping_test_child();
-        crate::utils::terminate_tree(child.id(), crate::utils::Grace::Immediate).await;
+        mermaid_model::utils::terminate_tree(child.id(), mermaid_model::utils::Grace::Immediate)
+            .await;
         child.wait().unwrap();
         let mut running = Running {
             child,

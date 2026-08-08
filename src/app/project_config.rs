@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use super::config::{ConfigLayer, LayerSource, SafetyConfig, read_config_table};
 use crate::app::{FilesystemPolicy, NetworkPolicy};
-use crate::runtime::SafetyMode;
+use mermaid_runtime::SafetyMode;
 
 /// Top-level `Config` keys a project file may set. Everything absent from
 /// this list is stripped with a warning — including any FUTURE section, which
@@ -81,7 +81,7 @@ pub(crate) fn load_project_layer(
                 None,
                 vec![format!(
                     "skipping malformed project config: {}",
-                    crate::utils::redact_secrets(&format!("{e:#}"))
+                    mermaid_model::utils::redact_secrets(&format!("{e:#}"))
                 )],
                 None,
             );

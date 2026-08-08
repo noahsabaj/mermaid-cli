@@ -24,7 +24,7 @@ use chrono::{DateTime, Local};
 
 use crate::app::recorder::{RecordLine, Replay, SessionHeader, session_fingerprint};
 use crate::domain::{Msg, State, update};
-use crate::models::MessageRole;
+use mermaid_model::models::MessageRole;
 
 /// Everything `--replay` learned from one recording.
 pub struct ReplayReport {
@@ -285,7 +285,7 @@ mod tests {
     use crate::app::Config;
     use crate::app::recorder::{RECORDING_FORMAT_VERSION, Recorder};
     use crate::domain::TurnId;
-    use crate::models::{FinishReason, TokenUsage};
+    use mermaid_model::models::{FinishReason, TokenUsage};
     use std::path::PathBuf;
 
     fn tmpfile(name: &str) -> PathBuf {

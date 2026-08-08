@@ -63,7 +63,7 @@ impl WebCapabilities {
         let needs_ollama_key = web.fetch_backend == FetchBackend::Ollama
             || web.search_backend == SearchBackend::Ollama;
         let ollama_key = needs_ollama_key
-            .then(|| crate::utils::resolve_provider_key("ollama", "OLLAMA_API_KEY", None))
+            .then(|| mermaid_model::utils::resolve_provider_key("ollama", "OLLAMA_API_KEY", None))
             .flatten();
 
         let (fetch, fetch_backend): (_, Option<Arc<dyn FetchProvider>>) = match web.fetch_backend {
@@ -271,7 +271,7 @@ impl ToolExecutor for WebSearchTool {
                     "queries": {
                         "type": "array",
                         "minItems": 1,
-                        "maxItems": crate::constants::MAX_BATCH_TOOL_ITEMS,
+                        "maxItems": mermaid_model::constants::MAX_BATCH_TOOL_ITEMS,
                         "items": {
                             "type": "object",
                             "properties": {
@@ -303,7 +303,7 @@ impl ToolExecutor for WebSearchTool {
         if let Some(blocked) = super::policy_gate::gate_external(
             &ctx,
             "web_search",
-            crate::runtime::ToolCategory::Web,
+            mermaid_runtime::ToolCategory::Web,
             format!("web_search ({} queries)", queries.len()),
             &args,
         )
@@ -320,7 +320,7 @@ impl ToolExecutor for WebSearchTool {
                 let budget = ctx.web_budget();
                 let total = queries.len();
                 async move {
-                    let display_query = crate::utils::redact_secrets(&query);
+                    let display_query = mermaid_model::utils::redact_secrets(&query);
                     let _ = progress
                         .send(ProgressEvent::Status(format!(
                             "searching {}/{}: {}",
@@ -333,7 +333,7 @@ impl ToolExecutor for WebSearchTool {
                     (idx, query, result)
                 }
             })
-            .buffer_unordered(crate::constants::MAX_WEB_SEARCH_CONCURRENCY)
+            .buffer_unordered(mermaid_model::constants::MAX_WEB_SEARCH_CONCURRENCY)
             .collect::<Vec<_>>();
         let mut completed = tokio::select! {
             biased;
@@ -347,36 +347,35 @@ impl ToolExecutor for WebSearchTool {
         let mut sources = Vec::new();
         let mut errors: Vec<crate::domain::WebSearchFailure> = Vec::new();
         for (idx, query, result) in completed {
-            let display_query = crate::utils::redact_secrets(&query);
+            let display_query = mermaid_model::utils::redact_secrets(&query);
             // A single query returning nothing or erroring does NOT abort the
             // batch — record it and carry on so the other queries' results
             // survive (a partial answer beats none).
-            let section = match result {
-                Ok(results) => {
-                    result_count += results.len();
-                    sources.extend(
-                        results
-                            .iter()
-                            .map(|result| crate::utils::sanitize_url_for_display(&result.url)),
-                    );
-                    if results.is_empty() {
-                        "[SEARCH_RESULTS]\n(no results found)\n[/SEARCH_RESULTS]\n".to_string()
-                    } else {
-                        format_results(&results)
-                    }
-                },
-                Err(e) => {
-                    let safe_error = crate::utils::truncate_middle_bytes(
-                        &crate::utils::redact_secrets(&format!("{e:#}")),
-                        MAX_WEB_SEARCH_FAILURE_BYTES,
-                    );
-                    errors.push(crate::domain::WebSearchFailure {
-                        query_index: idx,
-                        error: safe_error.clone(),
-                    });
-                    format!("(search failed: {safe_error})\n")
-                },
-            };
+            let section =
+                match result {
+                    Ok(results) => {
+                        result_count += results.len();
+                        sources.extend(results.iter().map(|result| {
+                            mermaid_model::utils::sanitize_url_for_display(&result.url)
+                        }));
+                        if results.is_empty() {
+                            "[SEARCH_RESULTS]\n(no results found)\n[/SEARCH_RESULTS]\n".to_string()
+                        } else {
+                            format_results(&results)
+                        }
+                    },
+                    Err(e) => {
+                        let safe_error = mermaid_model::utils::truncate_middle_bytes(
+                            &mermaid_model::utils::redact_secrets(&format!("{e:#}")),
+                            MAX_WEB_SEARCH_FAILURE_BYTES,
+                        );
+                        errors.push(crate::domain::WebSearchFailure {
+                            query_index: idx,
+                            error: safe_error.clone(),
+                        });
+                        format!("(search failed: {safe_error})\n")
+                    },
+                };
             if queries.len() > 1 {
                 combined.push_str(&format!("=== query: {display_query} ===\n{section}\n\n"));
             } else {
@@ -394,9 +393,10 @@ impl ToolExecutor for WebSearchTool {
                 .collect::<Vec<_>>()
                 .join("; ");
             let message = format!("web_search via {} failed: {summary}", self.backend_name);
-            let message = crate::utils::truncate_middle_bytes(
+            let message = mermaid_model::utils::truncate_middle_bytes(
                 &message,
-                crate::constants::WEB_SEARCH_AGGREGATE_MAX_BYTES.saturating_sub("Error: ".len()),
+                mermaid_model::constants::WEB_SEARCH_AGGREGATE_MAX_BYTES
+                    .saturating_sub("Error: ".len()),
             );
             return ToolOutcome::error(message, start.elapsed().as_secs_f64()).with_metadata(
                 ToolRunMetadata {
@@ -421,10 +421,10 @@ impl ToolExecutor for WebSearchTool {
         // Cap the aggregate output. Per-result content is already truncated to
         // WEB_CONTENT_MAX_CHARS, but many results across many queries can still
         // bloat context (and memory) past what any single result's cap bounds (#28).
-        let truncated = combined.len() > crate::constants::WEB_SEARCH_AGGREGATE_MAX_BYTES;
-        let combined = crate::utils::truncate_middle_bytes(
+        let truncated = combined.len() > mermaid_model::constants::WEB_SEARCH_AGGREGATE_MAX_BYTES;
+        let combined = mermaid_model::utils::truncate_middle_bytes(
             &combined,
-            crate::constants::WEB_SEARCH_AGGREGATE_MAX_BYTES,
+            mermaid_model::constants::WEB_SEARCH_AGGREGATE_MAX_BYTES,
         );
 
         let duration_secs = start.elapsed().as_secs_f64();
@@ -501,8 +501,8 @@ fn fetch_failure_outcome(
     pattern: Option<String>,
     context_lines: usize,
 ) -> ToolOutcome {
-    let requested_url = crate::utils::sanitize_url_for_display(requested_url);
-    let message = crate::utils::redact_secrets(&format!(
+    let requested_url = mermaid_model::utils::sanitize_url_for_display(requested_url);
+    let message = mermaid_model::utils::redact_secrets(&format!(
         "web_fetch({requested_url}) via {backend}: {error}"
     ));
     let pattern_context = pattern.as_ref().map(|_| context_lines);
@@ -815,11 +815,11 @@ impl ToolExecutor for WebFetchTool {
                 (page, snapshot_id.to_string())
             },
             FetchTarget::Url(url) => {
-                let safe_url = crate::utils::sanitize_url_for_display(url.as_str());
+                let safe_url = mermaid_model::utils::sanitize_url_for_display(url.as_str());
                 if let Some(blocked) = super::policy_gate::gate_external(
                     &ctx,
                     "web_fetch",
-                    crate::runtime::ToolCategory::Web,
+                    mermaid_runtime::ToolCategory::Web,
                     format!("web_fetch via {} {safe_url}", self.backend_name),
                     &args,
                 )
@@ -889,11 +889,11 @@ impl ToolExecutor for WebFetchTool {
         let line_count = formatted.output.lines().count();
         let byte_count = formatted.output.len();
         let title = (!page.title.is_empty()).then(|| bounded_title(&page.title));
-        let requested_url = crate::utils::sanitize_url_for_display(&page.requested_url);
+        let requested_url = mermaid_model::utils::sanitize_url_for_display(&page.requested_url);
         let final_url = page
             .final_url
             .as_deref()
-            .map(crate::utils::sanitize_url_for_display);
+            .map(mermaid_model::utils::sanitize_url_for_display);
         let pattern_context = request.pattern.as_ref().map(|_| request.context_lines);
         ToolOutcome::success(
             formatted.output,
@@ -1061,7 +1061,7 @@ fn parse_bounded_usize(
 
 /// Cap on the complete model-visible `web_fetch` result, including provenance
 /// headers and truncation marker.
-const WEB_FETCH_MAX_BYTES: usize = crate::constants::WEB_SEARCH_AGGREGATE_MAX_BYTES;
+const WEB_FETCH_MAX_BYTES: usize = mermaid_model::constants::WEB_SEARCH_AGGREGATE_MAX_BYTES;
 const FETCH_TRUNCATION_SUFFIX: &str = "\n\n...[content truncated]\n[/WEB_FETCH]";
 
 struct FormattedFetch {
@@ -1181,7 +1181,7 @@ fn bounded_title(title: &str) -> String {
 
 fn bounded_url(url: &str) -> String {
     const MAX_DISPLAY_URL_BYTES: usize = 2048;
-    let url = crate::utils::sanitize_url_for_display(url);
+    let url = mermaid_model::utils::sanitize_url_for_display(url);
     if url.len() <= MAX_DISPLAY_URL_BYTES {
         return url;
     }
@@ -1307,11 +1307,11 @@ fn parse_queries(args: &serde_json::Value) -> Result<Vec<(String, usize)>, Strin
         if arr.is_empty() {
             return Err("web_search: 'queries' must contain at least one entry".to_string());
         }
-        if arr.len() > crate::constants::MAX_BATCH_TOOL_ITEMS {
+        if arr.len() > mermaid_model::constants::MAX_BATCH_TOOL_ITEMS {
             return Err(format!(
                 "web_search: too many queries ({}); cap is {} per call — split the request",
                 arr.len(),
-                crate::constants::MAX_BATCH_TOOL_ITEMS
+                mermaid_model::constants::MAX_BATCH_TOOL_ITEMS
             ));
         }
         let mut out = Vec::with_capacity(arr.len());
@@ -1752,20 +1752,20 @@ mod tests {
     #[test]
     fn parse_queries_rejects_excess_fan_out() {
         // #90: a single call can't request unbounded fan-out.
-        let many: Vec<_> = (0..crate::constants::MAX_BATCH_TOOL_ITEMS + 1)
+        let many: Vec<_> = (0..mermaid_model::constants::MAX_BATCH_TOOL_ITEMS + 1)
             .map(|i| serde_json::json!({"query": format!("q{i}")}))
             .collect();
         let args = serde_json::json!({ "queries": many });
         assert!(parse_queries(&args).is_err());
 
         // Exactly at the cap is still accepted.
-        let at_cap: Vec<_> = (0..crate::constants::MAX_BATCH_TOOL_ITEMS)
+        let at_cap: Vec<_> = (0..mermaid_model::constants::MAX_BATCH_TOOL_ITEMS)
             .map(|i| serde_json::json!({"query": format!("q{i}")}))
             .collect();
         let args = serde_json::json!({ "queries": at_cap });
         assert_eq!(
             parse_queries(&args).unwrap().len(),
-            crate::constants::MAX_BATCH_TOOL_ITEMS
+            mermaid_model::constants::MAX_BATCH_TOOL_ITEMS
         );
     }
 
@@ -2005,7 +2005,9 @@ mod tests {
         }
 
         assert_eq!(active.load(Ordering::SeqCst), 0);
-        assert!(peak.load(Ordering::SeqCst) <= crate::constants::MAX_WEB_EXTRACTION_CONCURRENCY);
+        assert!(
+            peak.load(Ordering::SeqCst) <= mermaid_model::constants::MAX_WEB_EXTRACTION_CONCURRENCY
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2190,7 +2192,7 @@ mod tests {
         assert_eq!(active.load(Ordering::SeqCst), 0);
         assert_eq!(
             peak.load(Ordering::SeqCst),
-            crate::constants::MAX_WEB_SEARCH_CONCURRENCY
+            mermaid_model::constants::MAX_WEB_SEARCH_CONCURRENCY
         );
         let mut cursor = 0;
         for index in 0..6 {
@@ -2241,7 +2243,7 @@ mod tests {
 
         assert_eq!(outcome.status, ToolStatus::Success);
         assert!(
-            outcome.output().len() <= crate::constants::WEB_SEARCH_AGGREGATE_MAX_BYTES,
+            outcome.output().len() <= mermaid_model::constants::WEB_SEARCH_AGGREGATE_MAX_BYTES,
             "{} bytes escaped the complete search-result cap",
             outcome.output().len()
         );
@@ -2282,7 +2284,7 @@ mod tests {
 
         assert_eq!(outcome.status, ToolStatus::Error);
         assert!(
-            outcome.output().len() <= crate::constants::WEB_SEARCH_AGGREGATE_MAX_BYTES,
+            outcome.output().len() <= mermaid_model::constants::WEB_SEARCH_AGGREGATE_MAX_BYTES,
             "{} bytes escaped the complete search error cap",
             outcome.output().len()
         );

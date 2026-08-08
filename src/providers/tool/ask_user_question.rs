@@ -216,7 +216,7 @@ fn save_prefs_at(path: &Path, map: &HashMap<String, StoredAnswer>) {
     };
     // Atomic write so a crash mid-save can't truncate the prefs file, and log on
     // failure instead of silently losing the user's "remember this answer" choice.
-    if let Err(err) = crate::runtime::write_atomic(path, json.as_bytes()) {
+    if let Err(err) = mermaid_runtime::write_atomic(path, json.as_bytes()) {
         tracing::warn!(
             error = %err,
             path = %path.display(),

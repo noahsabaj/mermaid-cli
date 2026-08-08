@@ -13,9 +13,9 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 
 use crate::domain::ChatRequest;
-use crate::models::adapters::ModelLimits;
-use crate::models::adapters::openai_compat::OpenAICompatAdapter;
-use crate::models::{Model, ModelConfig, ModelError, ProviderProfile, Result};
+use mermaid_model::models::adapters::ModelLimits;
+use mermaid_model::models::adapters::openai_compat::OpenAICompatAdapter;
+use mermaid_model::models::{Model, ModelConfig, ModelError, ProviderProfile, Result};
 
 use super::super::capabilities::Capabilities;
 use super::super::ctx::{FinalResponse, StreamContext, StreamEvent};
@@ -149,7 +149,7 @@ impl ModelProvider for OpenAICompatProvider {
             stop_reason: stop_reason.clone(),
         });
         drop(relay_tx);
-        crate::utils::join_logged(relay_handle.take(), "stream_relay").await;
+        mermaid_model::utils::join_logged(relay_handle.take(), "stream_relay").await;
 
         Ok(FinalResponse {
             usage,
@@ -185,7 +185,7 @@ mod tests {
             messages: vec![],
             system_prompt: "sys".to_string(),
             instructions: None,
-            reasoning: crate::models::ReasoningLevel::Medium,
+            reasoning: mermaid_model::models::ReasoningLevel::Medium,
             temperature: 0.7,
             max_tokens: 4096,
             tools: vec![],

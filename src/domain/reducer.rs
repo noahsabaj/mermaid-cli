@@ -27,16 +27,15 @@
 //!     queued-message auto-submit) without self-invoking the
 //!     reducer.
 
-use crate::models::{ChatMessage, MessageRole, ProviderContinuation, TokenUsage};
 use crate::prompts::get_system_prompt;
-use crate::runtime::TaskStatus;
+use mermaid_model::models::{ChatMessage, MessageRole, ProviderContinuation, TokenUsage};
+use mermaid_runtime::TaskStatus;
 
 use super::cmd::{ChatRequest, Cmd};
 use super::compaction::{
     CompactionArchive, CompactionRequest, CompactionResult, CompactionTrigger,
     context_exceeds_hard_limit, format_compact_count, should_auto_compact,
 };
-use super::ids::TurnId;
 use super::msg::{ClipboardRead, KeyCode, KeyMods, Msg, Paste, SlashCmd};
 use super::state::{
     GenPhase, McpServerEntry, McpServerStatus, State, StatusKind, TokenUsageTotals, ToolOutcome,
@@ -47,6 +46,7 @@ use super::transition::{
     tool_result_messages, try_complete_outcomes,
 };
 use super::{COMMAND_GROUPS, COMMAND_REGISTRY};
+use mermaid_model::ids::TurnId;
 
 /// Cap on how many queued follow-up messages get drained per
 /// external `update()` call. Arms typically enqueue zero or one
@@ -256,7 +256,7 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
                 if max_output.is_some() {
                     state.runtime.provider_capabilities.max_output_tokens = max_output;
                 }
-                state.runtime.ollama_context = Some(crate::domain::runtime::OllamaContextInfo {
+                state.runtime.ollama_context = Some(mermaid_model::tool_run::OllamaContextInfo {
                     model_max,
                     effective,
                     source,
@@ -330,7 +330,7 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             // Drop a probe that landed after a `/model` switch (it describes the
             // previous model, not the one now active).
             if model_id == state.session.model_id {
-                let placement = crate::domain::runtime::OllamaPlacement {
+                let placement = mermaid_model::tool_run::OllamaPlacement {
                     size_vram_bytes,
                     total_bytes,
                 };
@@ -504,7 +504,7 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             }
             state
                 .pending_question
-                .push_back(super::question::PendingQuestionSet::new(
+                .push_back(mermaid_model::question::PendingQuestionSet::new(
                     turn, call_id, questions,
                 ));
         },
@@ -934,7 +934,7 @@ enum QuestionKeyAction {
 /// Advance past the current question: resolve immediately for the atomic
 /// single-select-single-question case, step to the next question, or land on
 /// the review screen.
-fn advance_question(set: &mut super::question::PendingQuestionSet) -> QuestionKeyAction {
+fn advance_question(set: &mut mermaid_model::question::PendingQuestionSet) -> QuestionKeyAction {
     let nq = set.questions.len();
     if set.skips_review() {
         return QuestionKeyAction::Submit;
@@ -950,7 +950,7 @@ fn advance_question(set: &mut super::question::PendingQuestionSet) -> QuestionKe
 /// Act on an option row: toggle it (multi-select) or choose it and advance
 /// (single-select, which also drops any typed "Other" text).
 fn act_on_option(
-    set: &mut super::question::PendingQuestionSet,
+    set: &mut mermaid_model::question::PendingQuestionSet,
     q_idx: usize,
     opt_idx: usize,
 ) -> QuestionKeyAction {
@@ -973,7 +973,7 @@ fn act_on_option(
 /// Act on the row under the cursor: an option, the "Other" free-text row, or
 /// the multi-select Submit row.
 fn act_on_row(
-    set: &mut super::question::PendingQuestionSet,
+    set: &mut mermaid_model::question::PendingQuestionSet,
     q_idx: usize,
     row: usize,
 ) -> QuestionKeyAction {
@@ -1003,7 +1003,7 @@ fn act_on_row(
     reason = "predates the lint; see .github/baselines/expect_budget.txt"
 )]
 fn apply_question_key(
-    set: &mut super::question::PendingQuestionSet,
+    set: &mut mermaid_model::question::PendingQuestionSet,
     code: KeyCode,
     mods: KeyMods,
 ) -> QuestionKeyAction {
@@ -1160,7 +1160,7 @@ fn apply_question_key(
 /// Key handling for an input-kind question (Text/Number/Date/Path): typing
 /// edits the value, Number steps with Up/Down, Enter submits when valid.
 fn apply_input_key(
-    set: &mut super::question::PendingQuestionSet,
+    set: &mut mermaid_model::question::PendingQuestionSet,
     q_idx: usize,
     code: KeyCode,
     mods: KeyMods,
@@ -1199,7 +1199,7 @@ fn apply_input_key(
 }
 
 /// Step a Number question's value by `dir * step`, clamped to min/max.
-fn step_number(set: &mut super::question::PendingQuestionSet, q_idx: usize, dir: f64) {
+fn step_number(set: &mut mermaid_model::question::PendingQuestionSet, q_idx: usize, dir: f64) {
     let (min, max, step) = match &set.questions[q_idx].kind {
         crate::domain::QuestionKind::Number { min, max, step, .. } => (*min, *max, *step),
         _ => return,
@@ -1232,7 +1232,7 @@ fn format_number(n: f64) -> String {
 /// Key handling for a Rank question: Up/Down move the cursor; Space grabs the
 /// item under the cursor so Up/Down then moves it; Enter submits the order.
 fn apply_rank_key(
-    set: &mut super::question::PendingQuestionSet,
+    set: &mut mermaid_model::question::PendingQuestionSet,
     q_idx: usize,
     code: KeyCode,
     _mods: KeyMods,
@@ -1336,7 +1336,8 @@ fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMo
             state.ui.history_draft.clear();
         }
         state.ui.exit_armed_until = Some(
-            state.now + chrono::Duration::seconds(crate::constants::UI_EXIT_CONFIRM_WINDOW_SECS),
+            state.now
+                + chrono::Duration::seconds(mermaid_model::constants::UI_EXIT_CONFIRM_WINDOW_SECS),
         );
         return;
     }
@@ -1899,8 +1900,8 @@ fn rewind_candidates(messages: &[ChatMessage]) -> Vec<crate::domain::RewindCandi
         .enumerate()
         .rev()
         .filter(|(_, m)| {
-            m.role == crate::models::MessageRole::User
-                && m.kind == crate::models::ChatMessageKind::Normal
+            m.role == mermaid_model::models::MessageRole::User
+                && m.kind == mermaid_model::models::ChatMessageKind::Normal
         })
         .map(|(message_index, m)| {
             let line = m
@@ -2487,8 +2488,10 @@ fn history_nav_forward(state: &mut State) {
 /// Cycle ReasoningLevel through every variant, wrapping around. Used
 /// by Alt+T. Order matches the `Ord` impl so the cycle walks from
 /// lowest to highest and back to None.
-fn cycle_reasoning(current: crate::models::ReasoningLevel) -> crate::models::ReasoningLevel {
-    use crate::models::ReasoningLevel as R;
+fn cycle_reasoning(
+    current: mermaid_model::models::ReasoningLevel,
+) -> mermaid_model::models::ReasoningLevel {
+    use mermaid_model::models::ReasoningLevel as R;
     match current {
         R::None => R::Minimal,
         R::Minimal => R::Low,
@@ -2507,8 +2510,8 @@ fn cycle_reasoning(current: crate::models::ReasoningLevel) -> crate::models::Rea
 /// one (`permissiveness() == 0`), so the walk starts there. Entering it still
 /// allocates a plan path and may swap the model; that side of the transition
 /// lives in [`apply_safety_mode`], which every mode switch routes through.
-fn cycle_safety(current: crate::runtime::SafetyMode) -> crate::runtime::SafetyMode {
-    use crate::runtime::SafetyMode as S;
+fn cycle_safety(current: mermaid_runtime::SafetyMode) -> mermaid_runtime::SafetyMode {
+    use mermaid_runtime::SafetyMode as S;
     match current {
         S::Plan => S::ReadOnly,
         S::ReadOnly => S::Ask,
@@ -3390,7 +3393,12 @@ fn visible_reasoning_value(arg: Option<&str>, current: bool) -> Result<bool, &'s
 /// scrollable transcript instead of flashing in the spinner's row. The zone
 /// above the input is reserved for the generation spinner alone.
 fn push_system(state: &mut State, cmds: &mut Vec<Cmd>, text: impl Into<String>) {
-    push_system_kind(state, cmds, text, crate::models::ChatMessageKind::Normal);
+    push_system_kind(
+        state,
+        cmds,
+        text,
+        mermaid_model::models::ChatMessageKind::Normal,
+    );
 }
 
 /// `push_system` with an explicit message kind. The recovery tails use it to
@@ -3400,7 +3408,7 @@ fn push_system_kind(
     state: &mut State,
     cmds: &mut Vec<Cmd>,
     text: impl Into<String>,
-    kind: crate::models::ChatMessageKind,
+    kind: mermaid_model::models::ChatMessageKind,
 ) {
     // While tools are mid-flight the trailing message is the committed
     // `assistant(tool_calls)` whose `tool` results haven't landed yet. Appending
@@ -3436,7 +3444,7 @@ fn push_system_kind(
     // reminder is one of these and rides EVERY model call, so this fired once
     // per dispatch for a byte-identical message that is guaranteed to be gone
     // before the save could ever be read back. Durable kinds still save.
-    if kind != crate::models::ChatMessageKind::RecoveryNudge {
+    if kind != mermaid_model::models::ChatMessageKind::RecoveryNudge {
         cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
     }
 }
@@ -3450,7 +3458,7 @@ fn push_system_kind(
 fn sweep_spent_nudges(state: &mut State) -> bool {
     let messages = state.session.conversation.messages_mut();
     let before = messages.len();
-    messages.retain(|m| m.kind != crate::models::ChatMessageKind::RecoveryNudge);
+    messages.retain(|m| m.kind != mermaid_model::models::ChatMessageKind::RecoveryNudge);
     messages.len() != before
 }
 
@@ -3647,7 +3655,7 @@ fn latest_user_intent(session: &super::state::Session) -> Option<String> {
         .messages()
         .iter()
         .rev()
-        .find(|m| matches!(m.role, crate::models::MessageRole::User))
+        .find(|m| matches!(m.role, mermaid_model::models::MessageRole::User))
         .map(|m| {
             let c = m.content.trim();
             if c.len() > MAX {
@@ -3783,12 +3791,13 @@ fn context_text(state: &State) -> String {
                 format_compact_count(eff)
             ));
         }
-        let num_predict = crate::models::adapters::ollama_sizing::default_ollama_num_predict(
-            request.max_tokens,
-            ctx.effective,
-            next_snapshot.used_tokens,
-            state.runtime.provider_capabilities.max_output_tokens,
-        );
+        let num_predict =
+            mermaid_model::models::adapters::ollama_sizing::default_ollama_num_predict(
+                request.max_tokens,
+                ctx.effective,
+                next_snapshot.used_tokens,
+                state.runtime.provider_capabilities.max_output_tokens,
+            );
         lines.push(format!(
             "Output budget (num_predict): {}",
             match num_predict {
@@ -3982,7 +3991,7 @@ fn context_text(state: &State) -> String {
     lines.join("\n")
 }
 
-fn tasks_text(tasks: &[crate::runtime::TaskRecord]) -> String {
+fn tasks_text(tasks: &[mermaid_runtime::TaskRecord]) -> String {
     let mut lines = vec!["Tasks".to_string()];
     if tasks.is_empty() {
         lines.push("No tasks recorded yet.".to_string());
@@ -4000,8 +4009,8 @@ fn tasks_text(tasks: &[crate::runtime::TaskRecord]) -> String {
 }
 
 fn task_detail_text(
-    task: Option<&crate::runtime::TaskRecord>,
-    events: &[crate::runtime::TaskTimelineEvent],
+    task: Option<&mermaid_runtime::TaskRecord>,
+    events: &[mermaid_runtime::TaskTimelineEvent],
 ) -> String {
     let Some(task) = task else {
         return "Task not found.".to_string();
@@ -4034,7 +4043,7 @@ fn task_detail_text(
     lines.join("\n")
 }
 
-fn processes_text(processes: &[crate::runtime::ProcessRecord]) -> String {
+fn processes_text(processes: &[mermaid_runtime::ProcessRecord]) -> String {
     let mut lines = vec!["Processes".to_string()];
     if processes.is_empty() {
         lines.push("No processes recorded yet.".to_string());
@@ -4061,7 +4070,7 @@ fn processes_text(processes: &[crate::runtime::ProcessRecord]) -> String {
     lines.join("\n")
 }
 
-fn approvals_text(approvals: &[crate::runtime::ApprovalRecord]) -> String {
+fn approvals_text(approvals: &[mermaid_runtime::ApprovalRecord]) -> String {
     let mut lines = vec!["Approvals".to_string()];
     if approvals.is_empty() {
         lines.push("No pending approvals.".to_string());
@@ -4082,7 +4091,7 @@ fn approvals_text(approvals: &[crate::runtime::ApprovalRecord]) -> String {
     lines.join("\n")
 }
 
-fn checkpoints_text(checkpoints: &[crate::runtime::CheckpointRecord]) -> String {
+fn checkpoints_text(checkpoints: &[mermaid_runtime::CheckpointRecord]) -> String {
     let mut lines = vec!["Checkpoints".to_string()];
     if checkpoints.is_empty() {
         lines.push("No checkpoints recorded yet.".to_string());
@@ -4097,7 +4106,7 @@ fn checkpoints_text(checkpoints: &[crate::runtime::CheckpointRecord]) -> String 
     lines.join("\n")
 }
 
-fn plugins_text(plugins: &[crate::runtime::PluginInstallRecord]) -> String {
+fn plugins_text(plugins: &[mermaid_runtime::PluginInstallRecord]) -> String {
     let mut lines = vec!["Plugins".to_string()];
     if plugins.is_empty() {
         lines.push("No plugins installed.".to_string());
@@ -4640,7 +4649,7 @@ fn handle_compaction_failed(
 fn handle_stream_tool_call(
     state: &mut State,
     turn: TurnId,
-    call: crate::models::tool_call::ToolCall,
+    call: mermaid_model::models::tool_call::ToolCall,
 ) {
     if let TurnState::Generating {
         id,
@@ -4720,9 +4729,9 @@ fn handle_stream_done(
     state: &mut State,
     cmds: &mut Vec<Cmd>,
     turn: TurnId,
-    usage: Option<crate::models::TokenUsage>,
+    usage: Option<mermaid_model::models::TokenUsage>,
     provider_continuation: Option<ProviderContinuation>,
-    stop_reason: Option<crate::models::FinishReason>,
+    stop_reason: Option<mermaid_model::models::FinishReason>,
 ) {
     // Unpack the Generating state, drop it into Idle temporarily;
     // the branch below decides whether to stay Idle (no tool calls)
@@ -4798,8 +4807,8 @@ fn handle_stream_done(
     // or a content-filter block (terminal); those have their own handling.
     let normal_stop = !matches!(
         stop_reason,
-        Some(crate::models::FinishReason::Length)
-            | Some(crate::models::FinishReason::ContentFilter)
+        Some(mermaid_model::models::FinishReason::Length)
+            | Some(mermaid_model::models::FinishReason::ContentFilter)
     );
     // Recover a stalled turn by re-issuing the model call (tail below) so it
     // actually produces its reply/actions, bounded per-run so a persistently-empty
@@ -4835,8 +4844,11 @@ fn handle_stream_done(
     // A bare length-truncation (no tool calls) is the recoverable case below; any
     // other ending means the run made progress, so reset the recovery guard — it
     // should count only *consecutive* no-progress truncations.
-    let dry_truncation =
-        tool_calls.is_empty() && matches!(stop_reason, Some(crate::models::FinishReason::Length));
+    let dry_truncation = tool_calls.is_empty()
+        && matches!(
+            stop_reason,
+            Some(mermaid_model::models::FinishReason::Length)
+        );
     if !dry_truncation {
         state.runtime.truncation_recoveries = 0;
         state.runtime.continue_recoveries = 0;
@@ -4858,7 +4870,7 @@ fn handle_stream_done(
     // contradictory anyway, so dropping the note in that case is safe.
     if tool_calls.is_empty() && !auto_retry_empty {
         match stop_reason {
-            Some(crate::models::FinishReason::Length) => {
+            Some(mermaid_model::models::FinishReason::Length) => {
                 // Classify before deciding: a length-stop is either the window
                 // filling mid-turn (compaction helps) or the per-response
                 // OUTPUT cap (it can't — compacting the input is futile; GLM-5.2
@@ -4892,7 +4904,7 @@ fn handle_stream_done(
                                     >= u.completion_tokens.saturating_mul(9)
                         });
                         let under_cap = state.runtime.continue_recoveries
-                            < crate::constants::MAX_OUTPUT_CONTINUATIONS;
+                            < mermaid_model::constants::MAX_OUTPUT_CONTINUATIONS;
                         if !no_visible_output && !mid_reasoning && under_cap {
                             continuing = true;
                         } else {
@@ -4929,7 +4941,7 @@ fn handle_stream_done(
                     },
                 }
             },
-            Some(crate::models::FinishReason::ContentFilter) => push_system(
+            Some(mermaid_model::models::FinishReason::ContentFilter) => push_system(
                 state,
                 cmds,
                 "Response was flagged by the provider's content filter.",
@@ -4995,7 +5007,7 @@ fn handle_stream_done(
         // ExecutingTools transition (so the outcome slots exist) and fed
         // through the normal `handle_tool_finished` slot-fill machinery —
         // deterministic under --replay with zero new Msg/Cmd variants.
-        let intercepted: Vec<(super::ids::ToolCallId, ToolOutcome)> = pending
+        let intercepted: Vec<(mermaid_model::ids::ToolCallId, ToolOutcome)> = pending
             .iter()
             .filter(|call| call.source.function.name == super::tool_search::TOOL_SEARCH_NAME)
             .map(|call| {
@@ -5105,7 +5117,7 @@ fn handle_stream_done(
             cmds,
             "The response hit the model's per-response output limit — continuing. Resume \
              exactly where the previous message stopped; do not repeat text already sent.",
-            crate::models::ChatMessageKind::RecoveryNudge,
+            mermaid_model::models::ChatMessageKind::RecoveryNudge,
         );
         let next_turn = state.ids.fresh_turn();
         state.turn = super::transition::start_generating_with(
@@ -5130,7 +5142,7 @@ fn handle_stream_done(
             cmds,
             "The last turn produced no reply or action — continuing. Provide your \
              response or take the next step.",
-            crate::models::ChatMessageKind::RecoveryNudge,
+            mermaid_model::models::ChatMessageKind::RecoveryNudge,
         );
         let next_turn = state.ids.fresh_turn();
         // Propagate the continuation flag: an empty retry *inside* an
@@ -5302,7 +5314,7 @@ fn handle_upstream_error(
     state: &mut State,
     cmds: &mut Vec<Cmd>,
     turn: TurnId,
-    error: crate::models::UserFacingError,
+    error: mermaid_model::models::UserFacingError,
 ) {
     // Defense in depth (F4): even though the stale-filter at the top of
     // `update_step` gates on `turn_id()`, re-check here so a future
@@ -5339,15 +5351,15 @@ fn handle_upstream_error(
         role: MessageRole::Assistant,
         content: String::new(),
         timestamp: now,
-        kind: crate::models::ChatMessageKind::Normal,
+        kind: mermaid_model::models::ChatMessageKind::Normal,
         metadata: None,
-        actions: vec![super::action::ActionDisplay {
+        actions: vec![mermaid_model::action::ActionDisplay {
             action_type: "Error".to_string(),
             target: error.summary.clone(),
-            result: super::action::ActionResult::Error {
+            result: mermaid_model::action::ActionResult::Error {
                 error: error.message.clone(),
             },
-            details: super::action::ActionDetails::Simple,
+            details: mermaid_model::action::ActionDetails::Simple,
             duration_seconds: None,
             metadata: None,
         }],
@@ -5385,7 +5397,7 @@ fn handle_tool_progress(
     state: &mut State,
     _cmds: &mut Vec<Cmd>,
     turn: TurnId,
-    call_id: super::ids::ToolCallId,
+    call_id: mermaid_model::ids::ToolCallId,
     event: crate::providers::ProgressEvent,
 ) {
     use crate::providers::{ProgressEvent, SubagentPhase};
@@ -5449,7 +5461,7 @@ fn handle_tool_finished(
     state: &mut State,
     cmds: &mut Vec<Cmd>,
     turn: TurnId,
-    call_id: super::ids::ToolCallId,
+    call_id: mermaid_model::ids::ToolCallId,
     outcome: ToolOutcome,
 ) {
     // Borrow calls + outcomes simultaneously via a helper to avoid
@@ -5690,7 +5702,7 @@ fn advertise_context_changes(state: &mut State, cmds: &mut Vec<Cmd>) {
         state,
         cmds,
         text,
-        crate::models::ChatMessageKind::ContextMarker,
+        mermaid_model::models::ChatMessageKind::ContextMarker,
     );
 }
 
@@ -5780,7 +5792,7 @@ fn push_plan_reminder(state: &mut State, cmds: &mut Vec<Cmd>) {
     }
     let plan_path = plan.plan_path.display().to_string();
     state.session.conversation.messages_mut().retain(|m| {
-        m.kind != crate::models::ChatMessageKind::RecoveryNudge
+        m.kind != mermaid_model::models::ChatMessageKind::RecoveryNudge
             || !m.content.starts_with(PLAN_REMINDER_PREFIX)
     });
     // Doom-loop escalation: once a plan denial armed the breaker, count model
@@ -5816,7 +5828,7 @@ fn push_plan_reminder(state: &mut State, cmds: &mut Vec<Cmd>) {
         state,
         cmds,
         text,
-        crate::models::ChatMessageKind::RecoveryNudge,
+        mermaid_model::models::ChatMessageKind::RecoveryNudge,
     );
 }
 
@@ -5944,7 +5956,7 @@ pub fn build_chat_request(state: &State) -> ChatRequest {
             .session
             .messages()
             .iter()
-            .filter(|m| m.kind != crate::models::ChatMessageKind::RunSummary)
+            .filter(|m| m.kind != mermaid_model::models::ChatMessageKind::RunSummary)
             .cloned()
             .collect(),
     );
@@ -6137,7 +6149,7 @@ fn plan_capabilities_line(perms: &crate::app::PlanPermissions) -> String {
 /// transformation is on the CLONED Vec passed to the provider); only
 /// the wire payload is slimmed.
 fn evict_stale_screenshots(mut messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
-    use crate::constants::MAX_RETAINED_SCREENSHOTS;
+    use mermaid_model::constants::MAX_RETAINED_SCREENSHOTS;
     let mut seen = 0usize;
     for msg in messages.iter_mut().rev() {
         let Some(imgs) = msg.images.as_ref() else {
@@ -6177,7 +6189,7 @@ fn evict_stale_screenshots(mut messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
 /// - only tool-result messages (`MessageRole::Tool`) are considered, so a user
 ///   message or model turn that merely quotes the phrase is untouched;
 /// - the match is the *contiguous* denial signature (`blocked by policy:` +
-///   [`crate::runtime::READ_ONLY_DENIAL_MARKER`]), so a `grep` hit that happens
+///   [`mermaid_runtime::READ_ONLY_DENIAL_MARKER`]), so a `grep` hit that happens
 ///   to contain the marker text is not rewritten;
 /// - it is a no-op in read_only (the denials still apply) and self-corrects if
 ///   the user toggles back down.
@@ -6187,9 +6199,9 @@ fn evict_stale_screenshots(mut messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
 /// tool_use/tool_result pairing is preserved.
 fn neutralize_superseded_policy_denials(
     messages: &mut [ChatMessage],
-    mode: crate::runtime::SafetyMode,
+    mode: mermaid_runtime::SafetyMode,
 ) {
-    use crate::runtime::SafetyMode;
+    use mermaid_runtime::SafetyMode;
     // `Plan` carries the same read-only floor, so a read-only denial recorded
     // earlier still describes reality and must NOT be retired.
     if matches!(mode, SafetyMode::ReadOnly | SafetyMode::Plan) {
@@ -6220,13 +6232,13 @@ fn neutralize_superseded_policy_denials(
 /// The `content` infix that marks a persisted **read-only** policy denial: the
 /// gate wraps a `PolicyDecision::Deny` as `"{summary} blocked by policy:
 /// {reason}"`, and every read-only reason starts with
-/// [`crate::runtime::READ_ONLY_DENIAL_MARKER`]. Matching the *contiguous* phrase
+/// [`mermaid_runtime::READ_ONLY_DENIAL_MARKER`]. Matching the *contiguous* phrase
 /// (not the bare marker) avoids rewriting a `grep` hit that merely contains the
 /// marker text.
 fn readonly_denial_signature() -> String {
     format!(
         "blocked by policy: {}",
-        crate::runtime::READ_ONLY_DENIAL_MARKER
+        mermaid_runtime::READ_ONLY_DENIAL_MARKER
     )
 }
 
@@ -6251,7 +6263,7 @@ const SAFETY_NUDGE_PREFIX: &str = "Safety mode is now ";
 /// request it steers has gone out. Pairs with
 /// `neutralize_superseded_policy_denials`, which rewrites the denials
 /// themselves on every request.
-fn safety_loosened_note(mode: crate::runtime::SafetyMode) -> String {
+fn safety_loosened_note(mode: mermaid_runtime::SafetyMode) -> String {
     format!(
         "{SAFETY_NUDGE_PREFIX}{}; earlier read-only policy blocks no longer apply. \
          Re-attempt gated actions instead of assuming they'll fail.",
@@ -6274,11 +6286,11 @@ fn safety_loosened_note(mode: crate::runtime::SafetyMode) -> String {
 fn note_safety_mode_change(
     state: &mut State,
     cmds: &mut Vec<Cmd>,
-    previous: crate::runtime::SafetyMode,
-    next: crate::runtime::SafetyMode,
+    previous: mermaid_runtime::SafetyMode,
+    next: mermaid_runtime::SafetyMode,
 ) {
-    use crate::models::ChatMessageKind;
-    use crate::runtime::SafetyMode;
+    use mermaid_model::models::ChatMessageKind;
+    use mermaid_runtime::SafetyMode;
     let messages = state.session.conversation.messages_mut();
     let before = messages.len();
     messages.retain(|m| {
@@ -6463,7 +6475,7 @@ fn cycle_plan_config_row(state: &mut State, row: usize, forward: bool) {
             };
         },
         6 => {
-            use crate::models::ReasoningLevel as R;
+            use mermaid_model::models::ReasoningLevel as R;
             const REASONING: [Option<R>; 8] = [
                 None,
                 Some(R::None),
@@ -6497,7 +6509,7 @@ fn cycle_plan_config_row(state: &mut State, row: usize, forward: bool) {
 /// model/reasoning overrides, leaving tears them back down. Routing every
 /// switch through here is what lets plan sit in the flat Shift+Tab cycle
 /// without a separate "am I planning?" flag to contradict it.
-fn apply_safety_mode(state: &mut State, cmds: &mut Vec<Cmd>, next: crate::runtime::SafetyMode) {
+fn apply_safety_mode(state: &mut State, cmds: &mut Vec<Cmd>, next: mermaid_runtime::SafetyMode) {
     let previous = state.session.safety_mode;
     if previous == next {
         return;
@@ -6532,10 +6544,10 @@ fn apply_safety_mode(state: &mut State, cmds: &mut Vec<Cmd>, next: crate::runtim
 ///
 /// There is deliberately no remembered per-session restore target: plan is a
 /// safety mode like the others, and a mode does not carry the mode before it.
-fn mode_after_plan(state: &State) -> crate::runtime::SafetyMode {
+fn mode_after_plan(state: &State) -> mermaid_runtime::SafetyMode {
     let configured = state.settings.safety.mode;
     if configured.is_planning() {
-        crate::runtime::SafetyMode::Ask
+        mermaid_runtime::SafetyMode::Ask
     } else {
         configured
     }
@@ -6578,7 +6590,7 @@ fn enter_plan_mode_state(state: &mut State, cmds: &mut Vec<Cmd>) -> Option<std::
     }
     // The mode BECOMES plan. `session.plan` carries only the plan's data, so
     // there is no second value that can disagree with the floor.
-    state.session.safety_mode = crate::runtime::SafetyMode::Plan;
+    state.session.safety_mode = mermaid_runtime::SafetyMode::Plan;
     state.session.plan = Some(super::state::PlanState {
         plan_path: plan_path.clone(),
         prev_model_id,
@@ -6589,7 +6601,7 @@ fn enter_plan_mode_state(state: &mut State, cmds: &mut Vec<Cmd>) -> Option<std::
     // plan-exit nudge is gone — the context-delta injector diffs at dispatch,
     // so an off→on flip between dispatches collapses to no message at all.)
     state.session.conversation.messages_mut().retain(|m| {
-        m.kind != crate::models::ChatMessageKind::RecoveryNudge
+        m.kind != mermaid_model::models::ChatMessageKind::RecoveryNudge
             || !m.content.starts_with(SAFETY_NUDGE_PREFIX)
     });
     // A fresh plan starts with a disarmed doom-loop breaker.
@@ -6662,7 +6674,7 @@ fn exit_plan_mode(state: &mut State, cmds: &mut Vec<Cmd>) {
 /// stale thrash counter waiting for the next plan).
 fn retract_plan_reminder(state: &mut State) {
     state.session.conversation.messages_mut().retain(|m| {
-        m.kind != crate::models::ChatMessageKind::RecoveryNudge
+        m.kind != mermaid_model::models::ChatMessageKind::RecoveryNudge
             || !m.content.starts_with(PLAN_REMINDER_PREFIX)
     });
     state.runtime.plan_thrash_armed = false;
@@ -6671,9 +6683,9 @@ fn retract_plan_reminder(state: &mut State) {
 
 /// The `content` infix that marks a persisted **plan-mode** policy denial.
 /// Sibling of [`readonly_denial_signature`], keyed on
-/// [`crate::runtime::PLAN_DENIAL_MARKER`].
+/// [`mermaid_runtime::PLAN_DENIAL_MARKER`].
 fn plan_denial_signature() -> String {
-    format!("blocked by policy: {}", crate::runtime::PLAN_DENIAL_MARKER)
+    format!("blocked by policy: {}", mermaid_runtime::PLAN_DENIAL_MARKER)
 }
 
 /// True if the conversation still carries a plan-mode policy denial.
@@ -6851,7 +6863,7 @@ fn handoff_plan_mode(
 fn plan_tool_transition(
     state: &mut State,
     cmds: &mut Vec<Cmd>,
-    call_id: super::ids::ToolCallId,
+    call_id: mermaid_model::ids::ToolCallId,
     outcome: &ToolOutcome,
 ) -> bool {
     use super::plan::{ENTER_PLAN_MODE_TOOL, EXIT_PLAN_MODE_TOOL};
@@ -7344,7 +7356,7 @@ mod tests {
             .session
             .append(ChatMessage::system("system note"), state.now);
         let mut summary = ChatMessage::user("summary-ish");
-        summary.kind = crate::models::ChatMessageKind::RunSummary;
+        summary.kind = mermaid_model::models::ChatMessageKind::RunSummary;
         state.session.append(summary, state.now);
         let candidates = rewind_candidates(state.session.messages());
         assert_eq!(candidates.len(), 1);
@@ -7371,14 +7383,14 @@ mod tests {
 
     #[test]
     fn evict_stale_screenshots_retains_most_recent_and_elides_rest() {
-        use crate::constants::MAX_RETAINED_SCREENSHOTS;
+        use mermaid_model::constants::MAX_RETAINED_SCREENSHOTS;
         let mut msgs = Vec::new();
         for i in 0..(MAX_RETAINED_SCREENSHOTS + 3) {
             msgs.push(ChatMessage {
                 role: MessageRole::Assistant,
                 content: format!("turn {}", i),
                 timestamp: chrono::Local::now(),
-                kind: crate::models::ChatMessageKind::Normal,
+                kind: mermaid_model::models::ChatMessageKind::Normal,
                 metadata: None,
                 actions: vec![],
                 thinking: None,
@@ -7407,7 +7419,7 @@ mod tests {
 
     #[test]
     fn evict_stale_screenshots_preserves_messages_without_images() {
-        use crate::constants::MAX_RETAINED_SCREENSHOTS;
+        use mermaid_model::constants::MAX_RETAINED_SCREENSHOTS;
         // 5 text-only + 2 with images (under the cap) — nothing should
         // be elided.
         let mut msgs = Vec::new();
@@ -7416,7 +7428,7 @@ mod tests {
                 role: MessageRole::User,
                 content: format!("text only {}", i),
                 timestamp: chrono::Local::now(),
-                kind: crate::models::ChatMessageKind::Normal,
+                kind: mermaid_model::models::ChatMessageKind::Normal,
                 metadata: None,
                 actions: vec![],
                 thinking: None,
@@ -7433,7 +7445,7 @@ mod tests {
                 role: MessageRole::Assistant,
                 content: format!("with image {}", i),
                 timestamp: chrono::Local::now(),
-                kind: crate::models::ChatMessageKind::Normal,
+                kind: mermaid_model::models::ChatMessageKind::Normal,
                 metadata: None,
                 actions: vec![],
                 thinking: None,
@@ -7511,7 +7523,8 @@ mod tests {
         let (mut state, _) = update(state, ctrl_c());
         assert!(state.ui.exit_armed_until.is_some());
         // Advance the injected clock past the deadline.
-        state.now += chrono::Duration::seconds(crate::constants::UI_EXIT_CONFIRM_WINDOW_SECS + 1);
+        state.now +=
+            chrono::Duration::seconds(mermaid_model::constants::UI_EXIT_CONFIRM_WINDOW_SECS + 1);
         let (state, cmds) = update(state, ctrl_c());
         assert!(!state.should_exit, "expired arm must re-arm, not exit");
         assert!(cmds.is_empty());
@@ -7583,7 +7596,7 @@ mod tests {
             state,
             Msg::ToolProgress {
                 turn,
-                call_id: super::super::ids::ToolCallId(1),
+                call_id: mermaid_model::ids::ToolCallId(1),
                 event: ProgressEvent::Output(
                     "drwxrwxr-x  3 nsabaj nsabaj 4096 Mar 30 14:02 .mermaid".to_string(),
                 ),
@@ -8286,7 +8299,7 @@ mod tests {
         // RC-1 (D2/D3/D4): a parked `ask_user_question` modal must not survive a
         // turn cancel/reset — the tool task behind it is torn down, so the modal
         // would be permanently unanswerable. Every cancel/reset path clears it.
-        use super::super::ids::ToolCallId;
+        use mermaid_model::ids::ToolCallId;
 
         let parked = || {
             let mut state = fresh_state();
@@ -8535,15 +8548,15 @@ mod tests {
     /// message before the tool results land.
     fn executing_tools_with_committed_call(turn: TurnId) -> State {
         let mut state = fresh_state();
-        let source = crate::models::tool_call::ToolCall {
+        let source = mermaid_model::models::tool_call::ToolCall {
             id: Some("call-1".to_string()),
-            function: crate::models::tool_call::FunctionCall {
+            function: mermaid_model::models::tool_call::FunctionCall {
                 name: "read_file".to_string(),
                 arguments: serde_json::json!({"path": "foo"}),
             },
         };
         let call = PendingToolCall {
-            call_id: super::super::ids::ToolCallId(1),
+            call_id: mermaid_model::ids::ToolCallId(1),
             source: source.clone(),
         };
         state.session.append(
@@ -8688,11 +8701,11 @@ mod tests {
             state,
             Msg::UpstreamError {
                 turn: TurnId(5),
-                error: crate::models::UserFacingError {
+                error: mermaid_model::models::UserFacingError {
                     summary: "Backend error".to_string(),
                     message: "connection reset".to_string(),
                     suggestion: String::new(),
-                    category: crate::models::ErrorCategory::Connection,
+                    category: mermaid_model::models::ErrorCategory::Connection,
                     recoverable: true,
                 },
             },
@@ -9139,7 +9152,7 @@ mod tests {
             state,
             Msg::StreamReasoning {
                 turn: TurnId(5),
-                chunk: crate::models::ReasoningChunk {
+                chunk: mermaid_model::models::ReasoningChunk {
                     text: "weighing...".to_string(),
                     signature: None,
                 },
@@ -9264,7 +9277,7 @@ mod tests {
             .session
             .messages()
             .iter()
-            .find(|m| m.kind == crate::models::ChatMessageKind::RunSummary)
+            .find(|m| m.kind == mermaid_model::models::ChatMessageKind::RunSummary)
             .expect("run summary");
         assert!(
             summary.content.contains("3 tasks completed"),
@@ -9294,7 +9307,7 @@ mod tests {
             .session
             .messages()
             .iter()
-            .find(|m| m.kind == crate::models::ChatMessageKind::RunSummary)
+            .find(|m| m.kind == mermaid_model::models::ChatMessageKind::RunSummary)
             .expect("run summary");
         assert!(
             !summary.content.contains("completed"),
@@ -9390,7 +9403,7 @@ mod tests {
             .session
             .messages()
             .iter()
-            .find(|m| m.kind == crate::models::ChatMessageKind::RunSummary)
+            .find(|m| m.kind == mermaid_model::models::ChatMessageKind::RunSummary)
             .expect("a run summary should be appended at run end");
         assert!(summary.content.contains("Worked for"));
         assert!(
@@ -9440,7 +9453,7 @@ mod tests {
             .session
             .messages()
             .iter()
-            .find(|m| m.kind == crate::models::ChatMessageKind::RunSummary)
+            .find(|m| m.kind == mermaid_model::models::ChatMessageKind::RunSummary)
             .expect("a run summary should be appended at run end");
         assert!(
             summary.content.contains("· +4/-4"),
@@ -9478,7 +9491,7 @@ mod tests {
             .session
             .messages()
             .iter()
-            .find(|m| m.kind == crate::models::ChatMessageKind::RunSummary)
+            .find(|m| m.kind == mermaid_model::models::ChatMessageKind::RunSummary)
             .expect("a run summary should be appended at run end");
         assert!(
             !summary.content.contains('+'),
@@ -9499,7 +9512,7 @@ mod tests {
             std::time::SystemTime::now(),
         );
         let outcome = ToolOutcome::success("Wrote foo.rs (3 lines)", "3 lines written", 0.1)
-            .with_metadata(crate::domain::runtime::ToolRunMetadata {
+            .with_metadata(mermaid_model::tool_run::ToolRunMetadata {
                 lines_added: 3,
                 lines_removed: 1,
                 ..Default::default()
@@ -9543,7 +9556,8 @@ mod tests {
             Msg::StreamDone {
                 turn: TurnId(5),
                 usage: Some(
-                    crate::models::TokenUsage::provider(1_000, 30).with_reasoning_output(20),
+                    mermaid_model::models::TokenUsage::provider(1_000, 30)
+                        .with_reasoning_output(20),
                 ),
                 provider_continuation: None,
                 stop_reason: None,
@@ -9553,7 +9567,7 @@ mod tests {
             .session
             .messages()
             .iter()
-            .find(|m| m.kind == crate::models::ChatMessageKind::RunSummary)
+            .find(|m| m.kind == mermaid_model::models::ChatMessageKind::RunSummary)
             .expect("a run summary should be appended at run end");
         assert!(
             summary.content.contains("used 50 tokens"),
@@ -9575,7 +9589,7 @@ mod tests {
         assert!(
             !req.messages
                 .iter()
-                .any(|m| m.kind == crate::models::ChatMessageKind::RunSummary),
+                .any(|m| m.kind == mermaid_model::models::ChatMessageKind::RunSummary),
             "run summaries are display-only and must not reach the model"
         );
         assert!(
@@ -9707,7 +9721,7 @@ mod tests {
             turn: TurnId(5),
             usage: None,
             provider_continuation: None,
-            stop_reason: Some(crate::models::FinishReason::Length),
+            stop_reason: Some(mermaid_model::models::FinishReason::Length),
         }
     }
 
@@ -9858,9 +9872,11 @@ mod tests {
     fn length_done_with_usage(prompt: usize, completion: usize) -> Msg {
         Msg::StreamDone {
             turn: TurnId(5),
-            usage: Some(crate::models::TokenUsage::provider(prompt, completion)),
+            usage: Some(mermaid_model::models::TokenUsage::provider(
+                prompt, completion,
+            )),
             provider_continuation: None,
-            stop_reason: Some(crate::models::FinishReason::Length),
+            stop_reason: Some(mermaid_model::models::FinishReason::Length),
         }
     }
 
@@ -9926,14 +9942,15 @@ mod tests {
             .session
             .append(ChatMessage::assistant("exploring the code"), state.now);
         state.turn = truncating_turn("here is");
-        let usage = crate::models::TokenUsage::provider(16_600, 4_000).with_reasoning_output(3_900);
+        let usage =
+            mermaid_model::models::TokenUsage::provider(16_600, 4_000).with_reasoning_output(3_900);
         let (state, cmds) = update(
             state,
             Msg::StreamDone {
                 turn: TurnId(5),
                 usage: Some(usage),
                 provider_continuation: None,
-                stop_reason: Some(crate::models::FinishReason::Length),
+                stop_reason: Some(mermaid_model::models::FinishReason::Length),
             },
         );
 
@@ -9955,7 +9972,7 @@ mod tests {
         // At the per-run continuation cap the run stops with the hint instead
         // of looping forever on a model that keeps re-truncating.
         let mut state = fresh_state();
-        state.runtime.continue_recoveries = crate::constants::MAX_OUTPUT_CONTINUATIONS;
+        state.runtime.continue_recoveries = mermaid_model::constants::MAX_OUTPUT_CONTINUATIONS;
         state
             .session
             .append(ChatMessage::user("audit the widget"), state.now);
@@ -10036,7 +10053,7 @@ mod tests {
             .expect("nudge pushed");
         assert_eq!(
             nudge.kind,
-            crate::models::ChatMessageKind::RecoveryNudge,
+            mermaid_model::models::ChatMessageKind::RecoveryNudge,
             "the nudge is stamped for hiding + retirement"
         );
         let cont_id = state.turn.id().expect("continuation turn live");
@@ -10067,7 +10084,7 @@ mod tests {
         assert!(
             !messages
                 .iter()
-                .any(|m| m.kind == crate::models::ChatMessageKind::RecoveryNudge),
+                .any(|m| m.kind == mermaid_model::models::ChatMessageKind::RecoveryNudge),
             "the spent nudge is retired from history"
         );
         assert!(
@@ -10085,7 +10102,7 @@ mod tests {
         );
         assert_eq!(
             part_two.kind,
-            crate::models::ChatMessageKind::Continuation,
+            mermaid_model::models::ChatMessageKind::Continuation,
             "the continuation commit is stamped for the display stitch"
         );
         assert_eq!(state.runtime.continue_recoveries, 0, "progress resets");
@@ -10128,7 +10145,7 @@ mod tests {
             .expect("empty-retry nudge pushed");
         assert_eq!(
             nudge.kind,
-            crate::models::ChatMessageKind::RecoveryNudge,
+            mermaid_model::models::ChatMessageKind::RecoveryNudge,
             "the stalled-turn nudge gets the same retirement treatment"
         );
     }
@@ -10180,7 +10197,7 @@ mod tests {
             .session
             .append(ChatMessage::assistant("part one of the reply"), state.now);
         let mut nudge = ChatMessage::system("resume nudge");
-        nudge.kind = crate::models::ChatMessageKind::RecoveryNudge;
+        nudge.kind = mermaid_model::models::ChatMessageKind::RecoveryNudge;
         state.session.append(nudge, state.now);
         state.turn = continuation_turn(TurnId(9), "and part tw");
         let (state, cmds) = update(state, Msg::Quit);
@@ -10191,14 +10208,14 @@ mod tests {
         assert!(
             !messages
                 .iter()
-                .any(|m| m.kind == crate::models::ChatMessageKind::RecoveryNudge),
+                .any(|m| m.kind == mermaid_model::models::ChatMessageKind::RecoveryNudge),
             "the live nudge is not persisted on quit"
         );
         let last = messages.last().expect("interrupted partial committed");
         assert!(last.content.contains("and part tw"));
         assert_eq!(
             last.kind,
-            crate::models::ChatMessageKind::Continuation,
+            mermaid_model::models::ChatMessageKind::Continuation,
             "the interrupted commit keeps the stitch marker"
         );
     }
@@ -10211,17 +10228,17 @@ mod tests {
         for is_error in [false, true] {
             let mut state = fresh_state();
             let mut nudge = ChatMessage::system("resume nudge");
-            nudge.kind = crate::models::ChatMessageKind::RecoveryNudge;
+            nudge.kind = mermaid_model::models::ChatMessageKind::RecoveryNudge;
             state.session.append(nudge, state.now);
             let msg = if is_error {
                 state.turn = continuation_turn(TurnId(9), "half");
                 Msg::UpstreamError {
                     turn: TurnId(9),
-                    error: crate::models::UserFacingError {
+                    error: mermaid_model::models::UserFacingError {
                         summary: "boom".to_string(),
                         message: "provider died".to_string(),
                         suggestion: String::new(),
-                        category: crate::models::ErrorCategory::Temporary,
+                        category: mermaid_model::models::ErrorCategory::Temporary,
                         recoverable: true,
                     },
                 }
@@ -10238,7 +10255,7 @@ mod tests {
                     .session
                     .messages()
                     .iter()
-                    .any(|m| m.kind == crate::models::ChatMessageKind::RecoveryNudge),
+                    .any(|m| m.kind == mermaid_model::models::ChatMessageKind::RecoveryNudge),
                 "nudge swept (is_error={is_error})"
             );
             assert!(
@@ -10253,7 +10270,7 @@ mod tests {
         // A run that ENDED at the continuation cap never hits the in-stream
         // reset; the next submit must restore the full budget.
         let mut state = fresh_state();
-        state.runtime.continue_recoveries = crate::constants::MAX_OUTPUT_CONTINUATIONS;
+        state.runtime.continue_recoveries = mermaid_model::constants::MAX_OUTPUT_CONTINUATIONS;
         let (state, _) = update(
             state,
             Msg::SubmitPrompt {
@@ -10457,10 +10474,10 @@ mod tests {
         );
     }
 
-    fn tool_call_fixture(id: &str, name: &str) -> crate::models::tool_call::ToolCall {
-        crate::models::tool_call::ToolCall {
+    fn tool_call_fixture(id: &str, name: &str) -> mermaid_model::models::tool_call::ToolCall {
+        mermaid_model::models::tool_call::ToolCall {
             id: Some(id.to_string()),
-            function: crate::models::tool_call::FunctionCall {
+            function: mermaid_model::models::tool_call::FunctionCall {
                 name: name.to_string(),
                 arguments: serde_json::json!({}),
             },
@@ -10786,7 +10803,7 @@ mod tests {
     #[test]
     fn fold_token_usage_variants_route_to_the_right_meters() {
         let mut state = fresh_state();
-        let usage = crate::models::TokenUsage::provider(100, 20).with_reasoning_output(5);
+        let usage = mermaid_model::models::TokenUsage::provider(100, 20).with_reasoning_output(5);
 
         // OwnRequest: last + cumulative, no run banking (the stream-done
         // path banks its own output separately).
@@ -10855,7 +10872,7 @@ mod tests {
             state,
             Msg::StreamDone {
                 turn: TurnId(5),
-                usage: Some(crate::models::TokenUsage::provider(120, 30)),
+                usage: Some(mermaid_model::models::TokenUsage::provider(120, 30)),
                 provider_continuation: None,
                 stop_reason: None,
             },
@@ -10892,7 +10909,7 @@ mod tests {
             state,
             Msg::StreamDone {
                 turn: TurnId(5),
-                usage: Some(crate::models::TokenUsage::provider(100, 0)),
+                usage: Some(mermaid_model::models::TokenUsage::provider(100, 0)),
                 provider_continuation: None,
                 stop_reason: None,
             },
@@ -11059,11 +11076,11 @@ mod tests {
     fn handle_upstream_error_refuses_mismatched_turn_id() {
         let mut state = fresh_state();
         state.turn = start_generating(TurnId(5), std::time::SystemTime::now());
-        let err = crate::models::UserFacingError {
+        let err = mermaid_model::models::UserFacingError {
             summary: "Stale".to_string(),
             message: "wrong turn".to_string(),
             suggestion: String::new(),
-            category: crate::models::ErrorCategory::Temporary,
+            category: mermaid_model::models::ErrorCategory::Temporary,
             recoverable: true,
         };
         let mut cmds = Vec::new();
@@ -11080,11 +11097,11 @@ mod tests {
     fn upstream_error_ends_turn_and_records_line() {
         let mut state = fresh_state();
         state.turn = start_generating(TurnId(1), std::time::SystemTime::now());
-        let err = crate::models::UserFacingError {
+        let err = mermaid_model::models::UserFacingError {
             summary: "Server error".to_string(),
             message: "500 internal".to_string(),
             suggestion: "retry".to_string(),
-            category: crate::models::ErrorCategory::Temporary,
+            category: mermaid_model::models::ErrorCategory::Temporary,
             recoverable: true,
         };
         let (state, cmds) = update(
@@ -11124,11 +11141,11 @@ mod tests {
                 text: "queued during turn".to_string(),
                 attachment_ids: Vec::new(),
             });
-        let err = crate::models::UserFacingError {
+        let err = mermaid_model::models::UserFacingError {
             summary: "Server error".to_string(),
             message: "500 internal".to_string(),
             suggestion: "retry".to_string(),
-            category: crate::models::ErrorCategory::Temporary,
+            category: mermaid_model::models::ErrorCategory::Temporary,
             recoverable: true,
         };
         let (state, cmds) = update(
@@ -11314,10 +11331,13 @@ mod tests {
         let (state, cmds) = update(
             state,
             Msg::Slash(SlashCmd::Reasoning(Some(
-                crate::models::ReasoningLevel::High,
+                mermaid_model::models::ReasoningLevel::High,
             ))),
         );
-        assert_eq!(state.session.reasoning, crate::models::ReasoningLevel::High);
+        assert_eq!(
+            state.session.reasoning,
+            mermaid_model::models::ReasoningLevel::High
+        );
         let emitted = cmds
             .iter()
             .find_map(|c| match c {
@@ -11326,7 +11346,7 @@ mod tests {
             })
             .expect("persist cmd emitted");
         assert_eq!(emitted.0, "ollama/test");
-        assert_eq!(emitted.1, crate::models::ReasoningLevel::High);
+        assert_eq!(emitted.1, mermaid_model::models::ReasoningLevel::High);
     }
 
     #[test]
@@ -11412,7 +11432,7 @@ mod tests {
 
     #[test]
     fn provider_context_resolved_stored_in_runtime() {
-        use crate::models::adapters::ollama_sizing::NumCtxSource;
+        use mermaid_model::models::adapters::ollama_sizing::NumCtxSource;
         let state = fresh_state();
         let (state, _) = update(
             state,
@@ -11443,7 +11463,7 @@ mod tests {
     fn provider_context_resolved_ignores_probe_for_other_model() {
         // A window probe that lands after a /model switch (model_id != session
         // model) must not overwrite the active model's context window.
-        use crate::models::adapters::ollama_sizing::NumCtxSource;
+        use mermaid_model::models::adapters::ollama_sizing::NumCtxSource;
         let state = fresh_state();
         let (state, _) = update(
             state,
@@ -11536,7 +11556,7 @@ mod tests {
 
     #[test]
     fn ollama_placement_offload_math_boundaries() {
-        use crate::domain::runtime::OllamaPlacement;
+        use mermaid_model::tool_run::OllamaPlacement;
         let p = |vram, total| OllamaPlacement {
             size_vram_bytes: vram,
             total_bytes: total,
@@ -11665,7 +11685,7 @@ mod tests {
 
     #[test]
     fn cycle_safety_walks_by_permissiveness() {
-        use crate::runtime::SafetyMode as S;
+        use mermaid_runtime::SafetyMode as S;
         // Plan is the strictest position (permissiveness 0), so the walk
         // starts there and wraps back to it — one flat cycle, no side door.
         assert_eq!(cycle_safety(S::Plan), S::ReadOnly);
@@ -11896,9 +11916,9 @@ mod tests {
         let state = fresh_state();
         let (state, _) = update(
             state,
-            Msg::Slash(SlashCmd::Safety(Some(crate::runtime::SafetyMode::Auto))),
+            Msg::Slash(SlashCmd::Safety(Some(mermaid_runtime::SafetyMode::Auto))),
         );
-        assert_eq!(state.session.safety_mode, crate::runtime::SafetyMode::Auto);
+        assert_eq!(state.session.safety_mode, mermaid_runtime::SafetyMode::Auto);
     }
 
     /// A tool-result shaped exactly like a real read-only policy denial
@@ -11910,14 +11930,14 @@ mod tests {
             "execute_command",
             format!(
                 "{summary} blocked by policy: {} blocks mutations and control actions",
-                crate::runtime::READ_ONLY_DENIAL_MARKER
+                mermaid_runtime::READ_ONLY_DENIAL_MARKER
             ),
         )
     }
 
     #[test]
     fn superseded_readonly_denial_is_rewritten_when_mode_loosened() {
-        use crate::runtime::SafetyMode;
+        use mermaid_runtime::SafetyMode;
         let mut msgs = vec![readonly_denial_message("write_file(main.qml)")];
         neutralize_superseded_policy_denials(&mut msgs, SafetyMode::FullAccess);
         let content = &msgs[0].content;
@@ -11941,7 +11961,7 @@ mod tests {
 
     #[test]
     fn readonly_denial_preserved_in_read_only_mode() {
-        use crate::runtime::SafetyMode;
+        use mermaid_runtime::SafetyMode;
         let original = readonly_denial_message("write_file(x)");
         let mut msgs = vec![original.clone()];
         neutralize_superseded_policy_denials(&mut msgs, SafetyMode::ReadOnly);
@@ -11953,11 +11973,11 @@ mod tests {
 
     #[test]
     fn neutralizer_ignores_non_tool_and_non_denial_messages() {
-        use crate::runtime::SafetyMode;
+        use mermaid_runtime::SafetyMode;
         // Role gate: a USER message quoting the full signature is left alone.
         let quote = ChatMessage::user(format!(
             "it said: blocked by policy: {} blocks mutations and control actions",
-            crate::runtime::READ_ONLY_DENIAL_MARKER
+            mermaid_runtime::READ_ONLY_DENIAL_MARKER
         ));
         // Contiguous-signature gate: a tool result that merely contains the
         // marker text (e.g. a grep of the source) is not a denial.
@@ -11966,7 +11986,7 @@ mod tests {
             "execute_command",
             format!(
                 "policy.rs: const MARKER = {:?};",
-                crate::runtime::READ_ONLY_DENIAL_MARKER
+                mermaid_runtime::READ_ONLY_DENIAL_MARKER
             ),
         );
         let mut msgs = vec![quote.clone(), grep.clone()];
@@ -11980,7 +12000,7 @@ mod tests {
 
     #[test]
     fn leaving_read_only_past_a_stale_denial_injects_a_hidden_nudge() {
-        use crate::runtime::SafetyMode;
+        use mermaid_runtime::SafetyMode;
         let mut state = fresh_state();
         state.session.safety_mode = SafetyMode::ReadOnly;
         state
@@ -11997,14 +12017,14 @@ mod tests {
         assert_eq!(nudge.role, MessageRole::System);
         assert_eq!(
             nudge.kind,
-            crate::models::ChatMessageKind::RecoveryNudge,
+            mermaid_model::models::ChatMessageKind::RecoveryNudge,
             "the nudge is for the model only — RecoveryNudge hides it from the transcript",
         );
     }
 
     #[test]
     fn further_loosening_replaces_the_pending_nudge_instead_of_stacking() {
-        use crate::runtime::SafetyMode;
+        use mermaid_runtime::SafetyMode;
         let mut state = fresh_state();
         state.session.safety_mode = SafetyMode::ReadOnly;
         state
@@ -12033,7 +12053,7 @@ mod tests {
 
     #[test]
     fn loosening_after_the_nudge_was_spent_stays_silent() {
-        use crate::runtime::SafetyMode;
+        use mermaid_runtime::SafetyMode;
         let mut state = fresh_state();
         state.session.safety_mode = SafetyMode::ReadOnly;
         state
@@ -12054,7 +12074,7 @@ mod tests {
 
     #[test]
     fn tightening_back_to_read_only_retracts_the_pending_nudge() {
-        use crate::runtime::SafetyMode;
+        use mermaid_runtime::SafetyMode;
         let mut state = fresh_state();
         state.session.safety_mode = SafetyMode::ReadOnly;
         state
@@ -12077,7 +12097,7 @@ mod tests {
 
     #[test]
     fn clean_mode_cycle_stays_silent() {
-        use crate::runtime::SafetyMode;
+        use mermaid_runtime::SafetyMode;
         let mut state = fresh_state();
         state.session.safety_mode = SafetyMode::ReadOnly;
         let (state, _) = update(state, key(KeyCode::BackTab));
@@ -12094,7 +12114,7 @@ mod tests {
 
     #[test]
     fn slash_safety_loosening_announces_when_denial_present() {
-        use crate::runtime::SafetyMode;
+        use mermaid_runtime::SafetyMode;
         let mut state = fresh_state();
         state.session.safety_mode = SafetyMode::ReadOnly;
         state
@@ -12117,16 +12137,16 @@ mod tests {
 
     #[test]
     fn build_chat_request_neutralizes_a_superseded_denial() {
-        use crate::runtime::SafetyMode;
+        use mermaid_runtime::SafetyMode;
         // Full production path: a read_only denial sits in history behind a valid
         // tool_use/tool_result pair (so `normalize_history` keeps it); once the
         // live mode is looser, `build_chat_request` must hand the model a
         // rewritten, non-standing note rather than the original block.
         let mut state = fresh_state();
         state.session.safety_mode = SafetyMode::FullAccess;
-        let call = crate::models::tool_call::ToolCall {
+        let call = mermaid_model::models::tool_call::ToolCall {
             id: Some("call-1".to_string()),
-            function: crate::models::tool_call::FunctionCall {
+            function: mermaid_model::models::tool_call::FunctionCall {
                 name: "write_file".to_string(),
                 arguments: serde_json::json!({ "path": "main.qml" }),
             },
@@ -12141,7 +12161,7 @@ mod tests {
                 "write_file",
                 format!(
                     "write_file(main.qml) blocked by policy: {} blocks mutations and control actions",
-                    crate::runtime::READ_ONLY_DENIAL_MARKER
+                    mermaid_runtime::READ_ONLY_DENIAL_MARKER
                 ),
             ),
             state.now,
@@ -12174,7 +12194,7 @@ mod tests {
             state,
             Msg::ApprovalRequested {
                 turn: TurnId(1),
-                call_id: super::super::ids::ToolCallId(5),
+                call_id: mermaid_model::ids::ToolCallId(5),
                 tool: "execute_command".to_string(),
                 risk: "shell_mutation".to_string(),
                 kind: crate::domain::ApprovalKind::Shell,
@@ -12352,7 +12372,7 @@ mod tests {
             .messages()
             .iter()
             .rev()
-            .find(|m| m.role == crate::models::MessageRole::User)
+            .find(|m| m.role == mermaid_model::models::MessageRole::User)
             .map(|m| m.content.clone());
         assert_eq!(last_user.as_deref(), Some("Deploy to prod now."));
         assert!(state.ui.input_buffer.is_empty());
@@ -12503,7 +12523,7 @@ mod tests {
             state,
             Msg::ApprovalRequested {
                 turn: TurnId(1),
-                call_id: super::super::ids::ToolCallId(5),
+                call_id: mermaid_model::ids::ToolCallId(5),
                 tool: "execute_command".to_string(),
                 risk: "shell_mutation".to_string(),
                 kind: crate::domain::ApprovalKind::Shell,
@@ -12618,7 +12638,7 @@ mod tests {
             state,
             Msg::ApprovalRequested {
                 turn: TurnId(1),
-                call_id: super::super::ids::ToolCallId(6),
+                call_id: mermaid_model::ids::ToolCallId(6),
                 tool: "write_file".to_string(),
                 risk: "file_mutation".to_string(),
                 kind: crate::domain::ApprovalKind::FileMutation,
@@ -12685,7 +12705,7 @@ mod tests {
             .session
             .append(ChatMessage::assistant("two"), state.now);
         state.session.context_usage = Some(crate::domain::ContextUsageSnapshot::from_usage(
-            &crate::models::TokenUsage::provider(120_000, 900),
+            &mermaid_model::models::TokenUsage::provider(120_000, 900),
             Some(200_000),
         ));
         state.session.cumulative_token_usage = TokenUsageTotals {
@@ -12844,9 +12864,9 @@ mod tests {
             tokens: 0,
             phase: GenPhase::Streaming,
             provider_continuation: None,
-            pending_tool_calls: vec![crate::models::ToolCall {
+            pending_tool_calls: vec![mermaid_model::models::ToolCall {
                 id: Some("call_ts".to_string()),
-                function: crate::models::FunctionCall {
+                function: mermaid_model::models::FunctionCall {
                     name: super::super::tool_search::TOOL_SEARCH_NAME.to_string(),
                     arguments: serde_json::json!({"query": "alpha"}),
                 },
@@ -12888,11 +12908,9 @@ mod tests {
             "promoted tool advertised directly; tool_search drops out once nothing is deferred"
         );
         // The tool result round-trips through the normal pairing machinery.
-        let has_tool_result = state
-            .session
-            .messages()
-            .iter()
-            .any(|m| m.role == crate::models::MessageRole::Tool && m.content.contains("alpha"));
+        let has_tool_result = state.session.messages().iter().any(|m| {
+            m.role == mermaid_model::models::MessageRole::Tool && m.content.contains("alpha")
+        });
         assert!(has_tool_result, "tool_search outcome committed to history");
     }
 
@@ -12910,9 +12928,9 @@ mod tests {
             tokens: 0,
             phase: GenPhase::Streaming,
             provider_continuation: None,
-            pending_tool_calls: vec![crate::models::ToolCall {
+            pending_tool_calls: vec![mermaid_model::models::ToolCall {
                 id: Some("call_ts2".to_string()),
-                function: crate::models::FunctionCall {
+                function: mermaid_model::models::FunctionCall {
                     name: super::super::tool_search::TOOL_SEARCH_NAME.to_string(),
                     arguments: serde_json::json!({"query": "anything"}),
                 },
@@ -12941,9 +12959,9 @@ mod tests {
     fn pending_read_file_call() -> super::super::state::PendingToolCall {
         super::super::state::PendingToolCall {
             call_id: crate::domain::ToolCallId(1),
-            source: crate::models::ToolCall {
+            source: mermaid_model::models::ToolCall {
                 id: Some("call_a".to_string()),
-                function: crate::models::FunctionCall {
+                function: mermaid_model::models::FunctionCall {
                     name: "read_file".to_string(),
                     arguments: serde_json::json!({}),
                 },
@@ -13062,9 +13080,9 @@ mod tests {
             tokens: 0,
             phase: GenPhase::Streaming,
             provider_continuation: None,
-            pending_tool_calls: vec![crate::models::ToolCall {
+            pending_tool_calls: vec![mermaid_model::models::ToolCall {
                 id: Some("call_b".to_string()),
-                function: crate::models::FunctionCall {
+                function: mermaid_model::models::FunctionCall {
                     name: "read_file".to_string(),
                     arguments: serde_json::json!({}),
                 },
@@ -13127,7 +13145,7 @@ mod tests {
     /// way allocates the plan file exactly as `/plan` does.
     #[test]
     fn shift_tab_cycles_into_plan_mode_and_allocates_a_plan_path() {
-        use crate::runtime::SafetyMode as S;
+        use mermaid_runtime::SafetyMode as S;
         let tab = || {
             Msg::Key(Key {
                 code: KeyCode::BackTab,
@@ -13217,7 +13235,7 @@ mod tests {
 
     // ── Context-delta injector ───────────────────────────────────────
 
-    use crate::models::ChatMessageKind;
+    use mermaid_model::models::ChatMessageKind;
 
     /// Toggle plan mode the way a user does now that Alt+P is gone.
     fn plan_on() -> Msg {
@@ -13245,7 +13263,7 @@ mod tests {
     /// without the mode is the state this refactor made unrepresentable, so
     /// tests must not hand-roll it.
     fn enter_planning(state: &mut State, plan_path: &str) {
-        state.session.safety_mode = crate::runtime::SafetyMode::Plan;
+        state.session.safety_mode = mermaid_runtime::SafetyMode::Plan;
         state.session.plan = Some(crate::domain::PlanState {
             plan_path: PathBuf::from(plan_path),
             ..Default::default()
@@ -13257,7 +13275,7 @@ mod tests {
     /// is the same half-state `enter_planning` guards against.
     fn exit_planning(state: &mut State) {
         state.session.plan = None;
-        state.session.safety_mode = crate::runtime::SafetyMode::default();
+        state.session.safety_mode = mermaid_runtime::SafetyMode::default();
     }
 
     fn markers(request: &ChatRequest) -> Vec<String> {
@@ -13282,7 +13300,7 @@ mod tests {
     /// leaving plan and dropping the floor are the same event.
     #[test]
     fn shift_tab_out_of_plan_moves_the_live_mode_and_drops_the_floor_together() {
-        use crate::runtime::SafetyMode;
+        use mermaid_runtime::SafetyMode;
         let mut state = fresh_state();
         dispatch(&mut state, 1);
         let (mut state, _) = update(state, Msg::Slash(SlashCmd::Plan(None)));
@@ -13458,9 +13476,9 @@ mod tests {
         dispatch(&mut state, 2);
         state.session.append(
             ChatMessage::assistant("editing").with_tool_calls(vec![
-                crate::models::tool_call::ToolCall {
+                mermaid_model::models::tool_call::ToolCall {
                     id: Some("call-1".to_string()),
-                    function: crate::models::tool_call::FunctionCall {
+                    function: mermaid_model::models::tool_call::FunctionCall {
                         name: "write_file".to_string(),
                         arguments: serde_json::json!({}),
                     },
@@ -13474,7 +13492,7 @@ mod tests {
                 "write_file",
                 format!(
                     "write_file(x) blocked by policy: {} is active",
-                    crate::runtime::PLAN_DENIAL_MARKER
+                    mermaid_runtime::PLAN_DENIAL_MARKER
                 ),
             ),
             state.now,
@@ -13505,7 +13523,7 @@ mod tests {
 
     #[test]
     fn safety_mode_flip_is_announced_exactly_once() {
-        use crate::runtime::SafetyMode;
+        use mermaid_runtime::SafetyMode;
         let mut state = fresh_state();
         dispatch(&mut state, 1);
         state.session.safety_mode = SafetyMode::ReadOnly;
@@ -13539,7 +13557,7 @@ mod tests {
 
     #[test]
     fn subagents_get_no_markers_or_reminders() {
-        use crate::runtime::SafetyMode;
+        use mermaid_runtime::SafetyMode;
         let mut state = fresh_state();
         state.session.is_subagent = true;
         dispatch(&mut state, 1);
@@ -13657,7 +13675,7 @@ mod tests {
             format!(
                 "execute_command echo x > src/a.rs blocked by policy: {} is active — planning \
                  only",
-                crate::runtime::PLAN_DENIAL_MARKER
+                mermaid_runtime::PLAN_DENIAL_MARKER
             ),
             0.0,
         )
@@ -13857,7 +13875,7 @@ mod tests {
 
     #[test]
     fn plan_mode_floors_dispatch_to_read_only_and_stamps_the_plan_file() {
-        use crate::runtime::SafetyMode;
+        use mermaid_runtime::SafetyMode;
         let mut state = state_with_two_exchanges();
         // Entering plan mode from full_access: the MODE becomes plan, and
         // full_access is staged as the resume target.
@@ -13872,9 +13890,9 @@ mod tests {
             tokens: 0,
             phase: GenPhase::Streaming,
             provider_continuation: None,
-            pending_tool_calls: vec![crate::models::ToolCall {
+            pending_tool_calls: vec![mermaid_model::models::ToolCall {
                 id: Some("call_b".to_string()),
-                function: crate::models::FunctionCall {
+                function: mermaid_model::models::FunctionCall {
                     name: "write_file".to_string(),
                     arguments: serde_json::json!({}),
                 },
@@ -13918,9 +13936,9 @@ mod tests {
         // Once plan mode ends its denials stop describing the live policy —
         // the wire history must stop asserting them.
         let mut state = fresh_state();
-        let call = crate::models::tool_call::ToolCall {
+        let call = mermaid_model::models::tool_call::ToolCall {
             id: Some("call-1".to_string()),
-            function: crate::models::tool_call::FunctionCall {
+            function: mermaid_model::models::tool_call::FunctionCall {
                 name: "write_file".to_string(),
                 arguments: serde_json::json!({ "path": "main.qml" }),
             },
@@ -13935,7 +13953,7 @@ mod tests {
                 "write_file",
                 format!(
                     "write_file(main.qml) blocked by policy: {} is active — planning only",
-                    crate::runtime::PLAN_DENIAL_MARKER
+                    mermaid_runtime::PLAN_DENIAL_MARKER
                 ),
             ),
             state.now,
@@ -13973,16 +13991,16 @@ mod tests {
 
     #[test]
     fn plan_mode_keeps_read_only_denials_standing() {
-        use crate::runtime::SafetyMode;
+        use mermaid_runtime::SafetyMode;
         // full_access + planning: the EFFECTIVE mode is the read-only floor,
         // so a pre-plan read-only denial still describes reality — the
         // loosened-mode rewrite must not fire.
         let mut state = fresh_state();
         state.session.safety_mode = SafetyMode::FullAccess;
         enter_planning(&mut state, "/tmp/project/.mermaid/plans/x.md");
-        let call = crate::models::tool_call::ToolCall {
+        let call = mermaid_model::models::tool_call::ToolCall {
             id: Some("call-1".to_string()),
-            function: crate::models::tool_call::FunctionCall {
+            function: mermaid_model::models::tool_call::FunctionCall {
                 name: "write_file".to_string(),
                 arguments: serde_json::json!({ "path": "main.qml" }),
             },
@@ -13997,7 +14015,7 @@ mod tests {
                 "write_file",
                 format!(
                     "write_file(main.qml) blocked by policy: {} blocks mutations and control actions",
-                    crate::runtime::READ_ONLY_DENIAL_MARKER
+                    mermaid_runtime::READ_ONLY_DENIAL_MARKER
                 ),
             ),
             state.now,
@@ -14123,9 +14141,9 @@ mod tests {
             tokens: 0,
             phase: GenPhase::Streaming,
             provider_continuation: None,
-            pending_tool_calls: vec![crate::models::ToolCall {
+            pending_tool_calls: vec![mermaid_model::models::ToolCall {
                 id: Some("call_p".to_string()),
-                function: crate::models::FunctionCall {
+                function: mermaid_model::models::FunctionCall {
                     name: tool.to_string(),
                     arguments: serde_json::json!({}),
                 },
@@ -14319,10 +14337,13 @@ mod tests {
     fn plan_model_override_swaps_on_entry_and_restores_on_exit() {
         let mut state = fresh_state();
         state.settings.plan.model = Some("anthropic/frontier".to_string());
-        state.settings.plan.reasoning = Some(crate::models::ReasoningLevel::High);
+        state.settings.plan.reasoning = Some(mermaid_model::models::ReasoningLevel::High);
         let (state, _) = update(state, Msg::Slash(SlashCmd::Plan(None)));
         assert_eq!(state.session.model_id, "anthropic/frontier");
-        assert_eq!(state.session.reasoning, crate::models::ReasoningLevel::High);
+        assert_eq!(
+            state.session.reasoning,
+            mermaid_model::models::ReasoningLevel::High
+        );
         let plan = state.session.plan.clone().expect("planning");
         assert_eq!(plan.prev_model_id.as_deref(), Some("ollama/test"));
         // Exit restores.
@@ -14330,7 +14351,7 @@ mod tests {
         assert_eq!(state.session.model_id, "ollama/test");
         assert_eq!(
             state.session.reasoning,
-            crate::models::ReasoningLevel::Medium,
+            mermaid_model::models::ReasoningLevel::Medium,
             "reasoning restored to the pre-plan default"
         );
     }
@@ -14459,7 +14480,7 @@ mod tests {
         // A provider-counted figure for the FULL transcript, as a live session
         // would have after its last call.
         state.session.context_usage = Some(crate::domain::ContextUsageSnapshot::from_usage(
-            &crate::models::TokenUsage::provider(250_000, 1_000),
+            &mermaid_model::models::TokenUsage::provider(250_000, 1_000),
             Some(1_000_000),
         ));
         let before = state
@@ -14517,8 +14538,8 @@ mod tests {
         assert_ne!(state.session.conversation.id, original_id, "forked");
     }
 
-    fn anchored_checkpoint(id: &str, index: i64) -> crate::runtime::CheckpointRecord {
-        crate::runtime::CheckpointRecord {
+    fn anchored_checkpoint(id: &str, index: i64) -> mermaid_runtime::CheckpointRecord {
+        mermaid_runtime::CheckpointRecord {
             id: id.to_string(),
             task_id: None,
             project_path: "/tmp/p".to_string(),
@@ -14602,9 +14623,9 @@ mod tests {
         // `McpServerErrored` note must be inserted BEFORE that assistant message,
         // not appended after it — keeping the tool_use adjacent to its tool_result.
         let mut state = fresh_state();
-        let source = crate::models::tool_call::ToolCall {
+        let source = mermaid_model::models::tool_call::ToolCall {
             id: Some("call-1".to_string()),
-            function: crate::models::tool_call::FunctionCall {
+            function: mermaid_model::models::tool_call::FunctionCall {
                 name: "read_file".to_string(),
                 arguments: serde_json::json!({"path": "foo"}),
             },
@@ -14647,10 +14668,10 @@ mod tests {
     fn tool_finished_with_all_outcomes_triggers_follow_up_call_model() {
         let mut state = fresh_state();
         let call = PendingToolCall {
-            call_id: super::super::ids::ToolCallId(1),
-            source: crate::models::tool_call::ToolCall {
+            call_id: mermaid_model::ids::ToolCallId(1),
+            source: mermaid_model::models::tool_call::ToolCall {
                 id: Some("c1".to_string()),
-                function: crate::models::tool_call::FunctionCall {
+                function: mermaid_model::models::tool_call::FunctionCall {
                     name: "read_file".to_string(),
                     arguments: serde_json::json!({"path": "foo"}),
                 },
@@ -14668,7 +14689,7 @@ mod tests {
             state,
             Msg::ToolFinished {
                 turn: TurnId(3),
-                call_id: super::super::ids::ToolCallId(1),
+                call_id: mermaid_model::ids::ToolCallId(1),
                 outcome: ToolOutcome::success("file contents", "file contents", 0.05),
             },
         );
@@ -14686,10 +14707,10 @@ mod tests {
     fn exec_tool_finished_bumps_full_redraw_seq() {
         let mut state = fresh_state();
         let call = PendingToolCall {
-            call_id: super::super::ids::ToolCallId(1),
-            source: crate::models::tool_call::ToolCall {
+            call_id: mermaid_model::ids::ToolCallId(1),
+            source: mermaid_model::models::tool_call::ToolCall {
                 id: Some("c1".to_string()),
-                function: crate::models::tool_call::FunctionCall {
+                function: mermaid_model::models::tool_call::FunctionCall {
                     name: "execute_command".to_string(),
                     arguments: serde_json::json!({"command": "echo hi"}),
                 },
@@ -14702,7 +14723,7 @@ mod tests {
             state,
             Msg::ToolFinished {
                 turn: TurnId(3),
-                call_id: super::super::ids::ToolCallId(1),
+                call_id: mermaid_model::ids::ToolCallId(1),
                 outcome: ToolOutcome::success("hi", "hi", 0.01),
             },
         );
@@ -14720,10 +14741,10 @@ mod tests {
     fn non_exec_tool_finished_does_not_bump_full_redraw_seq() {
         let mut state = fresh_state();
         let call = PendingToolCall {
-            call_id: super::super::ids::ToolCallId(1),
-            source: crate::models::tool_call::ToolCall {
+            call_id: mermaid_model::ids::ToolCallId(1),
+            source: mermaid_model::models::tool_call::ToolCall {
                 id: Some("c1".to_string()),
-                function: crate::models::tool_call::FunctionCall {
+                function: mermaid_model::models::tool_call::FunctionCall {
                     name: "read_file".to_string(),
                     arguments: serde_json::json!({"path": "foo"}),
                 },
@@ -14736,7 +14757,7 @@ mod tests {
             state,
             Msg::ToolFinished {
                 turn: TurnId(3),
-                call_id: super::super::ids::ToolCallId(1),
+                call_id: mermaid_model::ids::ToolCallId(1),
                 outcome: ToolOutcome::success("contents", "contents", 0.01),
             },
         );
@@ -14878,10 +14899,10 @@ mod tests {
         // Two committed user messages so index 1 is a valid fork cut.
         state
             .session
-            .append(crate::models::ChatMessage::user("one"), state.now);
+            .append(mermaid_model::models::ChatMessage::user("one"), state.now);
         state
             .session
-            .append(crate::models::ChatMessage::user("two"), state.now);
+            .append(mermaid_model::models::ChatMessage::user("two"), state.now);
         let mut cmds = Vec::new();
         super::fork_conversation_at(&mut state, &mut cmds, 1);
         assert!(state.session.conversation.tasks.is_empty());
@@ -15120,7 +15141,7 @@ mod tests {
             state,
             Msg::StreamDone {
                 turn: TurnId(1),
-                usage: Some(crate::models::TokenUsage::provider(120, 30)),
+                usage: Some(mermaid_model::models::TokenUsage::provider(120, 30)),
                 provider_continuation: None,
                 stop_reason: None,
             },
@@ -15154,10 +15175,10 @@ mod tests {
         // is dropped (and logged), never panics or mutates state.
         let mut state = fresh_state();
         let call = PendingToolCall {
-            call_id: super::super::ids::ToolCallId(1),
-            source: crate::models::tool_call::ToolCall {
+            call_id: mermaid_model::ids::ToolCallId(1),
+            source: mermaid_model::models::tool_call::ToolCall {
                 id: Some("c1".to_string()),
-                function: crate::models::tool_call::FunctionCall {
+                function: mermaid_model::models::tool_call::FunctionCall {
                     name: "read_file".to_string(),
                     arguments: serde_json::json!({"path": "foo"}),
                 },
@@ -15168,9 +15189,9 @@ mod tests {
             state,
             Msg::StreamToolCall {
                 turn: TurnId(3),
-                call: crate::models::tool_call::ToolCall {
+                call: mermaid_model::models::tool_call::ToolCall {
                     id: Some("late".to_string()),
-                    function: crate::models::tool_call::FunctionCall {
+                    function: mermaid_model::models::tool_call::FunctionCall {
                         name: "write_file".to_string(),
                         arguments: serde_json::json!({}),
                     },
@@ -15203,10 +15224,10 @@ mod tests {
         // success outcome, so the turn advances normally. Locks that behavior.
         let mut state = fresh_state();
         let call = PendingToolCall {
-            call_id: super::super::ids::ToolCallId(1),
-            source: crate::models::tool_call::ToolCall {
+            call_id: mermaid_model::ids::ToolCallId(1),
+            source: mermaid_model::models::tool_call::ToolCall {
                 id: Some("c1".to_string()),
-                function: crate::models::tool_call::FunctionCall {
+                function: mermaid_model::models::tool_call::FunctionCall {
                     name: "execute_command".to_string(),
                     arguments: serde_json::json!({"command": "sleep 9"}),
                 },
@@ -15236,7 +15257,7 @@ mod tests {
             state,
             Msg::ToolFinished {
                 turn: TurnId(3),
-                call_id: super::super::ids::ToolCallId(1),
+                call_id: mermaid_model::ids::ToolCallId(1),
                 outcome: ToolOutcome::success(
                     "Moved to background.\nPID: 1234",
                     "moved to background",
@@ -15272,8 +15293,8 @@ mod tests {
 
     #[test]
     fn context_text_shows_ollama_window_detail_and_tip() {
-        use crate::domain::runtime::OllamaContextInfo;
-        use crate::models::adapters::ollama_sizing::NumCtxSource;
+        use mermaid_model::models::adapters::ollama_sizing::NumCtxSource;
+        use mermaid_model::tool_run::OllamaContextInfo;
         let mut state = fresh_state();
         // No probe yet → no Ollama window lines.
         assert!(!context_text(&state).contains("Active num_ctx"));
@@ -15307,10 +15328,10 @@ mod tests {
     fn background_command_tool_finish_registers_process() {
         let mut state = fresh_state();
         let call = PendingToolCall {
-            call_id: super::super::ids::ToolCallId(1),
-            source: crate::models::tool_call::ToolCall {
+            call_id: mermaid_model::ids::ToolCallId(1),
+            source: mermaid_model::models::tool_call::ToolCall {
                 id: Some("c1".to_string()),
-                function: crate::models::tool_call::FunctionCall {
+                function: mermaid_model::models::tool_call::FunctionCall {
                     name: "execute_command".to_string(),
                     arguments: serde_json::json!({
                         "command": "npm run dev",
@@ -15329,7 +15350,7 @@ mod tests {
             state,
             Msg::ToolFinished {
                 turn: TurnId(3),
-                call_id: super::super::ids::ToolCallId(1),
+                call_id: mermaid_model::ids::ToolCallId(1),
                 outcome: ToolOutcome::success(
                     "Background command started.\nPID: 123\nLog: /tmp/mermaid-bg.log\nReady: matched pattern \"Local:\"\nDetected URL: http://127.0.0.1:5173\n",
                     "background process started",
@@ -15366,20 +15387,20 @@ mod tests {
         let mut state = fresh_state();
         let calls = vec![
             PendingToolCall {
-                call_id: super::super::ids::ToolCallId(1),
-                source: crate::models::tool_call::ToolCall {
+                call_id: mermaid_model::ids::ToolCallId(1),
+                source: mermaid_model::models::tool_call::ToolCall {
                     id: Some("c1".to_string()),
-                    function: crate::models::tool_call::FunctionCall {
+                    function: mermaid_model::models::tool_call::FunctionCall {
                         name: "read_file".to_string(),
                         arguments: serde_json::json!({}),
                     },
                 },
             },
             PendingToolCall {
-                call_id: super::super::ids::ToolCallId(2),
-                source: crate::models::tool_call::ToolCall {
+                call_id: mermaid_model::ids::ToolCallId(2),
+                source: mermaid_model::models::tool_call::ToolCall {
                     id: Some("c2".to_string()),
-                    function: crate::models::tool_call::FunctionCall {
+                    function: mermaid_model::models::tool_call::FunctionCall {
                         name: "write_file".to_string(),
                         arguments: serde_json::json!({}),
                     },
@@ -15395,7 +15416,7 @@ mod tests {
             state,
             Msg::ToolFinished {
                 turn: TurnId(3),
-                call_id: super::super::ids::ToolCallId(1),
+                call_id: mermaid_model::ids::ToolCallId(1),
                 outcome: ToolOutcome::cancelled(),
             },
         );
@@ -15418,10 +15439,10 @@ mod tests {
         state.turn = start_executing_tools(
             TurnId(3),
             vec![PendingToolCall {
-                call_id: super::super::ids::ToolCallId(1),
-                source: crate::models::tool_call::ToolCall {
+                call_id: mermaid_model::ids::ToolCallId(1),
+                source: mermaid_model::models::tool_call::ToolCall {
                     id: None,
-                    function: crate::models::tool_call::FunctionCall {
+                    function: mermaid_model::models::tool_call::FunctionCall {
                         name: "x".to_string(),
                         arguments: serde_json::json!({}),
                     },
@@ -15434,7 +15455,7 @@ mod tests {
             state,
             Msg::ToolFinished {
                 turn: TurnId(999),
-                call_id: super::super::ids::ToolCallId(1),
+                call_id: mermaid_model::ids::ToolCallId(1),
                 outcome: ToolOutcome::cancelled(),
             },
         );
@@ -15485,7 +15506,7 @@ mod tests {
                 report: "docs are fine".to_string(),
                 success: true,
                 cancelled: false,
-                usage: Some(crate::models::TokenUsage::provider(70_000, 20_000)),
+                usage: Some(mermaid_model::models::TokenUsage::provider(70_000, 20_000)),
                 tokens: 90_000,
                 duration_secs: 61,
             },
@@ -15504,7 +15525,7 @@ mod tests {
             .messages()
             .iter()
             .rev()
-            .find(|m| m.role == crate::models::MessageRole::User)
+            .find(|m| m.role == mermaid_model::models::MessageRole::User)
             .expect("report submitted as a user message");
         assert!(last_user.content.contains("docs are fine"));
         assert!(last_user.content.contains("background agent 'audit docs'"));
@@ -15623,7 +15644,7 @@ mod tests {
                 report: "partial findings".to_string(),
                 success: false,
                 cancelled: true,
-                usage: Some(crate::models::TokenUsage::provider(10_000, 5_000)),
+                usage: Some(mermaid_model::models::TokenUsage::provider(10_000, 5_000)),
                 tokens: 15_000,
                 duration_secs: 42,
             },
@@ -15644,16 +15665,16 @@ mod tests {
 
     /// Build a one-call ExecutingTools state around an `agent` tool call,
     /// shared by the subagent progress/rollup tests below.
-    fn state_executing_agent_call() -> (State, super::super::ids::ToolCallId) {
+    fn state_executing_agent_call() -> (State, mermaid_model::ids::ToolCallId) {
         let mut state = fresh_state();
-        let call_id = super::super::ids::ToolCallId(1);
+        let call_id = mermaid_model::ids::ToolCallId(1);
         state.turn = start_executing_tools(
             TurnId(3),
             vec![PendingToolCall {
                 call_id,
-                source: crate::models::tool_call::ToolCall {
+                source: mermaid_model::models::tool_call::ToolCall {
                     id: None,
-                    function: crate::models::tool_call::FunctionCall {
+                    function: mermaid_model::models::tool_call::FunctionCall {
                         name: "agent".to_string(),
                         arguments: serde_json::json!({"description": "explore"}),
                     },
@@ -15679,7 +15700,7 @@ mod tests {
                 turn: TurnId(3),
                 call_id,
                 event: ProgressEvent::SubagentToolCall {
-                    child_call_id: super::super::ids::ToolCallId(9),
+                    child_call_id: mermaid_model::ids::ToolCallId(9),
                     tool_name: "read_file".to_string(),
                     phase: SubagentPhase::Started,
                 },
@@ -15767,7 +15788,8 @@ mod tests {
         let before_cum = state.session.cumulative_token_usage.total_tokens();
         assert_eq!(state.runtime.run_tokens.output_tokens, 0);
 
-        let usage = crate::models::TokenUsage::provider(1_000, 250).with_reasoning_output(50);
+        let usage =
+            mermaid_model::models::TokenUsage::provider(1_000, 250).with_reasoning_output(50);
         let metadata = crate::domain::ToolRunMetadata {
             detail: crate::domain::ToolMetadata::Subagent {
                 model_id: "ollama/test".to_string(),

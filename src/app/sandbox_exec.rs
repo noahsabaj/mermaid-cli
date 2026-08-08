@@ -2,7 +2,7 @@
 //!
 //! The exec tool spawns `mermaid __sandbox-exec [flags] -- <program> <args…>`
 //! instead of running a command directly when OS confinement is requested. This
-//! process asks the platform backend ([`crate::runtime::enforce`]) to enforce
+//! process asks the platform backend ([`mermaid_runtime::enforce`]) to enforce
 //! the requested sandbox — network denial (`--no-network`) and/or filesystem
 //! write-confinement (repeatable `--confine-writes <dir>`) — from ordinary
 //! single-threaded code, then runs the real command. On Linux the seccomp /
@@ -73,12 +73,12 @@ pub fn maybe_dispatch<I: IntoIterator<Item = OsString>>(args: I) -> Option<i32> 
     // self-applied here; macOS: argv rewritten onto sandbox-exec). Fail
     // closed: if the caller asked for confinement and the platform cannot
     // apply it, exit 126 — never run the command unconfined.
-    let policy = crate::runtime::SandboxPolicy {
+    let policy = mermaid_runtime::SandboxPolicy {
         deny_network: no_network,
         allowed_writes: confine_writes,
     };
-    match crate::runtime::enforce(&policy, &argv) {
-        Ok(crate::runtime::Enforcement::SelfApplied { fs_enforced }) => {
+    match mermaid_runtime::enforce(&policy, &argv) {
+        Ok(mermaid_runtime::Enforcement::SelfApplied { fs_enforced }) => {
             // A kernel that simply can't enforce Landlock degrades to a
             // warned no-op (documented best-effort — pre-5.13 kernels).
             if !fs_enforced {
@@ -88,8 +88,8 @@ pub fn maybe_dispatch<I: IntoIterator<Item = OsString>>(args: I) -> Option<i32> 
             }
             Some(exec_wrapped(&argv))
         },
-        Ok(crate::runtime::Enforcement::ExecArgv(wrapped)) => Some(exec_wrapped(&wrapped)),
-        Ok(crate::runtime::Enforcement::Ran(code)) => Some(code),
+        Ok(mermaid_runtime::Enforcement::ExecArgv(wrapped)) => Some(exec_wrapped(&wrapped)),
+        Ok(mermaid_runtime::Enforcement::Ran(code)) => Some(code),
         Err(err) => {
             eprintln!("mermaid {SANDBOX_EXEC_SUBCOMMAND}: sandbox unavailable: {err:#}");
             Some(126)

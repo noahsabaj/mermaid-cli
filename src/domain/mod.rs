@@ -10,15 +10,12 @@
 //! lost tool results, and two event loops competing for input are all
 //! impossible to express against these types.
 
-pub mod action;
 pub mod cmd;
 pub mod compaction;
 pub mod file_mention;
-pub mod ids;
 pub mod image_token;
 pub mod msg;
 pub mod plan;
-pub mod question;
 pub mod reducer;
 pub mod run_event;
 pub mod runtime;
@@ -28,7 +25,6 @@ pub mod tasks;
 pub mod tool_search;
 pub mod transition;
 
-pub use action::{ActionDetails, ActionDisplay, ActionResult};
 pub use cmd::{ChatRequest, Cmd, ToolDefinition};
 pub use compaction::{
     CompactionArchive, CompactionBoundary, CompactionPolicy, CompactionRecord, CompactionRequest,
@@ -37,20 +33,24 @@ pub use compaction::{
     compaction_receipt, context_exceeds_hard_limit, format_compact_count, normalize_summary,
     prepare_compaction, should_auto_compact, validate_summary_structure,
 };
-pub use ids::{IdAllocator, ToolCallId, TurnId};
-pub use msg::{
-    ClipboardRead, ContextCmd, Key, KeyCode, KeyMods, Msg, MsgKind, Paste, SlashCmd, StartupConfig,
-};
-pub use question::{
+pub use mermaid_model::action::{ActionDetails, ActionDisplay, ActionResult};
+pub use mermaid_model::ids::{IdAllocator, ToolCallId, TurnId};
+pub use mermaid_model::question::{
     OptionPreview, PendingQuestionSet, Question, QuestionAnswer, QuestionKind, QuestionOption,
     QuestionResolution, QuestionSelection, TextValidate, rank_order, validate_input,
+};
+pub use mermaid_model::tool_run::{
+    ManagedProcess, ManagedProcessStatus, ToolArtifact, ToolMetadata, ToolRunMetadata, ToolStatus,
+    WebSearchFailure,
+};
+pub use msg::{
+    ClipboardRead, ContextCmd, Key, KeyCode, KeyMods, Msg, MsgKind, Paste, SlashCmd, StartupConfig,
 };
 pub use reducer::{build_chat_request, update};
 pub use run_event::{RUN_EVENT_PROTOCOL_VERSION, RunEvent};
 pub use runtime::{
-    ManagedProcess, ManagedProcessStatus, ProviderCapabilitySnapshot, RuntimeSignal, RuntimeState,
-    RuntimeTimelineEvent, RuntimeTimelineKind, ToolArtifact, ToolMetadata, ToolRunMetadata,
-    ToolStatus, WebSearchFailure,
+    ProviderCapabilitySnapshot, RuntimeSignal, RuntimeState, RuntimeTimelineEvent,
+    RuntimeTimelineKind,
 };
 pub use slash_commands::{COMMAND_GROUPS, COMMAND_REGISTRY, SlashCommand, filter_by_prefix};
 pub use state::{

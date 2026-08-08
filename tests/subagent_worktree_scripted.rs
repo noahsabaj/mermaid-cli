@@ -22,8 +22,8 @@ use mermaid_cli::providers::model::ModelProvider;
 use mermaid_cli::providers::tool::ToolExecutor;
 use mermaid_cli::providers::tool::subagent::{SubagentSpawner, SubagentTool};
 use mermaid_cli::providers::tool::web::WebCapabilities;
-use mermaid_cli::runtime::SafetyMode;
-use mermaid_cli::runtime::git::git;
+use mermaid_runtime::SafetyMode;
+use mermaid_runtime::git::git;
 
 #[path = "harness/stub_model.rs"]
 mod stub_model;

@@ -45,18 +45,12 @@ use tokio::sync::mpsc;
 
 use crate::app::{Config, MemoryConfig};
 use crate::domain::{Cmd, CompactionRequest, CompactionResult, CompactionTrigger, Msg, TurnId};
-use crate::models::{ModelError, TokenUsage};
 use crate::providers::ctx::{ExecContext, StreamContext};
 use crate::providers::model::ModelProvider;
 use crate::providers::{ProviderFactory, StreamEvent, ToolRegistry};
-use crate::utils::{join_logged, spawn_guarded};
+use mermaid_model::models::{ModelError, TokenUsage};
+use mermaid_model::utils::{join_logged, spawn_guarded};
 
-// The transient-HTTP retry policy lives with the adapters that are its only
-// consumers (`models::retry`), not here. Re-exported under the historical
-// `effect::` path so call sites and docs keep working.
-pub use crate::models::retry::{
-    DEFAULT_MAX_ATTEMPTS, retry_transient_http, retry_transient_http_no_connect_retry,
-};
 pub use turn_scope::TurnScope;
 
 #[cfg(not(test))]
@@ -222,8 +216,8 @@ impl PersistenceState {
         let path = manager.save_compaction_archive(&save.archive)?;
         manager.save_conversation(&save.conversation)?;
 
-        if let Ok(store) = crate::runtime::RuntimeStore::open_default() {
-            let _ = store.compactions().create(crate::runtime::NewCompaction {
+        if let Ok(store) = mermaid_runtime::RuntimeStore::open_default() {
+            let _ = store.compactions().create(mermaid_runtime::NewCompaction {
                 id: Some(save.record.id.clone()),
                 task_id: save.task_id.clone(),
                 session_id: Some(save.archive.conversation_id.clone()),
@@ -690,14 +684,14 @@ impl EffectRunner {
                         let _ = fallback_tx
                             .send(Msg::UpstreamError {
                                 turn,
-                                error: crate::models::UserFacingError {
+                                error: mermaid_model::models::UserFacingError {
                                     summary: "Internal error".to_string(),
                                     message: "The model dispatch task panicked unexpectedly."
                                         .to_string(),
                                     suggestion: "This is a bug. Please retry; if it persists, \
                                                  check the logs."
                                         .to_string(),
-                                    category: crate::models::ErrorCategory::Internal,
+                                    category: mermaid_model::models::ErrorCategory::Internal,
                                     recoverable: true,
                                 },
                             })
@@ -779,7 +773,7 @@ impl EffectRunner {
                 // resolve through `PolicyDecision::Classify`, which fails
                 // safe to escalate without a classifier bound.
                 let classifier: Option<Arc<dyn crate::providers::AutoClassifier>> =
-                    if safety_mode == crate::runtime::SafetyMode::Auto || plan_file.is_some() {
+                    if safety_mode == mermaid_runtime::SafetyMode::Auto || plan_file.is_some() {
                         self.providers.as_ref().map(|p| {
                             let model = config
                                 .safety
@@ -965,7 +959,7 @@ impl EffectRunner {
                     let Some((plugin, reason)) = gate.deny else {
                         return;
                     };
-                    let reason = crate::utils::redact_secrets(&reason);
+                    let reason = mermaid_model::utils::redact_secrets(&reason);
                     let _ = broker
                         .update(vec![crate::domain::TaskEdit {
                             id: task.id,
@@ -1024,17 +1018,17 @@ impl EffectRunner {
                 self.detached.spawn(async move {
                     let status = match process.status {
                         crate::domain::ManagedProcessStatus::Running => {
-                            crate::runtime::ProcessStatus::Running
+                            mermaid_runtime::ProcessStatus::Running
                         },
                         crate::domain::ManagedProcessStatus::Exited => {
-                            crate::runtime::ProcessStatus::Exited
+                            mermaid_runtime::ProcessStatus::Exited
                         },
                         crate::domain::ManagedProcessStatus::Unknown => {
-                            crate::runtime::ProcessStatus::Unknown
+                            mermaid_runtime::ProcessStatus::Unknown
                         },
                     };
-                    if let Ok(store) = crate::runtime::RuntimeStore::open_default() {
-                        let _ = store.processes().upsert(crate::runtime::NewProcess {
+                    if let Ok(store) = mermaid_runtime::RuntimeStore::open_default() {
+                        let _ = store.processes().upsert(mermaid_runtime::NewProcess {
                             id: Some(process.id),
                             task_id,
                             pid: process.pid,
@@ -1217,7 +1211,7 @@ impl EffectRunner {
                 // Synchronous rusqlite read — run on the blocking pool so it
                 // never stalls an async worker thread (#40).
                 self.detached.spawn_blocking(move || {
-                    let tasks = crate::runtime::RuntimeClient::auto()
+                    let tasks = crate::runtime_client::RuntimeClient::auto()
                         .list_tasks(limit)
                         .map(|read| read.value)
                         .unwrap_or_default();
@@ -1227,7 +1221,7 @@ impl EffectRunner {
             Cmd::LoadRuntimeTask { id } => {
                 let tx = self.msg_tx.clone();
                 self.detached.spawn_blocking(move || {
-                    let (task, events) = crate::runtime::RuntimeClient::auto()
+                    let (task, events) = crate::runtime_client::RuntimeClient::auto()
                         .task_detail(&id)
                         .map(|read| (Some(read.value.task), read.value.events))
                         .unwrap_or((None, Vec::new()));
@@ -1237,7 +1231,7 @@ impl EffectRunner {
             Cmd::ListRuntimeProcesses { limit } => {
                 let tx = self.msg_tx.clone();
                 self.detached.spawn_blocking(move || {
-                    let processes = crate::runtime::RuntimeClient::auto()
+                    let processes = crate::runtime_client::RuntimeClient::auto()
                         .list_processes(limit)
                         .map(|read| read.value)
                         .unwrap_or_default();
@@ -1247,7 +1241,7 @@ impl EffectRunner {
             Cmd::ShowRuntimeProcessLogs { id } => {
                 let tx = self.msg_tx.clone();
                 self.detached.spawn_blocking(move || {
-                    let text = crate::runtime::RuntimeClient::auto()
+                    let text = crate::runtime_client::RuntimeClient::auto()
                         .process_log(&id, None)
                         .map(|log| format!("Process log {}\n\n{}", id, log.content))
                         .unwrap_or_else(|err| format!("Process log error: {}", err));
@@ -1257,7 +1251,7 @@ impl EffectRunner {
             Cmd::StopRuntimeProcess { id } => {
                 let tx = self.msg_tx.clone();
                 self.detached.spawn_blocking(move || {
-                    let msg = match crate::runtime::RuntimeClient::auto().stop_process(&id) {
+                    let msg = match crate::runtime_client::RuntimeClient::auto().stop_process(&id) {
                         Ok(response) => Msg::TransientStatus {
                             text: format!("Stopped process {} (pid {})", id, response.item.pid),
                         },
@@ -1296,7 +1290,9 @@ impl EffectRunner {
             Cmd::RestartRuntimeProcess { id } => {
                 let tx = self.msg_tx.clone();
                 self.detached.spawn_blocking(move || {
-                    let msg = match crate::runtime::RuntimeClient::auto().restart_process(&id) {
+                    let msg = match crate::runtime_client::RuntimeClient::auto()
+                        .restart_process(&id)
+                    {
                         Ok(response) => Msg::TransientStatus {
                             text: format!("Restarted process {} (pid {})", id, response.item.pid),
                         },
@@ -1309,23 +1305,23 @@ impl EffectRunner {
             },
             Cmd::OpenRuntimeTarget { target } => {
                 self.detached.spawn_blocking(move || {
-                    let resolved = crate::runtime::RuntimeService::open_default()
+                    let resolved = crate::runtime_client::RuntimeService::open_default()
                         .and_then(|service| service.resolve_open_target(&target))
                         .unwrap_or(target);
                     // #63: the resolved value can be a `detected_url`/`log_path`
                     // from a `processes` row — validate before the OS opener,
                     // exactly like `open_process`.
-                    if let Err(err) = crate::runtime::validate_open_target(&resolved) {
+                    if let Err(err) = crate::runtime_client::validate_open_target(&resolved) {
                         tracing::warn!(error = %err, "refusing to open runtime target");
                         return;
                     }
-                    crate::utils::open_file(resolved);
+                    mermaid_model::utils::open_file(resolved);
                 });
             },
             Cmd::ShowRuntimePorts => {
                 let tx = self.msg_tx.clone();
                 self.detached.spawn_blocking(move || {
-                    let text = crate::runtime::RuntimeClient::auto()
+                    let text = crate::runtime_client::RuntimeClient::auto()
                         .ports()
                         .map(|ports| format!("Listening TCP ports\n\n{}", ports.ports))
                         .unwrap_or_else(|err| format!("Port inspection failed: {}", err));
@@ -1335,7 +1331,7 @@ impl EffectRunner {
             Cmd::ListRuntimeApprovals => {
                 let tx = self.msg_tx.clone();
                 self.detached.spawn_blocking(move || {
-                    let approvals = crate::runtime::RuntimeClient::auto()
+                    let approvals = crate::runtime_client::RuntimeClient::auto()
                         .list_approvals()
                         .map(|read| read.value)
                         .unwrap_or_default();
@@ -1346,9 +1342,9 @@ impl EffectRunner {
                 let tx = self.msg_tx.clone();
                 self.detached.spawn_blocking(move || {
                     let result = if decision == "approved" {
-                        crate::runtime::RuntimeClient::auto().approve(&id)
+                        crate::runtime_client::RuntimeClient::auto().approve(&id)
                     } else {
-                        crate::runtime::RuntimeClient::auto().deny(&id)
+                        crate::runtime_client::RuntimeClient::auto().deny(&id)
                     };
                     let msg = match result {
                         Ok(result) => Msg::TransientStatus {
@@ -1368,7 +1364,7 @@ impl EffectRunner {
             Cmd::ListRuntimeCheckpoints { limit } => {
                 let tx = self.msg_tx.clone();
                 self.detached.spawn_blocking(move || {
-                    let checkpoints = crate::runtime::RuntimeClient::auto()
+                    let checkpoints = crate::runtime_client::RuntimeClient::auto()
                         .list_checkpoints(limit)
                         .map(|read| read.value)
                         .unwrap_or_default();
@@ -1381,7 +1377,7 @@ impl EffectRunner {
             } => {
                 let tx = self.msg_tx.clone();
                 self.detached.spawn_blocking(move || {
-                    let checkpoints = crate::runtime::RuntimeStore::open_default()
+                    let checkpoints = mermaid_runtime::RuntimeStore::open_default()
                         .and_then(|store| {
                             store
                                 .checkpoints()
@@ -1394,7 +1390,7 @@ impl EffectRunner {
             Cmd::ListRuntimePlugins => {
                 let tx = self.msg_tx.clone();
                 self.detached.spawn_blocking(move || {
-                    let plugins = crate::runtime::RuntimeClient::auto()
+                    let plugins = crate::runtime_client::RuntimeClient::auto()
                         .list_plugins()
                         .map(|read| read.value)
                         .unwrap_or_default();
@@ -1408,18 +1404,19 @@ impl EffectRunner {
             } => {
                 let tx = self.msg_tx.clone();
                 self.detached.spawn_blocking(move || {
-                    let msg = match crate::runtime::RuntimeStore::open_default().and_then(|store| {
-                        store
-                            .tasks()
-                            .update_status(&id, status, final_report.as_deref())
-                    }) {
-                        Ok(()) => Msg::TransientStatus {
-                            text: format!("Task {} -> {}", id, status),
-                        },
-                        Err(err) => Msg::TransientStatus {
-                            text: format!("Task update failed: {}", err),
-                        },
-                    };
+                    let msg =
+                        match mermaid_runtime::RuntimeStore::open_default().and_then(|store| {
+                            store
+                                .tasks()
+                                .update_status(&id, status, final_report.as_deref())
+                        }) {
+                            Ok(()) => Msg::TransientStatus {
+                                text: format!("Task {} -> {}", id, status),
+                            },
+                            Err(err) => Msg::TransientStatus {
+                                text: format!("Task update failed: {}", err),
+                            },
+                        };
                     let _ = tx.blocking_send(msg);
                 });
             },
@@ -1431,26 +1428,31 @@ impl EffectRunner {
                         "source": "tui",
                         "command": "checkpoint",
                     }));
-                    let msg =
-                        match crate::runtime::create_checkpoint(&workdir, &paths, pending_action) {
-                            Ok(manifest) => Msg::TransientStatus {
-                                text: format!(
-                                    "Checkpoint {} created for {} path(s)",
-                                    manifest.id,
-                                    manifest.files.len()
-                                ),
-                            },
-                            Err(err) => Msg::TransientStatus {
-                                text: format!("Checkpoint failed: {}", err),
-                            },
-                        };
+                    let msg = match mermaid_runtime::create_checkpoint(
+                        &workdir,
+                        &paths,
+                        pending_action,
+                    ) {
+                        Ok(manifest) => Msg::TransientStatus {
+                            text: format!(
+                                "Checkpoint {} created for {} path(s)",
+                                manifest.id,
+                                manifest.files.len()
+                            ),
+                        },
+                        Err(err) => Msg::TransientStatus {
+                            text: format!("Checkpoint failed: {}", err),
+                        },
+                    };
                     let _ = tx.blocking_send(msg);
                 });
             },
             Cmd::RestoreRuntimeCheckpoint { id } => {
                 let tx = self.msg_tx.clone();
                 self.detached.spawn_blocking(move || {
-                    let msg = match crate::runtime::RuntimeClient::auto().restore_checkpoint(&id) {
+                    let msg = match crate::runtime_client::RuntimeClient::auto()
+                        .restore_checkpoint(&id)
+                    {
                         Ok(result) => Msg::TransientStatus {
                             text: format!(
                                 "Restored checkpoint {} ({} file(s)){}",
@@ -1502,7 +1504,7 @@ impl EffectRunner {
             Cmd::OpenInSystem(path) => {
                 self.detached.spawn(async move {
                     let _ = tokio::task::spawn_blocking(move || {
-                        crate::utils::open_file(&path);
+                        mermaid_model::utils::open_file(&path);
                     })
                     .await;
                 });
@@ -1738,7 +1740,7 @@ impl EffectRunner {
 /// between in_progress and completed stamps.
 fn note_stream_usage(
     tasks: &crate::providers::TaskBroker,
-    usage: &Option<crate::models::TokenUsage>,
+    usage: &Option<mermaid_model::models::TokenUsage>,
 ) {
     if let Some(usage) = usage {
         tasks.add_tokens(usage.completion_tokens as u64);
@@ -1773,14 +1775,14 @@ async fn dispatch_call_model(
     token: tokio_util::sync::CancellationToken,
     tasks: crate::providers::TaskBroker,
 ) {
-    use crate::models::UserFacingError;
+    use mermaid_model::models::UserFacingError;
 
     let Some(factory) = providers else {
         let error = UserFacingError {
             summary: "not wired".to_string(),
             message: "EffectRunner has no ProviderFactory bound".to_string(),
             suggestion: "construct via EffectRunner::pair_with_bindings".to_string(),
-            category: crate::models::ErrorCategory::Internal,
+            category: mermaid_model::models::ErrorCategory::Internal,
             recoverable: false,
         };
         let _ = msg_tx.send(Msg::UpstreamError { turn, error }).await;
@@ -2030,7 +2032,7 @@ async fn dispatch_call_model(
             // Success — the final `Done` flowed through the sink.
             completed_ok = true;
         },
-        Err(crate::models::ModelError::Cancelled) => {
+        Err(mermaid_model::models::ModelError::Cancelled) => {
             // Silent: `drop_scope` will emit `Msg::TurnCancelled`.
         },
         Err(e) => {
@@ -2241,7 +2243,7 @@ async fn dispatch_provider_stream(
 /// `spawn_blocking` moves it to the blocking pool. Hooks are fire-and-forget
 /// observers, so the result is dropped.
 async fn fire_plugin_hooks(event: &'static str, payload: serde_json::Value) {
-    let _ = tokio::task::spawn_blocking(move || crate::runtime::run_plugin_hooks(event, &payload))
+    let _ = tokio::task::spawn_blocking(move || mermaid_runtime::run_plugin_hooks(event, &payload))
         .await;
 }
 
@@ -2252,17 +2254,17 @@ async fn fire_plugin_hooks(event: &'static str, payload: serde_json::Value) {
 async fn run_plugin_hooks_gated(
     event: &'static str,
     payload: serde_json::Value,
-) -> crate::runtime::HookGate {
+) -> mermaid_runtime::HookGate {
     tokio::task::spawn_blocking(move || {
-        crate::runtime::run_plugin_hooks(event, &payload)
-            .map(crate::runtime::aggregate_hook_responses)
+        mermaid_runtime::run_plugin_hooks(event, &payload)
+            .map(mermaid_runtime::aggregate_hook_responses)
             .unwrap_or_default()
     })
     .await
     .unwrap_or_default()
 }
 
-async fn run_provider_error_hook(model_id: &str, error: &crate::models::UserFacingError) {
+async fn run_provider_error_hook(model_id: &str, error: &mermaid_model::models::UserFacingError) {
     fire_plugin_hooks(
         "provider_error",
         serde_json::json!({
@@ -2386,10 +2388,10 @@ async fn consolidate_memory(
     );
     let request = crate::domain::ChatRequest {
         model_id: model_id.clone(),
-        messages: vec![crate::models::ChatMessage::user(user)],
+        messages: vec![mermaid_model::models::ChatMessage::user(user)],
         system_prompt: CONSOLIDATE_SYSTEM_PROMPT.to_string(),
         instructions: None,
-        reasoning: crate::models::ReasoningLevel::None,
+        reasoning: mermaid_model::models::ReasoningLevel::None,
         temperature: 0.0,
         max_tokens: 1024,
         tools: Vec::new(),
@@ -2461,7 +2463,7 @@ async fn consolidate_memory(
         .filter_map(|id| crate::app::memory::find(&workdir, id).map(|e| e.path))
         .collect();
     if !paths.is_empty()
-        && let Err(e) = crate::runtime::create_checkpoint(
+        && let Err(e) = mermaid_runtime::create_checkpoint(
             &workdir,
             &paths,
             Some(serde_json::json!({ "tool": "consolidate_memory", "reason": plan.reason })),
@@ -2713,7 +2715,7 @@ async fn run_compaction(
         preserved_turn_count: prepared
             .preserved_messages
             .iter()
-            .filter(|message| message.role == crate::models::MessageRole::User)
+            .filter(|message| message.role == mermaid_model::models::MessageRole::User)
             .count(),
         summary_tokens: final_summary.len().div_ceil(4),
         duration_secs: started.elapsed().as_secs_f64(),
@@ -2830,7 +2832,7 @@ fn record_provider_capabilities(
     caps: &crate::providers::capabilities::Capabilities,
 ) {
     let (provider, model) = split_model_id(model_id);
-    if let Ok(store) = crate::runtime::RuntimeStore::open_default() {
+    if let Ok(store) = mermaid_runtime::RuntimeStore::open_default() {
         for (key, value) in [
             ("tools_support", caps.supports_tools.to_string()),
             ("vision_support", caps.supports_vision.to_string()),
@@ -2852,7 +2854,7 @@ fn record_provider_capabilities(
         ] {
             let _ = store
                 .provider_probes()
-                .upsert(crate::runtime::NewProviderProbe {
+                .upsert(mermaid_runtime::NewProviderProbe {
                     provider: provider.clone(),
                     model_id: model.clone(),
                     capability_key: key.to_string(),
@@ -2938,7 +2940,7 @@ async fn dispatch_execute_tool(
     workdir: PathBuf,
     turn: TurnId,
     call_id: crate::domain::ToolCallId,
-    source: crate::models::tool_call::ToolCall,
+    source: mermaid_model::models::tool_call::ToolCall,
     token: tokio_util::sync::CancellationToken,
     background: tokio_util::sync::CancellationToken,
     web_bytes: Arc<std::sync::atomic::AtomicUsize>,
@@ -2948,7 +2950,7 @@ async fn dispatch_execute_tool(
     session_id: String,
     message_index: usize,
     scratchpad: Option<PathBuf>,
-    safety_mode: crate::runtime::SafetyMode,
+    safety_mode: mermaid_runtime::SafetyMode,
     plan_file: Option<PathBuf>,
     plan_permissions: crate::app::PlanPermissions,
     context_percent: Option<u8>,
@@ -3099,7 +3101,7 @@ async fn dispatch_execute_tool(
         let texts = gate
             .context
             .iter()
-            .map(|t| crate::utils::redact_secrets(t))
+            .map(|t| mermaid_model::utils::redact_secrets(t))
             .collect();
         let _ = msg_tx.send(Msg::HookContext { turn, texts }).await;
     }
@@ -3108,7 +3110,7 @@ async fn dispatch_execute_tool(
         // Dropping `ctx` closes the progress channel so the relay terminates
         // before the join below.
         drop(ctx);
-        let reason = crate::utils::redact_secrets(&reason);
+        let reason = mermaid_model::utils::redact_secrets(&reason);
         let outcome = crate::domain::ToolOutcome::error(
             format!("Denied by plugin hook ({plugin}): {reason}"),
             0.0,
@@ -3180,9 +3182,9 @@ async fn start_runtime_tool_run(
     let tool_name = tool_name.to_string();
     let args_json = redacted_json_string(args);
     tokio::task::spawn_blocking(move || {
-        crate::runtime::RuntimeStore::open_default()
+        mermaid_runtime::RuntimeStore::open_default()
             .and_then(|store| {
-                store.tool_runs().start(crate::runtime::NewToolRun {
+                store.tool_runs().start(mermaid_runtime::NewToolRun {
                     id: None,
                     task_id,
                     turn_id: Some(turn.0.to_string()),
@@ -3217,7 +3219,7 @@ fn finish_runtime_tool_run(tool_run_id: Option<&str>, outcome: &crate::domain::T
     // Fire-and-forget telemetry write on the blocking pool — don't stall the
     // tool-finish path waiting on rusqlite (#39).
     tokio::task::spawn_blocking(move || {
-        if let Ok(store) = crate::runtime::RuntimeStore::open_default() {
+        if let Ok(store) = mermaid_runtime::RuntimeStore::open_default() {
             let _ = store
                 .tool_runs()
                 .finish(&tool_run_id, &status, output_json.as_deref());
@@ -3231,7 +3233,7 @@ fn finish_runtime_tool_run(tool_run_id: Option<&str>, outcome: &crate::domain::T
 /// persistence sinks.
 fn redacted_json_string(value: &serde_json::Value) -> Option<String> {
     let mut redacted = value.clone();
-    crate::utils::redact_json(&mut redacted);
+    mermaid_model::utils::redact_json(&mut redacted);
     serde_json::to_string(&redacted).ok()
 }
 
@@ -3260,7 +3262,7 @@ fn runtime_model_info_text(model: &str) -> String {
                 .unwrap_or_else(|| "unknown".to_string())
         ),
     ];
-    if let Ok(store) = crate::runtime::RuntimeStore::open_default()
+    if let Ok(store) = mermaid_runtime::RuntimeStore::open_default()
         && let Ok(probes) = store
             .provider_probes()
             .list(Some(&snapshot.provider), Some(&snapshot.model))
@@ -3535,8 +3537,8 @@ async fn discover_available_models(
 /// Autostart is hard-off: enumerating must never mutate. Same contract as the
 /// CLI's `list_ollama_models`.
 async fn list_ollama_models_readonly(config: &crate::app::Config) -> Option<Vec<String>> {
-    use crate::models::adapters::ollama::OllamaAdapter;
-    use crate::models::{BackendConfig, Model};
+    use mermaid_model::models::adapters::ollama::OllamaAdapter;
+    use mermaid_model::models::{BackendConfig, Model};
     let backend = BackendConfig {
         ollama_url: format!("{}:{}", config.ollama.host, config.ollama.port),
         timeout_secs: 5,
@@ -3572,8 +3574,10 @@ async fn dispatch_copy_to_clipboard(text: String, tx: MsgSender) {
     let _ = tx.send(msg).await;
 }
 
-fn classify_error_for_ui(e: &crate::models::ModelError) -> crate::models::UserFacingError {
-    use crate::models::{ErrorCategory, ModelError, UserFacingError};
+fn classify_error_for_ui(
+    e: &mermaid_model::models::ModelError,
+) -> mermaid_model::models::UserFacingError {
+    use mermaid_model::models::{ErrorCategory, ModelError, UserFacingError};
     match e {
         ModelError::Backend(b) => UserFacingError {
             summary: "Backend error".to_string(),
@@ -3902,7 +3906,7 @@ mod tests {
             messages: vec![],
             system_prompt: String::new(),
             instructions: None,
-            reasoning: crate::models::ReasoningLevel::Medium,
+            reasoning: mermaid_model::models::ReasoningLevel::Medium,
             temperature: 0.7,
             max_tokens: 4096,
             tools: vec![],
@@ -3931,7 +3935,7 @@ mod tests {
             messages: vec![],
             system_prompt: String::new(),
             instructions: None,
-            reasoning: crate::models::ReasoningLevel::Medium,
+            reasoning: mermaid_model::models::ReasoningLevel::Medium,
             temperature: 0.7,
             max_tokens: 4096,
             tools: vec![],
@@ -3974,9 +3978,9 @@ mod tests {
         let (mut r, mut rx) = runner();
         let turn = TurnId(7);
         let call_id = ToolCallId(1);
-        let source = crate::models::tool_call::ToolCall {
+        let source = mermaid_model::models::tool_call::ToolCall {
             id: Some("c1".to_string()),
-            function: crate::models::tool_call::FunctionCall {
+            function: mermaid_model::models::tool_call::FunctionCall {
                 name: "read_file".to_string(),
                 arguments: serde_json::json!({"path": "x"}),
             },
@@ -3986,7 +3990,7 @@ mod tests {
             call_id,
             source,
             model_id: "ollama/test".to_string(),
-            safety_mode: crate::runtime::SafetyMode::Ask,
+            safety_mode: mermaid_runtime::SafetyMode::Ask,
             plan_file: None,
             plan_permissions: crate::app::PlanPermissions::default(),
             context_percent: None,
@@ -4019,7 +4023,7 @@ mod tests {
                 messages: vec![],
                 system_prompt: String::new(),
                 instructions: None,
-                reasoning: crate::models::ReasoningLevel::Medium,
+                reasoning: mermaid_model::models::ReasoningLevel::Medium,
                 temperature: 0.7,
                 max_tokens: 4096,
                 tools: vec![],
@@ -4052,7 +4056,7 @@ mod tests {
             messages: vec![],
             system_prompt: String::new(),
             instructions: None,
-            reasoning: crate::models::ReasoningLevel::Medium,
+            reasoning: mermaid_model::models::ReasoningLevel::Medium,
             temperature: 0.7,
             max_tokens: 4096,
             tools: vec![],
@@ -4127,10 +4131,15 @@ mod tests {
             "test/model".to_string(),
             now,
         );
-        full.add_messages(&[crate::models::ChatMessage::user("raw history")], now);
+        full.add_messages(
+            &[mermaid_model::models::ChatMessage::user("raw history")],
+            now,
+        );
         let mut compacted = full.clone();
         compacted.replace_messages(
-            vec![crate::models::ChatMessage::user("compacted checkpoint")],
+            vec![mermaid_model::models::ChatMessage::user(
+                "compacted checkpoint",
+            )],
             now,
         );
         let archive = crate::domain::CompactionArchive {
@@ -4185,7 +4194,9 @@ mod tests {
         assert_eq!(events.len(), 1);
         let mut newer = compaction.conversation;
         newer.add_messages(
-            &[crate::models::ChatMessage::assistant("new assistant reply")],
+            &[mermaid_model::models::ChatMessage::assistant(
+                "new assistant reply",
+            )],
             chrono::Local::now(),
         );
         let (_, outcome) = state.process(PersistenceJob::Conversation(Box::new(newer)));

@@ -21,7 +21,7 @@ use mermaid_cli::providers::model::ModelProvider;
 use mermaid_cli::providers::tool::ToolExecutor;
 use mermaid_cli::providers::tool::subagent::{SubagentSpawner, SubagentTool};
 use mermaid_cli::providers::tool::web::WebCapabilities;
-use mermaid_cli::runtime::SafetyMode;
+use mermaid_runtime::SafetyMode;
 
 #[path = "harness/stub_model.rs"]
 mod stub_model;
@@ -166,7 +166,7 @@ async fn a_child_emitting_several_tool_calls_runs_them_all_and_sees_every_result
     let results = requests[1]
         .messages
         .iter()
-        .filter(|m| m.role == mermaid_cli::models::MessageRole::Tool)
+        .filter(|m| m.role == mermaid_model::models::MessageRole::Tool)
         .count();
     assert_eq!(
         results, 3,

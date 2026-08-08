@@ -134,7 +134,7 @@ static SYSTEM_PROMPT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| 
         .replace("{arch}", std::env::consts::ARCH)
         .replace(
             "{timeout_secs}",
-            &crate::constants::COMMAND_TIMEOUT_SECS.to_string(),
+            &mermaid_model::constants::COMMAND_TIMEOUT_SECS.to_string(),
         )
 });
 
@@ -1068,7 +1068,10 @@ mod tests {
             "timeout placeholder must be substituted"
         );
         assert!(
-            prompt.contains(&format!("({}s)", crate::constants::COMMAND_TIMEOUT_SECS)),
+            prompt.contains(&format!(
+                "({}s)",
+                mermaid_model::constants::COMMAND_TIMEOUT_SECS
+            )),
             "rendered prompt must state the executor's real foreground timeout"
         );
     }

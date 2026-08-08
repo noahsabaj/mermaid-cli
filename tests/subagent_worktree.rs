@@ -31,8 +31,8 @@ use mermaid_cli::providers::ctx::test_exec_context_with_config;
 use mermaid_cli::providers::tool::ToolExecutor;
 use mermaid_cli::providers::tool::subagent::{SubagentSpawner, SubagentTool};
 use mermaid_cli::providers::tool::web::WebCapabilities;
-use mermaid_cli::runtime::SafetyMode;
-use mermaid_cli::runtime::git::git;
+use mermaid_runtime::SafetyMode;
+use mermaid_runtime::git::git;
 use std::sync::Arc;
 
 /// Cheapest capable model that can drive a tool loop. The contributor tier

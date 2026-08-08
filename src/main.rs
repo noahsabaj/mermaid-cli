@@ -1,6 +1,9 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 
+use mermaid_model::utils::init_logger;
+use mermaid_runtime::{NewTask, RuntimeStore, TaskStatus};
+
 use mermaid_cli::{
     app::{
         InteractiveOptions, RunOptions, format_result, load_layered_config_or_warn,
@@ -9,16 +12,14 @@ use mermaid_cli::{
     },
     cli::{Cli, Commands, OutputFormat, resolve_run_prompt},
     ollama::ensure_model as ensure_ollama_model,
-    runtime::{NewTask, RuntimeStore, TaskStatus},
     session::{ConversationManager, SessionEntry, select_conversation},
-    utils::init_logger,
 };
 
 fn main() -> Result<()> {
     // Best-effort process hardening (no core dumps, no ptrace attach) before we
     // parse args or touch config — a crash must not write a core file carrying
     // secrets, and the process shouldn't be trivially attachable.
-    mermaid_cli::runtime::hardening::harden_process();
+    mermaid_runtime::hardening::harden_process();
 
     // The `__sandbox-exec` launcher applies OS confinement to this process and
     // execve's the wrapped command. It must run before the async runtime spawns
@@ -410,7 +411,7 @@ fn create_run_task(
             .tasks()
             .add_event(&task.id, "run_option", "tools disabled by --no-execute");
     }
-    let _ = mermaid_cli::runtime::run_plugin_hooks(
+    let _ = mermaid_runtime::run_plugin_hooks(
         "task_start",
         &serde_json::json!({
             "id": task.id.clone(),
@@ -428,7 +429,7 @@ fn finish_run_task(task_id: Option<&str>, status: TaskStatus, final_report: Opti
     };
     if let Ok(store) = RuntimeStore::open_default() {
         let _ = store.tasks().update_status(task_id, status, final_report);
-        let _ = mermaid_cli::runtime::run_plugin_hooks(
+        let _ = mermaid_runtime::run_plugin_hooks(
             "task_stop",
             &serde_json::json!({
                 "id": task_id,

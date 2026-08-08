@@ -14,8 +14,8 @@ use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, oneshot};
 use tokio::time::{Duration, timeout};
 
-use crate::constants::MAX_MCP_FRAME_BYTES;
-use crate::utils::{CappedLine, read_line_capped};
+use mermaid_model::constants::MAX_MCP_FRAME_BYTES;
+use mermaid_model::utils::{CappedLine, read_line_capped};
 
 /// Default timeout for JSON-RPC request/response round-trips (discovery,
 /// initialize, ping — all fast control calls). Shared with the HTTP transport.
@@ -142,7 +142,7 @@ impl StdioTransport {
             format!(
                 "Failed to spawn MCP server: {} {}",
                 command,
-                crate::utils::redact_secrets(&args.join(" "))
+                mermaid_model::utils::redact_secrets(&args.join(" "))
             )
         })?;
 
@@ -260,7 +260,10 @@ impl StdioTransport {
                     Ok(CappedLine::Line(bytes)) => {
                         // Redact — servers sometimes echo secrets on stderr (#93).
                         let line = String::from_utf8_lossy(&bytes);
-                        tracing::debug!("MCP stderr: {}", crate::utils::redact_secrets(&line));
+                        tracing::debug!(
+                            "MCP stderr: {}",
+                            mermaid_model::utils::redact_secrets(&line)
+                        );
                     },
                     Ok(CappedLine::TooLong) => continue,
                     Ok(CappedLine::Eof) | Err(_) => break,

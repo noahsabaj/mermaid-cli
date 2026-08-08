@@ -8,8 +8,8 @@
 use async_trait::async_trait;
 
 use crate::domain::ChatRequest;
-use crate::models::adapters::gemini::GeminiAdapter;
-use crate::models::{Model, ModelConfig, ModelError, Result};
+use mermaid_model::models::adapters::gemini::GeminiAdapter;
+use mermaid_model::models::{Model, ModelConfig, ModelError, Result};
 
 use super::super::capabilities::Capabilities;
 use super::super::ctx::{FinalResponse, StreamContext, StreamEvent};
@@ -87,7 +87,7 @@ impl ModelProvider for GeminiProvider {
             stop_reason: stop_reason.clone(),
         });
         drop(relay_tx);
-        crate::utils::join_logged(relay_handle.take(), "stream_relay").await;
+        mermaid_model::utils::join_logged(relay_handle.take(), "stream_relay").await;
 
         Ok(FinalResponse {
             usage,
@@ -123,7 +123,7 @@ mod tests {
             messages: vec![],
             system_prompt: "sys".to_string(),
             instructions: None,
-            reasoning: crate::models::ReasoningLevel::High,
+            reasoning: mermaid_model::models::ReasoningLevel::High,
             temperature: 0.5,
             max_tokens: 4096,
             tools: vec![],
@@ -137,7 +137,7 @@ mod tests {
             suppressed_builtin_tools: Vec::new(),
         };
         let cfg = build_model_config(&req);
-        assert_eq!(cfg.reasoning, crate::models::ReasoningLevel::High);
+        assert_eq!(cfg.reasoning, mermaid_model::models::ReasoningLevel::High);
         assert_eq!(cfg.temperature, 0.5);
         assert!(cfg.dynamic_system_suffix.is_none());
     }

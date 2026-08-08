@@ -12,13 +12,13 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::domain::ChatRequest;
-use crate::models::adapters::ollama::{OllamaAdapter, OllamaModelInfo};
-use crate::models::adapters::ollama_sizing::{
+use mermaid_model::models::adapters::ollama::{OllamaAdapter, OllamaModelInfo};
+use mermaid_model::models::adapters::ollama_sizing::{
     NumCtxInputs, converge_num_ctx, default_ollama_num_predict, kv_bytes_per_token,
     resolve_ollama_num_ctx,
 };
-use crate::models::{BackendConfig, Model, ModelConfig, ModelError, Result};
-use crate::runtime::{NewProviderProbe, RuntimeStore};
+use mermaid_model::models::{BackendConfig, Model, ModelConfig, ModelError, Result};
+use mermaid_runtime::{NewProviderProbe, RuntimeStore};
 
 use super::super::capabilities::Capabilities;
 use super::super::ctx::{FinalResponse, StreamContext, StreamEvent};
@@ -118,9 +118,9 @@ impl OllamaProvider {
         // Only fetch the budget we'll actually use: VRAM when keeping the model
         // on the GPU (default), system RAM when offload is allowed.
         let (vram_bytes, system_ram_bytes) = if allow_ram_offload {
-            (None, crate::utils::system_ram_bytes())
+            (None, mermaid_model::utils::system_ram_bytes())
         } else {
-            (crate::utils::gpu_vram_bytes().await, None)
+            (mermaid_model::utils::gpu_vram_bytes().await, None)
         };
         NumCtxInputs {
             model_max: info.context_length,
@@ -296,7 +296,7 @@ impl ModelProvider for OllamaProvider {
             stop_reason: stop_reason.clone(),
         });
         drop(relay_tx);
-        crate::utils::join_logged(relay_handle.take(), "stream_relay").await;
+        mermaid_model::utils::join_logged(relay_handle.take(), "stream_relay").await;
 
         Ok(FinalResponse {
             usage,
@@ -432,7 +432,7 @@ mod tests {
             messages: vec![],
             system_prompt: "sys".to_string(),
             instructions: Some("instructions text".to_string()),
-            reasoning: crate::models::ReasoningLevel::High,
+            reasoning: mermaid_model::models::ReasoningLevel::High,
             temperature: 0.3,
             max_tokens: 2048,
             tools: vec![],
@@ -450,7 +450,7 @@ mod tests {
         assert_eq!(cfg.model, "ollama/test");
         assert_eq!(cfg.temperature, 0.3);
         assert_eq!(cfg.max_tokens, 2048);
-        assert_eq!(cfg.reasoning, crate::models::ReasoningLevel::High);
+        assert_eq!(cfg.reasoning, mermaid_model::models::ReasoningLevel::High);
         assert_eq!(cfg.system_prompt.as_deref(), Some("sys"));
         assert_eq!(
             cfg.dynamic_system_suffix.as_deref(),
@@ -470,7 +470,7 @@ mod tests {
             messages: vec![],
             system_prompt: "sys".to_string(),
             instructions: None,
-            reasoning: crate::models::ReasoningLevel::Medium,
+            reasoning: mermaid_model::models::ReasoningLevel::Medium,
             temperature: 0.7,
             max_tokens: 4096,
             tools: vec![],
@@ -507,7 +507,7 @@ mod tests {
             messages: vec![],
             system_prompt: String::new(),
             instructions: None,
-            reasoning: crate::models::ReasoningLevel::Max,
+            reasoning: mermaid_model::models::ReasoningLevel::Max,
             temperature: 0.7,
             max_tokens: 4096,
             tools: vec![],
@@ -535,7 +535,7 @@ mod tests {
             messages: vec![],
             system_prompt: String::new(),
             instructions: None,
-            reasoning: crate::models::ReasoningLevel::Medium,
+            reasoning: mermaid_model::models::ReasoningLevel::Medium,
             temperature: 0.7,
             max_tokens: 0, // AUTO — the incident's configuration
             tools: vec![],

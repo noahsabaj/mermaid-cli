@@ -29,7 +29,7 @@ use rustc_hash::FxHashMap;
 use unicode_width::UnicodeWidthChar;
 
 use crate::domain::{State, TurnState};
-use crate::models::{ReasoningCapability, ReasoningLevel, nearest_effort};
+use mermaid_model::models::{ReasoningCapability, ReasoningLevel, nearest_effort};
 
 use widgets::{
     ChatState, ChatWidget, GenerationStatus, InputState, InputWidget, SlashPaletteWidget,
@@ -105,7 +105,7 @@ impl Default for RenderCache {
 /// See [`RenderCache::stitched`].
 struct StitchedMemo {
     key: u64,
-    messages: Vec<crate::models::ChatMessage>,
+    messages: Vec<mermaid_model::models::ChatMessage>,
 }
 
 impl RenderCache {
@@ -440,7 +440,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
     // (borrowed slice, no fingerprint); with them, the memo makes idle frames
     // a hash-check instead of a transcript clone.
     let committed = state.session.messages();
-    let base: &[crate::models::ChatMessage] = if needs_stitch(committed, &state.turn) {
+    let base: &[mermaid_model::models::ChatMessage] = if needs_stitch(committed, &state.turn) {
         let key = stitch_fingerprint(committed);
         if rstate.stitched.as_ref().map(|m| m.key) != Some(key) {
             rstate.stitched = Some(StitchedMemo {
@@ -690,11 +690,12 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
 /// error-carrier message, or an assistant that ended in tool calls.
 /// `pub(crate)` so the chat widget applies the same rule when deciding to
 /// draw a streaming continuation without a fresh bubble prefix.
-pub(crate) fn mergeable_into(prev: &crate::models::ChatMessage) -> bool {
-    prev.role == crate::models::MessageRole::Assistant
+pub(crate) fn mergeable_into(prev: &mermaid_model::models::ChatMessage) -> bool {
+    prev.role == mermaid_model::models::MessageRole::Assistant
         && matches!(
             prev.kind,
-            crate::models::ChatMessageKind::Normal | crate::models::ChatMessageKind::Continuation
+            mermaid_model::models::ChatMessageKind::Normal
+                | mermaid_model::models::ChatMessageKind::Continuation
         )
         && prev.tool_calls.is_none()
 }
@@ -720,8 +721,8 @@ pub(crate) fn mergeable_into(prev: &crate::models::ChatMessage) -> bool {
 ///   run stops blinking once the session goes idle.
 fn chat_content_key(
     state: &State,
-    base: &[crate::models::ChatMessage],
-    live: &[crate::models::ChatMessage],
+    base: &[mermaid_model::models::ChatMessage],
+    live: &[mermaid_model::models::ChatMessage],
     blink_on: bool,
 ) -> u64 {
     use std::hash::{Hash, Hasher};
@@ -767,7 +768,7 @@ fn chat_content_key(
 /// Including markers here made this permanently true for any session that ever
 /// changed mode — `ContextMarker` is never swept — which cost a
 /// transcript-sized hash on every frame forever, at ~60 frames per second.
-fn needs_stitch(committed: &[crate::models::ChatMessage], turn: &TurnState) -> bool {
+fn needs_stitch(committed: &[mermaid_model::models::ChatMessage], turn: &TurnState) -> bool {
     let live_continuation = matches!(
         turn,
         TurnState::Generating { continuation, .. } if *continuation
@@ -775,7 +776,7 @@ fn needs_stitch(committed: &[crate::models::ChatMessage], turn: &TurnState) -> b
     live_continuation
         || committed
             .iter()
-            .any(|m| m.kind == crate::models::ChatMessageKind::Continuation)
+            .any(|m| m.kind == mermaid_model::models::ChatMessageKind::Continuation)
 }
 
 /// Fingerprint of every committed-message field the stitched transcript
@@ -783,7 +784,7 @@ fn needs_stitch(committed: &[crate::models::ChatMessage], turn: &TurnState) -> b
 /// the chat widget's frame fingerprint so in-place mutations that don't
 /// change message count (e.g. an action attached to the last message during a
 /// tool run) still invalidate the memo.
-fn stitch_fingerprint(committed: &[crate::models::ChatMessage]) -> u64 {
+fn stitch_fingerprint(committed: &[mermaid_model::models::ChatMessage]) -> u64 {
     use std::hash::{Hash, Hasher};
     use std::mem::discriminant;
 
@@ -837,17 +838,19 @@ fn stitch_fingerprint(committed: &[crate::models::ChatMessage]) -> u64 {
 /// renders as a single intact block. A `Continuation` whose predecessor is
 /// not a mergeable bubble (archived by compaction, wedged system note)
 /// renders as its own message — a graceful seam, never a wrong merge.
-fn stitch_committed(committed: &[crate::models::ChatMessage]) -> Vec<crate::models::ChatMessage> {
-    let mut out: Vec<crate::models::ChatMessage> = Vec::with_capacity(committed.len());
+fn stitch_committed(
+    committed: &[mermaid_model::models::ChatMessage],
+) -> Vec<mermaid_model::models::ChatMessage> {
+    let mut out: Vec<mermaid_model::models::ChatMessage> = Vec::with_capacity(committed.len());
     for msg in committed {
         if matches!(
             msg.kind,
-            crate::models::ChatMessageKind::RecoveryNudge
-                | crate::models::ChatMessageKind::ContextMarker
+            mermaid_model::models::ChatMessageKind::RecoveryNudge
+                | mermaid_model::models::ChatMessageKind::ContextMarker
         ) {
             continue;
         }
-        if msg.kind == crate::models::ChatMessageKind::Continuation
+        if msg.kind == mermaid_model::models::ChatMessageKind::Continuation
             && let Some(prev) = out.last_mut()
             && mergeable_into(prev)
         {
@@ -862,8 +865,11 @@ fn stitch_committed(committed: &[crate::models::ChatMessage]) -> Vec<crate::mode
 /// Fold one continuation segment into the bubble it resumes. The seam gets a
 /// conservative overlap trim (see `continuation_overlap`): a resume-echo of
 /// the previous tail is dropped, anything ambiguous is kept.
-fn merge_continuation(prev: &mut crate::models::ChatMessage, cont: &crate::models::ChatMessage) {
-    let skip = crate::utils::continuation_overlap(&prev.content, &cont.content);
+fn merge_continuation(
+    prev: &mut mermaid_model::models::ChatMessage,
+    cont: &mermaid_model::models::ChatMessage,
+) {
+    let skip = mermaid_model::utils::continuation_overlap(&prev.content, &cont.content);
     prev.content.push_str(&cont.content[skip..]);
     if let Some(cont_thinking) = &cont.thinking {
         match &mut prev.thinking {
@@ -912,10 +918,10 @@ fn merge_continuation(prev: &mut crate::models::ChatMessage, cont: &crate::model
 /// in-flight reply looks like one message while it streams, not just after
 /// it commits.
 fn build_live_messages<'a>(
-    committed: &'a [crate::models::ChatMessage],
+    committed: &'a [mermaid_model::models::ChatMessage],
     turn: &TurnState,
     now: chrono::DateTime<chrono::Local>,
-) -> std::borrow::Cow<'a, [crate::models::ChatMessage]> {
+) -> std::borrow::Cow<'a, [mermaid_model::models::ChatMessage]> {
     if let TurnState::ExecutingTools {
         calls, outcomes, ..
     } = turn
@@ -945,7 +951,7 @@ fn build_live_messages<'a>(
         if actions.is_empty() {
             return std::borrow::Cow::Borrowed(committed);
         }
-        let mut msg = crate::models::ChatMessage::assistant("");
+        let mut msg = mermaid_model::models::ChatMessage::assistant("");
         msg.timestamp = now;
         msg.actions = actions;
         let mut out = committed.to_vec();
@@ -971,21 +977,21 @@ fn build_live_messages<'a>(
         let stitching = *continuation && committed.last().is_some_and(mergeable_into);
         let content = if stitching {
             let prev = &committed[committed.len() - 1].content;
-            let skip = crate::utils::continuation_overlap(prev, partial_text);
+            let skip = mermaid_model::utils::continuation_overlap(prev, partial_text);
             partial_text[skip..].to_string()
         } else {
             partial_text.clone()
         };
-        let msg = crate::models::ChatMessage {
-            role: crate::models::MessageRole::Assistant,
+        let msg = mermaid_model::models::ChatMessage {
+            role: mermaid_model::models::MessageRole::Assistant,
             content,
             // `state.now` (stamped each tick) keeps render a pure function of
             // State — never read the wall clock here.
             timestamp: now,
             kind: if stitching {
-                crate::models::ChatMessageKind::Continuation
+                mermaid_model::models::ChatMessageKind::Continuation
             } else {
-                crate::models::ChatMessageKind::Normal
+                mermaid_model::models::ChatMessageKind::Normal
             },
             metadata: None,
             actions: Vec::new(),
@@ -1182,7 +1188,7 @@ mod tests {
         let mut state = mock_state();
         state
             .session
-            .append(crate::models::ChatMessage::user("hello"), state.now);
+            .append(mermaid_model::models::ChatMessage::user("hello"), state.now);
         let dark = render_to_string(&state);
         state.ui.theme = crate::app::ThemeChoice::Light;
         let light = render_to_string(&state);
@@ -1218,9 +1224,9 @@ mod tests {
             started: std::time::SystemTime::now(),
             calls: vec![PendingToolCall {
                 call_id,
-                source: crate::models::tool_call::ToolCall {
+                source: mermaid_model::models::tool_call::ToolCall {
                     id: None,
-                    function: crate::models::tool_call::FunctionCall {
+                    function: mermaid_model::models::tool_call::FunctionCall {
                         name: "agent".to_string(),
                         arguments: serde_json::json!({"description": "explore crates"}),
                     },
@@ -1262,9 +1268,9 @@ mod tests {
         let agent_id = ToolCallId(9);
         let call = |id, name: &str, args| PendingToolCall {
             call_id: id,
-            source: crate::models::tool_call::ToolCall {
+            source: mermaid_model::models::tool_call::ToolCall {
                 id: None,
-                function: crate::models::tool_call::FunctionCall {
+                function: mermaid_model::models::tool_call::FunctionCall {
                     name: name.to_string(),
                     arguments: args,
                 },
@@ -1315,7 +1321,7 @@ mod tests {
     #[test]
     fn build_live_messages_borrows_idle_and_stamps_partial_with_injected_now() {
         use crate::domain::{GenPhase, TurnId};
-        use crate::models::ChatMessage;
+        use mermaid_model::models::ChatMessage;
         use std::borrow::Cow;
         use std::time::SystemTime;
 
@@ -1347,16 +1353,16 @@ mod tests {
     }
 
     fn kinded(
-        mut msg: crate::models::ChatMessage,
-        kind: crate::models::ChatMessageKind,
-    ) -> crate::models::ChatMessage {
+        mut msg: mermaid_model::models::ChatMessage,
+        kind: mermaid_model::models::ChatMessageKind,
+    ) -> mermaid_model::models::ChatMessage {
         msg.kind = kind;
         msg
     }
 
     #[test]
     fn stitch_committed_merges_chain_and_hides_nudges() {
-        use crate::models::{ChatMessage, ChatMessageKind};
+        use mermaid_model::models::{ChatMessage, ChatMessageKind};
         let mut part1 = ChatMessage::assistant("The audit found three issues in the resolver");
         part1.thinking = Some("first trace".to_string());
         // The continuation echoes the tail of part1 — the seam trim drops it.
@@ -1398,7 +1404,7 @@ mod tests {
     /// the human announcement of a mode change, so the transcript hides them.
     #[test]
     fn context_markers_are_hidden_from_the_transcript() {
-        use crate::models::{ChatMessage, ChatMessageKind};
+        use mermaid_model::models::{ChatMessage, ChatMessageKind};
         let committed = vec![
             ChatMessage::user("plan this"),
             kinded(
@@ -1428,7 +1434,7 @@ mod tests {
 
     #[test]
     fn stitch_refuses_non_bubble_predecessor() {
-        use crate::models::{ChatMessage, ChatMessageKind};
+        use mermaid_model::models::{ChatMessage, ChatMessageKind};
         // A continuation whose bubble was archived by compaction lands after
         // the checkpoint's assistant half — render it as its own message
         // (graceful seam) rather than merging into the event block.
@@ -1449,7 +1455,7 @@ mod tests {
 
     #[test]
     fn needs_stitch_is_false_for_plain_sessions() {
-        use crate::models::ChatMessage;
+        use mermaid_model::models::ChatMessage;
         // The fast path: a session that never auto-continued skips the
         // pre-pass entirely (borrowed slice, no fingerprint, no clone).
         let committed = vec![
@@ -1469,7 +1475,7 @@ mod tests {
     /// text duplicated.
     #[test]
     fn a_live_continuation_still_forces_the_stitch() {
-        use crate::models::{ChatMessage, ChatMessageKind};
+        use mermaid_model::models::{ChatMessage, ChatMessageKind};
         let committed = vec![
             ChatMessage::user("write it"),
             ChatMessage::assistant("first half"),
@@ -1504,7 +1510,7 @@ mod tests {
     #[test]
     fn build_live_messages_stamps_streaming_continuation_and_trims_echo() {
         use crate::domain::{GenPhase, TurnId};
-        use crate::models::{ChatMessage, ChatMessageKind};
+        use mermaid_model::models::{ChatMessage, ChatMessageKind};
 
         let committed = vec![ChatMessage::assistant(
             "the fix lands in the resolver module",
@@ -1535,7 +1541,7 @@ mod tests {
 
     #[test]
     fn auto_continued_reply_renders_as_one_bubble() {
-        use crate::models::{ChatMessage, ChatMessageKind};
+        use mermaid_model::models::{ChatMessage, ChatMessageKind};
         let mut s = mock_state();
         s.session.append(ChatMessage::user("audit"), s.now);
         s.session
@@ -1572,7 +1578,7 @@ mod tests {
     #[test]
     fn streaming_continuation_renders_without_fresh_bullet() {
         use crate::domain::{GenPhase, TurnId};
-        use crate::models::{ChatMessage, ChatMessageKind};
+        use mermaid_model::models::{ChatMessage, ChatMessageKind};
         let mut s = mock_state();
         s.session.append(ChatMessage::user("audit"), s.now);
         s.session
@@ -1610,8 +1616,10 @@ mod tests {
     #[test]
     fn user_prompt_renders_with_highlight_band() {
         let mut s = mock_state();
-        s.session
-            .append(crate::models::ChatMessage::user("hello there"), s.now);
+        s.session.append(
+            mermaid_model::models::ChatMessage::user("hello there"),
+            s.now,
+        );
         let buf = render_to_buffer(&s);
         let band_bg = crate::render::theme::Theme::dark()
             .colors
@@ -1664,7 +1672,7 @@ mod tests {
     #[test]
     fn in_flight_tool_renders_as_transcript_row_with_bare_status_line() {
         use crate::domain::PendingToolCall;
-        use crate::models::tool_call::{FunctionCall, ToolCall as ModelToolCall};
+        use mermaid_model::models::tool_call::{FunctionCall, ToolCall as ModelToolCall};
         let mut s = mock_state();
         let call = PendingToolCall {
             call_id: crate::domain::ToolCallId(1),
@@ -1700,7 +1708,7 @@ mod tests {
     #[test]
     fn pending_question_and_agent_calls_get_no_transcript_row() {
         use crate::domain::PendingToolCall;
-        use crate::models::tool_call::{FunctionCall, ToolCall as ModelToolCall};
+        use mermaid_model::models::tool_call::{FunctionCall, ToolCall as ModelToolCall};
         let mut s = mock_state();
         let mk = |id: u64, name: &str, args: serde_json::Value| PendingToolCall {
             call_id: crate::domain::ToolCallId(id),
@@ -1759,10 +1767,10 @@ mod tests {
     #[test]
     fn reasoning_blocks_are_collapsed_by_default() {
         let mut s = mock_state();
-        let mut first_msg = crate::models::ChatMessage::assistant("first visible answer");
+        let mut first_msg = mermaid_model::models::ChatMessage::assistant("first visible answer");
         first_msg.thinking = Some("first private chain of thought".to_string());
         s.session.append(first_msg, s.now);
-        let mut second_msg = crate::models::ChatMessage::assistant("second visible answer");
+        let mut second_msg = mermaid_model::models::ChatMessage::assistant("second visible answer");
         second_msg.thinking = Some("second private chain of thought".to_string());
         s.session.append(second_msg, s.now);
         let frame = render_to_string(&s);
@@ -1780,7 +1788,7 @@ mod tests {
     #[test]
     fn hidden_reasoning_then_action_renders_action_without_placeholder() {
         let mut s = mock_state();
-        let mut msg = crate::models::ChatMessage::assistant("");
+        let mut msg = mermaid_model::models::ChatMessage::assistant("");
         msg.thinking = Some("private chain of thought".to_string());
         msg.actions.push(crate::domain::ActionDisplay {
             action_type: "Bash".to_string(),
@@ -1809,7 +1817,7 @@ mod tests {
     fn committed_message_appears_in_chat_pane() {
         let mut s = mock_state();
         s.session.append(
-            crate::models::ChatMessage::user("unique-user-token-xyz"),
+            mermaid_model::models::ChatMessage::user("unique-user-token-xyz"),
             s.now,
         );
         let frame = render_to_string(&s);

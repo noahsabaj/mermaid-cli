@@ -52,7 +52,7 @@ struct AgentBundle {
 /// plugin-vs-plugin collisions resolve deterministically.
 pub fn load() -> PluginAssets {
     let mut assets = PluginAssets::default();
-    let Ok(store) = crate::runtime::RuntimeStore::open_default() else {
+    let Ok(store) = mermaid_runtime::RuntimeStore::open_default() else {
         return assets;
     };
     let Ok(mut plugins) = store.plugins().list() else {
@@ -64,7 +64,7 @@ pub fn load() -> PluginAssets {
             continue;
         }
         let Ok(manifest) =
-            serde_json::from_str::<crate::runtime::PluginManifest>(&plugin.manifest_json)
+            serde_json::from_str::<mermaid_runtime::PluginManifest>(&plugin.manifest_json)
         else {
             assets.warnings.push(format!(
                 "plugin '{}': unreadable manifest; skipped",
@@ -118,7 +118,7 @@ fn merge_assets(acc: &mut PluginAssets, next: PluginAssets) {
 /// Pure-ish (filesystem reads only) so tests need no `RuntimeStore`.
 pub(crate) fn assets_from_manifest(
     root: &Path,
-    manifest: &crate::runtime::PluginManifest,
+    manifest: &mermaid_runtime::PluginManifest,
 ) -> PluginAssets {
     let mut assets = PluginAssets::default();
     let plugin = &manifest.name;
@@ -286,9 +286,9 @@ mod tests {
         mcp: &[&str],
         prompts: &[&str],
         agents: &[&str],
-    ) -> crate::runtime::PluginManifest {
+    ) -> mermaid_runtime::PluginManifest {
         let _ = root;
-        crate::runtime::PluginManifest {
+        mermaid_runtime::PluginManifest {
             name: "demo".to_string(),
             version: None,
             description: None,

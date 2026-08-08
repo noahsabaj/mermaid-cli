@@ -13,7 +13,7 @@
 //! - **Replayable tools** (`execute_command`, file mutators): an `Ask` (or an
 //!   escalated Auto-mode `Classify`) decision creates a checkpoint + an
 //!   approval row and BLOCKS, returning an "approval required" outcome. The
-//!   action is later re-run out-of-band by [`crate::runtime::approve_and_replay`].
+//!   action is later re-run out-of-band by [`mermaid_runtime::approve_and_replay`].
 //! - **Non-replayable tools** (`web_*`, `mcp`, `subagent`, computer-use):
 //!   there is no checkpoint/replay path, so an `Ask` decision resolves
 //!   inline when an approval broker is bound and otherwise fails closed
@@ -31,7 +31,7 @@ use std::path::PathBuf;
 
 use crate::domain::{ApprovalKind, ToolOutcome};
 use crate::providers::{ApprovalBroker, ApprovalDecision, allowlist_key};
-use crate::runtime::{
+use mermaid_runtime::{
     ActionRequest, NewApproval, PolicyDecision, PolicyEngine, RiskClass, RuntimeStore,
     create_checkpoint_for_task, run_plugin_hooks,
 };
@@ -62,7 +62,7 @@ pub enum Gate {
 pub async fn gate_external(
     ctx: &ExecContext,
     tool: &'static str,
-    category: crate::runtime::ToolCategory,
+    category: mermaid_runtime::ToolCategory,
     summary: String,
     args: &serde_json::Value,
 ) -> Option<ToolOutcome> {
@@ -81,7 +81,7 @@ pub async fn gate_external_mcp(
     gate_external_inner(
         ctx,
         "mcp_proxy",
-        crate::runtime::ToolCategory::Mcp,
+        mermaid_runtime::ToolCategory::Mcp,
         summary,
         args,
         read_only_hint,
@@ -92,14 +92,14 @@ pub async fn gate_external_mcp(
 async fn gate_external_inner(
     ctx: &ExecContext,
     tool: &'static str,
-    category: crate::runtime::ToolCategory,
+    category: mermaid_runtime::ToolCategory,
     summary: String,
     args: &serde_json::Value,
     mcp_read_only_hint: bool,
 ) -> Option<ToolOutcome> {
     if matches!(
         category,
-        crate::runtime::ToolCategory::Web | crate::runtime::ToolCategory::Network
+        mermaid_runtime::ToolCategory::Web | mermaid_runtime::ToolCategory::Network
     ) && matches!(ctx.config.safety.network, crate::app::NetworkPolicy::Deny)
     {
         return Some(ToolOutcome::error(
@@ -246,8 +246,8 @@ pub async fn gate(
     let decision = match decision {
         PolicyDecision::Ask { risk, .. }
             if ctx.plan_file.is_none()
-                && ctx.safety_mode == crate::runtime::SafetyMode::ReadOnly
-                && request.category == crate::runtime::ToolCategory::Web
+                && ctx.safety_mode == mermaid_runtime::SafetyMode::ReadOnly
+                && request.category == mermaid_runtime::ToolCategory::Web
                 && ctx.config.safety.allow_readonly_web =>
         {
             PolicyDecision::Allow {
@@ -369,7 +369,7 @@ pub async fn gate(
 }
 
 /// The plan-flavored teaching denial. Its reason starts with
-/// [`crate::runtime::PLAN_DENIAL_MARKER`] so the history neutralizer can
+/// [`mermaid_runtime::PLAN_DENIAL_MARKER`] so the history neutralizer can
 /// retire it once plan mode ends — and it must name the escape hatch:
 /// without the plan path and the allowed tools in the error, models
 /// generalize "writes are blocked" and doom-loop through shell probes
@@ -383,7 +383,7 @@ fn plan_deny(risk: RiskClass, plan_file: &std::path::Path) -> PolicyDecision {
              instead of performing it now: write_file or apply_patch on that exact path \
              are the allowed mutations (a shell redirect writing ONLY that file also \
              works). When the plan is complete, call exit_plan_mode",
-            crate::runtime::PLAN_DENIAL_MARKER,
+            mermaid_runtime::PLAN_DENIAL_MARKER,
             plan_file.display(),
         ),
     }
@@ -432,11 +432,11 @@ fn apply_plan_profile(
     request: &ActionRequest,
     decision: PolicyDecision,
 ) -> (PolicyDecision, bool) {
-    use crate::runtime::ToolCategory as C;
+    use mermaid_runtime::ToolCategory as C;
     let perms = ctx.plan_permissions;
     match decision {
         PolicyDecision::Deny { risk, reason }
-            if reason.starts_with(crate::runtime::READ_ONLY_DENIAL_MARKER) =>
+            if reason.starts_with(mermaid_runtime::READ_ONLY_DENIAL_MARKER) =>
         {
             let plan_file = ctx.plan_file.as_deref().expect("plan mode ctx");
             // Command-relative paths resolve against the directory the action
@@ -445,10 +445,9 @@ fn apply_plan_profile(
             // somewhere else. `Edit` paths are already project-rooted.
             let action_dir = request.resolve_dir(&ctx.workdir);
             let plan_file_edit = request.category == C::Edit
-                && request
-                    .path
-                    .as_deref()
-                    .is_some_and(|p| crate::runtime::is_plan_file_path(&ctx.workdir, p, plan_file));
+                && request.path.as_deref().is_some_and(|p| {
+                    mermaid_runtime::is_plan_file_path(&ctx.workdir, p, plan_file)
+                });
             if plan_file_edit {
                 // Authoring the plan IS plan mode — not a profile category.
                 (
@@ -463,7 +462,7 @@ fn apply_plan_profile(
             } else if request
                 .command
                 .as_deref()
-                .is_some_and(|c| crate::runtime::is_plan_file_only_write(c, action_dir, plan_file))
+                .is_some_and(|c| mermaid_runtime::is_plan_file_only_write(c, action_dir, plan_file))
             {
                 // The shell spelling of plan authoring (`echo … > plan.md`,
                 // `cat > plan.md <<'EOF'`) — same exemption as the Edit
@@ -478,7 +477,7 @@ fn apply_plan_profile(
             } else if request
                 .command
                 .as_deref()
-                .is_some_and(crate::runtime::is_plan_safe_build_command)
+                .is_some_and(mermaid_runtime::is_plan_safe_build_command)
             {
                 (plan_level_decision(perms.builds, risk, plan_file), false)
             } else {
@@ -580,10 +579,10 @@ fn format_approval_body(request: &ActionRequest, classifier_reason: Option<&str>
         format!("{}…", &value[..end])
     }
 
-    use crate::runtime::ToolCategory as C;
+    use mermaid_runtime::ToolCategory as C;
     let redacted_detail = request.arguments.as_ref().and_then(|arguments| {
         let mut safe = arguments.clone();
-        crate::utils::redact_json(&mut safe);
+        mermaid_model::utils::redact_json(&mut safe);
         action_detail(&request.tool, &safe)
     });
     let modal_detail = redacted_detail.as_ref().or(request.command.as_ref());
@@ -609,8 +608,8 @@ fn format_approval_body(request: &ActionRequest, classifier_reason: Option<&str>
     body
 }
 
-fn approval_kind(category: crate::runtime::ToolCategory) -> ApprovalKind {
-    use crate::runtime::ToolCategory as C;
+fn approval_kind(category: mermaid_runtime::ToolCategory) -> ApprovalKind {
+    use mermaid_runtime::ToolCategory as C;
     match category {
         C::Edit => ApprovalKind::FileMutation,
         C::Shell | C::Git | C::Process => ApprovalKind::Shell,
@@ -721,7 +720,7 @@ fn block_for_approval(
 mod tests {
     use super::*;
     use crate::domain::{ToolCallId, TurnId};
-    use crate::runtime::{SafetyMode, ToolCategory};
+    use mermaid_runtime::{SafetyMode, ToolCategory};
     use std::path::PathBuf;
     use std::sync::Arc;
 
@@ -1180,7 +1179,7 @@ mod tests {
                 Gate::Block(outcome) => assert!(
                     outcome.model_content.contains(&format!(
                         "blocked by policy: {}",
-                        crate::runtime::PLAN_DENIAL_MARKER
+                        mermaid_runtime::PLAN_DENIAL_MARKER
                     )),
                     "plan denial must carry the plan signature for {path:?}: {:?}",
                     outcome.model_content
@@ -1311,7 +1310,7 @@ mod tests {
                 assert!(
                     outcome.model_content.contains(&format!(
                         "blocked by policy: {}",
-                        crate::runtime::PLAN_DENIAL_MARKER
+                        mermaid_runtime::PLAN_DENIAL_MARKER
                     )),
                     "got {:?}",
                     outcome.model_content
@@ -1334,7 +1333,7 @@ mod tests {
             Gate::Block(outcome) => assert!(
                 !outcome
                     .model_content
-                    .contains(crate::runtime::PLAN_DENIAL_MARKER),
+                    .contains(mermaid_runtime::PLAN_DENIAL_MARKER),
                 "destructive deny must not be rewritten: {:?}",
                 outcome.model_content
             ),
@@ -1373,7 +1372,7 @@ mod tests {
             Gate::Block(outcome) => assert!(
                 outcome
                     .model_content
-                    .contains(crate::runtime::PLAN_DENIAL_MARKER),
+                    .contains(mermaid_runtime::PLAN_DENIAL_MARKER),
                 "got {:?}",
                 outcome.model_content
             ),
@@ -1590,9 +1589,9 @@ mod tests {
         // the downgrade deliberately never touches.
         let mut config = crate::app::Config::default();
         config.safety.mode = SafetyMode::Ask;
-        config.safety.overrides = vec![crate::runtime::PolicyOverride {
+        config.safety.overrides = vec![mermaid_runtime::PolicyOverride {
             tool: Some("write_file".to_string()),
-            decision: crate::runtime::PolicyOverrideDecision::Deny,
+            decision: mermaid_runtime::PolicyOverrideDecision::Deny,
             ..Default::default()
         }];
         let ctx = ctx_with(config);

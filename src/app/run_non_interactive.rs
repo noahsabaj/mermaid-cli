@@ -17,8 +17,8 @@ use crate::app::lifecycle::RuntimeLifecycle;
 use crate::cli::OutputFormat;
 use crate::domain::{Msg, RUN_EVENT_PROTOCOL_VERSION, RunEvent, State, TurnState, update};
 use crate::effect::EffectRunner;
-use crate::models::MessageRole;
 use crate::providers::ToolRegistry;
+use mermaid_model::models::MessageRole;
 
 /// Output shape the CLI prints.
 #[derive(Debug, Default)]
@@ -537,7 +537,7 @@ fn build_result(state: &State) -> RunResult {
     {
         let mut head_idx = last_idx;
         while head_idx > 0
-            && messages[head_idx].kind == crate::models::ChatMessageKind::Continuation
+            && messages[head_idx].kind == mermaid_model::models::ChatMessageKind::Continuation
             && let Some(prev_idx) = messages[..head_idx]
                 .iter()
                 .rposition(|m| m.role == MessageRole::Assistant)
@@ -545,8 +545,8 @@ fn build_result(state: &State) -> RunResult {
             // empty error-carrier is never part of the reply chain.
             && matches!(
                 messages[prev_idx].kind,
-                crate::models::ChatMessageKind::Normal
-                    | crate::models::ChatMessageKind::Continuation
+                mermaid_model::models::ChatMessageKind::Normal
+                    | mermaid_model::models::ChatMessageKind::Continuation
             )
             && messages[prev_idx].tool_calls.is_none()
         {
@@ -558,7 +558,7 @@ fn build_result(state: &State) -> RunResult {
             .iter()
             .filter(|m| m.role == MessageRole::Assistant)
         {
-            let skip = crate::utils::continuation_overlap(&response, &msg.content);
+            let skip = mermaid_model::utils::continuation_overlap(&response, &msg.content);
             response.push_str(&msg.content[skip..]);
             if let Some(t) = &msg.thinking {
                 match &mut reasoning {
@@ -633,7 +633,7 @@ mod tests {
 
     #[test]
     fn build_result_joins_an_auto_continued_reply() {
-        use crate::models::{ChatMessage, ChatMessageKind};
+        use mermaid_model::models::{ChatMessage, ChatMessageKind};
         let mut state = crate::domain::State::new(
             crate::app::Config::default(),
             std::path::PathBuf::from("/tmp/p"),
@@ -662,7 +662,7 @@ mod tests {
 
     #[test]
     fn build_result_without_chain_takes_the_last_reply() {
-        use crate::models::ChatMessage;
+        use mermaid_model::models::ChatMessage;
         let mut state = crate::domain::State::new(
             crate::app::Config::default(),
             std::path::PathBuf::from("/tmp/p"),
@@ -696,7 +696,7 @@ mod tests {
     }
 
     fn schema_state(reply: &str) -> crate::domain::State {
-        use crate::models::ChatMessage;
+        use mermaid_model::models::ChatMessage;
         let mut state = crate::domain::State::new(
             crate::app::Config::default(),
             std::path::PathBuf::from("/tmp/p"),
@@ -779,7 +779,7 @@ mod tests {
         // The formatting turn produced nothing new (same last assistant
         // message) -> keep the agent's answer, record the failure.
         let schema = serde_json::json!({"type": "object"});
-        use crate::models::ChatMessage;
+        use mermaid_model::models::ChatMessage;
         let mut state = crate::domain::State::new(
             crate::app::Config::default(),
             std::path::PathBuf::from("/tmp/p"),

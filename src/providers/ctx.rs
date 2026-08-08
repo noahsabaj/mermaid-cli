@@ -26,9 +26,11 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::domain::{Msg, ToolCallId, TurnId};
-use crate::models::tool_call::ToolCall as ModelToolCall;
-use crate::models::{ChatMessage, FinishReason, ProviderContinuation, ReasoningChunk, TokenUsage};
-use crate::runtime::SafetyMode;
+use mermaid_model::models::tool_call::ToolCall as ModelToolCall;
+use mermaid_model::models::{
+    ChatMessage, FinishReason, ProviderContinuation, ReasoningChunk, TokenUsage,
+};
+use mermaid_runtime::SafetyMode;
 
 use super::approval::ApprovalBroker;
 use super::auto_classifier::AutoClassifier;
@@ -57,7 +59,7 @@ impl WebByteBudget {
     /// counter so every later response observes an exhausted budget before it
     /// polls another body.
     pub fn charge(&self, bytes: usize) -> Result<usize, usize> {
-        let limit = crate::constants::MAX_WEB_TURN_BYTES;
+        let limit = mermaid_model::constants::MAX_WEB_TURN_BYTES;
         let prior = self
             .used
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
@@ -73,7 +75,8 @@ impl WebByteBudget {
     }
 
     pub fn remaining(&self) -> usize {
-        crate::constants::MAX_WEB_TURN_BYTES.saturating_sub(self.used.load(Ordering::Acquire))
+        mermaid_model::constants::MAX_WEB_TURN_BYTES
+            .saturating_sub(self.used.load(Ordering::Acquire))
     }
 }
 
@@ -307,8 +310,8 @@ impl ExecContext {
     /// Checkpoint provenance for this call — every checkpoint-creating tool
     /// passes this so file snapshots anchor to the conversation position
     /// that produced them (rewind/fork surfaces them by anchor).
-    pub fn checkpoint_origin(&self) -> crate::runtime::CheckpointOrigin {
-        crate::runtime::CheckpointOrigin {
+    pub fn checkpoint_origin(&self) -> mermaid_runtime::CheckpointOrigin {
+        mermaid_runtime::CheckpointOrigin {
             task_id: self.task_id.clone(),
             session_id: self.session_id.clone(),
             message_index: self.message_index,
@@ -336,7 +339,7 @@ pub enum ProgressEvent {
     /// message; anything else lands on the status line as a label.
     Artifact {
         mime: String,
-        #[serde(with = "crate::utils::serde_base64")]
+        #[serde(with = "mermaid_model::utils::serde_base64")]
         data: Vec<u8>,
         caption: Option<String>,
     },
@@ -396,7 +399,7 @@ pub fn test_exec_context(
     workdir: PathBuf,
 ) -> (ExecContext, mpsc::Receiver<ProgressEvent>) {
     let mut config = crate::app::Config::default();
-    config.safety.mode = crate::runtime::SafetyMode::FullAccess;
+    config.safety.mode = mermaid_runtime::SafetyMode::FullAccess;
     test_exec_context_with_config(turn, call_id, workdir, config)
 }
 
@@ -478,21 +481,21 @@ mod tests {
     fn web_budget_is_atomic_and_never_crosses_the_turn_limit() {
         let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(2), PathBuf::from("/tmp"));
         assert_eq!(ctx.charge_web_bytes(1024), Ok(1024));
-        let remaining = crate::constants::MAX_WEB_TURN_BYTES - 1024;
+        let remaining = mermaid_model::constants::MAX_WEB_TURN_BYTES - 1024;
         assert_eq!(
             ctx.charge_web_bytes(remaining),
-            Ok(crate::constants::MAX_WEB_TURN_BYTES)
+            Ok(mermaid_model::constants::MAX_WEB_TURN_BYTES)
         );
         assert_eq!(
             ctx.charge_web_bytes(1),
-            Err(crate::constants::MAX_WEB_TURN_BYTES)
+            Err(mermaid_model::constants::MAX_WEB_TURN_BYTES)
         );
     }
 
     #[test]
     fn web_budget_overflow_saturates_and_stays_exhausted() {
         let budget = WebByteBudget::isolated();
-        let limit = crate::constants::MAX_WEB_TURN_BYTES;
+        let limit = mermaid_model::constants::MAX_WEB_TURN_BYTES;
         assert_eq!(budget.charge(limit - 1), Ok(limit - 1));
         assert_eq!(budget.charge(2), Err(limit));
         assert_eq!(budget.remaining(), 0);

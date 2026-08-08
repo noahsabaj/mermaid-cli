@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
-use super::{
+use mermaid_runtime::{
     ApprovalRecord, ApprovalReplayResult, CheckpointManifest, CheckpointRecord, CompactionRecord,
     MessageRecord, NewProcess, NewProviderProbe, PairingTokenRecord, PluginInstallRecord,
     ProcessRecord, ProcessStatus, ProviderProbeRecord, RuntimeStore, SessionRecord, TaskRecord,
@@ -271,42 +271,43 @@ impl RuntimeClient {
     }
 
     pub fn health(&self) -> Result<RuntimeRead<RuntimeHealth>> {
-        self.read(crate::runtime::DaemonRequest::Health.to_wire(), |service| {
-            service.health()
-        })
+        self.read(
+            crate::runtime_client::DaemonRequest::Health.to_wire(),
+            |service| service.health(),
+        )
     }
 
     pub fn snapshot(&self) -> Result<RuntimeRead<RuntimeSnapshot>> {
         self.read(
-            crate::runtime::DaemonRequest::Snapshot.to_wire(),
+            crate::runtime_client::DaemonRequest::Snapshot.to_wire(),
             |service| service.snapshot(),
         )
     }
 
     pub fn dashboard(&self) -> Result<RuntimeRead<RuntimeDashboard>> {
         self.read(
-            crate::runtime::DaemonRequest::RuntimeDashboard.to_wire(),
+            crate::runtime_client::DaemonRequest::RuntimeDashboard.to_wire(),
             |service| service.dashboard(),
         )
     }
 
     pub fn diagnostics(&self) -> Result<RuntimeRead<RuntimeDiagnostics>> {
         self.read(
-            crate::runtime::DaemonRequest::RuntimeDiagnostics.to_wire(),
+            crate::runtime_client::DaemonRequest::RuntimeDiagnostics.to_wire(),
             |service| service.diagnostics(),
         )
     }
 
     pub fn hygiene_preview(&self) -> Result<RuntimeRead<RuntimeHygienePreview>> {
         self.read(
-            crate::runtime::DaemonRequest::RuntimeHygienePreview.to_wire(),
+            crate::runtime_client::DaemonRequest::RuntimeHygienePreview.to_wire(),
             |service| service.hygiene_preview(),
         )
     }
 
     pub fn hygiene_archive(&self) -> Result<RuntimeRead<RuntimeHygieneArchive>> {
         self.read_inner(
-            crate::runtime::DaemonRequest::RuntimeHygieneArchive.to_wire(),
+            crate::runtime_client::DaemonRequest::RuntimeHygieneArchive.to_wire(),
             true,
             |service| service.hygiene_archive(),
         )
@@ -314,28 +315,31 @@ impl RuntimeClient {
 
     pub fn task_detail(&self, id: &str) -> Result<RuntimeRead<RuntimeTaskDetail>> {
         self.read(
-            crate::runtime::DaemonRequest::RuntimeTaskDetail { id: id.to_string() }.to_wire(),
+            crate::runtime_client::DaemonRequest::RuntimeTaskDetail { id: id.to_string() }
+                .to_wire(),
             |service| service.task_detail(id),
         )
     }
 
     pub fn approval_detail(&self, id: &str) -> Result<RuntimeRead<RuntimeApprovalDetail>> {
         self.read(
-            crate::runtime::DaemonRequest::RuntimeApprovalDetail { id: id.to_string() }.to_wire(),
+            crate::runtime_client::DaemonRequest::RuntimeApprovalDetail { id: id.to_string() }
+                .to_wire(),
             |service| service.approval_detail(id),
         )
     }
 
     pub fn checkpoint_detail(&self, id: &str) -> Result<RuntimeRead<RuntimeCheckpointDetail>> {
         self.read(
-            crate::runtime::DaemonRequest::RuntimeCheckpointDetail { id: id.to_string() }.to_wire(),
+            crate::runtime_client::DaemonRequest::RuntimeCheckpointDetail { id: id.to_string() }
+                .to_wire(),
             |service| service.checkpoint_detail(id),
         )
     }
 
     pub fn list_tasks(&self, limit: usize) -> Result<RuntimeRead<Vec<TaskRecord>>> {
         self.list(
-            crate::runtime::DaemonRequest::RuntimeTasks {
+            crate::runtime_client::DaemonRequest::RuntimeTasks {
                 limit: Some(limit as u64),
             }
             .to_wire(),
@@ -345,7 +349,7 @@ impl RuntimeClient {
 
     pub fn list_processes(&self, limit: usize) -> Result<RuntimeRead<Vec<ProcessRecord>>> {
         self.list(
-            crate::runtime::DaemonRequest::RuntimeProcesses {
+            crate::runtime_client::DaemonRequest::RuntimeProcesses {
                 limit: Some(limit as u64),
             }
             .to_wire(),
@@ -355,14 +359,14 @@ impl RuntimeClient {
 
     pub fn list_approvals(&self) -> Result<RuntimeRead<Vec<ApprovalRecord>>> {
         self.list(
-            crate::runtime::DaemonRequest::RuntimeApprovals.to_wire(),
+            crate::runtime_client::DaemonRequest::RuntimeApprovals.to_wire(),
             |service| service.list_approvals(),
         )
     }
 
     pub fn list_tool_runs(&self, limit: usize) -> Result<RuntimeRead<Vec<ToolRunRecord>>> {
         self.list(
-            crate::runtime::DaemonRequest::RuntimeToolRuns {
+            crate::runtime_client::DaemonRequest::RuntimeToolRuns {
                 limit: Some(limit as u64),
             }
             .to_wire(),
@@ -372,7 +376,7 @@ impl RuntimeClient {
 
     pub fn list_checkpoints(&self, limit: usize) -> Result<RuntimeRead<Vec<CheckpointRecord>>> {
         self.list(
-            crate::runtime::DaemonRequest::RuntimeCheckpoints {
+            crate::runtime_client::DaemonRequest::RuntimeCheckpoints {
                 limit: Some(limit as u64),
             }
             .to_wire(),
@@ -382,14 +386,14 @@ impl RuntimeClient {
 
     pub fn list_plugins(&self) -> Result<RuntimeRead<Vec<PluginInstallRecord>>> {
         self.list(
-            crate::runtime::DaemonRequest::RuntimePlugins.to_wire(),
+            crate::runtime_client::DaemonRequest::RuntimePlugins.to_wire(),
             |service| service.list_plugins(),
         )
     }
 
     pub fn process_log(&self, id: &str, tail_bytes: Option<u64>) -> Result<RuntimeProcessLog> {
         self.action(
-            crate::runtime::DaemonRequest::Logs {
+            crate::runtime_client::DaemonRequest::Logs {
                 id: id.to_string(),
                 tail_bytes,
             }
@@ -401,7 +405,7 @@ impl RuntimeClient {
     pub fn stop_process(&self, id: &str) -> Result<RuntimeOne<ProcessRecord>> {
         // Non-idempotent: `terminate_tree` must not fire twice (RC-G/F25).
         self.action_authed_non_idempotent(
-            crate::runtime::DaemonRequest::StopProcess { id: id.to_string() }.to_wire(),
+            crate::runtime_client::DaemonRequest::StopProcess { id: id.to_string() }.to_wire(),
             |service| {
                 service
                     .stop_process(id)
@@ -414,7 +418,7 @@ impl RuntimeClient {
         // Non-idempotent: kills then respawns — a duplicate run double-signals
         // (possibly a since-reused PID) and can spawn two servers (RC-G/F25).
         self.action_authed_non_idempotent(
-            crate::runtime::DaemonRequest::RestartProcess { id: id.to_string() }.to_wire(),
+            crate::runtime_client::DaemonRequest::RestartProcess { id: id.to_string() }.to_wire(),
             |service| {
                 service
                     .restart_process(id)
@@ -425,29 +429,30 @@ impl RuntimeClient {
 
     pub fn open_process(&self, id: &str) -> Result<RuntimeProcessOpen> {
         self.action_authed(
-            crate::runtime::DaemonRequest::OpenProcess { id: id.to_string() }.to_wire(),
+            crate::runtime_client::DaemonRequest::OpenProcess { id: id.to_string() }.to_wire(),
             |service| service.open_process(id),
         )
     }
 
     pub fn ports(&self) -> Result<RuntimePorts> {
-        self.action(crate::runtime::DaemonRequest::Ports.to_wire(), |service| {
-            service.ports()
-        })
+        self.action(
+            crate::runtime_client::DaemonRequest::Ports.to_wire(),
+            |service| service.ports(),
+        )
     }
 
     pub fn approve(&self, id: &str) -> Result<RuntimeApprovalDecision> {
         // Non-idempotent: replays the approved action, so a duplicate run could
         // execute that side effect twice (RC-G/F25).
         self.action_authed_non_idempotent(
-            crate::runtime::DaemonRequest::Approve { id: id.to_string() }.to_wire(),
+            crate::runtime_client::DaemonRequest::Approve { id: id.to_string() }.to_wire(),
             |_service| RuntimeService::approval_decision(approve_and_replay(id)?),
         )
     }
 
     pub fn deny(&self, id: &str) -> Result<RuntimeApprovalDecision> {
         self.action_authed(
-            crate::runtime::DaemonRequest::Deny { id: id.to_string() }.to_wire(),
+            crate::runtime_client::DaemonRequest::Deny { id: id.to_string() }.to_wire(),
             |_service| RuntimeService::approval_decision(deny_approval(id)?),
         )
     }
@@ -456,7 +461,8 @@ impl RuntimeClient {
         // Non-idempotent: rewrites working-tree files from the snapshot — a
         // duplicate run could clobber edits made between the two runs (RC-G/F25).
         self.action_authed_non_idempotent(
-            crate::runtime::DaemonRequest::RestoreCheckpoint { id: id.to_string() }.to_wire(),
+            crate::runtime_client::DaemonRequest::RestoreCheckpoint { id: id.to_string() }
+                .to_wire(),
             |_service| {
                 Ok(RuntimeCheckpointRestore {
                     ok: true,
@@ -468,7 +474,7 @@ impl RuntimeClient {
 
     pub fn set_plugin_enabled(&self, id: &str, enabled: bool) -> Result<()> {
         self.action_authed::<Value, _>(
-            crate::runtime::DaemonRequest::SetPluginEnabled {
+            crate::runtime_client::DaemonRequest::SetPluginEnabled {
                 id: id.to_string(),
                 enabled,
             }
@@ -483,7 +489,7 @@ impl RuntimeClient {
 
     pub fn model_info(&self, model: &str) -> Result<Value> {
         self.action(
-            crate::runtime::DaemonRequest::ModelInfo {
+            crate::runtime_client::DaemonRequest::ModelInfo {
                 model: model.to_string(),
             }
             .to_wire(),
@@ -493,7 +499,7 @@ impl RuntimeClient {
 
     pub fn set_safety_mode(&self, mode: &str) -> Result<Value> {
         self.action_authed(
-            crate::runtime::DaemonRequest::SetSafetyMode {
+            crate::runtime_client::DaemonRequest::SetSafetyMode {
                 mode: mode.to_string(),
             }
             .to_wire(),
@@ -996,7 +1002,10 @@ impl RuntimeService {
             .with_context(|| format!("process not found: {}", id))?;
         // Best-effort group kill (SIGTERM → grace → SIGKILL) so workers the dev
         // server forked die with it; then mark the row stopped regardless.
-        crate::utils::terminate_tree_blocking(process.pid, crate::utils::Grace::Graceful);
+        mermaid_model::utils::terminate_tree_blocking(
+            process.pid,
+            mermaid_model::utils::Grace::Graceful,
+        );
         self.store.processes().upsert(NewProcess {
             id: Some(process.id.clone()),
             task_id: process.task_id.clone(),
@@ -1020,11 +1029,14 @@ impl RuntimeService {
         // in a destructive command. Refuse to respawn it (mirrors exec.rs's
         // execute_command pre-check) before killing or spawning anything.
         anyhow::ensure!(
-            !crate::runtime::is_destructive_command(&process.command),
+            !mermaid_runtime::is_destructive_command(&process.command),
             "refusing to restart process {id}: command flagged destructive: {:?}",
             process.command
         );
-        crate::utils::terminate_tree_blocking(process.pid, crate::utils::Grace::Graceful);
+        mermaid_model::utils::terminate_tree_blocking(
+            process.pid,
+            mermaid_model::utils::Grace::Graceful,
+        );
         // Wait (bounded) for the old PID to actually exit before respawning —
         // the kill above is fire-and-forget (async signal / taskkill), so an
         // immediate respawn can race the old process for its listening port.
@@ -1086,7 +1098,7 @@ impl RuntimeService {
             .or(process.log_path)
             .with_context(|| format!("process has no URL or log path: {}", id))?;
         validate_open_target(&target)?;
-        crate::utils::open_file(target.clone());
+        mermaid_model::utils::open_file(target.clone());
         Ok(RuntimeProcessOpen { ok: true, target })
     }
 
@@ -1116,12 +1128,12 @@ impl RuntimeService {
 
     pub fn set_plugin_enabled(&self, id: &str, enabled: bool) -> Result<()> {
         self.store.plugins().set_enabled(id, enabled)?;
-        super::write_plugin_lockfile()?;
+        mermaid_runtime::write_plugin_lockfile()?;
         Ok(())
     }
 
     pub fn set_safety_mode(&self, mode: &str) -> Result<crate::app::SafetyConfig> {
-        let parsed = super::SafetyMode::parse(mode)
+        let parsed = mermaid_runtime::SafetyMode::parse(mode)
             .ok_or_else(|| anyhow::anyhow!("unknown safety mode: {}", mode))?;
         // Rewrite only `safety.mode` in the user file (never the whole merged
         // config), then report back the resulting user-scope safety section.
@@ -1164,7 +1176,7 @@ impl RuntimeService {
                 error: None,
             });
         }
-        if let Some(profile) = crate::models::lookup_provider(&snapshot.provider) {
+        if let Some(profile) = mermaid_model::models::lookup_provider(&snapshot.provider) {
             record_static_provider_probes(
                 &self.store,
                 profile,
@@ -1241,7 +1253,7 @@ pub fn runtime_hygiene_reason() -> &'static str {
 /// can no longer silently miss the other.
 pub fn record_static_provider_probes(
     store: &RuntimeStore,
-    profile: &crate::models::ProviderProfile,
+    profile: &mermaid_model::models::ProviderProfile,
     provider: &str,
     model_id: &str,
 ) {
@@ -1566,7 +1578,7 @@ mod tests {
         let task = service
             .store
             .tasks()
-            .create(super::super::NewTask::new(
+            .create(mermaid_runtime::NewTask::new(
                 "contract task",
                 "/tmp/mermaid_runtime_client",
                 "openai/test",
@@ -1586,7 +1598,7 @@ mod tests {
         let store = RuntimeStore::open(&path).expect("open store");
         let checkpoint = store
             .checkpoints()
-            .create(super::super::NewCheckpoint {
+            .create(mermaid_runtime::NewCheckpoint {
                 id: Some("checkpoint-test".to_string()),
                 task_id: None,
                 project_path: "/tmp/mermaid_checkpoint_test".to_string(),
@@ -1600,7 +1612,7 @@ mod tests {
             .expect("create checkpoint");
         let approval = store
             .approvals()
-            .create(super::super::NewApproval {
+            .create(mermaid_runtime::NewApproval {
                 task_id: None,
                 proposed_action: "restore replay: write_file".to_string(),
                 risk_classification: "restored_action".to_string(),

@@ -116,7 +116,7 @@ async fn effect_runner_cancels_scope_on_command() {
         messages: vec![],
         system_prompt: String::new(),
         instructions: None,
-        reasoning: mermaid_cli::models::ReasoningLevel::Medium,
+        reasoning: mermaid_model::models::ReasoningLevel::Medium,
         temperature: 0.7,
         max_tokens: 4096,
         tools: vec![],

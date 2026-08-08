@@ -104,7 +104,7 @@ impl McpServerManager {
                 name,
                 config.command,
                 // Redact args — they can carry secrets (e.g. `--api-key=…`) (#93).
-                crate::utils::redact_secrets(&config.args.join(" "))
+                mermaid_model::utils::redact_secrets(&config.args.join(" "))
             ),
         }
 

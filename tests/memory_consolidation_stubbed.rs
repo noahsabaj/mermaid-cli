@@ -33,7 +33,7 @@ use mermaid_cli::effect::EffectRunner;
 use mermaid_cli::providers::ProviderFactory;
 use mermaid_cli::providers::model::ModelProvider;
 use mermaid_cli::providers::tool::ToolRegistry;
-use mermaid_cli::runtime::git::git;
+use mermaid_runtime::git::git;
 
 #[path = "harness/stub_model.rs"]
 mod stub_model;
