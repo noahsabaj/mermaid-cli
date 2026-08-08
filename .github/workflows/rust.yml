@@ -179,6 +179,52 @@ jobs:
       - name: Audit dependencies
         run: cargo audit
 
+  # Every publishable crate must build ALONE, on Linux.
+  #
+  # `cargo build --workspace` unifies features across members, so the root
+  # enabling `dbus-secret-service/vendored` made every crate's keyring build —
+  # including one whose own manifest never declared it. Nothing caught that
+  # until `cargo publish` verified the packaged tarball in isolation, mid-release,
+  # after `mermaid-runtime` had already gone to crates.io and could not be taken
+  # back (v0.21.0). A local `--dry-run` could not have caught it either: on
+  # Windows keyring uses `windows-native` and never touches dbus.
+  #
+  # `cargo package` + building the extracted tarball reproduces exactly what
+  # publish verifies, without needing the version to exist on the index — so
+  # this runs on every PR instead of once per release.
+  isolated-crate-build:
+    name: Crates build standalone (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: isolated-crate-build
+      - name: Build each crate outside the workspace
+        run: |
+          set -euo pipefail
+          # Copy the crates somewhere with no workspace root above them. Each
+          # then builds as its own root — no feature unification with
+          # `mermaid-cli` — which is exactly the isolation `cargo publish`
+          # applies, and exactly what hid the missing dep.
+          #
+          # Copying rather than `cargo package`: packaging resolves deps against
+          # the crates.io index, so a crate depending on an unreleased sibling
+          # version cannot be packaged before that sibling is published. That
+          # made the first version of this job fail on its own fix PR. Sibling
+          # path deps resolve fine here because the siblings are copied too.
+          ISO="$RUNNER_TEMP/isolated"
+          mkdir -p "$ISO"
+          cp -r crates/. "$ISO/"
+          for crate in mermaid-runtime mermaid-model; do
+            echo "::group::$crate (standalone)"
+            ( cd "$ISO/$crate" && cargo build --all-targets )
+            echo "::endgroup::"
+          done
+
   # Dependency-free source guards: no emoji in user-facing output, and the pure
   # `src/domain` MVU core stays free of I/O + the wall clock.
   guards:

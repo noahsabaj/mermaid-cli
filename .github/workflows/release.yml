@@ -302,13 +302,29 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
+          set -uo pipefail
           # Publish in dependency order: `mermaid-model` depends on
           # `mermaid-runtime`, and `mermaid-cli` depends on both. Recent cargo
           # waits for each dependency to appear on the index before publishing
           # the crate that needs it.
-          cargo publish -p mermaid-runtime
-          cargo publish -p mermaid-model
-          cargo publish -p mermaid-cli
+          #
+          # Skip what is already up rather than failing on it. This job runs
+          # AFTER the GitHub release and every binary artifact have shipped, so
+          # a mid-sequence failure leaves the release half-done — and on the
+          # retry, the crates that DID publish would otherwise abort the whole
+          # job with "already exists" before reaching the ones that did not.
+          # v0.21.0 hit exactly that: `mermaid-runtime` published, `mermaid-model`
+          # failed to verify, and there was no way to resume.
+          VERSION=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/^version = "(.*)"/\1/')
+          for crate in mermaid-runtime mermaid-model mermaid-cli; do
+            if curl -sf -H "User-Agent: mermaid-release" \
+                 "https://crates.io/api/v1/crates/$crate/$VERSION" >/dev/null 2>&1; then
+              echo "::notice::$crate $VERSION is already on crates.io, skipping"
+              continue
+            fi
+            echo "publishing $crate $VERSION"
+            cargo publish -p "$crate" || exit 1
+          done
 
   # Bump the Homebrew tap + Scoop bucket to the new release. This is a no-op
   # until TAP_TOKEN is set — a PAT (Contents: read/write) on

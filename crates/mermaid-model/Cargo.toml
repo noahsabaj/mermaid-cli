@@ -1,6 +1,6 @@
 [package]
 name = "mermaid-model"
-version = "0.21.0"
+version = "0.21.1"
 edition = "2024"
 rust-version = "1.91"
 authors = ["Noah Sabaj <noahsabaj@gmail.com>"]
@@ -22,7 +22,7 @@ clap = { version = "4.6", features = ["derive", "env"] }
 futures = "0.3"
 getrandom = "0.4"
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
-mermaid-runtime = { path = "../mermaid-runtime", version = "0.21.0" }
+mermaid-runtime = { path = "../mermaid-runtime", version = "0.21.1" }
 regex = "1.12"
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls", "gzip", "brotli"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -31,6 +31,17 @@ sysinfo = { version = "0.38.4", default-features = false, features = ["system"] 
 tokio = { version = "1.44", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Direct dep ONLY to turn on its `vendored` feature (static libdbus) for
+# keyring's sync-secret-service backend; nothing imports it directly.
+#
+# Mirrors the root crate, and it has to: `cargo publish` builds this crate
+# ALONE, without the workspace's feature unification. In the workspace the root
+# turned `vendored` on for everyone, so `cargo build` was green while this
+# manifest was incomplete — the gap only appeared when the packaged tarball was
+# verified on Linux, after `mermaid-runtime` had already been published.
+dbus-secret-service = { version = "4", features = ["vendored"] }
 
 [dev-dependencies]
 temp-env = "0.3"
