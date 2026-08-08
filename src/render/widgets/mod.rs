@@ -76,6 +76,7 @@ pub enum GenerationStatus {
 }
 
 impl GenerationStatus {
+    #[must_use]
     pub fn display_text(&self) -> &str {
         match self {
             Self::Idle => "Idle",
@@ -93,6 +94,7 @@ impl GenerationStatus {
     /// active variant maps to `Streaming` (the status-line widget
     /// doesn't distinguish beyond the basic upstream/downstream
     /// arrow).
+    #[must_use]
     pub fn from_turn(turn: &mermaid_domain::TurnState) -> Self {
         use mermaid_domain::{GenPhase, TurnState};
         match turn {

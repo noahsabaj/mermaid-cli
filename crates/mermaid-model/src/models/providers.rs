@@ -86,6 +86,7 @@ impl ReasoningStrategy {
     /// merged into the `/chat/completions` request body. Returns `None`
     /// if there's nothing to add (strategy is `None`, or the level is
     /// `None` for a provider that signals via field omission).
+    #[must_use]
     pub fn render(&self, level: ReasoningLevel) -> Option<Value> {
         match self {
             Self::None => None,
@@ -153,6 +154,7 @@ impl ReasoningExtraction {
     /// (`None` and `InlineThinkTags`) or if the delta has no reasoning.
     /// `InlineThinkTags` is handled separately at the byte-stream level
     /// in the adapter; this method returns `None` for it.
+    #[must_use]
     pub fn parse_delta(&self, delta: &Value) -> Option<ReasoningChunk> {
         match self {
             Self::None | Self::InlineThinkTags => None,
@@ -186,6 +188,7 @@ pub enum CompatStyle {
 }
 
 impl CompatStyle {
+    #[must_use]
     pub fn reasoning_strategy(self) -> ReasoningStrategy {
         match self {
             Self::Openai => ReasoningStrategy::None,
@@ -328,6 +331,7 @@ pub const REGISTRY: &[ProviderProfile] = &[
 ];
 
 /// Look up a built-in provider by name. Case-insensitive.
+#[must_use]
 pub fn lookup_provider(name: &str) -> Option<&'static ProviderProfile> {
     let lower = name.to_lowercase();
     REGISTRY.iter().find(|p| p.name == lower)

@@ -60,6 +60,7 @@ pub enum Backend {
 
 impl Backend {
     /// Whether the driver has any tools it can run on this backend.
+    #[must_use]
     pub fn is_usable(self) -> bool {
         !matches!(self, Self::Unsupported)
     }
@@ -69,6 +70,7 @@ impl Backend {
     /// (ydotool/wtype) only; macOS capture works via `screencapture`, but the
     /// input verbs are unimplemented and `bail!` in the driver, so they must
     /// not be advertised there (#35). Windows is a stub.
+    #[must_use]
     pub fn supports_input_injection(self) -> bool {
         matches!(self, Self::X11 | Self::Wayland)
     }
@@ -76,6 +78,7 @@ impl Backend {
     /// Whether this backend can enumerate windows (`list_windows`). X11 only —
     /// via `xdotool search`; Wayland has no portable primitive and the driver
     /// `bail!`s (#35).
+    #[must_use]
     pub fn supports_window_listing(self) -> bool {
         matches!(self, Self::X11)
     }
@@ -85,6 +88,7 @@ impl Backend {
 /// right binary exist? Is the display reachable? Returns
 /// `Backend::Unsupported` when mermaid can't drive the display even
 /// though env vars might suggest otherwise (e.g. SSH forwarding).
+#[must_use]
 pub fn probe() -> Backend {
     if cfg!(target_os = "macos") {
         if has_command("screencapture") {
@@ -123,6 +127,7 @@ pub fn probe() -> Backend {
 /// Quick re-probe used by `ComputerUseDriver::ensure_alive`. Cheaper
 /// than the full `probe()` — just checks the display answers — so
 /// every tool call can afford it.
+#[must_use]
 pub fn display_is_reachable(backend: Backend) -> bool {
     match backend {
         Backend::X11 => xdpyinfo_alive(),

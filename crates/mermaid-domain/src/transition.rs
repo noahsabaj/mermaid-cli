@@ -28,6 +28,7 @@ use mermaid_model::tool_run::ToolMetadata;
 /// constructor for `Vec<ToolOutcome>` elsewhere in the codebase, and
 /// the follow-up transition's builder function takes `Vec<ToolOutcome>`
 /// by value.
+#[must_use]
 pub fn try_complete_outcomes(outcomes: &[Option<ToolOutcome>]) -> Option<Vec<ToolOutcome>> {
     // `Option<Vec<T>>: FromIterator<Option<T>>` short-circuits to `None` on the
     // first empty slot — same semantics as the explicit loop, one line.
@@ -63,6 +64,7 @@ pub fn fill_outcome(
 /// `ChatRequest` separately and returns it to the reducer as a `Cmd`.
 /// `now` is the reducer step's injected clock (`state.now`), so the
 /// `started` stamp is deterministic on replay rather than read live (Cause 3).
+#[must_use]
 pub fn start_generating(id: TurnId, now: SystemTime) -> TurnState {
     start_generating_with(id, now, false)
 }
@@ -71,6 +73,7 @@ pub fn start_generating(id: TurnId, now: SystemTime) -> TurnState {
 /// auto-continue tail (and the paths that must carry its flag forward:
 /// empty-retry, truncation-recovery resume) so the eventual commit stamps
 /// `ChatMessageKind::Continuation`.
+#[must_use]
 pub fn start_generating_with(id: TurnId, now: SystemTime, continuation: bool) -> TurnState {
     TurnState::Generating {
         id,
@@ -89,6 +92,7 @@ pub fn start_generating_with(id: TurnId, now: SystemTime, continuation: bool) ->
 /// for every call so the invariant ("`outcomes.len()` == `calls.len()`")
 /// is upheld by construction. `now` is the reducer step's injected clock
 /// (`state.now`) so `started` is deterministic on replay (Cause 3).
+#[must_use]
 pub fn start_executing_tools(
     id: TurnId,
     calls: Vec<PendingToolCall>,
@@ -107,6 +111,7 @@ pub fn start_executing_tools(
 /// accumulated content. Safe to call with empty text (the model might
 /// have responded with only tool calls). Returns the message plus the
 /// provider continuation state needed for the next model call.
+#[must_use]
 pub fn commit_assistant_message(
     partial_text: String,
     partial_reasoning: String,
@@ -149,6 +154,7 @@ pub fn commit_assistant_message(
 /// Build the follow-up `tool` role messages from completed outcomes.
 /// The OpenAI-compatible wire format requires (`tool_call_id`, `tool_name`,
 /// content) — we pull name from the original call.
+#[must_use]
 pub fn tool_result_messages(
     calls: &[PendingToolCall],
     outcomes: Vec<ToolOutcome>,
@@ -175,6 +181,7 @@ pub fn tool_result_messages(
 /// Convert a completed tool outcome into an `ActionDisplay` entry
 /// attached to the assistant message that triggered the call. Used so
 /// the chat renderer can show "Read main.rs → 1,234 bytes" etc.
+#[must_use]
 pub fn action_display_for(call: &PendingToolCall, outcome: &ToolOutcome) -> ActionDisplay {
     let (action_type, target) = display_info_for(call);
     // `write_file` that overwrote an existing file is an *update*, not a fresh
@@ -589,6 +596,7 @@ fn format_duration(seconds: f64) -> String {
 }
 
 /// Human-readable duration for a finished run: "Ns", "Mm Ss", or "Hh Mm".
+#[must_use]
 pub fn format_run_duration(seconds: u64) -> String {
     if seconds < 60 {
         format!("{seconds}s")

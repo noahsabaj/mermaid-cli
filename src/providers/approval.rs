@@ -59,6 +59,7 @@ pub struct ApprovalBroker {
 }
 
 impl ApprovalBroker {
+    #[must_use]
     pub fn new(msg_tx: mpsc::Sender<Msg>) -> Self {
         Self {
             pending: Arc::new(Mutex::new(HashMap::new())),
@@ -68,6 +69,7 @@ impl ApprovalBroker {
     }
 
     /// True if the user already chose "don't ask again" for this key.
+    #[must_use]
     pub fn is_allowlisted(&self, key: &str) -> bool {
         self.allowlist
             .lock()
@@ -185,6 +187,7 @@ const NON_ALLOWLISTABLE_TOOLS: &[&str] = &[
 ///   `curl https://evil.example` — argv0 keying was too coarse for a tool whose
 ///   danger lives entirely in its arguments (#6).
 /// - Everything else keys per-tool.
+#[must_use]
 pub fn allowlist_key(tool: &str, command: Option<&str>) -> String {
     if NON_ALLOWLISTABLE_TOOLS.contains(&tool) {
         return String::new();

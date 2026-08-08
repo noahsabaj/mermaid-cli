@@ -44,6 +44,7 @@ pub struct TaskBroker {
 }
 
 impl TaskBroker {
+    #[must_use]
     pub fn new(msg_tx: mpsc::Sender<Msg>) -> Self {
         Self {
             store: Arc::new(Mutex::new(ChecklistStore::default())),
@@ -180,6 +181,7 @@ impl TaskBroker {
         }
     }
 
+    #[must_use]
     pub fn snapshot(&self) -> ChecklistStore {
         self.lock().clone()
     }

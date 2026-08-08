@@ -3,6 +3,7 @@ use crate::constants::WEB_CONTENT_MAX_CHARS;
 /// Truncate content to a maximum character count, keeping the HEAD (char-boundary
 /// safe). Prefer [`truncate_middle`] where the tail matters (command/tool output);
 /// this remains for per-item web caps where head-only is acceptable.
+#[must_use]
 pub fn truncate_content(content: &str, max_chars: usize) -> String {
     if content.len() <= max_chars {
         return content.to_string();
@@ -19,6 +20,7 @@ pub fn truncate_content(content: &str, max_chars: usize) -> String {
 /// output and web pages put the most important content — compiler errors, exit
 /// summaries, page footers — at the END, so head-only truncation discarded
 /// exactly what mattered. Content that already fits is returned unchanged.
+#[must_use]
 pub fn truncate_middle(content: &str, max_chars: usize) -> String {
     // Fast path: fits by bytes ⇒ fits by chars (every char is ≥ 1 byte).
     if content.len() <= max_chars {
@@ -54,6 +56,7 @@ pub fn truncate_middle(content: &str, max_chars: usize) -> String {
 /// scalar values. Protocol envelopes and tool-result limits are byte budgets,
 /// so multi-byte text must be cut on a character boundary without exceeding
 /// `max_bytes` after the marker is included.
+#[must_use]
 pub fn truncate_middle_bytes(content: &str, max_bytes: usize) -> String {
     if content.len() <= max_bytes {
         return content.to_string();
@@ -78,6 +81,7 @@ pub fn truncate_middle_bytes(content: &str, max_bytes: usize) -> String {
 }
 
 /// Truncate web content using the default limit, keeping head and tail.
+#[must_use]
 pub fn truncate_web_content(content: &str) -> String {
     truncate_middle(content, WEB_CONTENT_MAX_CHARS)
 }
@@ -101,6 +105,7 @@ const CONTINUATION_OVERLAP_MIN_BYTES: usize = 16;
 /// canonical conversation history is never trimmed — so a false negative
 /// costs a few repeated words on screen, while a false positive would delete
 /// real content. Returns a char-boundary-safe byte offset into `continuation`.
+#[must_use]
 pub fn continuation_overlap(prev: &str, continuation: &str) -> usize {
     // Window into prev's tail, aligned to a char boundary.
     let mut window_start = prev.len().saturating_sub(CONTINUATION_OVERLAP_WINDOW_BYTES);
@@ -129,6 +134,7 @@ pub fn continuation_overlap(prev: &str, continuation: &str) -> usize {
 ///
 /// Uses decimal precision for sub-minute durations (e.g., "12.3s"),
 /// and integer components for longer durations (e.g., "1m 47s", "2h 5m 0s").
+#[must_use]
 pub fn format_duration(total_secs: f64) -> String {
     let secs = total_secs as u64;
     if secs < 60 {

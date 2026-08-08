@@ -192,6 +192,7 @@ pub fn redact_json(value: &mut serde_json::Value) {
 
 /// Redact a serialized JSON payload. Malformed input is treated as ordinary
 /// text and still receives shape-based scrubbing; persistence never fails open.
+#[must_use]
 pub fn redact_json_text(input: &str) -> String {
     match serde_json::from_str::<serde_json::Value>(input) {
         Ok(mut value) => {
@@ -203,6 +204,7 @@ pub fn redact_json_text(input: &str) -> String {
 }
 
 /// Sanitize a URL for display or storage without changing the transport URL.
+#[must_use]
 pub fn sanitize_url_for_display(input: &str) -> String {
     let Ok(url) = url::Url::parse(input) else {
         return redact_secrets(input);

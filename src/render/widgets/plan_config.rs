@@ -22,6 +22,7 @@ pub const PLAN_CONFIG_HEIGHT: u16 = PLAN_CONFIG_ROWS as u16 + 3;
 
 /// The `(label, value)` pairs the picker shows, derived from the live
 /// config. Shared with the reducer tests so row indices can't drift.
+#[must_use]
 pub fn plan_config_rows(plan: &PlanConfig, session_model: &str) -> Vec<(String, String)> {
     let perms = &plan.permissions;
     vec![

@@ -32,6 +32,7 @@ pub enum HostClass {
 impl HostClass {
     /// True for any non-public host. Used by the web-fetch SSRF blocklist
     /// (block everything that isn't clearly routable).
+    #[must_use]
     pub fn is_internal(self) -> bool {
         !matches!(self, Self::Public)
     }
@@ -40,6 +41,7 @@ impl HostClass {
     /// `http` is acceptable to loopback (no network exposure), but sending an
     /// API key over `http` to any other host — even a LAN/private one — leaks
     /// it in cleartext.
+    #[must_use]
     pub fn is_loopback(self) -> bool {
         matches!(self, Self::Loopback)
     }
@@ -47,6 +49,7 @@ impl HostClass {
 
 /// Classify a URL host (hostname or IP literal, with optional `[]` around an
 /// IPv6 literal and an optional trailing FQDN dot).
+#[must_use]
 pub fn classify_host(host: &str) -> HostClass {
     let h = host
         .trim_start_matches('[')

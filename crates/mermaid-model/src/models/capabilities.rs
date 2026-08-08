@@ -54,6 +54,7 @@ impl ModelCapabilities {
     /// snapshot via `Msg::ProviderVisionResolved`), and treat reasoning as
     /// binary on/off (matches the `think: bool` semantics for everything
     /// except gpt-oss).
+    #[must_use]
     pub fn ollama_default() -> Self {
         Self {
             supports_tools: true,

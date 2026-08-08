@@ -132,6 +132,7 @@ impl State {
     /// `temp_dir` is last rather than beside `cwd` on purpose: two adjacent
     /// `PathBuf` parameters are silently swappable, and nothing in the type
     /// system would catch it.
+    #[must_use]
     pub fn new(
         settings: Config,
         cwd: PathBuf,
@@ -275,6 +276,7 @@ impl State {
 
     /// True iff the reducer is currently mid-turn. UI uses this for
     /// the "⏎ cancels generation" hint and for keybind routing.
+    #[must_use]
     pub fn is_busy(&self) -> bool {
         !matches!(self.turn, TurnState::Idle)
     }
@@ -283,6 +285,7 @@ impl State {
     /// filters incoming effect messages by comparing their embedded
     /// `TurnId` to this value — if the user cancelled and started a
     /// new turn, stale results from the old turn are dropped cleanly.
+    #[must_use]
     pub fn current_turn_id(&self) -> Option<TurnId> {
         self.turn.id()
     }
@@ -303,6 +306,7 @@ pub struct TokenUsageTotals {
 }
 
 impl TokenUsageTotals {
+    #[must_use]
     pub fn from_usage(usage: &TokenUsage) -> Self {
         Self {
             prompt_tokens: usage.prompt_tokens,
@@ -329,17 +333,20 @@ impl TokenUsageTotals {
             .saturating_add(other.reasoning_output_tokens);
     }
 
+    #[must_use]
     pub fn input_total_tokens(&self) -> usize {
         self.prompt_tokens
             .saturating_add(self.cached_input_tokens)
             .saturating_add(self.cache_creation_input_tokens)
     }
 
+    #[must_use]
     pub fn output_total_tokens(&self) -> usize {
         self.completion_tokens
             .saturating_add(self.reasoning_output_tokens)
     }
 
+    #[must_use]
     pub fn total_tokens(&self) -> usize {
         self.input_total_tokens()
             .saturating_add(self.output_total_tokens())
@@ -360,6 +367,7 @@ pub struct PromptTokenBreakdown {
 }
 
 impl PromptTokenBreakdown {
+    #[must_use]
     pub fn total_tokens(&self) -> usize {
         self.system_tokens
             .saturating_add(self.instructions_tokens)
@@ -386,6 +394,7 @@ pub struct ContextUsageSnapshot {
 }
 
 impl ContextUsageSnapshot {
+    #[must_use]
     pub fn from_usage(usage: &TokenUsage, max_tokens: Option<usize>) -> Self {
         // input + output ≈ what the next request's prompt will occupy;
         // derived from disjoint components so it means the same thing
@@ -403,6 +412,7 @@ impl ContextUsageSnapshot {
         )
     }
 
+    #[must_use]
     pub fn from_estimate(breakdown: PromptTokenBreakdown, max_tokens: Option<usize>) -> Self {
         let used = breakdown.total_tokens();
         Self::new(
@@ -449,6 +459,7 @@ impl ContextUsageSnapshot {
         }
     }
 
+    #[must_use]
     pub fn is_estimate(&self) -> bool {
         self.source == TokenUsageSource::Estimate
     }
@@ -458,6 +469,7 @@ impl ContextUsageSnapshot {
     /// MCP-only request estimate can't see. Recomputes `remaining_tokens` and
     /// `used_percent`; the breakdown is left untouched (the caller surfaces the
     /// built-in figure on its own line so the MCP line stays accurate).
+    #[must_use]
     pub fn with_additional_tokens(mut self, extra: usize) -> Self {
         if extra == 0 {
             return self;
@@ -550,6 +562,7 @@ fn approx_tokens(text: &str) -> usize {
 /// and the effect runner so the reducer's `/context` preview can account for
 /// the built-in tool schemas that are only appended to the request during
 /// dispatch enrichment.
+#[must_use]
 pub fn estimate_tool_schema_tokens(tools: &[super::cmd::ToolDefinition]) -> usize {
     let tool_schema: Vec<_> = tools.iter().map(|tool| tool.to_openai_json()).collect();
     serde_json::to_string(&tool_schema)
@@ -605,6 +618,7 @@ pub struct AdvertisedContext {
 
 impl AdvertisedContext {
     /// The facts as they stand right now — the injector's diff input.
+    #[must_use]
     pub fn observe(session: &Session) -> Self {
         Self {
             plan_path: session.plan.as_ref().map(|p| p.plan_path.clone()),
@@ -666,6 +680,7 @@ impl Session {
     /// `Session` (which is NOT serialized — only `conversation` is), so every
     /// `Cmd::SaveConversation` snapshots them in and `seed_conversation`
     /// hydrates them back on resume.
+    #[must_use]
     pub fn snapshot_conversation(&self) -> ConversationHistory {
         let mut history = self.conversation.clone();
         history.safety_mode = Some(self.safety_mode);
@@ -679,6 +694,7 @@ impl Session {
     /// The committed message log. All messages visible in the chat
     /// widget live here; partial in-flight content lives in
     /// `TurnState::Generating`.
+    #[must_use]
     pub fn messages(&self) -> &[ChatMessage] {
         self.conversation.messages()
     }
@@ -774,6 +790,7 @@ pub enum TurnState {
 }
 
 impl TurnState {
+    #[must_use]
     pub fn id(&self) -> Option<TurnId> {
         match self {
             Self::Idle => None,
@@ -787,6 +804,7 @@ impl TurnState {
     /// True when a `Msg` tagged with the given `TurnId` should be
     /// accepted. Events from prior turns return false — the reducer's
     /// first line on every effect-result arm.
+    #[must_use]
     pub fn accepts(&self, event_turn: TurnId) -> bool {
         self.id() == Some(event_turn)
     }
@@ -875,6 +893,7 @@ impl ToolOutcome {
         }
     }
 
+    #[must_use]
     pub fn cancelled() -> Self {
         Self {
             status: ToolStatus::Cancelled,
@@ -887,18 +906,21 @@ impl ToolOutcome {
         }
     }
 
+    #[must_use]
     pub fn with_metadata(mut self, mut metadata: ToolRunMetadata) -> Self {
         metadata.duration_secs = self.duration_secs;
         self.metadata = Box::new(metadata);
         self
     }
 
+    #[must_use]
     pub fn with_artifacts(mut self, artifacts: Vec<ToolArtifact>) -> Self {
         self.artifacts = artifacts.clone();
         self.metadata.artifacts = artifacts;
         self
     }
 
+    #[must_use]
     pub fn with_images(self, images: Vec<String>) -> Self {
         self.with_artifacts(
             images
@@ -916,6 +938,7 @@ impl ToolOutcome {
     /// for `isError: true` results (#91): the model still sees the server's
     /// content verbatim via `model_content`, but the outcome reads as an
     /// error rather than a success.
+    #[must_use]
     pub fn with_status(mut self, status: ToolStatus) -> Self {
         if status == ToolStatus::Error && self.error.is_none() {
             self.error = Some(self.model_content.clone());
@@ -924,22 +947,27 @@ impl ToolOutcome {
         self
     }
 
+    #[must_use]
     pub fn was_cancelled(&self) -> bool {
         self.status == ToolStatus::Cancelled
     }
 
+    #[must_use]
     pub fn is_success(&self) -> bool {
         self.status == ToolStatus::Success
     }
 
+    #[must_use]
     pub fn output(&self) -> &str {
         &self.model_content
     }
 
+    #[must_use]
     pub fn error_message(&self) -> Option<&str> {
         self.error.as_deref()
     }
 
+    #[must_use]
     pub fn images(&self) -> Option<Vec<String>> {
         let images: Vec<String> = self
             .artifacts
@@ -960,6 +988,7 @@ impl ToolOutcome {
     /// the follow-up `tool` role message. Cancellation produces a
     /// placeholder so the model sees "this was skipped" rather than
     /// the history becoming malformed.
+    #[must_use]
     pub fn as_tool_message_content(&self) -> String {
         self.model_content.clone()
     }
@@ -994,6 +1023,7 @@ impl PluginCommand {
     /// Expand the body with typed arguments: replace-all of `$ARGUMENTS`
     /// when the token is present, else append the args as a new paragraph
     /// when non-empty. Pure.
+    #[must_use]
     pub fn expand(&self, args: &str) -> String {
         let args = args.trim();
         if self.body.contains("$ARGUMENTS") {
@@ -1163,6 +1193,7 @@ impl UiState {
     /// The @-mention token under the cursor, when the picker may show:
     /// not user-dismissed, and not while the buffer is a slash command
     /// (the slash palette owns that surface).
+    #[must_use]
     pub fn active_file_token(&self) -> Option<crate::file_mention::AtToken> {
         if self.file_picker_dismissed || self.input_buffer.starts_with('/') {
             return None;
@@ -1171,6 +1202,7 @@ impl UiState {
     }
 
     /// Whether the @-mention file picker is currently open.
+    #[must_use]
     pub fn file_picker_open(&self) -> bool {
         self.active_file_token().is_some()
     }

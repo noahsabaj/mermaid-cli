@@ -382,6 +382,7 @@ const OPENAI_REASONING: ModelCapEntry = ModelCapEntry {
 
 /// Look up the capability row for a model id (bare or `provider/`-prefixed,
 /// case-insensitive). Unmatched ids get [`UNKNOWN_MODEL`].
+#[must_use]
 pub fn lookup(model_id: &str) -> &'static ModelCapEntry {
     let full = model_id.to_ascii_lowercase();
     let bare = full.rsplit('/').next().unwrap_or(full.as_str());

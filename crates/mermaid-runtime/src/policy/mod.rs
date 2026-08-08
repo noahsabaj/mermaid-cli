@@ -29,6 +29,7 @@ pub enum SafetyMode {
 
 impl SafetyMode {
     /// Canonical serialized name — matches the serde `snake_case` rename.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Plan => "plan",
@@ -41,6 +42,7 @@ impl SafetyMode {
 
     /// Parse a canonical mode name. Accepts ONLY the canonical `snake_case`
     /// names — no legacy aliases (the old `"auto_review"` is gone).
+    #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "plan" => Some(Self::Plan),
@@ -54,6 +56,7 @@ impl SafetyMode {
 
     /// Is a plan being drafted? The single source of truth — never infer this
     /// from `Session.plan`, which is the plan's DATA and outlives nothing.
+    #[must_use]
     pub fn is_planning(self) -> bool {
         matches!(self, Self::Plan)
     }
@@ -62,6 +65,7 @@ impl SafetyMode {
     /// `full_access` loosest. Plan ranks below read-only because its carve-outs
     /// only ever open paths the gate re-checks, and a subagent must never
     /// inherit "planning" as a ceiling (children explore, they don't plan).
+    #[must_use]
     pub fn permissiveness(self) -> u8 {
         match self {
             Self::Plan => 0,
@@ -75,6 +79,7 @@ impl SafetyMode {
     /// The stricter of two modes. Used to apply an agent type's safety
     /// ceiling to a session's live mode — a ceiling can only tighten what
     /// the parent already allows, never loosen it.
+    #[must_use]
     pub fn least_permissive(a: Self, b: Self) -> Self {
         if a.permissiveness() <= b.permissiveness() {
             a
@@ -105,6 +110,7 @@ pub enum ToolCategory {
 }
 
 impl ToolCategory {
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Read => "read",
@@ -144,6 +150,7 @@ pub enum RiskClass {
 }
 
 impl RiskClass {
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::ReadOnly => "read_only",
@@ -209,6 +216,7 @@ impl ActionRequest {
 
     /// The directory command-relative paths must resolve against: the
     /// request's own cwd when it has one, else `fallback` (the project root).
+    #[must_use]
     pub fn resolve_dir<'a>(&'a self, fallback: &'a Path) -> &'a Path {
         self.cwd.as_deref().unwrap_or(fallback)
     }
@@ -273,6 +281,7 @@ impl Default for PolicyOverride {
 }
 
 impl PolicyDecision {
+    #[must_use]
     pub fn risk(&self) -> RiskClass {
         match self {
             Self::Allow { risk, .. }
@@ -282,6 +291,7 @@ impl PolicyDecision {
         }
     }
 
+    #[must_use]
     pub fn label(&self) -> &'static str {
         match self {
             Self::Allow { .. } => "allow",
@@ -319,6 +329,7 @@ pub struct PolicyEngine {
 }
 
 impl PolicyEngine {
+    #[must_use]
     pub fn new(mode: SafetyMode) -> Self {
         Self {
             mode,
@@ -328,21 +339,25 @@ impl PolicyEngine {
         }
     }
 
+    #[must_use]
     pub fn with_overrides(mut self, overrides: Vec<PolicyOverride>) -> Self {
         self.overrides = overrides;
         self
     }
 
+    #[must_use]
     pub fn with_external_writes(mut self, level: FloorLevel) -> Self {
         self.external_writes = level;
         self
     }
 
+    #[must_use]
     pub fn with_system_installs(mut self, level: FloorLevel) -> Self {
         self.system_installs = level;
         self
     }
 
+    #[must_use]
     pub fn decide(&self, request: &ActionRequest) -> PolicyDecision {
         let risk = classify(request);
         if risk == RiskClass::Destructive {

@@ -90,6 +90,7 @@ pub struct ToolRegistry {
 }
 
 impl ToolRegistry {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             entries: HashMap::new(),
@@ -98,10 +99,12 @@ impl ToolRegistry {
         }
     }
 
+    #[must_use]
     pub fn web_capabilities(&self) -> Option<&web::WebCapabilities> {
         self.web_capabilities.as_deref()
     }
 
+    #[must_use]
     pub fn subagent_spawner(&self) -> Option<&Arc<subagent::SubagentSpawner>> {
         self.subagent_spawner.as_ref()
     }
@@ -110,14 +113,17 @@ impl ToolRegistry {
         self.entries.insert(tool.name(), tool);
     }
 
+    #[must_use]
     pub fn get(&self, name: &str) -> Option<Arc<dyn ToolExecutor>> {
         self.entries.get(name).cloned()
     }
 
+    #[must_use]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -131,6 +137,7 @@ impl ToolRegistry {
     /// dispatching `Cmd::CallModel` so the model always sees the
     /// same list the runner can dispatch. Internal routers (the MCP
     /// proxy) are filtered out.
+    #[must_use]
     pub fn describe_all(&self) -> Vec<ToolDefinition> {
         self.entries
             .values()

@@ -36,6 +36,7 @@ fn list_marker_style(theme: &Theme) -> Style {
 /// under its text (after the marker) instead of snapping back to the flat
 /// message gutter. Counts leading whitespace plus a leading list marker; returns
 /// 0 for ordinary paragraphs and headings.
+#[must_use]
 pub fn line_hanging_indent(line: &Line, theme: &Theme) -> usize {
     let marker = list_marker_style(theme);
     let mut indent = 0usize;
@@ -69,6 +70,7 @@ pub fn line_hanging_indent(line: &Line, theme: &Theme) -> usize {
     clippy::too_many_lines,
     reason = "predates the lint; see .github/baselines/expect_budget.txt"
 )]
+#[must_use]
 pub fn parse_markdown(input: &str, theme: &Theme, width: usize) -> Vec<MarkdownLine> {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_STRIKETHROUGH);

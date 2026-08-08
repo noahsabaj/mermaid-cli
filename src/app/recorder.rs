@@ -194,6 +194,7 @@ impl Drop for Recorder {
 /// no longer reproduces the live session's outcome — expected when
 /// redaction fired mid-session or the reducer changed since recording,
 /// alarming otherwise.
+#[must_use]
 pub fn session_fingerprint(session: &Session) -> String {
     use sha2::{Digest, Sha256};
     use std::fmt::Write as _;

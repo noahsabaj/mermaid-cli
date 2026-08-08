@@ -87,6 +87,7 @@ impl WebByteBudget {
         }
     }
 
+    #[must_use]
     pub fn remaining(&self) -> usize {
         mermaid_model::constants::MAX_WEB_TURN_BYTES
             .saturating_sub(self.used.load(Ordering::Acquire))
@@ -102,6 +103,7 @@ pub struct StreamContext {
 }
 
 impl StreamContext {
+    #[must_use]
     pub fn new(token: CancellationToken, sink: mpsc::Sender<StreamEvent>, turn: TurnId) -> Self {
         Self { token, sink, turn }
     }
@@ -258,6 +260,7 @@ impl std::fmt::Debug for ExecContext {
 
 impl ExecContext {
     #[expect(clippy::too_many_arguments)]
+    #[must_use]
     pub fn new(
         token: CancellationToken,
         progress: mpsc::Sender<ProgressEvent>,
@@ -316,6 +319,7 @@ impl ExecContext {
 
     /// A cloneable handle for transport code to charge each decoded chunk at
     /// the point it is accepted, including failed responses and retries.
+    #[must_use]
     pub fn web_budget(&self) -> WebByteBudget {
         WebByteBudget::shared(self.web_bytes.clone())
     }
@@ -323,6 +327,7 @@ impl ExecContext {
     /// Checkpoint provenance for this call — every checkpoint-creating tool
     /// passes this so file snapshots anchor to the conversation position
     /// that produced them (rewind/fork surfaces them by anchor).
+    #[must_use]
     pub fn checkpoint_origin(&self) -> mermaid_runtime::CheckpointOrigin {
         mermaid_runtime::CheckpointOrigin {
             task_id: self.task_id.clone(),
@@ -337,6 +342,7 @@ impl ExecContext {
 /// message (e.g. Anthropic `cache_control` injection); this helper
 /// clones the slice as owned so the provider can do that without
 /// fighting the borrow checker.
+#[must_use]
 pub fn clone_messages(msgs: &[ChatMessage]) -> Vec<ChatMessage> {
     msgs.to_vec()
 }
@@ -344,6 +350,7 @@ pub fn clone_messages(msgs: &[ChatMessage]) -> Vec<ChatMessage> {
 /// Builder that lets tests construct a pair of `StreamContext` +
 /// receiver without needing a runtime. Used by provider unit tests
 /// and by integration harnesses in C9.
+#[must_use]
 pub fn test_stream_context(turn: TurnId) -> (StreamContext, mpsc::Receiver<StreamEvent>) {
     let token = CancellationToken::new();
     let (tx, rx) = mpsc::channel(64);
@@ -355,6 +362,7 @@ pub fn test_stream_context(turn: TurnId) -> (StreamContext, mpsc::Receiver<Strea
 /// unit tests exercise the tool's own behavior rather than the approval
 /// gate. Tests that specifically exercise policy gating should construct
 /// `ExecContext::new` directly with their chosen safety mode.
+#[must_use]
 pub fn test_exec_context(
     turn: TurnId,
     call_id: ToolCallId,
@@ -369,6 +377,7 @@ pub fn test_exec_context(
 /// to pin the pipe spawn path, or a `safety.mode` other than `FullAccess`).
 /// The context's safety mode follows `config.safety.mode`, so gate tests can
 /// pick a mode without hand-rolling `ExecContext::new`.
+#[must_use]
 pub fn test_exec_context_with_config(
     turn: TurnId,
     call_id: ToolCallId,

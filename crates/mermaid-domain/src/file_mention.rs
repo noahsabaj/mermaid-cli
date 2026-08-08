@@ -24,6 +24,7 @@ pub struct AtToken {
 /// cursor. `user@host` never triggers (the `@` follows a non-space char);
 /// UTF-8 boundaries are respected throughout (byte-offset scanning only at
 /// char boundaries).
+#[must_use]
 pub fn active_at_token(buf: &str, cursor: usize) -> Option<AtToken> {
     let cursor = cursor.min(buf.len());
     if !buf.is_char_boundary(cursor) {
@@ -60,6 +61,7 @@ pub fn active_at_token(buf: &str, cursor: usize) -> Option<AtToken> {
 /// Rank `files` against `query`, best first, at most `limit` results.
 /// Deterministic: nucleo score descending, input order breaking ties; an
 /// empty query returns the lexicographic head of the (pre-sorted) list.
+#[must_use]
 pub fn fuzzy_rank(files: &[String], query: &str, limit: usize) -> Vec<String> {
     if query.is_empty() {
         return files.iter().take(limit).cloned().collect();

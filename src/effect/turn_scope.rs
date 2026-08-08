@@ -45,6 +45,7 @@ pub struct TurnScope {
 }
 
 impl TurnScope {
+    #[must_use]
     pub fn new(id: TurnId) -> Self {
         Self {
             id,
@@ -55,23 +56,27 @@ impl TurnScope {
         }
     }
 
+    #[must_use]
     pub fn id(&self) -> TurnId {
         self.id
     }
 
     /// Clone the scope's token. Hand this to child tasks so they can
     /// participate in cooperative cancellation.
+    #[must_use]
     pub fn token(&self) -> CancellationToken {
         self.token.clone()
     }
 
     /// Clone the scope's background-request token (Ctrl+B). Tools that can
     /// detach a running child select on this instead of killing it.
+    #[must_use]
     pub fn background_token(&self) -> CancellationToken {
         self.background.clone()
     }
 
     /// Shared decoded-web-byte counter for every tool call in this turn.
+    #[must_use]
     pub fn web_bytes(&self) -> Arc<AtomicUsize> {
         self.web_bytes.clone()
     }
@@ -99,6 +104,7 @@ impl TurnScope {
     }
 
     /// True iff the scope has been cancelled.
+    #[must_use]
     pub fn is_cancelled(&self) -> bool {
         self.token.is_cancelled()
     }
@@ -113,6 +119,7 @@ impl TurnScope {
     /// True iff no child task is currently running inside this scope.
     /// The main loop uses this after a `cancel()` to decide when to
     /// transition from `TurnState::Cancelling` back to `Idle`.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.joins.is_empty()
     }
@@ -139,6 +146,7 @@ impl TurnScope {
         }
     }
 
+    #[must_use]
     pub fn len(&self) -> usize {
         self.joins.len()
     }

@@ -429,6 +429,7 @@ impl ToolDefinition {
     /// parameters}}`. This is the OpenAI / Ollama Chat Completions
     /// format; Anthropic and Gemini adapters translate further from
     /// here. Single-canonical-shape keeps adapters from drifting.
+    #[must_use]
     pub fn to_openai_json(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "function",
@@ -444,6 +445,7 @@ impl ToolDefinition {
 impl Cmd {
     /// Human-readable tag, for tracing + replay logs. Stable across
     /// refactors (tests assert against it).
+    #[must_use]
     pub fn tag(&self) -> &'static str {
         match self {
             Self::CallModel { .. } => "call_model",
@@ -511,6 +513,7 @@ impl Cmd {
     /// True iff this command needs to run inside a `TurnScope` so it
     /// can be cancelled by `Cmd::CancelScope`. The effect runner uses
     /// this to decide between "spawn into `JoinSet`" and "spawn detached".
+    #[must_use]
     pub fn is_turn_scoped(&self) -> bool {
         matches!(
             self,
@@ -530,6 +533,7 @@ impl Cmd {
     /// resurrect an un-cancelled scope via `scope_mut`'s `or_insert_with`
     /// (F38). `CancelScope` must keep working on a tombstoned turn, which
     /// is exactly why it is excluded here.
+    #[must_use]
     pub fn scope_turn(&self) -> Option<TurnId> {
         match self {
             Self::CallModel { turn, .. }
@@ -546,6 +550,7 @@ impl Cmd {
         clippy::too_many_lines,
         reason = "predates the lint; see .github/baselines/expect_budget.txt"
     )]
+    #[must_use]
     pub fn summary(&self) -> String {
         match self {
             Self::CallModel { turn, request } => format!(

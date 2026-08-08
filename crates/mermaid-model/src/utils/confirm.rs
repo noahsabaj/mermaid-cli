@@ -10,6 +10,7 @@ use anyhow::{Result, bail};
 
 /// Whether `s` is `y`/`yes` (case-insensitive). Default is NO — anything else,
 /// including empty input / EOF, is declined.
+#[must_use]
 pub fn is_affirmative(s: &str) -> bool {
     s.eq_ignore_ascii_case("y") || s.eq_ignore_ascii_case("yes")
 }
@@ -17,6 +18,7 @@ pub fn is_affirmative(s: &str) -> bool {
 /// Fail-closed policy: refuse a destructive/untrusted action when there is no
 /// interactive terminal to confirm at and the explicit opt-in was not passed.
 /// Also defeats `yes | mermaid …`, since a pipe is not a TTY.
+#[must_use]
 pub fn should_refuse_noninteractive(is_tty: bool, assume_yes: bool) -> bool {
     !is_tty && !assume_yes
 }

@@ -128,6 +128,7 @@ pub struct SessionProvenance {
 impl LoadedInstructions {
     /// Approximate token count for status messages. ~4 chars/token is
     /// the rule of thumb that's correct enough for user-facing display.
+    #[must_use]
     pub fn approx_tokens(&self) -> usize {
         self.content.len() / 4
     }
@@ -135,6 +136,7 @@ impl LoadedInstructions {
 
 impl MemoryScope {
     /// Kebab token used in frontmatter and the `scope` tool argument.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Global => "global",
@@ -144,6 +146,7 @@ impl MemoryScope {
     }
 
     /// Human label for the index section header.
+    #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Self::Global => "Global (all projects)",
@@ -154,10 +157,12 @@ impl MemoryScope {
 }
 
 impl LoadedMemory {
+    #[must_use]
     pub fn approx_tokens(&self) -> usize {
         self.index.len() / 4
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -166,6 +171,7 @@ impl LoadedMemory {
 impl SkillSource {
     /// Short label rendered in the index so the model (and the user reading a
     /// transcript) can see where each playbook comes from.
+    #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Self::Project => "project",

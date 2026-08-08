@@ -3,6 +3,7 @@ use anyhow::Result;
 /// Whether the Ollama Cloud key is configured — i.e. the `OLLAMA_API_KEY`
 /// environment variable is set to a non-empty value. The key is never read from
 /// or written to `config.toml` (#88).
+#[must_use]
 pub fn is_cloud_configured() -> bool {
     get_cloud_api_key().is_some()
 }
@@ -38,11 +39,13 @@ pub fn setup_cloud_interactive() -> Result<bool> {
 ///
 /// Never persisted to config files (#88); the keyring is the only at-rest
 /// store and it is the OS's. Empty values are treated as unset.
+#[must_use]
 pub fn get_cloud_api_key() -> Option<String> {
     mermaid_model::utils::resolve_provider_key("ollama", "OLLAMA_API_KEY", None)
 }
 
 /// Check if a model name requires cloud access.
+#[must_use]
 pub fn is_cloud_model(model_name: &str) -> bool {
     model_name.ends_with(":cloud")
 }

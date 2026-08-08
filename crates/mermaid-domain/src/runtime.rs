@@ -19,6 +19,7 @@ pub enum RuntimeSignal {
 }
 
 impl RuntimeSignal {
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Interrupt => "interrupt",
@@ -64,6 +65,7 @@ impl ProviderCapabilitySnapshot {
     /// resolved. This is intentionally cheap and side-effect free so
     /// the reducer can update it on `/model` without touching network
     /// or credential state.
+    #[must_use]
     pub fn from_model_id(model_id: &str) -> Self {
         let (provider, model) = match model_id.split_once('/') {
             Some((provider, model)) if !provider.is_empty() && !model.is_empty() => {
@@ -110,6 +112,7 @@ fn infer_static_context_window(model: &str) -> Option<usize> {
     mermaid_model::models::catalog::lookup(model).context_window
 }
 
+#[must_use]
 pub fn infer_static_context_window_for_model_id(model_id: &str) -> Option<usize> {
     let model = match model_id.split_once('/') {
         Some((provider, model)) if !provider.is_empty() && !model.is_empty() => model,
@@ -281,12 +284,14 @@ impl RunLineChanges {
         self.removed = self.removed.saturating_add(removed);
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.added == 0 && self.removed == 0
     }
 }
 
 impl RuntimeState {
+    #[must_use]
     pub fn new(model_id: &str) -> Self {
         Self {
             provider_capabilities: ProviderCapabilitySnapshot::from_model_id(model_id),

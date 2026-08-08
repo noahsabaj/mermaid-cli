@@ -47,6 +47,7 @@ pub struct ConfiguredProvider {
 
 impl ConfiguredProvider {
     /// Human-readable provenance for the listing surfaces.
+    #[must_use]
     pub fn source_label(&self) -> String {
         match (&self.env_var, self.keyless) {
             (Some(env), _) => format!("via ${env}"),
@@ -92,6 +93,7 @@ fn candidate_providers(config: &Config) -> Vec<String> {
 ///
 /// Empty means only a local Ollama is reachable — the one case where a missing
 /// Ollama is genuinely a dead end.
+#[must_use]
 pub fn configured_remote_providers(config: &Config) -> Vec<ConfiguredProvider> {
     candidate_providers(config)
         .into_iter()
@@ -108,6 +110,7 @@ pub fn configured_remote_providers(config: &Config) -> Vec<ConfiguredProvider> {
 }
 
 /// Just the names from [`configured_remote_providers`].
+#[must_use]
 pub fn configured_remote_provider_names(config: &Config) -> Vec<String> {
     configured_remote_providers(config)
         .into_iter()
@@ -122,6 +125,7 @@ pub fn configured_remote_provider_names(config: &Config) -> Vec<String> {
 /// unusable on a machine with no keys, and reporting fifteen of those as
 /// problems would bury the one that matters. The classic hit is Cloudflare with
 /// a token but no `CLOUDFLARE_ACCOUNT_ID`.
+#[must_use]
 pub fn provider_problems(config: &Config) -> Vec<ProviderProblem> {
     candidate_providers(config)
         .into_iter()

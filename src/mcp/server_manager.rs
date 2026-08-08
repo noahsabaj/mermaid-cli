@@ -300,6 +300,7 @@ impl McpServerManager {
     /// attached through the same channel — adapters that don't support audio
     /// will silently drop it. Resource links + embedded resources render as
     /// text so the model can follow up with another tool call.
+    #[must_use]
     pub fn format_tool_result(result: &McpToolResult) -> (String, Option<Vec<String>>) {
         let mut text_parts = Vec::new();
         let mut images = Vec::new();

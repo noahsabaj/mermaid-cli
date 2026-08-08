@@ -12,6 +12,7 @@ use crate::models::reasoning::ReasoningLevel;
 /// burn its whole answer budget before responding. Scales with the effort
 /// level. Used by compaction to reserve response room in the window; the AUTO
 /// budget itself needs no reserve (it already hands over the full window room).
+#[must_use]
 pub fn reasoning_output_reserve(level: ReasoningLevel) -> usize {
     match level {
         ReasoningLevel::None | ReasoningLevel::Minimal => 0,
@@ -56,6 +57,7 @@ pub struct OutputBudgetInputs {
 
 /// Resolve the per-request output cap. `Some(n)` = send `n`; `None` = omit the
 /// field entirely (let the provider apply its own per-response maximum).
+#[must_use]
 pub fn resolve_output_budget(inputs: &OutputBudgetInputs, mode: OutputCapMode) -> Option<usize> {
     // Room the window leaves after the prompt. `Some(0)` when the window is
     // already full; `None` when the window is unknown — kept distinct so a full

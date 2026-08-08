@@ -127,6 +127,7 @@ pub enum ColorValue {
 }
 
 impl ColorValue {
+    #[must_use]
     pub fn to_color(&self) -> Color {
         match self {
             Self::Rgb { r, g, b } => Color::Rgb(*r, *g, *b),
@@ -153,6 +154,7 @@ impl ColorValue {
 impl Theme {
     /// Create a light theme. Selected by `ui.theme = "light"` in config.toml
     /// or `/theme light` (see `render()`'s theme memo).
+    #[must_use]
     pub fn light() -> Self {
         Self {
             name: "Light".to_string(),
@@ -233,6 +235,7 @@ impl Theme {
     }
 
     /// Create the default dark theme
+    #[must_use]
     pub fn dark() -> Self {
         Self {
             name: "Dark".to_string(),
@@ -300,6 +303,7 @@ impl Theme {
     /// default fg/bg (`Color::Reset`), so nothing emits a color at all.
     /// Structure (glyphs, layout, bold/dim) is untouched — diffs still read
     /// via their `+`/`-` prefixes.
+    #[must_use]
     pub fn plain() -> Self {
         fn d() -> ColorValue {
             ColorValue::Named("default".to_string())

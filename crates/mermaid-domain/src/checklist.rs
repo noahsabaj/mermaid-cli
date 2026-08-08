@@ -32,6 +32,7 @@ pub enum ChecklistStatus {
 }
 
 impl ChecklistStatus {
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Pending => "pending",
@@ -42,6 +43,7 @@ impl ChecklistStatus {
         }
     }
 
+    #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "pending" => Some(Self::Pending),
@@ -119,6 +121,7 @@ pub struct ChecklistItem {
 
 impl ChecklistItem {
     /// Elapsed seconds from start to completion, when both stamps exist.
+    #[must_use]
     pub fn elapsed_secs(&self) -> Option<u64> {
         match (self.started_at, self.completed_at) {
             (Some(s), Some(c)) => Some(c.saturating_sub(s)),
@@ -276,6 +279,7 @@ impl ChecklistStore {
     }
 
     /// `(completed, total)` over visible tasks.
+    #[must_use]
     pub fn counts(&self) -> (usize, usize) {
         let mut completed = 0;
         let mut total = 0;
@@ -289,21 +293,25 @@ impl ChecklistStore {
     }
 
     /// Compact progress label, e.g. `Tasks 2/5`.
+    #[must_use]
     pub fn progress_string(&self) -> String {
         let (completed, total) = self.counts();
         format!("Tasks {completed}/{total}")
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.visible().next().is_none()
     }
 
+    #[must_use]
     pub fn all_done(&self) -> bool {
         let (completed, total) = self.counts();
         total > 0 && completed == total
     }
 
     /// The current in-progress task (first, if the model broke discipline).
+    #[must_use]
     pub fn active(&self) -> Option<&ChecklistItem> {
         self.tasks
             .iter()
@@ -311,6 +319,7 @@ impl ChecklistStore {
     }
 
     /// The next pending task, in creation order.
+    #[must_use]
     pub fn next_pending(&self) -> Option<&ChecklistItem> {
         self.tasks
             .iter()
@@ -319,6 +328,7 @@ impl ChecklistStore {
 
     /// Tasks that flipped to `Completed` relative to `before` — drives the
     /// `task_completed` hook.
+    #[must_use]
     pub fn newly_completed<'a>(&'a self, before: &Self) -> Vec<&'a ChecklistItem> {
         self.visible()
             .filter(|t| {
@@ -368,6 +378,7 @@ fn transition(task: &mut ChecklistItem, status: ChecklistStatus, stamp: Stamp) {
 /// rejection (a hard reject risks retry loops; codex's enforce-nothing
 /// approach lets malformed checklists render silently). Strictness changes
 /// edit this list of checks only.
+#[must_use]
 pub fn advisory_notes(
     before: &ChecklistStore,
     edits: &[ChecklistEdit],

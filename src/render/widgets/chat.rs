@@ -89,6 +89,7 @@ struct FrameMemo {
 
 impl ChatState {
     /// Create a new chat state (starts in auto-follow mode)
+    #[must_use]
     pub fn new() -> Self {
         Self {
             scroll_offset: 0,
@@ -106,6 +107,7 @@ impl ChatState {
 
     /// Get the scroll position for rendering
     /// `scroll_offset` represents distance from bottom, convert to ratatui scroll position
+    #[must_use]
     pub fn get_scroll_position(&self, content_height: u16, viewport_height: u16) -> u16 {
         let max_scroll = content_height.saturating_sub(viewport_height);
         if self.is_user_scrolling {
@@ -147,6 +149,7 @@ impl ChatState {
 
     /// Find an image click target at the given screen coordinates.
     /// Returns `Some((message_index`, `image_index`)) if an image indicator was clicked.
+    #[must_use]
     pub fn find_image_at_screen_pos(&self, screen_row: u16) -> Option<&ImageClickTarget> {
         let (_, area_y, _, area_height) = self.last_chat_area?;
 
@@ -201,6 +204,7 @@ impl ChatState {
     /// `None` if there's no selection or it's empty (e.g. a plain click).
     /// Walks the retained per-row text and slices each row by display cells so
     /// CJK / wide glyphs are never split mid-cell.
+    #[must_use]
     pub fn selected_text(&self) -> Option<String> {
         let (a, b) = self.selection?;
         let (start, end) = if a <= b { (a, b) } else { (b, a) };

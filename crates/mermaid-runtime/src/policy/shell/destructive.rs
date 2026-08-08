@@ -266,6 +266,7 @@ pub(crate) fn destructive_scan_segments(command: &str) -> Vec<String> {
     out
 }
 
+#[must_use]
 pub fn is_destructive_command(command: &str) -> bool {
     // Some destructive shapes (notably fork bombs, `name(){ name|name& };name`)
     // straddle the `|`/`&`/`;` operators `split_into_segments` breaks on, so the

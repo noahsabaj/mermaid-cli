@@ -36,6 +36,7 @@ pub enum CompactionTrigger {
 }
 
 impl CompactionTrigger {
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Manual => "manual",
@@ -45,6 +46,7 @@ impl CompactionTrigger {
         }
     }
 
+    #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Self::Manual => "manual",
@@ -106,6 +108,7 @@ impl CompactionPolicy {
     /// `1/SUMMARY_OUTPUT_WINDOW_SHARE` of it, so the input budget always has
     /// room left; large windows are unaffected because `summary_max_tokens`
     /// stays the ceiling.
+    #[must_use]
     pub fn summary_output_tokens(self, window: Option<usize>) -> usize {
         match window {
             None => self.summary_max_tokens,
@@ -124,6 +127,7 @@ impl CompactionPolicy {
     /// model therefore got a 64k input budget while a 9k model got 1k —
     /// shrinking the window made the request bigger, and 8k-and-below could
     /// never compact.
+    #[must_use]
     pub fn summary_input_budget(self, window: Option<usize>) -> usize {
         match window {
             None => self.summarizer_input_token_budget,
@@ -138,6 +142,7 @@ impl CompactionPolicy {
     /// is the best reserve estimate, but AUTO (`max_tokens == 0`) reserves the
     /// baseline plus the reasoning headroom the level implies — a High/Max
     /// turn needs more room before the window counts as "full".
+    #[must_use]
     pub fn response_reserve(self, request: &ChatRequest) -> usize {
         let desired = if request.max_tokens > 0 {
             request.max_tokens
@@ -172,6 +177,7 @@ pub enum LengthCause {
 /// window at all — the normal remote-provider case) is the per-response output
 /// cap, not a full window. `usage == None` (common on tool follow-ups) stays
 /// `Unknown` so the caller preserves the legacy recovery path.
+#[must_use]
 pub fn classify_length_stop(
     usage: Option<&TokenUsage>,
     window: Option<usize>,
@@ -205,6 +211,7 @@ impl CompactionRequest {
     // `[compaction]` config exists precisely so these knobs can differ from the
     // constants, and a constructor that quietly substituted defaults would make
     // whether the user's settings applied depend on which call site ran.
+    #[must_use]
     pub fn manual(
         chat: ChatRequest,
         instructions: Option<String>,
@@ -218,6 +225,7 @@ impl CompactionRequest {
         }
     }
 
+    #[must_use]
     pub fn auto(chat: ChatRequest, trigger: CompactionTrigger, policy: CompactionPolicy) -> Self {
         Self {
             chat,
@@ -236,6 +244,7 @@ pub enum CompactionReviewStatus {
 }
 
 impl CompactionReviewStatus {
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Reviewed => "reviewed",
@@ -296,12 +305,14 @@ pub struct CompactionBoundary {
 }
 
 impl CompactionBoundary {
+    #[must_use]
     pub fn from_message(message: &ChatMessage) -> Self {
         Self {
             fingerprint: Self::fingerprint_of(message),
         }
     }
 
+    #[must_use]
     pub fn fingerprint_of(message: &ChatMessage) -> String {
         use sha2::{Digest, Sha256};
         use std::fmt::Write as _;
@@ -327,6 +338,7 @@ impl CompactionBoundary {
         out
     }
 
+    #[must_use]
     pub fn matches(&self, message: &ChatMessage) -> bool {
         Self::fingerprint_of(message) == self.fingerprint
     }
@@ -407,6 +419,7 @@ pub fn should_auto_compact(
     }
 }
 
+#[must_use]
 pub fn context_exceeds_hard_limit(
     snapshot: &ContextUsageSnapshot,
     request: &ChatRequest,
@@ -537,6 +550,7 @@ pub fn prepare_compaction(
     })
 }
 
+#[must_use]
 pub fn build_summary_request(
     base: &ChatRequest,
     prepared: &PreparedCompaction,
@@ -569,6 +583,7 @@ pub fn build_summary_request(
     }
 }
 
+#[must_use]
 pub fn build_verification_request(
     base: &ChatRequest,
     prepared: &PreparedCompaction,
@@ -605,6 +620,7 @@ pub fn build_verification_request(
     }
 }
 
+#[must_use]
 pub fn build_replacement_messages(
     summary: &str,
     prepared: &PreparedCompaction,
@@ -651,6 +667,7 @@ pub fn build_replacement_messages(
     messages
 }
 
+#[must_use]
 pub fn compaction_receipt(record: &CompactionEvent) -> String {
     let review = match record.review_status {
         CompactionReviewStatus::Reviewed => "Reviewed in a second pass.".to_string(),
@@ -670,6 +687,7 @@ pub fn compaction_receipt(record: &CompactionEvent) -> String {
     )
 }
 
+#[must_use]
 pub fn normalize_summary(text: &str) -> String {
     let trimmed = text.trim();
     if let Some(summary) = extract_tagged_summary(trimmed) {
@@ -728,6 +746,7 @@ pub fn validate_summary_structure(summary: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[must_use]
 pub fn combine_usage(a: Option<TokenUsage>, b: Option<TokenUsage>) -> Option<TokenUsage> {
     match (a, b) {
         (None, None) => None,
@@ -761,6 +780,7 @@ pub fn estimate_messages_tokens(messages: &[ChatMessage]) -> usize {
 /// decimal (`128k`, not `128.0k`). Previously three copies existed with two
 /// different policies (threshold + rounding), so the same count rendered
 /// inconsistently across the UI.
+#[must_use]
 pub fn format_compact_count(value: usize) -> String {
     if value >= 1_000_000 {
         format_scaled(value, 1_000_000, "M")

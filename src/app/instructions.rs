@@ -55,6 +55,7 @@ pub enum ReloadOutcome {
 ///
 /// Returns all supported instruction files in the nearest matching
 /// directory, in precedence order, or an empty vec if none exist.
+#[must_use]
 pub fn find_instruction_files(start: &Path) -> Vec<PathBuf> {
     find_instruction_files_bounded(start, home_dir_boundary().as_deref())
 }
@@ -148,12 +149,14 @@ fn find_instruction_files_bounded(start: &Path, home: Option<&Path>) -> Vec<Path
 /// Read the file at `path`, truncate to `MAX_INSTRUCTIONS_BYTES` if
 /// oversized, and return a `LoadedInstructions`. Returns `None` if the
 /// file can't be read or doesn't exist.
+#[must_use]
 pub fn load_from_path(path: &Path) -> Option<LoadedInstructions> {
     load_from_paths(&[path.to_path_buf()])
 }
 
 /// Read and combine the instruction files at `paths`, truncating the
 /// combined body to `MAX_INSTRUCTIONS_BYTES` if needed.
+#[must_use]
 pub fn load_from_paths(paths: &[PathBuf]) -> Option<LoadedInstructions> {
     let mut sources = Vec::new();
     let mut bodies = Vec::new();
@@ -215,6 +218,7 @@ pub fn load_from_paths(paths: &[PathBuf]) -> Option<LoadedInstructions> {
 ///
 /// `cwd` is used to re-discover MERMAID.md when `current` is `None`
 /// (handles "user created the file mid-session" by re-running the walk).
+#[must_use]
 pub fn refresh(
     current: Option<LoadedInstructions>,
     cwd: &Path,
@@ -288,6 +292,7 @@ pub fn refresh(
 /// call — otherwise the request goes out with no MERMAID.md/AGENTS.md, no
 /// memory index, and no skills, which is exactly the context `mermaid doctor`
 /// reports as loaded.
+#[must_use]
 pub fn load_project_context(
     cwd: &Path,
     mem_cfg: &mermaid_domain::MemoryConfig,

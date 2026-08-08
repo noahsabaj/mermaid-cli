@@ -141,6 +141,7 @@ impl DaemonRequest {
     /// (TCP requires auth for everything). Exhaustive — adding a variant
     /// forces a decision here. Session content flows through
     /// `SubscribeTask`, so it is gated like `session_messages`.
+    #[must_use]
     pub fn requires_auth(&self) -> bool {
         match self {
             Self::Health => false,
@@ -185,6 +186,7 @@ impl DaemonRequest {
 
     /// Serialize to the wire `Value` (the shape `request_daemon` injects
     /// `auth` into).
+    #[must_use]
     pub fn to_wire(&self) -> serde_json::Value {
         serde_json::to_value(self).expect("DaemonRequest serializes")
     }

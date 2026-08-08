@@ -86,6 +86,7 @@ fn strip_persisted_screenshots(messages: &[ChatMessage]) -> Option<Vec<ChatMessa
 /// `None` when `dir` isn't a git work tree, git is absent, or HEAD is
 /// detached. Kept out of the pure reducer — callers invoke it in the impure
 /// startup path and stamp the result onto the conversation.
+#[must_use]
 pub fn detect_git_branch(dir: &Path) -> Option<String> {
     let output = std::process::Command::new("git")
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
@@ -103,6 +104,7 @@ pub fn detect_git_branch(dir: &Path) -> Option<String> {
 /// Best-effort short git SHA of `dir`'s HEAD, for session provenance. `None`
 /// outside a git work tree or when git is absent. Impure — stamped at startup
 /// alongside `detect_git_branch`, never in the reducer.
+#[must_use]
 pub fn detect_git_sha(dir: &Path) -> Option<String> {
     let output = std::process::Command::new("git")
         .args(["rev-parse", "--short", "HEAD"])
@@ -501,10 +503,12 @@ impl ConversationManager {
     }
 
     /// Get the conversations directory path
+    #[must_use]
     pub fn conversations_dir(&self) -> &Path {
         &self.conversations_dir
     }
 
+    #[must_use]
     pub fn compactions_dir(&self) -> &Path {
         &self.compactions_dir
     }
@@ -513,6 +517,7 @@ impl ConversationManager {
 /// Probe the session's provenance. Impure — spawns `git` twice — so it is a
 /// value the shell resolves once at startup and delivers as
 /// `Msg::SessionProvenanceResolved`.
+#[must_use]
 pub fn probe_session_provenance(cwd: &Path) -> mermaid_domain::SessionProvenance {
     mermaid_domain::SessionProvenance {
         git_branch: detect_git_branch(cwd),

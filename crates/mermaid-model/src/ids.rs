@@ -63,6 +63,7 @@ impl Default for IdAllocator {
 impl IdAllocator {
     /// Start at 1 so `TurnId::ZERO` / `ToolCallId(0)` stay reserved as
     /// sentinel values — no real allocation ever collides with them.
+    #[must_use]
     pub const fn new() -> Self {
         Self { next: 1 }
     }
@@ -71,6 +72,7 @@ impl IdAllocator {
     /// continue a global counter past the highest value already persisted (e.g.
     /// image numbers), so a resumed session never re-issues a number that an
     /// earlier message already used.
+    #[must_use]
     pub const fn starting_at(next: u64) -> Self {
         Self { next }
     }
@@ -89,6 +91,7 @@ impl IdAllocator {
     }
 
     /// Peek without advancing.
+    #[must_use]
     pub fn peek(&self) -> u64 {
         self.next
     }

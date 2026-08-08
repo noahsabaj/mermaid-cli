@@ -44,6 +44,7 @@ pub enum TaskStatus {
 }
 
 impl TaskStatus {
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Queued => "queued",
@@ -85,6 +86,7 @@ pub enum TaskPriority {
 }
 
 impl TaskPriority {
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Low => "low",
@@ -118,6 +120,7 @@ pub enum ProcessStatus {
 }
 
 impl ProcessStatus {
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Running => "running",
@@ -239,6 +242,7 @@ impl NewTask {
     /// Mark this task as daemon-owned (run in the daemon process). Only such
     /// tasks are reset by [`RuntimeStore::reconcile_after_restart`]; omit it for
     /// interactive CLI runs so they survive a daemon restart.
+    #[must_use]
     pub fn daemon_owned(mut self) -> Self {
         self.owner_kind = Some(OWNER_KIND_DAEMON.to_string());
         self
@@ -250,6 +254,7 @@ impl NewTask {
         self
     }
 
+    #[must_use]
     pub fn with_priority(mut self, priority: TaskPriority) -> Self {
         self.priority = priority;
         self

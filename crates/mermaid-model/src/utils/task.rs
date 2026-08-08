@@ -26,6 +26,7 @@ pub async fn join_logged(handle: tokio::task::JoinHandle<()>, what: &str) {
 pub struct AbortOnDrop(Option<tokio::task::JoinHandle<()>>);
 
 impl AbortOnDrop {
+    #[must_use]
     pub fn take(mut self) -> tokio::task::JoinHandle<()> {
         self.0.take().expect("AbortOnDrop::take called once")
     }

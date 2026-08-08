@@ -14,6 +14,7 @@ pub enum ProviderContinuation {
 }
 
 impl ProviderContinuation {
+    #[must_use]
     pub fn anthropic_signature(&self) -> Option<&str> {
         match self {
             Self::Anthropic { signature } => Some(signature),
@@ -21,6 +22,7 @@ impl ProviderContinuation {
         }
     }
 
+    #[must_use]
     pub fn meta_output(&self) -> Option<&[MetaResponseItem]> {
         match self {
             Self::MetaResponses { output } => Some(output),
@@ -70,6 +72,7 @@ impl MetaResponseItem {
         Self::Other { item }
     }
 
+    #[must_use]
     pub fn to_wire(&self) -> serde_json::Value {
         match self {
             Self::Reasoning {
@@ -215,6 +218,7 @@ impl ChatMessage {
     }
 
     /// Builder: attach images
+    #[must_use]
     pub fn with_images(mut self, images: Vec<String>) -> Self {
         self.images = Some(images);
         self
@@ -223,12 +227,14 @@ impl ChatMessage {
     /// Builder: attach the parallel global image numbers (same length/order as
     /// `with_images`). Set together at submit time so the transcript can show
     /// each image's stable `[Image #N]`.
+    #[must_use]
     pub fn with_image_numbers(mut self, numbers: Vec<u64>) -> Self {
         self.image_numbers = Some(numbers);
         self
     }
 
     /// Builder: attach tool calls
+    #[must_use]
     pub fn with_tool_calls(mut self, tool_calls: Vec<crate::models::tool_call::ToolCall>) -> Self {
         self.tool_calls = if tool_calls.is_empty() {
             None
@@ -239,6 +245,7 @@ impl ChatMessage {
     }
 
     /// Builder: attach opaque provider continuation data.
+    #[must_use]
     pub fn with_provider_continuation(mut self, continuation: ProviderContinuation) -> Self {
         self.provider_continuation = Some(continuation);
         self
@@ -254,6 +261,7 @@ impl ChatMessage {
     /// Safety: `str::find()` returns byte offsets. The markers `"Thinking..."`
     /// and `"...done thinking."` are pure ASCII, so adding their `.len()`
     /// always lands on a valid UTF-8 char boundary.
+    #[must_use]
     pub fn extract_thinking(text: &str) -> (Option<String>, String) {
         let Some(thinking_start) = text.find("Thinking...") else {
             return (None, text.to_string());
@@ -380,6 +388,7 @@ impl ChatMessageKind {
     /// `ChatMessageKind` fails to compile here until its audience is decided,
     /// which is the guard against another kind being silently dropped on the
     /// providers that can't carry system-role history.
+    #[must_use]
     pub fn audience(self) -> MessageAudience {
         match self {
             // Injected to steer the model — the whole point is that it reads
@@ -475,6 +484,7 @@ pub struct TokenUsage {
 }
 
 impl TokenUsage {
+    #[must_use]
     pub fn provider(prompt_tokens: usize, completion_tokens: usize) -> Self {
         Self {
             prompt_tokens,
@@ -486,6 +496,7 @@ impl TokenUsage {
         }
     }
 
+    #[must_use]
     pub fn estimate(prompt_tokens: usize) -> Self {
         Self {
             prompt_tokens,
@@ -497,27 +508,32 @@ impl TokenUsage {
         }
     }
 
+    #[must_use]
     pub fn with_cached_input(mut self, cached_input_tokens: usize) -> Self {
         self.cached_input_tokens = cached_input_tokens;
         self
     }
 
+    #[must_use]
     pub fn with_cache_creation(mut self, cache_creation_input_tokens: usize) -> Self {
         self.cache_creation_input_tokens = cache_creation_input_tokens;
         self
     }
 
+    #[must_use]
     pub fn with_reasoning_output(mut self, reasoning_output_tokens: usize) -> Self {
         self.reasoning_output_tokens = reasoning_output_tokens;
         self
     }
 
+    #[must_use]
     pub fn input_total_tokens(&self) -> usize {
         self.prompt_tokens
             .saturating_add(self.cached_input_tokens)
             .saturating_add(self.cache_creation_input_tokens)
     }
 
+    #[must_use]
     pub fn output_total_tokens(&self) -> usize {
         self.completion_tokens
             .saturating_add(self.reasoning_output_tokens)
@@ -526,6 +542,7 @@ impl TokenUsage {
     /// Full request total, derived. Equals every provider's wire total
     /// (verified for Anthropic, OpenAI, Gemini, Ollama) — a stored total
     /// would only reintroduce per-provider drift.
+    #[must_use]
     pub fn total_tokens(&self) -> usize {
         self.input_total_tokens()
             .saturating_add(self.output_total_tokens())

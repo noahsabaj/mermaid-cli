@@ -379,6 +379,7 @@ pub struct ProviderFactory {
 }
 
 impl ProviderFactory {
+    #[must_use]
     pub fn new(config: Config) -> Self {
         Self {
             config: Arc::new(config),

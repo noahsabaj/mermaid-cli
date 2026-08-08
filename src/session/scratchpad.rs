@@ -69,6 +69,7 @@ fn scratch_root() -> PathBuf {
 /// Flatten a project path into a single filesystem-safe component
 /// (`/home/user/my proj` -> `-home-user-my-proj`). Never empty: a
 /// degenerate input falls back to `"project"`.
+#[must_use]
 pub fn project_slug(project: &Path) -> String {
     sanitize_component(&project.display().to_string(), "project")
 }
@@ -100,6 +101,7 @@ fn sanitize_component(raw: &str, fallback: &str) -> String {
 /// Pure path computation: the locked session dir for
 /// `(project, session_id)` under `root`. No filesystem access. The
 /// advertised scratchpad is its [`SCRATCH_SUBDIR`] child.
+#[must_use]
 pub fn session_dir(root: &Path, project: &Path, session_id: &str) -> PathBuf {
     root.join(project_slug(project))
         .join(sanitize_component(session_id, "session"))
@@ -244,6 +246,7 @@ fn remove_in(root: &Path, project: &Path, session_id: &str) -> io::Result<()> {
 /// paths, human-readable sizes, capped at [`MAX_LIST_ENTRIES`] lines with
 /// an explicit "more" marker. The lock file lives outside the advertised
 /// directory, so everything found here is user content.
+#[must_use]
 pub fn list_text(dir: &Path) -> String {
     let mut out = format!("Scratchpad: {}", dir.display());
     let mut entries = Vec::new();

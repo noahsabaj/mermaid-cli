@@ -25,6 +25,7 @@ pub enum DiffLineKind {
 /// `{number}{marker}{content}` shape — including malformed or
 /// truncated input — fall through to `Context` so the renderer's
 /// match stays exhaustive without panicking.
+#[must_use]
 pub fn parse_diff_line(line: &str) -> DiffLineKind {
     let trimmed = line.trim_start();
     let after_num = trimmed.trim_start_matches(|c: char| c.is_ascii_digit());
@@ -57,6 +58,7 @@ pub const MAX_DISPLAY_DIFF_LINES: usize = 220;
 /// `{num:>4}{marker}{content}` using the shared markers so [`parse_diff_line`]
 /// colors it. No unified-diff header lines. Shared by `write_file` and
 /// `apply_patch`.
+#[must_use]
 pub fn generate_display_diff(old: &str, new: &str) -> DisplayDiff {
     let old_lines: Vec<&str> = old.lines().collect();
     let new_lines: Vec<&str> = new.lines().collect();

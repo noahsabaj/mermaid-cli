@@ -14,6 +14,7 @@ pub const EXIT_PLAN_MODE_TOOL: &str = "exit_plan_mode";
 /// Advertised only while NOT planning (and never to subagents).
 pub const ENTER_PLAN_MODE_TOOL: &str = "enter_plan_mode";
 
+#[must_use]
 pub fn exit_plan_mode_definition() -> ToolDefinition {
     ToolDefinition {
         name: EXIT_PLAN_MODE_TOOL.to_string(),
@@ -29,6 +30,7 @@ pub fn exit_plan_mode_definition() -> ToolDefinition {
     }
 }
 
+#[must_use]
 pub fn enter_plan_mode_definition() -> ToolDefinition {
     ToolDefinition {
         name: ENTER_PLAN_MODE_TOOL.to_string(),

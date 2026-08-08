@@ -15,6 +15,7 @@ pub struct RuntimeLifecycle {
 }
 
 impl RuntimeLifecycle {
+    #[must_use]
     pub fn new() -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         spawn_signal_tasks(tx);
