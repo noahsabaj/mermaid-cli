@@ -61,6 +61,16 @@ tests hold the detail; this is what's easy to get wrong.
   throughout: it warns once the suppression stops being necessary, so
   shortening a function tells you to delete its attribute. Converting the
   existing `#[allow]`s found four that were suppressing nothing.
+
+  **A local clippy run only covers your own platform.** `tests/pty_exit.rs`
+  and `tests/daemon_integration.rs` are `#![cfg(unix)]`, `tests/sandbox_*.rs`
+  are Linux+macOS, and 99 items under `src/` and `crates/` are `#[cfg(unix)]`.
+  On Windows those compile to nothing, so clippy has nothing to lint and a
+  green local run says nothing about them — the two `too_many_lines`
+  violations in `pty_exit.rs` were found by CI, not by any local sweep. To
+  check a gated file before pushing, drop its `#![cfg(...)]` and run
+  `cargo clippy --test <name>`; that reproduces the Linux verdict exactly.
+  Restore the attribute afterwards.
 - UI surfaces get coverage; keep the render/reducer tests green.
 
 ## Ratchets
