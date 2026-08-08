@@ -102,6 +102,10 @@ directories = "6.0"
 which = "8.0"  # Find executables
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls", "gzip", "brotli"] }
 encoding_rs = "0.8"
+# `McpServerConfig::transport_kind` parses a URL. Named directly rather than
+# reached through `reqwest::Url`, so a plain config type does not depend on the
+# HTTP client.
+url = "2.5"
 mime = "0.3"
 bytes = "1.11"
 rusqlite = { version = "0.40", features = ["bundled"] }

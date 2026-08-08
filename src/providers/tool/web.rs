@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use async_trait::async_trait;
 use futures::{StreamExt, stream};
 
-use crate::app::{FetchBackend, SearchBackend, WebConfig};
+use crate::domain::{FetchBackend, SearchBackend, WebConfig};
 use crate::domain::{ToolDefinition, ToolMetadata, ToolOutcome, ToolRunMetadata};
 
 use super::super::ctx::ExecContext;

@@ -68,7 +68,7 @@ fn readme_sample_config_parses() {
         .map(|rest| rest.split("```").next().unwrap_or(""))
         .find(|block| block.contains("[safety]"))
         .expect("README must contain the sample config with a [safety] section");
-    let config: mermaid_cli::app::Config =
+    let config: mermaid_cli::domain::Config =
         toml::from_str(block).expect("README sample config must parse as a valid Config");
     assert!(
         matches!(config.safety.mode, mermaid_runtime::SafetyMode::Ask),

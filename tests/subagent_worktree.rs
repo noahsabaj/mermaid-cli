@@ -58,7 +58,7 @@ fn project(tag: &str) -> Option<PathBuf> {
 }
 
 fn tool_and_ctx(workdir: &Path) -> (SubagentTool, ExecContext) {
-    let mut config = mermaid_cli::app::Config::default();
+    let mut config = mermaid_cli::domain::Config::default();
     // The child must be able to write without an approval UI; the gate is
     // covered by its own tests.
     config.safety.mode = SafetyMode::FullAccess;
@@ -193,7 +193,7 @@ async fn parallel_isolated_children_do_not_collide() {
     // model response go through the session's spawner, so the children get
     // distinct ids. Building a spawner per task would restart ids at `a1`
     // and test a shape that never occurs.
-    let mut config = mermaid_cli::app::Config::default();
+    let mut config = mermaid_cli::domain::Config::default();
     config.safety.mode = SafetyMode::FullAccess;
     config.safety.checkpoint_on_mutation = false;
     let providers = Arc::new(ProviderFactory::new(config.clone()));

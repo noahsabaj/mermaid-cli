@@ -282,8 +282,8 @@ fn render_report(path: &Path, report: &ReplayReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::Config;
     use crate::app::recorder::{RECORDING_FORMAT_VERSION, Recorder};
+    use crate::domain::Config;
     use crate::domain::TurnId;
     use mermaid_model::models::{FinishReason, TokenUsage};
     use std::path::PathBuf;

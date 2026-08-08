@@ -17,7 +17,7 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 
-use crate::app::PlanPostApprove;
+use crate::domain::PlanPostApprove;
 use crate::domain::{
     Question, QuestionKind, QuestionOption, QuestionResolution, ToolDefinition, ToolMetadata,
     ToolOutcome, ToolRunMetadata,

@@ -8,8 +8,10 @@ use mermaid_model::models::{
     BackendConfig, ChatMessage, Model, PROVIDER_REGISTRY, lookup_provider,
 };
 
+use crate::domain::Config;
+
 use crate::{
-    app::{Config, get_config_dir, init_config, load_config_or_warn},
+    app::{get_config_dir, init_config, load_config_or_warn},
     domain::{
         ChatRequest, Cmd, CompactionEvent, CompactionResult, CompactionTrigger, Msg, SlashCmd,
         State, build_replacement_messages, estimate_context_usage_for_request, prepare_compaction,
@@ -298,7 +300,7 @@ fn web_doctor_entries(config: &Config) -> (Vec<String>, Vec<String>) {
         ("web_fetch", capabilities.fetch),
         ("web_search", capabilities.search),
     ] {
-        if config.safety.network == crate::app::NetworkPolicy::Deny {
+        if config.safety.network == crate::domain::NetworkPolicy::Deny {
             next_steps.push(format!(
                 "{name} is disabled by safety.network = \"deny\" (selected backend '{}'; {}).",
                 status.backend, status.trust_destination
@@ -2752,9 +2754,9 @@ mod tests {
     #[test]
     fn doctor_uses_resolved_keyless_web_capabilities() {
         let config = Config {
-            web: crate::app::WebConfig {
-                fetch_backend: crate::app::FetchBackend::Native,
-                search_backend: crate::app::SearchBackend::Searxng,
+            web: crate::domain::WebConfig {
+                fetch_backend: crate::domain::FetchBackend::Native,
+                search_backend: crate::domain::SearchBackend::Searxng,
                 searxng_url: "http://127.0.0.1:8080".to_string(),
             },
             ..Config::default()
@@ -2780,9 +2782,9 @@ mod tests {
     #[test]
     fn doctor_reports_global_network_deny_instead_of_advertising_web() {
         let mut config = Config::default();
-        config.web.search_backend = crate::app::SearchBackend::Searxng;
+        config.web.search_backend = crate::domain::SearchBackend::Searxng;
         config.web.searxng_url = "http://127.0.0.1:8080".to_string();
-        config.safety.network = crate::app::NetworkPolicy::Deny;
+        config.safety.network = crate::domain::NetworkPolicy::Deny;
 
         let (tools, next_steps) = web_doctor_entries(&config);
         assert!(

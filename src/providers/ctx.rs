@@ -145,12 +145,12 @@ pub struct ExecContext {
     pub call_id: ToolCallId,
     pub turn: TurnId,
     pub workdir: PathBuf,
-    /// Parent session's `app::Config`. Needed by `SubagentTool` so the
+    /// Parent session's `domain::Config`. Needed by `SubagentTool` so the
     /// child reducer uses the same Ollama host, reasoning prefs, MCP
     /// servers, etc. Other tools don't consult it — keeping it as a
     /// typed field (rather than a global) means the dependency is
     /// explicit in the signature.
-    pub config: Arc<crate::app::Config>,
+    pub config: Arc<crate::domain::Config>,
     /// Parent session's active model id (e.g. `"anthropic/claude-opus-4-7"`).
     /// Subagents inherit this so they hit the same provider.
     pub model_id: String,
@@ -183,7 +183,7 @@ pub struct ExecContext {
     /// LIVE per-category plan permission levels, threaded from the reducer
     /// (the frozen startup `config` would go stale under `/plan config`
     /// edits). Only consulted while `plan_file` is `Some`; defaults in `new`.
-    pub plan_permissions: crate::app::PlanPermissions,
+    pub plan_permissions: crate::domain::PlanPermissions,
     /// Context-window fill at dispatch, when known (`exit_plan_mode` shows
     /// it on the clear-context approval option). Defaults to `None` in `new`.
     pub context_percent: Option<u8>,
@@ -252,7 +252,7 @@ impl ExecContext {
         call_id: ToolCallId,
         turn: TurnId,
         workdir: PathBuf,
-        config: Arc<crate::app::Config>,
+        config: Arc<crate::domain::Config>,
         model_id: String,
         task_id: Option<String>,
         session_id: Option<String>,
@@ -272,7 +272,7 @@ impl ExecContext {
             background: CancellationToken::new(),
             notify: None,
             plan_file: None,
-            plan_permissions: crate::app::PlanPermissions::default(),
+            plan_permissions: crate::domain::PlanPermissions::default(),
             context_percent: None,
             // Field-set by the live execute path alongside `background`/
             // `notify`; tests and bare contexts leave it unset.
@@ -348,7 +348,7 @@ pub fn test_exec_context(
     call_id: ToolCallId,
     workdir: PathBuf,
 ) -> (ExecContext, mpsc::Receiver<ProgressEvent>) {
-    let mut config = crate::app::Config::default();
+    let mut config = crate::domain::Config::default();
     config.safety.mode = mermaid_runtime::SafetyMode::FullAccess;
     test_exec_context_with_config(turn, call_id, workdir, config)
 }
@@ -361,7 +361,7 @@ pub fn test_exec_context_with_config(
     turn: TurnId,
     call_id: ToolCallId,
     workdir: PathBuf,
-    config: crate::app::Config,
+    config: crate::domain::Config,
 ) -> (ExecContext, mpsc::Receiver<ProgressEvent>) {
     let token = CancellationToken::new();
     let (tx, rx) = mpsc::channel(64);

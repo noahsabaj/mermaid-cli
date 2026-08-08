@@ -29,7 +29,7 @@ use async_trait::async_trait;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
-use crate::app::{FilesystemPolicy, NetworkPolicy};
+use crate::domain::{FilesystemPolicy, NetworkPolicy};
 use crate::domain::{ManagedProcess, ToolDefinition, ToolMetadata, ToolOutcome, ToolRunMetadata};
 use mermaid_model::constants::{COMMAND_MAX_TIMEOUT_SECS, COMMAND_TIMEOUT_SECS};
 
@@ -2419,7 +2419,7 @@ mod tests {
 
         let mk_ctx = || {
             let (tx, rx) = tokio::sync::mpsc::channel(64);
-            let mut config = crate::app::Config::default();
+            let mut config = crate::domain::Config::default();
             config.safety.mode = mermaid_runtime::SafetyMode::ReadOnly;
             let ctx = crate::providers::ctx::ExecContext::new(
                 tokio_util::sync::CancellationToken::new(),
@@ -2487,7 +2487,7 @@ mod tests {
 
         let mk_ctx = || {
             let (tx, rx) = tokio::sync::mpsc::channel(64);
-            let mut config = crate::app::Config::default();
+            let mut config = crate::domain::Config::default();
             config.safety.mode = mermaid_runtime::SafetyMode::ReadOnly;
             config.safety.checkpoint_on_mutation = false;
             let mut ctx = crate::providers::ctx::ExecContext::new(
@@ -2654,7 +2654,7 @@ mod tests {
         crate::providers::ctx::ExecContext,
         tokio::sync::mpsc::Receiver<crate::domain::ProgressEvent>,
     ) {
-        let mut config = crate::app::Config::default();
+        let mut config = crate::domain::Config::default();
         config.safety.mode = mermaid_runtime::SafetyMode::FullAccess;
         config.exec.pty = Some(false);
         crate::providers::ctx::test_exec_context_with_config(
@@ -3239,7 +3239,7 @@ mod tests {
         // ReadOnly gate: an ExternalDirectory escalation would classify as
         // ExternalAccess and be denied; a Shell read-only command is allowed.
         let (tx, _rx) = tokio::sync::mpsc::channel(64);
-        let mut config = crate::app::Config::default();
+        let mut config = crate::domain::Config::default();
         config.safety.mode = mermaid_runtime::SafetyMode::ReadOnly;
         let mut ctx = crate::providers::ctx::ExecContext::new(
             tokio_util::sync::CancellationToken::new(),

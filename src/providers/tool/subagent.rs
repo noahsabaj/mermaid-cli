@@ -174,7 +174,7 @@ commit: finishing is what lands the work.";
 /// name the valid types / tools / safety modes.
 fn resolve_agent_type(
     requested: Option<&str>,
-    config: &crate::app::Config,
+    config: &crate::domain::Config,
 ) -> Result<AgentType, String> {
     let name = requested.unwrap_or("general");
     if let Some(custom) = config.agents.types.get(name) {
@@ -1474,7 +1474,7 @@ fn apply_live_mcp(
 fn build_child_registry(
     providers: Arc<ProviderFactory>,
     tools: Option<&[String]>,
-    config: &crate::app::Config,
+    config: &crate::domain::Config,
     safety_mode: SafetyMode,
     web: &WebCapabilities,
 ) -> Arc<ToolRegistry> {
@@ -1532,13 +1532,13 @@ fn build_child_registry(
 /// inline approval broker. Mirrors the policy gate's explicit headless and
 /// ReadOnly opt-ins while also honoring user safety overrides.
 fn headless_web_tool_is_executable(
-    config: &crate::app::Config,
+    config: &crate::domain::Config,
     safety_mode: SafetyMode,
     tool: &'static str,
 ) -> bool {
     use mermaid_runtime::{ActionRequest, PolicyDecision, PolicyEngine, ToolCategory};
 
-    if config.safety.network == crate::app::NetworkPolicy::Deny {
+    if config.safety.network == crate::domain::NetworkPolicy::Deny {
         return false;
     }
     let request = ActionRequest::new(tool, ToolCategory::Web, tool);
@@ -1563,7 +1563,7 @@ fn headless_web_tool_is_executable(
 /// (e.g. a test harness that uses the default `test_exec_context`
 /// builder). Production code always provides the parent's active model
 /// id via `Cmd::ExecuteTool::model_id`.
-fn default_model_id(config: &crate::app::Config) -> String {
+fn default_model_id(config: &crate::domain::Config) -> String {
     if !config.default_model.provider.is_empty() && !config.default_model.name.is_empty() {
         format!(
             "{}/{}",
@@ -1583,7 +1583,7 @@ mod tests {
 
     fn test_state() -> State {
         State::new(
-            crate::app::Config::default(),
+            crate::domain::Config::default(),
             PathBuf::from("/tmp"),
             "ollama/test".to_string(),
             chrono::Local::now(),
@@ -1591,7 +1591,7 @@ mod tests {
     }
 
     fn test_spawner() -> SubagentSpawner {
-        let config = crate::app::Config::default();
+        let config = crate::domain::Config::default();
         let providers = Arc::new(ProviderFactory::new(config.clone()));
         let web_capabilities = Arc::new(WebCapabilities::resolve(&config.web));
         SubagentSpawner::new(providers, web_capabilities)
@@ -1699,7 +1699,7 @@ mod tests {
         // static config default `State::new` would otherwise apply — otherwise
         // a downgraded session is escapable by delegating to a subagent.
         use mermaid_runtime::SafetyMode;
-        let mut config = crate::app::Config::default();
+        let mut config = crate::domain::Config::default();
         config.safety.mode = SafetyMode::FullAccess; // static config default
         let mut child_state = State::new(
             config,
@@ -1738,7 +1738,7 @@ mod tests {
     /// This pins the happy-path behavior.
     #[test]
     fn default_model_id_reads_config_provider_and_name() {
-        let mut cfg = crate::app::Config::default();
+        let mut cfg = crate::domain::Config::default();
         cfg.default_model.provider = "ollama".to_string();
         cfg.default_model.name = "qwen3-coder:30b".to_string();
         assert_eq!(default_model_id(&cfg), "ollama/qwen3-coder:30b");
@@ -1746,7 +1746,7 @@ mod tests {
 
     #[test]
     fn default_model_id_returns_bare_name_when_provider_empty() {
-        let mut cfg = crate::app::Config::default();
+        let mut cfg = crate::domain::Config::default();
         cfg.default_model.name = "just-a-name".to_string();
         // provider is empty — single-slash shape would be
         // "/just-a-name", which provider resolution would reject.
@@ -1757,7 +1757,7 @@ mod tests {
     fn apply_live_mcp_marks_running_servers_ready_with_their_tools() {
         use crate::domain::{McpServerEntry, McpServerStatus};
         let entry = || McpServerEntry {
-            config: crate::app::McpServerConfig::default(),
+            config: crate::domain::McpServerConfig::default(),
             status: McpServerStatus::Starting,
             tools: Vec::new(),
         };
@@ -1855,8 +1855,8 @@ mod tests {
 
     #[test]
     fn resolve_agent_type_builtins_custom_shadowing_and_errors() {
-        use crate::app::AgentTypeConfig;
-        let mut config = crate::app::Config::default();
+        use crate::domain::AgentTypeConfig;
+        let mut config = crate::domain::Config::default();
 
         // Built-ins: no request defaults to general; explore pins read_only.
         assert_eq!(resolve_agent_type(None, &config).unwrap().name, "general");
@@ -1939,7 +1939,7 @@ mod tests {
         let spawner = test_spawner();
         let mk_state = || {
             State::new(
-                crate::app::Config::default(),
+                crate::domain::Config::default(),
                 PathBuf::from("/tmp"),
                 "ollama/test".to_string(),
                 chrono::Local::now(),
@@ -2052,7 +2052,7 @@ mod tests {
         // Point the child at a provider that cannot answer, so the drive
         // fails without a model: what is under test is the workspace
         // plumbing around the drive, not the drive.
-        let mut config = crate::app::Config::default();
+        let mut config = crate::domain::Config::default();
         config.ollama.host = "http://127.0.0.1:1".to_string();
         // The default `Ask` would block the spawn on an approval UI that a
         // test has no way to answer; the gate itself is covered elsewhere.
@@ -2110,7 +2110,7 @@ mod tests {
 
     #[test]
     fn build_child_registry_excludes_gui_and_self() {
-        let config = crate::app::Config::default();
+        let config = crate::domain::Config::default();
         let providers = Arc::new(ProviderFactory::new(config.clone()));
         let web = WebCapabilities::resolve(&config.web);
         let r = build_child_registry(providers, None, &config, SafetyMode::Ask, &web);
@@ -2136,14 +2136,14 @@ mod tests {
     #[test]
     fn child_registry_exposes_web_only_when_headless_policy_can_execute_it() {
         let configured = |mode, readonly_web, headless_opt_in, network| {
-            let mut config = crate::app::Config::default();
+            let mut config = crate::domain::Config::default();
             config.safety.mode = mode;
             config.safety.allow_readonly_web = readonly_web;
             config.safety.allow_untrusted_headless_tools = headless_opt_in;
             config.safety.network = network;
             // A configured SearXNG client is platform-independent, unlike the
             // managed bundle, so this test covers both tools on Windows too.
-            config.web.search_backend = crate::app::SearchBackend::Searxng;
+            config.web.search_backend = crate::domain::SearchBackend::Searxng;
             config.web.searxng_url = "http://127.0.0.1:8080".to_string();
             let providers = Arc::new(ProviderFactory::new(config.clone()));
             let web = WebCapabilities::resolve(&config.web);
@@ -2151,7 +2151,7 @@ mod tests {
         };
 
         for mode in [SafetyMode::Auto, SafetyMode::FullAccess] {
-            let registry = configured(mode, false, false, crate::app::NetworkPolicy::Allow);
+            let registry = configured(mode, false, false, crate::domain::NetworkPolicy::Allow);
             assert!(registry.get("web_fetch").is_some(), "mode {mode:?}");
             assert!(registry.get("web_search").is_some(), "mode {mode:?}");
         }
@@ -2160,7 +2160,7 @@ mod tests {
             SafetyMode::ReadOnly,
             true,
             false,
-            crate::app::NetworkPolicy::Allow,
+            crate::domain::NetworkPolicy::Allow,
         );
         assert!(readonly.get("web_fetch").is_some());
         assert!(readonly.get("web_search").is_some());
@@ -2169,7 +2169,7 @@ mod tests {
             SafetyMode::Ask,
             false,
             true,
-            crate::app::NetworkPolicy::Allow,
+            crate::domain::NetworkPolicy::Allow,
         );
         assert!(opted_in.get("web_fetch").is_some());
         assert!(opted_in.get("web_search").is_some());
@@ -2178,7 +2178,7 @@ mod tests {
             SafetyMode::FullAccess,
             true,
             true,
-            crate::app::NetworkPolicy::Deny,
+            crate::domain::NetworkPolicy::Deny,
         );
         assert!(denied.get("web_fetch").is_none());
         assert!(denied.get("web_search").is_none());
@@ -2186,7 +2186,7 @@ mod tests {
 
     #[test]
     fn child_web_visibility_honors_explicit_policy_overrides() {
-        let mut config = crate::app::Config::default();
+        let mut config = crate::domain::Config::default();
         config.safety.overrides = vec![mermaid_runtime::PolicyOverride {
             category: Some(mermaid_runtime::ToolCategory::Web),
             decision: mermaid_runtime::PolicyOverrideDecision::Allow,
@@ -2283,9 +2283,9 @@ mod tests {
 
     #[test]
     fn explore_registry_is_a_read_only_surface() {
-        let providers = Arc::new(ProviderFactory::new(crate::app::Config::default()));
+        let providers = Arc::new(ProviderFactory::new(crate::domain::Config::default()));
         let explore = builtin_agent_type("explore").expect("builtin");
-        let config = crate::app::Config::default();
+        let config = crate::domain::Config::default();
         let web = WebCapabilities::resolve(&config.web);
         let r = build_child_registry(
             providers,

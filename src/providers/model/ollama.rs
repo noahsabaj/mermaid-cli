@@ -35,7 +35,7 @@ pub struct OllamaProvider {
     /// hardware options (`num_ctx`, `num_gpu`, `num_thread`, `numa`) at
     /// call time. Before F11 these were silently dropped because the
     /// wrapper built `ModelConfig` only from `ChatRequest` fields.
-    config: Arc<crate::app::Config>,
+    config: Arc<crate::domain::Config>,
     /// Cached `/api/show` probe (context window + dims + weight). Filled once per
     /// process per model — the provider itself is cached by `ProviderFactory`, so
     /// this fires a single network probe per model. Backed by the cross-session
@@ -49,17 +49,22 @@ impl OllamaProvider {
     /// Call `with_app_config` instead when you have one available so
     /// Ollama hardware options actually reach the adapter.
     pub async fn new(model_name: &str, backend: Arc<BackendConfig>) -> Result<Self> {
-        Self::with_app_config(model_name, backend, Arc::new(crate::app::Config::default())).await
+        Self::with_app_config(
+            model_name,
+            backend,
+            Arc::new(crate::domain::Config::default()),
+        )
+        .await
     }
 
-    /// Construct with an explicit `app::Config` reference. Used by
+    /// Construct with an explicit `domain::Config` reference. Used by
     /// `ProviderFactory::build_provider` so `config.ollama.{num_gpu,
     /// num_ctx, num_thread, numa}` make it into the Ollama request's
     /// `options` block.
     pub async fn with_app_config(
         model_name: &str,
         backend: Arc<BackendConfig>,
-        config: Arc<crate::app::Config>,
+        config: Arc<crate::domain::Config>,
     ) -> Result<Self> {
         let autostart = backend.ollama_autostart;
         let adapter = OllamaAdapter::new(model_name, backend).await?;
@@ -316,7 +321,7 @@ impl ModelProvider for OllamaProvider {
 /// Ollama Cloud 400), bounding the derived `num_predict`.
 fn build_model_config(
     request: &ChatRequest,
-    app_config: &crate::app::Config,
+    app_config: &crate::domain::Config,
     num_ctx: Option<usize>,
     provider_max_output: Option<usize>,
 ) -> ModelConfig {
@@ -445,7 +450,7 @@ mod tests {
             suppress_auto_compact: false,
             suppressed_builtin_tools: Vec::new(),
         };
-        let app_cfg = crate::app::Config::default();
+        let app_cfg = crate::domain::Config::default();
         let cfg = build_model_config(&req, &app_cfg, None, None);
         assert_eq!(cfg.model, "ollama/test");
         assert_eq!(cfg.temperature, 0.3);
@@ -483,7 +488,7 @@ mod tests {
             suppress_auto_compact: false,
             suppressed_builtin_tools: Vec::new(),
         };
-        let mut app_cfg = crate::app::Config::default();
+        let mut app_cfg = crate::domain::Config::default();
         app_cfg.ollama.num_gpu = Some(10);
         app_cfg.ollama.num_thread = Some(8);
         app_cfg.ollama.numa = Some(true);
@@ -520,7 +525,7 @@ mod tests {
             suppress_auto_compact: false,
             suppressed_builtin_tools: Vec::new(),
         };
-        let cfg = build_model_config(&req, &crate::app::Config::default(), Some(131_072), None);
+        let cfg = build_model_config(&req, &crate::domain::Config::default(), Some(131_072), None);
         // Exactly the 4096 cap; plenty of room in a 131072 window.
         assert_eq!(cfg.ollama_options().num_predict, Some(4_096));
     }
@@ -548,7 +553,7 @@ mod tests {
             suppress_auto_compact: false,
             suppressed_builtin_tools: Vec::new(),
         };
-        let app_cfg = crate::app::Config::default();
+        let app_cfg = crate::domain::Config::default();
         // Without a learned cap, AUTO hands over the full window room —
         // 524_288 minus margin — which Ollama Cloud 400s for minimax-m3.
         let uncapped = build_model_config(&req, &app_cfg, Some(524_288), None);

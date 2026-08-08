@@ -260,7 +260,7 @@ mod tests {
     #[tokio::test]
     async fn auto_screenshot_is_noop_when_disabled() {
         use crate::domain::{ToolCallId, TurnId};
-        let mut cfg = crate::app::Config::default();
+        let mut cfg = crate::domain::Config::default();
         cfg.computer_use.auto_screenshot = false;
         let (tx, mut rx) = tokio::sync::mpsc::channel::<ProgressEvent>(8);
         let ctx = ExecContext::new(

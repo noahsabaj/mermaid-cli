@@ -29,8 +29,8 @@ use stub_model::{ScriptedModel, Turn};
 
 const STUB: &str = "stub/scripted";
 
-fn config() -> mermaid_cli::app::Config {
-    let mut config = mermaid_cli::app::Config::default();
+fn config() -> mermaid_cli::domain::Config {
+    let mut config = mermaid_cli::domain::Config::default();
     config.safety.mode = SafetyMode::FullAccess;
     config.safety.checkpoint_on_mutation = false;
     config

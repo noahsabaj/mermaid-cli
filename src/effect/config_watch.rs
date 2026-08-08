@@ -13,9 +13,9 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::app::MemoryConfig;
 use crate::app::instructions::{self, LoadedInstructions, ReloadOutcome};
 use crate::app::memory::{self, LoadedMemory, MemoryReloadOutcome};
+use crate::domain::MemoryConfig;
 use crate::domain::Msg;
 
 use super::MsgSender;

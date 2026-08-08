@@ -351,7 +351,7 @@ mod tests {
         git(&dir).args(["add", "-A"]).run().unwrap();
         git(&dir).args(["commit", "-qm", "init"]).run().unwrap();
 
-        let mut config = crate::app::Config::default();
+        let mut config = crate::domain::Config::default();
         config.safety.checkpoint_on_mutation = false;
         let (ctx, _rx) = crate::providers::ctx::test_exec_context_with_config(
             TurnId(1),
@@ -465,7 +465,7 @@ mod tests {
         };
         // Checkpointing on, unlike the other tests here: this is about what
         // happens when that snapshot cannot be taken.
-        let mut config = crate::app::Config::default();
+        let mut config = crate::domain::Config::default();
         config.safety.checkpoint_on_mutation = true;
         let (ctx, _rx) = crate::providers::ctx::test_exec_context_with_config(
             TurnId(9),

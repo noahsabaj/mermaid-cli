@@ -46,8 +46,8 @@ fn project(tag: &str) -> Option<PathBuf> {
     Some(dir)
 }
 
-fn config() -> mermaid_cli::app::Config {
-    let mut config = mermaid_cli::app::Config::default();
+fn config() -> mermaid_cli::domain::Config {
+    let mut config = mermaid_cli::domain::Config::default();
     // The child must write without an approval UI; the gate has its own tests.
     config.safety.mode = SafetyMode::FullAccess;
     // Never write checkpoints into the developer's real data dir.

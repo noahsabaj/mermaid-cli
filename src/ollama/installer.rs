@@ -1,6 +1,6 @@
 use super::detector;
 use super::guide;
-use crate::app::Config;
+use crate::domain::Config;
 use anyhow::Result;
 use mermaid_model::models::adapters::ollama::OllamaAdapter;
 use mermaid_model::models::{BackendConfig, Model};

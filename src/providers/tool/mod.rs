@@ -214,7 +214,7 @@ impl ToolRegistry {
     /// Returns `Arc<Self>` so the effect runner can share a handle
     /// across turns without cloning the underlying HashMap.
     pub fn build(
-        config: &crate::app::Config,
+        config: &crate::domain::Config,
         mode: TuiMode,
         providers: Arc<crate::providers::ProviderFactory>,
     ) -> Arc<Self> {
@@ -238,7 +238,7 @@ impl ToolRegistry {
         // `safety.network = "deny"` is a global egress kill-switch, not only
         // a shell sandbox flag. Omit web capabilities entirely so adapters and
         // subagents cannot advertise or execute them.
-        if config.safety.network == crate::app::NetworkPolicy::Allow {
+        if config.safety.network == crate::domain::NetworkPolicy::Allow {
             if let Some(tool) = web_capabilities.fetch_tool() {
                 r.register(Arc::new(tool));
             }
@@ -393,7 +393,7 @@ mod tests {
         unsafe {
             std::env::remove_var("OLLAMA_API_KEY");
         }
-        let cfg = crate::app::Config::default();
+        let cfg = crate::domain::Config::default();
         let providers = Arc::new(crate::providers::ProviderFactory::new(cfg.clone()));
         let r = ToolRegistry::build(&cfg, TuiMode::Headless, providers);
         assert!(
@@ -428,8 +428,8 @@ mod tests {
         unsafe {
             std::env::set_var("OLLAMA_API_KEY", "test-key-build");
         }
-        let mut cfg = crate::app::Config::default();
-        cfg.web.search_backend = crate::app::SearchBackend::Ollama;
+        let mut cfg = crate::domain::Config::default();
+        cfg.web.search_backend = crate::domain::SearchBackend::Ollama;
         let providers = Arc::new(crate::providers::ProviderFactory::new(cfg.clone()));
         let r = ToolRegistry::build(&cfg, TuiMode::Interactive, providers);
         assert!(r.get("web_search").is_some(), "web_search registered");
@@ -449,7 +449,7 @@ mod tests {
         unsafe {
             std::env::set_var("OLLAMA_API_KEY", "test-key-must-not-route");
         }
-        let cfg = crate::app::Config::default();
+        let cfg = crate::domain::Config::default();
         let capabilities = web::WebCapabilities::resolve(&cfg.web);
         assert_eq!(capabilities.search.backend, "managed_searxng");
         assert_eq!(
@@ -473,8 +473,8 @@ mod tests {
         unsafe {
             std::env::remove_var("OLLAMA_API_KEY");
         }
-        let mut cfg = crate::app::Config::default();
-        cfg.web.search_backend = crate::app::SearchBackend::Searxng;
+        let mut cfg = crate::domain::Config::default();
+        cfg.web.search_backend = crate::domain::SearchBackend::Searxng;
         let providers = Arc::new(crate::providers::ProviderFactory::new(cfg.clone()));
         let r = ToolRegistry::build(&cfg, TuiMode::Headless, providers);
         assert!(
@@ -494,9 +494,9 @@ mod tests {
 
     #[test]
     fn network_deny_omits_all_web_capabilities() {
-        let mut cfg = crate::app::Config::default();
-        cfg.safety.network = crate::app::NetworkPolicy::Deny;
-        cfg.web.search_backend = crate::app::SearchBackend::Searxng;
+        let mut cfg = crate::domain::Config::default();
+        cfg.safety.network = crate::domain::NetworkPolicy::Deny;
+        cfg.web.search_backend = crate::domain::SearchBackend::Searxng;
         let providers = Arc::new(crate::providers::ProviderFactory::new(cfg.clone()));
         let registry = ToolRegistry::build(&cfg, TuiMode::Headless, providers);
         assert!(registry.get("web_fetch").is_none());

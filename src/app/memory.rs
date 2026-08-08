@@ -20,7 +20,7 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::app::MemoryConfig;
+use crate::domain::MemoryConfig;
 use mermaid_model::constants::MEMORY_INDEX_TRUNCATION_MARKER;
 
 /// Hard cap on directory levels `find_git_root` walks up (symlink-loop guard).

@@ -330,7 +330,7 @@ pub fn refresh(
 /// reports as loaded.
 pub fn load_project_context(
     cwd: &Path,
-    mem_cfg: &crate::app::MemoryConfig,
+    mem_cfg: &crate::domain::MemoryConfig,
 ) -> (
     Option<LoadedInstructions>,
     Option<crate::app::memory::LoadedMemory>,
@@ -663,7 +663,7 @@ mod tests {
         fs::create_dir(dir.join(".git")).unwrap();
         fs::write(dir.join("MERMAID.md"), "sync-loaded instructions").unwrap();
         let (instructions, _memory, _skills) =
-            load_project_context(&dir, &crate::app::MemoryConfig::default());
+            load_project_context(&dir, &crate::domain::MemoryConfig::default());
         let content = instructions
             .expect("instructions must load synchronously")
             .content;

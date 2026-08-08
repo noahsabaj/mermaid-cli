@@ -535,7 +535,7 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
                     e.tools = tools.clone();
                 })
                 .or_insert_with(|| McpServerEntry {
-                    config: crate::app::McpServerConfig::default(),
+                    config: crate::domain::McpServerConfig::default(),
                     status: McpServerStatus::Ready,
                     tools,
                 });
@@ -550,7 +550,7 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
                 .entry(name.clone())
                 .and_modify(|e| e.status = status.clone())
                 .or_insert_with(|| McpServerEntry {
-                    config: crate::app::McpServerConfig::default(),
+                    config: crate::domain::McpServerConfig::default(),
                     status,
                     tools: Vec::new(),
                 });
@@ -3231,7 +3231,7 @@ fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
             );
         },
         SlashCmd::Theme(arg) => {
-            use crate::app::ThemeChoice;
+            use crate::domain::ThemeChoice;
             // The trailing NO_COLOR note keeps a persisted-but-invisible
             // switch from reading as a broken command.
             let no_color_note = if state.ui.no_color {
@@ -5846,7 +5846,7 @@ fn push_plan_reminder(state: &mut State, cmds: &mut Vec<Cmd>) {
 /// planning session.
 fn checklist_writers_suppressed(state: &State) -> bool {
     state.session.safety_mode.is_planning()
-        && state.settings.plan.permissions.tasks != crate::app::PlanPermLevel::Allow
+        && state.settings.plan.permissions.tasks != crate::domain::PlanPermLevel::Allow
 }
 
 fn push_call_model(state: &mut State, cmds: &mut Vec<Cmd>, turn: TurnId) {
@@ -6117,8 +6117,8 @@ fn system_prompt_for_state(state: &State) -> String {
 /// Compose the "what runs while planning" sentence from the LIVE permission
 /// profile, so the prompt never promises a capability the gate will deny
 /// (`/plan config` can retune the profile mid-session).
-fn plan_capabilities_line(perms: &crate::app::PlanPermissions) -> String {
-    use crate::app::PlanPermLevel as L;
+fn plan_capabilities_line(perms: &crate::domain::PlanPermissions) -> String {
+    use crate::domain::PlanPermLevel as L;
     // Read-only subagent fan-out is always allowed under the plan-mode floor
     // (policy_gate leaves the Subagent Allow untouched) — without naming it,
     // "everything else is blocked" suppresses legitimate parallel exploration.
@@ -6427,7 +6427,7 @@ fn handle_plan_config_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode)
 /// the permission profile rides each tool dispatch, and the model/reasoning
 /// overrides are read at the next plan-mode entry.
 fn cycle_plan_config_row(state: &mut State, row: usize, forward: bool) {
-    use crate::app::{PlanPermLevel as L, PlanPermissions, PlanPostApprove};
+    use crate::domain::{PlanPermLevel as L, PlanPermissions, PlanPostApprove};
     fn cycle<T: Copy + PartialEq>(order: &[T], current: T, forward: bool) -> T {
         let idx = order.iter().position(|v| *v == current).unwrap_or(0);
         let len = order.len();
@@ -6942,7 +6942,7 @@ fn finish_plan_mode(state: &mut State, cmds: &mut Vec<Cmd>, body: &str, start: b
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::Config;
+    use crate::domain::Config;
     use crate::domain::msg::{Key, KeyCode, KeyMods};
     use crate::domain::state::{McpServerEntry, McpState, PendingToolCall, UiState};
     use crate::domain::transition::start_executing_tools;
@@ -10797,10 +10797,10 @@ mod tests {
 
     #[test]
     fn compaction_config_defaults_to_three() {
-        let cfg = crate::app::CompactionConfig::default();
+        let cfg = crate::domain::CompactionConfig::default();
         assert_eq!(cfg.max_truncation_recoveries, 3);
         // An absent [compaction] section deserializes to the default.
-        let parsed: crate::app::Config = toml::from_str("").unwrap();
+        let parsed: crate::domain::Config = toml::from_str("").unwrap();
         assert_eq!(parsed.compaction.max_truncation_recoveries, 3);
     }
 
@@ -12241,7 +12241,7 @@ mod tests {
 
     #[test]
     fn theme_command_switches_persists_and_reports() {
-        use crate::app::ThemeChoice;
+        use crate::domain::ThemeChoice;
         // /theme light → state flips, persist emitted, confirmation appended.
         let (state, cmds) = update(
             fresh_state(),
@@ -12766,7 +12766,7 @@ mod tests {
         state.mcp.servers.insert(
             "s1".to_string(),
             McpServerEntry {
-                config: crate::app::McpServerConfig {
+                config: crate::domain::McpServerConfig {
                     command: "echo".to_string(),
                     args: vec![],
                     env: std::collections::HashMap::new(),
@@ -12801,7 +12801,7 @@ mod tests {
             state.mcp.servers.insert(
                 name.to_string(),
                 McpServerEntry {
-                    config: crate::app::McpServerConfig {
+                    config: crate::domain::McpServerConfig {
                         command: "echo".to_string(),
                         args: vec![],
                         env: std::collections::HashMap::new(),
@@ -12849,7 +12849,7 @@ mod tests {
         state.mcp.servers.insert(
             "srv".to_string(),
             McpServerEntry {
-                config: crate::app::McpServerConfig::default(),
+                config: crate::domain::McpServerConfig::default(),
                 status: McpServerStatus::Ready,
                 tools: vec![crate::domain::state::McpToolSpec {
                     name: "mcp__srv__alpha".to_string(),
@@ -14116,7 +14116,7 @@ mod tests {
         );
         // An explicit `tasks = allow` in the plan profile restores them,
         // matching the runtime backstop in tasks::plan_mode_block.
-        state.settings.plan.permissions.tasks = crate::app::PlanPermLevel::Allow;
+        state.settings.plan.permissions.tasks = crate::domain::PlanPermLevel::Allow;
         assert!(
             build_chat_request(&state)
                 .suppressed_builtin_tools
@@ -14124,7 +14124,7 @@ mod tests {
             "tasks=allow restores advertisement"
         );
         // Subagents never plan, so nothing is suppressed for them either.
-        state.settings.plan.permissions.tasks = crate::app::PlanPermLevel::Deny;
+        state.settings.plan.permissions.tasks = crate::domain::PlanPermLevel::Deny;
         exit_planning(&mut state);
         state.session.is_subagent = true;
         assert!(
@@ -14308,7 +14308,7 @@ mod tests {
 
     #[test]
     fn plan_config_picker_cycles_values_and_persists() {
-        use crate::app::{PlanPermLevel, PlanPermissions};
+        use crate::domain::{PlanPermLevel, PlanPermissions};
         let (mut state, _) = update(
             fresh_state(),
             Msg::Slash(SlashCmd::Plan(Some("config".into()))),
@@ -14364,7 +14364,7 @@ mod tests {
 
     #[test]
     fn plan_capabilities_line_tracks_the_profile() {
-        use crate::app::PlanPermissions;
+        use crate::domain::PlanPermissions;
         let line = plan_capabilities_line(&PlanPermissions::default());
         assert!(line.contains("build and test"));
         assert!(line.contains("web search/fetch"));
@@ -14591,7 +14591,7 @@ mod tests {
         state.mcp.servers.insert(
             "s1".to_string(),
             McpServerEntry {
-                config: crate::app::McpServerConfig {
+                config: crate::domain::McpServerConfig {
                     command: "echo".to_string(),
                     args: vec![],
                     env: std::collections::HashMap::new(),

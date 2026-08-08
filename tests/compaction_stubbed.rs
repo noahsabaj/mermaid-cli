@@ -120,7 +120,7 @@ fn landed_summary(result: &mermaid_cli::domain::CompactionResult) -> String {
 /// Dispatch one compaction against `script` and return the terminal message.
 async fn compact_with(script: Vec<Turn>) -> Msg {
     let model = ScriptedModel::new(script);
-    let config = mermaid_cli::app::Config::default();
+    let config = mermaid_cli::domain::Config::default();
     let providers = Arc::new(ProviderFactory::with_seeded_providers(
         config.clone(),
         [(STUB.to_string(), model as Arc<dyn ModelProvider>)],
@@ -272,7 +272,7 @@ async fn a_conversation_too_short_to_compact_is_a_note_not_an_error() {
     // A benign precondition. Surfacing it as an error trains users to ignore
     // compaction errors, which is the last thing that should be ignorable.
     let model = ScriptedModel::new([]);
-    let config = mermaid_cli::app::Config::default();
+    let config = mermaid_cli::domain::Config::default();
     let providers = Arc::new(ProviderFactory::with_seeded_providers(
         config,
         [(STUB.to_string(), model.clone() as Arc<dyn ModelProvider>)],

@@ -250,3 +250,9 @@ pub const MAX_MEMORY_INDEX_BYTES: usize = 8_000;
 /// Marker appended to the memory index when it exceeds the byte cap.
 pub const MEMORY_INDEX_TRUNCATION_MARKER: &str =
     "\n\n[Memory index truncated - too many entries; run /consolidate-memory]";
+
+/// Days a session scratchpad survives before the daemon's hygiene sweep
+/// reclaims it. Lives here rather than in `session::scratchpad` because
+/// `Config`'s default reads it, and `Config` sits below the module that does
+/// the sweeping.
+pub const SCRATCHPAD_RETENTION_DAYS: u64 = 7;

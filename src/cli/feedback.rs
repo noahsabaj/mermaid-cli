@@ -12,7 +12,7 @@
 use anyhow::Result;
 use std::path::Path;
 
-use crate::app::Config;
+use crate::domain::Config;
 use mermaid_model::models::PROVIDER_REGISTRY;
 
 use super::OutputFormat;

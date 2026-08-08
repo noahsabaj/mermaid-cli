@@ -82,7 +82,7 @@ fn no_broker(secs: f64) -> ToolOutcome {
 fn plan_mode_block(ctx: &crate::providers::ExecContext, secs: f64) -> Option<ToolOutcome> {
     // Only an explicit `allow` in the plan profile unblocks the writers —
     // `auto`/`ask` collapse to deny (ungated tools have no approval path).
-    if ctx.plan_permissions.tasks == crate::app::PlanPermLevel::Allow {
+    if ctx.plan_permissions.tasks == crate::domain::PlanPermLevel::Allow {
         return None;
     }
     ctx.plan_file.as_ref().map(|_| {

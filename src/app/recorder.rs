@@ -39,7 +39,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 
-use crate::app::Config;
+use crate::domain::Config;
 use crate::domain::ConversationHistory;
 use crate::domain::{Msg, Session};
 

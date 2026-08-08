@@ -21,8 +21,8 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::app::McpServerConfig;
 use crate::domain::ConversationHistory;
+use crate::domain::McpServerConfig;
 use mermaid_model::models::ChatMessage;
 use mermaid_model::models::ReasoningLevel;
 use mermaid_model::models::tool_call::ToolCall as ModelToolCall;
@@ -80,7 +80,7 @@ pub enum Cmd {
         /// LIVE per-category plan permission levels (`/plan config` edits
         /// them mid-session; the startup `Config` snapshot in `ExecContext`
         /// would go stale). Only consulted while `plan_file` is `Some`.
-        plan_permissions: crate::app::PlanPermissions,
+        plan_permissions: crate::domain::PlanPermissions,
         /// Context-window fill at dispatch, when known. `exit_plan_mode`
         /// shows it on the clear-context option so the tradeoff is legible.
         context_percent: Option<u8>,
@@ -139,7 +139,7 @@ pub enum Cmd {
     /// Persist the `[plan]` table to the user config file (the `/plan
     /// config` picker edits live state; this writes it through the
     /// key-scoped updater so unrelated keys and defaults stay unfrozen).
-    PersistPlanConfig(crate::app::PlanConfig),
+    PersistPlanConfig(crate::domain::PlanConfig),
 
     /// A user `/tasks` edit. Routed through the effect runner to the
     /// `TaskBroker` (the single writer) instead of mutating reducer state
@@ -202,7 +202,7 @@ pub enum Cmd {
     /// Persist the Ollama RAM-offload toggle (`/context offload on|off`).
     PersistOllamaOffload(bool),
     /// Persist the `/theme` choice as `ui.theme` in the user config file.
-    PersistUiTheme(crate::app::ThemeChoice),
+    PersistUiTheme(crate::domain::ThemeChoice),
     /// List saved memories; emits `Msg::RuntimeText` with the rendered list.
     ListMemory,
     /// Save free-text to private memory; emits `Msg::MemoryChanged` + status.

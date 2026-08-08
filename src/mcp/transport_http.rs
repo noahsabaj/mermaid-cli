@@ -23,7 +23,7 @@ use tokio::time::{Duration, timeout};
 use super::transport::{
     REQUEST_TIMEOUT_SECS, extract_jsonrpc_result, is_response, parse_response_id,
 };
-use crate::app::{McpServerConfig, TransportKind};
+use crate::domain::{McpServerConfig, TransportKind};
 use mermaid_model::utils::{HostClass, classify_host, drain_sse_events};
 
 /// TCP connect budget. Separate from the response budget: a dead host should

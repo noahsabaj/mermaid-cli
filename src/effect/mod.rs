@@ -43,8 +43,8 @@ use std::time::Instant;
 
 use tokio::sync::mpsc;
 
-use crate::app::{Config, MemoryConfig};
 use crate::domain::{Cmd, CompactionRequest, CompactionResult, CompactionTrigger, Msg, TurnId};
+use crate::domain::{Config, MemoryConfig};
 use crate::providers::ctx::{ExecContext, StreamContext};
 use crate::providers::model::ModelProvider;
 use crate::providers::{ProviderFactory, StreamEvent, ToolRegistry};
@@ -789,7 +789,7 @@ impl EffectRunner {
                     .providers
                     .as_ref()
                     .map(|p| Arc::new(p.config().clone()))
-                    .unwrap_or_else(|| Arc::new(crate::app::Config::default()));
+                    .unwrap_or_else(|| Arc::new(crate::domain::Config::default()));
                 // Auto mode: build an LLM classifier to vet borderline
                 // actions. Only when a provider is bound (real wiring); the
                 // gate fails safe to "escalate" when it's `None`. The vet
@@ -2956,7 +2956,7 @@ async fn dispatch_execute_tool(
     token: tokio_util::sync::CancellationToken,
     background: tokio_util::sync::CancellationToken,
     web_bytes: Arc<std::sync::atomic::AtomicUsize>,
-    config: Arc<crate::app::Config>,
+    config: Arc<crate::domain::Config>,
     model_id: String,
     task_id: Option<String>,
     session_id: String,
@@ -2964,7 +2964,7 @@ async fn dispatch_execute_tool(
     scratchpad: Option<PathBuf>,
     safety_mode: mermaid_runtime::SafetyMode,
     plan_file: Option<PathBuf>,
-    plan_permissions: crate::app::PlanPermissions,
+    plan_permissions: crate::domain::PlanPermissions,
     context_percent: Option<u8>,
     intent: Option<String>,
     classifier: Option<Arc<dyn crate::providers::AutoClassifier>>,
@@ -3372,7 +3372,7 @@ async fn dispatch_pull_ollama_model(tx: MsgSender, model: String) {
 /// `mcp__` call waits, bounded, for the full fleet). A zero-tool server that
 /// started successfully is still Ready with an empty tool list.
 async fn dispatch_init_mcp_servers(
-    configs: std::collections::HashMap<String, crate::app::McpServerConfig>,
+    configs: std::collections::HashMap<String, crate::domain::McpServerConfig>,
     tx: tokio::sync::mpsc::Sender<Msg>,
 ) {
     if configs.is_empty() {
@@ -3548,7 +3548,7 @@ async fn discover_available_models(
 ///
 /// Autostart is hard-off: enumerating must never mutate. Same contract as the
 /// CLI's `list_ollama_models`.
-async fn list_ollama_models_readonly(config: &crate::app::Config) -> Option<Vec<String>> {
+async fn list_ollama_models_readonly(config: &crate::domain::Config) -> Option<Vec<String>> {
     use mermaid_model::models::adapters::ollama::OllamaAdapter;
     use mermaid_model::models::{BackendConfig, Model};
     let backend = BackendConfig {
@@ -3780,7 +3780,7 @@ mod tests {
         // otherwise they leak into a headless parent's stdout and corrupt
         // `--format json`/`text` output (caught during live headless testing).
         let (tx, _rx) = mpsc::channel::<Msg>(MSG_CHANNEL_CAPACITY);
-        let providers = Arc::new(ProviderFactory::new(crate::app::Config::default()));
+        let providers = Arc::new(ProviderFactory::new(crate::domain::Config::default()));
         let tools = Arc::new(ToolRegistry::new());
         let child = EffectRunner::new_child(tx, PathBuf::from("/tmp"), providers, tools);
         assert!(
@@ -3796,7 +3796,7 @@ mod tests {
         // reap it — that would kill the parent's MCP servers for the rest of
         // the session. Only the top-level runner owns the reap.
         let (tx, _rx) = mpsc::channel::<Msg>(MSG_CHANNEL_CAPACITY);
-        let providers = Arc::new(ProviderFactory::new(crate::app::Config::default()));
+        let providers = Arc::new(ProviderFactory::new(crate::domain::Config::default()));
         let tools = Arc::new(ToolRegistry::new());
         let child = EffectRunner::new_child(tx, PathBuf::from("/tmp"), providers, tools);
         assert!(
@@ -3874,7 +3874,7 @@ mod tests {
         for name in ["one", "two"] {
             configs.insert(
                 name.to_string(),
-                crate::app::McpServerConfig {
+                crate::domain::McpServerConfig {
                     command: "/nonexistent/mermaid-test-mcp-binary".to_string(),
                     ..Default::default()
                 },
@@ -4045,7 +4045,7 @@ mod tests {
             model_id: "ollama/test".to_string(),
             safety_mode: mermaid_runtime::SafetyMode::Ask,
             plan_file: None,
-            plan_permissions: crate::app::PlanPermissions::default(),
+            plan_permissions: crate::domain::PlanPermissions::default(),
             context_percent: None,
             intent: None,
             session_id: "sess-test".to_string(),

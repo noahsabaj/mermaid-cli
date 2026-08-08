@@ -17,7 +17,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::app::{AgentTypeConfig, McpServerConfig};
+use crate::domain::{AgentTypeConfig, McpServerConfig};
 
 /// Everything enabled plugins contribute (besides skills), plus the
 /// warnings the startup path should surface.
@@ -241,7 +241,7 @@ fn read_contained(
 /// Fold plugin assets into the already-merged `Config`. Config-defined
 /// entries always win (a user's `[mcp_servers.x]` / `[agents.types.x]`
 /// beats a plugin's); returns the warnings to surface at startup.
-pub fn apply(config: &mut crate::app::Config, assets: &PluginAssets) -> Vec<String> {
+pub fn apply(config: &mut crate::domain::Config, assets: &PluginAssets) -> Vec<String> {
     let mut warnings = assets.warnings.clone();
     for (name, server) in &assets.mcp_servers {
         if config.mcp_servers.contains_key(name) {
@@ -440,7 +440,7 @@ mod tests {
 
     #[test]
     fn apply_lets_config_win_and_merges_the_rest() {
-        let mut config = crate::app::Config::default();
+        let mut config = crate::domain::Config::default();
         config.mcp_servers.insert(
             "shared".to_string(),
             McpServerConfig {

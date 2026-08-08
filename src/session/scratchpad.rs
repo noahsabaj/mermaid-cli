@@ -33,7 +33,7 @@ const LOCK_FILE: &str = ".lock";
 const SCRATCH_SUBDIR: &str = "scratchpad";
 /// Default retention: unlocked scratchpads older than this are reaped by
 /// [`sweep_stale`]. mermaidd overrides it via `daemon.scratchpad_retention_days`.
-pub const RETENTION_DAYS: u64 = 7;
+pub use mermaid_model::constants::SCRATCHPAD_RETENTION_DAYS as RETENTION_DAYS;
 /// Cap on a sanitized path component — keeps the full scratchpad path
 /// well under PATH_MAX even for deeply nested project directories.
 const MAX_COMPONENT_LEN: usize = 96;

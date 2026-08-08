@@ -11,7 +11,7 @@
 
 use std::path::PathBuf;
 
-use mermaid_cli::app::Config;
+use mermaid_cli::domain::Config;
 use mermaid_cli::domain::{Msg, State, ToolCallId, ToolOutcome, TurnId, start_generating, update};
 use mermaid_model::models::tool_call::{FunctionCall, ToolCall as ModelToolCall};
 use mermaid_model::models::{FinishReason, MessageRole, TokenUsage};

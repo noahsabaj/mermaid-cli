@@ -7,7 +7,8 @@ use anyhow::{Result, anyhow};
 use std::collections::HashMap;
 use std::io::{self, Write};
 
-use crate::app::{McpServerConfig, load_config, remove_user_config_key, update_user_config_key};
+use crate::app::{load_config, remove_user_config_key, update_user_config_key};
+use crate::domain::McpServerConfig;
 
 use super::registry;
 

@@ -193,7 +193,7 @@ async fn all_scratch_patch_is_ungated() {
     fs::create_dir_all(&project).unwrap();
     fs::create_dir_all(&scratch).unwrap();
 
-    let mut config = crate::app::Config::default();
+    let mut config = crate::domain::Config::default();
     config.safety.mode = mermaid_runtime::SafetyMode::Ask;
     let (tx, _rx) = tokio::sync::mpsc::channel(8);
     let mut ctx = crate::providers::ctx::ExecContext::new(

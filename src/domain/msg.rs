@@ -21,8 +21,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::app::McpServerConfig;
 use crate::app::instructions::LoadedInstructions;
+use crate::domain::McpServerConfig;
 use mermaid_model::models::tool_call::ToolCall as ModelToolCall;
 use mermaid_model::models::{
     FinishReason, ProviderContinuation, ReasoningChunk, ReasoningLevel, TokenUsage, UserFacingError,

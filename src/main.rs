@@ -107,7 +107,7 @@ async fn async_main() -> Result<()> {
     dispatch_interactive(cli, config).await
 }
 
-fn apply_prompt_flags(cli: &Cli, config: &mut mermaid_cli::app::Config) -> Result<()> {
+fn apply_prompt_flags(cli: &Cli, config: &mut mermaid_cli::domain::Config) -> Result<()> {
     if let Some(prompt) = cli.system_prompt.as_ref() {
         config.prompt.system_prompt = Some(prompt.clone());
     }
@@ -140,7 +140,7 @@ fn apply_prompt_flags(cli: &Cli, config: &mut mermaid_cli::app::Config) -> Resul
     Ok(())
 }
 
-async fn dispatch_interactive(cli: Cli, mut config: mermaid_cli::app::Config) -> Result<()> {
+async fn dispatch_interactive(cli: Cli, mut config: mermaid_cli::domain::Config) -> Result<()> {
     let cli_model_provided = cli.model.is_some();
     let model_id = resolve_model_id(cli.model.as_deref(), &config).await?;
 
@@ -280,7 +280,7 @@ struct HeadlessFlags {
 
 async fn dispatch_non_interactive(
     cli: &Cli,
-    mut config: mermaid_cli::app::Config,
+    mut config: mermaid_cli::domain::Config,
     prompt: Option<String>,
     format: OutputFormat,
     output_schema: Option<serde_json::Value>,

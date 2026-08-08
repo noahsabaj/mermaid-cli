@@ -100,8 +100,10 @@ async fn gate_external_inner(
     if matches!(
         category,
         mermaid_runtime::ToolCategory::Web | mermaid_runtime::ToolCategory::Network
-    ) && matches!(ctx.config.safety.network, crate::app::NetworkPolicy::Deny)
-    {
+    ) && matches!(
+        ctx.config.safety.network,
+        crate::domain::NetworkPolicy::Deny
+    ) {
         return Some(ToolOutcome::error(
             format!(
                 "{tool} blocked because network access is disabled (safety.network = \"deny\" / --no-network)"
@@ -393,11 +395,11 @@ fn plan_deny(risk: RiskClass, plan_file: &std::path::Path) -> PolicyDecision {
 /// throughout — nothing in plan mode mutates the tree, so there is nothing
 /// to snapshot.
 fn plan_level_decision(
-    level: crate::app::PlanPermLevel,
+    level: crate::domain::PlanPermLevel,
     risk: RiskClass,
     plan_file: &std::path::Path,
 ) -> PolicyDecision {
-    use crate::app::PlanPermLevel as L;
+    use crate::domain::PlanPermLevel as L;
     match level {
         L::Allow => PolicyDecision::Allow {
             risk,
@@ -709,7 +711,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 
-    fn ctx_with(config: crate::app::Config) -> ExecContext {
+    fn ctx_with(config: crate::domain::Config) -> ExecContext {
         crate::providers::ctx::test_exec_context_with_config(
             TurnId(1),
             ToolCallId(1),
@@ -720,13 +722,13 @@ mod tests {
     }
 
     fn ctx(mode: SafetyMode) -> ExecContext {
-        let mut config = crate::app::Config::default();
+        let mut config = crate::domain::Config::default();
         config.safety.mode = mode;
         ctx_with(config)
     }
 
     fn ctx_headless_opted_in(mode: SafetyMode) -> ExecContext {
-        let mut config = crate::app::Config::default();
+        let mut config = crate::domain::Config::default();
         config.safety.mode = mode;
         config.safety.allow_untrusted_headless_tools = true;
         ctx_with(config)
@@ -896,7 +898,7 @@ mod tests {
     async fn global_network_deny_blocks_web_even_in_full_access() {
         let mut context = ctx(SafetyMode::FullAccess);
         let safety = &mut Arc::make_mut(&mut context.config).safety;
-        safety.network = crate::app::NetworkPolicy::Deny;
+        safety.network = crate::domain::NetworkPolicy::Deny;
         safety.allow_readonly_web = true;
         for tool in ["web_fetch", "web_search"] {
             let blocked = gate_external(
@@ -1329,7 +1331,7 @@ mod tests {
     #[tokio::test]
     async fn plan_profile_strict_denies_the_default_carve_outs() {
         let mut c = ctx_plan();
-        c.plan_permissions = crate::app::PlanPermissions::strict();
+        c.plan_permissions = crate::domain::PlanPermissions::strict();
         // Memory: default-allow flips to the plan deny.
         assert!(
             gate_external(
@@ -1572,7 +1574,7 @@ mod tests {
     async fn scratch_containment_never_downgrades_deny_override() {
         // A user-configured Deny override yields PolicyDecision::Deny, which
         // the downgrade deliberately never touches.
-        let mut config = crate::app::Config::default();
+        let mut config = crate::domain::Config::default();
         config.safety.mode = SafetyMode::Ask;
         config.safety.overrides = vec![mermaid_runtime::PolicyOverride {
             tool: Some("write_file".to_string()),

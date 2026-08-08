@@ -53,7 +53,7 @@ fn request(messages: Vec<ChatMessage>) -> ChatRequest {
 
 fn runner_with(model: Arc<ScriptedModel>) -> (EffectRunner, tokio::sync::mpsc::Receiver<Msg>) {
     let providers = Arc::new(ProviderFactory::with_seeded_providers(
-        mermaid_cli::app::Config::default(),
+        mermaid_cli::domain::Config::default(),
         [(STUB.to_string(), model as Arc<dyn ModelProvider>)],
     ));
     EffectRunner::pair_from(PathBuf::from("."), providers, Arc::new(ToolRegistry::new()))

@@ -1244,7 +1244,7 @@ mod tests {
         workdir: PathBuf,
         scratchpad: Option<PathBuf>,
     ) -> (ExecContext, tokio::sync::mpsc::Receiver<ProgressEvent>) {
-        let mut config = crate::app::Config::default();
+        let mut config = crate::domain::Config::default();
         config.safety.mode = mode;
         let (tx, rx) = tokio::sync::mpsc::channel(8);
         let mut ctx = ExecContext::new(

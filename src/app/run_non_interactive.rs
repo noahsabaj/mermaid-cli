@@ -12,9 +12,9 @@ use std::time::Duration;
 use anyhow::Result;
 use tokio::time::timeout;
 
-use crate::app::Config;
 use crate::app::lifecycle::RuntimeLifecycle;
 use crate::cli::OutputFormat;
+use crate::domain::Config;
 use crate::domain::{Msg, RUN_EVENT_PROTOCOL_VERSION, RunEvent, State, TurnState, update};
 use crate::effect::EffectRunner;
 use crate::providers::ToolRegistry;
@@ -101,7 +101,7 @@ pub async fn run_non_interactive_with(
     // approved plan into implementation.
     if opts.plan_autoaccept {
         config.plan.auto_approve = true;
-        config.plan.post_approve = Some(crate::app::PlanPostApprove::Start);
+        config.plan.post_approve = Some(crate::domain::PlanPostApprove::Start);
     }
 
     // Fold enabled plugins' MCP servers + agent types into the merged
@@ -635,7 +635,7 @@ mod tests {
     fn build_result_joins_an_auto_continued_reply() {
         use mermaid_model::models::{ChatMessage, ChatMessageKind};
         let mut state = crate::domain::State::new(
-            crate::app::Config::default(),
+            crate::domain::Config::default(),
             std::path::PathBuf::from("/tmp/p"),
             "ollama/test".to_string(),
             chrono::Local::now(),
@@ -664,7 +664,7 @@ mod tests {
     fn build_result_without_chain_takes_the_last_reply() {
         use mermaid_model::models::ChatMessage;
         let mut state = crate::domain::State::new(
-            crate::app::Config::default(),
+            crate::domain::Config::default(),
             std::path::PathBuf::from("/tmp/p"),
             "ollama/test".to_string(),
             chrono::Local::now(),
@@ -698,7 +698,7 @@ mod tests {
     fn schema_state(reply: &str) -> crate::domain::State {
         use mermaid_model::models::ChatMessage;
         let mut state = crate::domain::State::new(
-            crate::app::Config::default(),
+            crate::domain::Config::default(),
             std::path::PathBuf::from("/tmp/p"),
             "ollama/test".to_string(),
             chrono::Local::now(),
@@ -781,7 +781,7 @@ mod tests {
         let schema = serde_json::json!({"type": "object"});
         use mermaid_model::models::ChatMessage;
         let mut state = crate::domain::State::new(
-            crate::app::Config::default(),
+            crate::domain::Config::default(),
             std::path::PathBuf::from("/tmp/p"),
             "ollama/test".to_string(),
             chrono::Local::now(),

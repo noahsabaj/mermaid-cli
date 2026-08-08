@@ -9,7 +9,7 @@
 
 use std::path::PathBuf;
 
-use mermaid_cli::app::Config;
+use mermaid_cli::domain::Config;
 use mermaid_cli::domain::{
     Cmd, CompactionEvent, CompactionResult, CompactionTrigger, ContextUsageSnapshot, Msg,
     PendingToolCall, PromptTokenBreakdown, SlashCmd, State, ToolCallId, ToolOutcome, TurnId,
@@ -838,7 +838,7 @@ fn tool_progress_artifact_routes_image_to_assistant_message() {
 /// configured MCP tools never reached the outgoing `ChatRequest.tools`.
 #[test]
 fn configured_mcp_servers_seed_state_and_ready_updates() {
-    use mermaid_cli::app::{Config as AppConfig, McpServerConfig};
+    use mermaid_cli::domain::{Config as AppConfig, McpServerConfig};
     use mermaid_cli::domain::{McpServerStatus, McpToolSpec};
 
     let mut cfg = AppConfig::default();

@@ -25,11 +25,11 @@ use futures::{FutureExt, StreamExt};
 use ratatui::layout::Rect;
 use tokio::time::{Duration, interval};
 
-use crate::app::Config;
 use crate::app::event_source::coalesce_key_burst;
 use crate::app::lifecycle::RuntimeLifecycle;
 use crate::app::recorder::{RECORDING_FORMAT_VERSION, Recorder, SessionHeader};
 use crate::app::terminal::TerminalGuard;
+use crate::domain::Config;
 use crate::domain::ConversationHistory;
 use crate::domain::{Cmd, Msg, RuntimeSignal, State, update};
 use crate::effect::EffectRunner;
@@ -460,7 +460,7 @@ fn web_capabilities_notice(
 ) -> Option<String> {
     use crate::providers::tool::web::Egress;
 
-    if config.safety.network == crate::app::NetworkPolicy::Deny {
+    if config.safety.network == crate::domain::NetworkPolicy::Deny {
         return Some(format!(
             "Web egress disabled by safety.network = \"deny\" (selected fetch backend: {}; selected search backend: {}).",
             capabilities.fetch.backend, capabilities.search.backend
@@ -553,7 +553,7 @@ mod tests {
         let mut cfg = Config::default();
         cfg.mcp_servers.insert(
             "example".to_string(),
-            crate::app::McpServerConfig {
+            crate::domain::McpServerConfig {
                 command: "echo".to_string(),
                 args: vec![],
                 env: std::collections::HashMap::new(),
@@ -743,7 +743,7 @@ mod tests {
     #[test]
     fn web_capability_notice_honors_global_network_denial() {
         let mut config = Config::default();
-        config.safety.network = crate::app::NetworkPolicy::Deny;
+        config.safety.network = crate::domain::NetworkPolicy::Deny;
         // Denial reports regardless of viability or locality — both backends
         // resolve here, and both stay on this machine.
         let capabilities = capabilities(local_fetch(), local_search());

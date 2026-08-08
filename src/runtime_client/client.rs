@@ -71,7 +71,7 @@ pub struct RuntimeSnapshot {
     pub plugins: Vec<PluginInstallRecord>,
     pub provider_probes: Vec<ProviderProbeRecord>,
     pub pairings: Vec<PairingTokenRecord>,
-    pub safety: crate::app::SafetyConfig,
+    pub safety: crate::domain::SafetyConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,7 +91,7 @@ pub struct RuntimeDashboardCounts {
 pub struct RuntimeDashboard {
     pub ok: bool,
     pub health: RuntimeHealth,
-    pub safety: crate::app::SafetyConfig,
+    pub safety: crate::domain::SafetyConfig,
     pub counts: RuntimeDashboardCounts,
     pub sessions: Vec<SessionRecord>,
     pub tasks: Vec<TaskRecord>,
@@ -1132,7 +1132,7 @@ impl RuntimeService {
         Ok(())
     }
 
-    pub fn set_safety_mode(&self, mode: &str) -> Result<crate::app::SafetyConfig> {
+    pub fn set_safety_mode(&self, mode: &str) -> Result<crate::domain::SafetyConfig> {
         let parsed = mermaid_runtime::SafetyMode::parse(mode)
             .ok_or_else(|| anyhow::anyhow!("unknown safety mode: {}", mode))?;
         // Rewrite only `safety.mode` in the user file (never the whole merged

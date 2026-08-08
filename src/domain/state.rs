@@ -22,8 +22,8 @@ use std::time::SystemTime;
 use chrono::{DateTime, Local};
 
 use crate::app::instructions::LoadedInstructions;
-use crate::app::{Config, McpServerConfig};
 use crate::domain::ConversationHistory;
+use crate::domain::{Config, McpServerConfig};
 use mermaid_model::models::ChatMessage;
 use mermaid_model::models::tool_call::ToolCall as ModelToolCall;
 use mermaid_model::models::{ProviderContinuation, ReasoningLevel, TokenUsage, TokenUsageSource};
@@ -1004,7 +1004,7 @@ pub struct UiState {
     /// Active color theme. Seeded from `config.ui.theme` in `State::new`;
     /// `/theme` switches it live (and persists via `Cmd::PersistUiTheme`).
     /// The render layer memoizes the resolved `Theme` off this value.
-    pub theme: crate::app::ThemeChoice,
+    pub theme: crate::domain::ThemeChoice,
     /// `NO_COLOR` was set (present and non-empty) at startup. Injected by the
     /// run loop after `State::new` — the reducer never reads the environment.
     /// While true the render layer draws `Theme::plain()` regardless of

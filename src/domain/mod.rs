@@ -13,6 +13,7 @@
 pub mod checklist;
 pub mod cmd;
 pub mod compaction;
+pub mod config;
 pub mod conversation;
 pub mod file_mention;
 pub mod image_token;
@@ -38,6 +39,12 @@ pub use compaction::{
     build_replacement_messages, build_summary_request, build_verification_request, combine_usage,
     compaction_receipt, context_exceeds_hard_limit, format_compact_count, normalize_summary,
     prepare_compaction, should_auto_compact, validate_summary_structure,
+};
+pub use config::{
+    AgentTypeConfig, AgentsConfig, CompactionConfig, Config, ConfigLayer, ExecConfig, FetchBackend,
+    FilesystemPolicy, McpServerConfig, MemoryConfig, NetworkPolicy, PlanConfig, PlanPermLevel,
+    PlanPermissions, PlanPostApprove, SafetyConfig, SearchBackend, SessionFlags, ThemeChoice,
+    TransportKind, UiConfig, UserProviderConfig, WebConfig,
 };
 pub use conversation::ConversationHistory;
 pub use mermaid_model::action::{ActionDetails, ActionDisplay, ActionResult};

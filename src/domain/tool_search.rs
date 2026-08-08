@@ -240,8 +240,8 @@ pub fn apply_promotions(promoted: &mut BTreeSet<String>, names: Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{Config, McpServerConfig};
     use crate::domain::McpServerEntry;
+    use crate::domain::{Config, McpServerConfig};
     use chrono::TimeZone;
     use std::path::PathBuf;
 

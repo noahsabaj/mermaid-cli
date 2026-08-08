@@ -9,7 +9,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Widget},
 };
 
-use crate::app::PlanConfig;
+use crate::domain::PlanConfig;
 use crate::render::theme::Theme;
 
 /// Row count (kept in sync with `plan_config_rows` and the reducer's key
@@ -59,8 +59,8 @@ pub fn plan_config_rows(plan: &PlanConfig, session_model: &str) -> Vec<(String, 
             "after approval".to_string(),
             match plan.post_approve {
                 None => "ask each time".to_string(),
-                Some(crate::app::PlanPostApprove::Start) => "always start".to_string(),
-                Some(crate::app::PlanPostApprove::Wait) => "always wait".to_string(),
+                Some(crate::domain::PlanPostApprove::Start) => "always start".to_string(),
+                Some(crate::domain::PlanPostApprove::Wait) => "always wait".to_string(),
             },
         ),
     ]

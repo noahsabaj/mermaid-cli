@@ -31,7 +31,7 @@
 //! reject. Deliberate visual changes update the `.snap` files in the same PR.
 
 use super::{RenderCache, render_frame};
-use crate::app::Config;
+use crate::domain::Config;
 use crate::domain::{
     ActionDetails, ActionDisplay, ActionResult, ApprovalKind, GenPhase, PendingApproval,
     PendingToolCall, QueuedMessage, State, ToolCallId, TurnId, TurnState, UiMode,

@@ -33,7 +33,7 @@ const STUB: &str = "stub/scripted";
 
 fn classifier(model: Arc<ScriptedModel>) -> ModelAutoClassifier {
     let providers = ProviderFactory::with_seeded_providers(
-        mermaid_cli::app::Config::default(),
+        mermaid_cli::domain::Config::default(),
         [(STUB.to_string(), model as Arc<dyn ModelProvider>)],
     );
     ModelAutoClassifier::new(Arc::new(providers), STUB.to_string())

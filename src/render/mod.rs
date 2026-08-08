@@ -61,7 +61,7 @@ pub struct RenderCache {
     /// `wrapped_line_cache`) only on change, so `/theme` repaints instantly
     /// without per-frame `Theme` construction. `None` (fresh cache) keeps the
     /// `Theme::dark()` default until the first frame resolves it.
-    applied_theme: Option<(crate::app::ThemeChoice, bool)>,
+    applied_theme: Option<(crate::domain::ThemeChoice, bool)>,
     /// Host + user for the status bar's `user@host:cwd` line, read once at
     /// startup so `StatusWidget::render` doesn't hit the environment on every
     /// frame (#55). Process-constant, so caching here is exact.
@@ -127,8 +127,8 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             theme::Theme::plain()
         } else {
             match state.ui.theme {
-                crate::app::ThemeChoice::Dark => theme::Theme::dark(),
-                crate::app::ThemeChoice::Light => theme::Theme::light(),
+                crate::domain::ThemeChoice::Dark => theme::Theme::dark(),
+                crate::domain::ThemeChoice::Light => theme::Theme::light(),
             }
         };
         // The wrapped-line cache is theme-keyed, but drop stale entries
@@ -1150,7 +1150,7 @@ mod bench;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::Config;
+    use crate::domain::Config;
     use crate::domain::{State, TurnState};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -1189,7 +1189,7 @@ mod tests {
             .session
             .append(mermaid_model::models::ChatMessage::user("hello"), state.now);
         let dark = render_to_string(&state);
-        state.ui.theme = crate::app::ThemeChoice::Light;
+        state.ui.theme = crate::domain::ThemeChoice::Light;
         let light = render_to_string(&state);
         assert_eq!(dark, light, "light theme changed glyphs");
         state.ui.no_color = true;
@@ -1203,7 +1203,7 @@ mod tests {
         let mut rstate = RenderCache::new();
         render_frame(&state, &mut rstate, 80, 24);
         assert_eq!(rstate.theme.name, "Dark");
-        state.ui.theme = crate::app::ThemeChoice::Light;
+        state.ui.theme = crate::domain::ThemeChoice::Light;
         render_frame(&state, &mut rstate, 80, 24);
         assert_eq!(rstate.theme.name, "Light");
         // NO_COLOR beats the theme choice.

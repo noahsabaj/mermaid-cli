@@ -80,7 +80,7 @@ fn memory_file(project: &Path, id: &str) -> PathBuf {
 async fn consolidate(project: &Path, script: Vec<Turn>) -> (String, Arc<ScriptedModel>) {
     let model = ScriptedModel::new(script);
     let providers = Arc::new(ProviderFactory::with_seeded_providers(
-        mermaid_cli::app::Config::default(),
+        mermaid_cli::domain::Config::default(),
         [(STUB.to_string(), model.clone() as Arc<dyn ModelProvider>)],
     ));
     let (mut runner, mut rx) = EffectRunner::pair_from(
