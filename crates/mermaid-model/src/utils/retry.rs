@@ -21,17 +21,6 @@ impl Default for RetryConfig {
     }
 }
 
-/// Retry an async operation with exponential backoff, retrying on ANY error.
-/// For selective retries (skip terminal errors like HTTP 4xx) use
-/// [`retry_async_if`].
-pub async fn retry_async<F, Fut, T>(operation: F, config: &RetryConfig) -> Result<T>
-where
-    F: Fn() -> Fut,
-    Fut: std::future::Future<Output = Result<T>>,
-{
-    retry_async_if(operation, config, |_| true).await
-}
-
 /// Retry an async operation with exponential backoff, but only while
 /// `is_retryable` returns true for the error. A terminal error (e.g. an HTTP
 /// 4xx on a non-idempotent POST) is surfaced immediately instead of being
@@ -112,86 +101,6 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-
-    #[tokio::test]
-    async fn test_retry_async_success_on_first_try() {
-        let config = RetryConfig::default();
-        let call_count = Arc::new(AtomicUsize::new(0));
-        let call_count_clone = Arc::clone(&call_count);
-
-        let result = retry_async(
-            move || {
-                let count = Arc::clone(&call_count_clone);
-                async move {
-                    count.fetch_add(1, Ordering::SeqCst);
-                    Ok::<_, anyhow::Error>(42)
-                }
-            },
-            &config,
-        )
-        .await;
-
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), 42);
-        assert_eq!(call_count.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn test_retry_async_success_on_second_try() {
-        let config = RetryConfig {
-            max_attempts: 3,
-            initial_delay_ms: 10,
-            ..Default::default()
-        };
-        let call_count = Arc::new(AtomicUsize::new(0));
-        let call_count_clone = Arc::clone(&call_count);
-
-        let result = retry_async(
-            move || {
-                let count = Arc::clone(&call_count_clone);
-                async move {
-                    let current = count.fetch_add(1, Ordering::SeqCst) + 1;
-                    if current < 2 {
-                        Err(anyhow::anyhow!("Temporary error"))
-                    } else {
-                        Ok(42)
-                    }
-                }
-            },
-            &config,
-        )
-        .await;
-
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), 42);
-        assert_eq!(call_count.load(Ordering::SeqCst), 2);
-    }
-
-    #[tokio::test]
-    async fn test_retry_async_fails_after_max_attempts() {
-        let config = RetryConfig {
-            max_attempts: 3,
-            initial_delay_ms: 10,
-            ..Default::default()
-        };
-        let call_count = Arc::new(AtomicUsize::new(0));
-        let call_count_clone = Arc::clone(&call_count);
-
-        let result = retry_async(
-            move || {
-                let count = Arc::clone(&call_count_clone);
-                async move {
-                    count.fetch_add(1, Ordering::SeqCst);
-                    Err::<i32, _>(anyhow::anyhow!("Persistent error"))
-                }
-            },
-            &config,
-        )
-        .await;
-
-        assert!(result.is_err());
-        assert_eq!(call_count.load(Ordering::SeqCst), 3);
-    }
 
     #[tokio::test]
     async fn retry_async_if_skips_nonretryable_errors() {

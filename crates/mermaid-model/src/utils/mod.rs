@@ -52,7 +52,7 @@ pub use mermaid_runtime::{
     redact_json, redact_json_text, redact_secrets, sanitize_url_for_display,
 };
 pub use retry::jitter;
-pub use retry::{RetryConfig, retry_async, retry_async_if};
+pub use retry::{RetryConfig, retry_async_if};
 pub use sse::drain_sse_events;
 pub use task::{AbortOnDrop, join_logged, spawn_guarded};
 pub use text::{
