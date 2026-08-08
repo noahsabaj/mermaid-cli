@@ -16,9 +16,9 @@ use crate::domain::ChatRequest;
 use mermaid_model::models::adapters::anthropic::AnthropicAdapter;
 use mermaid_model::models::{Model, ModelConfig, ModelError, Result};
 
-use super::super::capabilities::Capabilities;
 use super::super::ctx::{FinalResponse, StreamContext, StreamEvent};
 use super::{ContextSizing, ModelProvider, resolve_limits_cached};
+use mermaid_model::models::ModelCapabilities;
 
 /// Anthropic's Messages-API root, and the env var its key lives in.
 ///
@@ -31,14 +31,13 @@ pub const DEFAULT_API_KEY_ENV: &str = "ANTHROPIC_API_KEY";
 /// Anthropic adapter fronted by `ModelProvider`.
 pub struct AnthropicProvider {
     adapter: AnthropicAdapter,
-    capabilities: Capabilities,
+    capabilities: ModelCapabilities,
 }
 
 impl AnthropicProvider {
     pub fn new(api_key: String, model_name: String, base_url: String) -> Result<Self> {
         let adapter = AnthropicAdapter::new(api_key, model_name, base_url)?;
-        let capabilities =
-            Capabilities::from_legacy(adapter.capabilities()).with_provider_continuation();
+        let capabilities = adapter.capabilities().clone().with_provider_continuation();
         Ok(Self {
             adapter,
             capabilities,
@@ -48,7 +47,7 @@ impl AnthropicProvider {
 
 #[async_trait]
 impl ModelProvider for AnthropicProvider {
-    fn capabilities(&self) -> &Capabilities {
+    fn capabilities(&self) -> &ModelCapabilities {
         &self.capabilities
     }
 

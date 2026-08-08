@@ -10324,7 +10324,7 @@ mod tests {
             Some(12_000),
         );
         CompactionResult {
-            record: crate::domain::CompactionRecord {
+            record: crate::domain::CompactionEvent {
                 id: "rec1".to_string(),
                 trigger: CompactionTrigger::TruncationRecovery,
                 created_at: chrono::Local::now(),
@@ -15372,7 +15372,7 @@ mod tests {
                         cwd: Some("/tmp/project".to_string()),
                         log_path: "/tmp/mermaid-bg.log".to_string(),
                         detected_url: Some("http://127.0.0.1:5173".to_string()),
-                        status: crate::domain::ManagedProcessStatus::Running,
+                        status: mermaid_runtime::ProcessStatus::Running,
                     }),
                     ..crate::domain::ToolRunMetadata::default()
                 }),

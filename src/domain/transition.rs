@@ -746,7 +746,7 @@ pub fn display_info_for(call: &PendingToolCall) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{ManagedProcess, ManagedProcessStatus, ToolMetadata, ToolRunMetadata};
+    use crate::domain::{ManagedProcess, ToolMetadata, ToolRunMetadata};
     use mermaid_model::models::tool_call::{FunctionCall, ToolCall as ModelToolCall};
 
     fn sample_call(id: u64, name: &str) -> PendingToolCall {
@@ -1145,7 +1145,7 @@ mod tests {
                     cwd: None,
                     log_path: "/tmp/mermaid-bg.log".to_string(),
                     detected_url: Some("http://127.0.0.1:5173".to_string()),
-                    status: ManagedProcessStatus::Running,
+                    status: mermaid_runtime::ProcessStatus::Running,
                 }),
                 ..ToolRunMetadata::default()
             });

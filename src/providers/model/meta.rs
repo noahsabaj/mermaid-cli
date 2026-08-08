@@ -21,9 +21,9 @@ use mermaid_model::models::{
 };
 use mermaid_model::utils::drain_sse_events;
 
-use super::super::capabilities::Capabilities;
 use super::super::ctx::{FinalResponse, StreamContext, StreamEvent};
 use super::ModelProvider;
+use mermaid_model::models::ModelCapabilities;
 
 pub const DEFAULT_BASE_URL: &str = "https://api.meta.ai/v1";
 pub const DEFAULT_API_KEY_ENV: &str = "MODEL_API_KEY";
@@ -34,7 +34,7 @@ pub struct MetaProvider {
     api_key: String,
     model_name: String,
     extra_headers: HashMap<String, String>,
-    capabilities: Capabilities,
+    capabilities: ModelCapabilities,
 }
 
 impl MetaProvider {
@@ -60,7 +60,7 @@ impl MetaProvider {
         // Prefix, not exact-id: a future muse-spark-1.2 should inherit the
         // documented family limits instead of regressing to "unknown".
         let muse_spark = model_name.to_ascii_lowercase().starts_with("muse-spark");
-        let capabilities = Capabilities {
+        let capabilities = ModelCapabilities {
             supports_tools: true,
             supports_vision: true,
             supports_reasoning: ReasoningCapability::Levels(meta_reasoning_levels()),
@@ -117,7 +117,7 @@ impl MetaProvider {
 
 #[async_trait]
 impl ModelProvider for MetaProvider {
-    fn capabilities(&self) -> &Capabilities {
+    fn capabilities(&self) -> &ModelCapabilities {
         &self.capabilities
     }
 

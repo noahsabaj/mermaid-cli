@@ -29,10 +29,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
 use crate::app::{FilesystemPolicy, NetworkPolicy};
-use crate::domain::{
-    ManagedProcess, ManagedProcessStatus, ToolDefinition, ToolMetadata, ToolOutcome,
-    ToolRunMetadata,
-};
+use crate::domain::{ManagedProcess, ToolDefinition, ToolMetadata, ToolOutcome, ToolRunMetadata};
 use mermaid_model::constants::{COMMAND_MAX_TIMEOUT_SECS, COMMAND_TIMEOUT_SECS};
 
 use super::super::ctx::{ExecContext, ProgressEvent};
@@ -536,7 +533,7 @@ fn finish_foreground_command(
                 cwd: Some(effective_workdir.display().to_string()),
                 log_path: log_path_str.clone(),
                 detected_url: None,
-                status: ManagedProcessStatus::Running,
+                status: mermaid_runtime::ProcessStatus::Running,
             };
             let mut metadata = command_metadata(CommandMetadataInput {
                 command: command.to_string(),
@@ -692,7 +689,7 @@ async fn run_background_command(
             cwd: Some(workdir.display().to_string()),
             log_path: log_path_str.clone(),
             detected_url: startup.detected_url.clone(),
-            status: ManagedProcessStatus::Running,
+            status: mermaid_runtime::ProcessStatus::Running,
         };
         let byte_count = output.len();
         let mut metadata = command_metadata(CommandMetadataInput {

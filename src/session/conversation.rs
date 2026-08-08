@@ -105,7 +105,7 @@ pub struct ConversationHistory {
     pub updated_at: DateTime<Local>,
     /// Metadata for context compactions performed in this conversation.
     #[serde(default)]
-    pub compactions: Vec<crate::domain::CompactionRecord>,
+    pub compactions: Vec<crate::domain::CompactionEvent>,
     /// History of user input prompts for navigation (up/down arrows)
     #[serde(default)]
     pub input_history: VecDeque<String>,
@@ -317,11 +317,7 @@ impl ConversationHistory {
 
     /// Record a completed context compaction. `now` injected — see
     /// [`Self::add_messages`].
-    pub fn add_compaction(
-        &mut self,
-        record: crate::domain::CompactionRecord,
-        now: DateTime<Local>,
-    ) {
+    pub fn add_compaction(&mut self, record: crate::domain::CompactionEvent, now: DateTime<Local>) {
         self.compactions.push(record);
         self.updated_at = now;
     }

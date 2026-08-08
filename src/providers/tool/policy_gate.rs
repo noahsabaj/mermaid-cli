@@ -540,7 +540,7 @@ async fn inline_decision(
     let kind = if classifier_reason.is_some() {
         ApprovalKind::Classify
     } else {
-        approval_kind(request.category)
+        ApprovalKind::from(request.category)
     };
     let prompt = format_approval_body(request, classifier_reason.as_deref());
     let decision = broker
@@ -606,21 +606,6 @@ fn format_approval_body(request: &ActionRequest, classifier_reason: Option<&str>
         body.push_str(&format!("\n\nAuto-review flagged this: {}", reason));
     }
     body
-}
-
-fn approval_kind(category: mermaid_runtime::ToolCategory) -> ApprovalKind {
-    use mermaid_runtime::ToolCategory as C;
-    match category {
-        C::Edit => ApprovalKind::FileMutation,
-        C::Shell | C::Git | C::Process => ApprovalKind::Shell,
-        C::Web | C::Network | C::ExternalDirectory => ApprovalKind::Web,
-        C::Mcp => ApprovalKind::Mcp,
-        C::Subagent => ApprovalKind::Subagent,
-        C::ComputerUse => ApprovalKind::ComputerUse,
-        // Read and Memory ⇒ Allow/Deny in `decide`, so neither reaches
-        // approval; keep the match total.
-        C::Read | C::Memory => ApprovalKind::Shell,
-    }
 }
 
 /// Take a checkpoint (when configured), record an approval row, and return a

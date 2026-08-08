@@ -31,7 +31,7 @@ pub use checklist::{
 };
 pub use cmd::{ChatRequest, Cmd, ToolDefinition};
 pub use compaction::{
-    CompactionArchive, CompactionBoundary, CompactionPolicy, CompactionRecord, CompactionRequest,
+    CompactionArchive, CompactionBoundary, CompactionEvent, CompactionPolicy, CompactionRequest,
     CompactionResult, CompactionReviewStatus, CompactionTrigger, PreparedCompaction,
     build_replacement_messages, build_summary_request, build_verification_request, combine_usage,
     compaction_receipt, context_exceeds_hard_limit, format_compact_count, normalize_summary,
@@ -44,8 +44,7 @@ pub use mermaid_model::question::{
     rank_order, validate_input,
 };
 pub use mermaid_model::tool_run::{
-    ManagedProcess, ManagedProcessStatus, ToolArtifact, ToolMetadata, ToolRunMetadata, ToolStatus,
-    WebSearchFailure,
+    ManagedProcess, ToolArtifact, ToolMetadata, ToolRunMetadata, ToolStatus, WebSearchFailure,
 };
 pub use msg::{
     ClipboardRead, ContextCmd, Key, KeyCode, KeyMods, Msg, MsgKind, Paste, SlashCmd, StartupConfig,

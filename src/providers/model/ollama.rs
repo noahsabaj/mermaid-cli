@@ -20,17 +20,17 @@ use mermaid_model::models::adapters::ollama_sizing::{
 use mermaid_model::models::{BackendConfig, Model, ModelConfig, ModelError, Result};
 use mermaid_runtime::{NewProviderProbe, RuntimeStore};
 
-use super::super::capabilities::Capabilities;
 use super::super::ctx::{FinalResponse, StreamContext, StreamEvent};
 use super::{
     ContextSizing, ModelPlacement, ModelProvider, learn_output_cap, load_limits_from_db,
     output_cap_from_error, probe_is_stale, retry_cap,
 };
+use mermaid_model::models::ModelCapabilities;
 
 /// Ollama adapter fronted by `ModelProvider`.
 pub struct OllamaProvider {
     adapter: OllamaAdapter,
-    capabilities: Capabilities,
+    capabilities: ModelCapabilities,
     /// Shared app `Config` so `build_model_config` can read Ollama
     /// hardware options (`num_ctx`, `num_gpu`, `num_thread`, `numa`) at
     /// call time. Before F11 these were silently dropped because the
@@ -72,7 +72,7 @@ impl OllamaProvider {
         } else {
             adapter
         };
-        let capabilities = Capabilities::from_legacy(adapter.capabilities());
+        let capabilities = adapter.capabilities().clone();
         Ok(Self {
             adapter,
             capabilities,
@@ -139,7 +139,7 @@ impl OllamaProvider {
 
 #[async_trait]
 impl ModelProvider for OllamaProvider {
-    fn capabilities(&self) -> &Capabilities {
+    fn capabilities(&self) -> &ModelCapabilities {
         &self.capabilities
     }
 

@@ -11,9 +11,9 @@ use crate::domain::ChatRequest;
 use mermaid_model::models::adapters::gemini::GeminiAdapter;
 use mermaid_model::models::{Model, ModelConfig, ModelError, Result};
 
-use super::super::capabilities::Capabilities;
 use super::super::ctx::{FinalResponse, StreamContext, StreamEvent};
 use super::{ContextSizing, ModelProvider, resolve_limits_cached};
+use mermaid_model::models::ModelCapabilities;
 
 /// Gemini's AI Studio root, and the env vars its key lives in. `LEGACY_API_KEY_ENV`
 /// predates Google's rename and is still accepted when `GOOGLE_API_KEY` is unset —
@@ -24,13 +24,13 @@ pub const LEGACY_API_KEY_ENV: &str = "GEMINI_API_KEY";
 
 pub struct GeminiProvider {
     adapter: GeminiAdapter,
-    capabilities: Capabilities,
+    capabilities: ModelCapabilities,
 }
 
 impl GeminiProvider {
     pub fn new(api_key: String, model_name: String, base_url: String) -> Result<Self> {
         let adapter = GeminiAdapter::new(api_key, model_name, base_url)?;
-        let capabilities = Capabilities::from_legacy(adapter.capabilities());
+        let capabilities = adapter.capabilities().clone();
         Ok(Self {
             adapter,
             capabilities,
@@ -40,7 +40,7 @@ impl GeminiProvider {
 
 #[async_trait]
 impl ModelProvider for GeminiProvider {
-    fn capabilities(&self) -> &Capabilities {
+    fn capabilities(&self) -> &ModelCapabilities {
         &self.capabilities
     }
 

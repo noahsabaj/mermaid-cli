@@ -591,6 +591,7 @@ impl AnthropicAdapter {
             // the Models API (cache-first). No static pins — they rot.
             max_context_tokens: None,
             max_output_tokens: None,
+            emits_provider_continuation: false,
         };
 
         Ok(Self {

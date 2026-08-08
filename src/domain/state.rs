@@ -1376,9 +1376,17 @@ pub enum ApprovalChoice {
     Deny,
 }
 
-/// Category of the gated action — drives the prompt's label. Mirrors the
-/// runtime `ToolCategory` but lives in `domain` so the pure reducer needn't
-/// depend on `providers`.
+/// Category of the gated action — drives the prompt's label.
+///
+/// A deliberately coarser projection of `mermaid_runtime::ToolCategory`: seven
+/// prompt labels for twelve policy categories, plus `Classify` which has no
+/// `ToolCategory` at all. The mapping is the `From` impl below, exhaustive so a
+/// new `ToolCategory` variant is a compile error in exactly one place.
+///
+/// (The previous comment here claimed the duplication existed "so the pure
+/// reducer needn't depend on `providers`". That was false twice over:
+/// `ToolCategory` lives in `mermaid-runtime`, which domain already depends on,
+/// and the reducer did import from `providers` anyway.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ApprovalKind {
     Shell,
@@ -1388,6 +1396,25 @@ pub enum ApprovalKind {
     Subagent,
     ComputerUse,
     Classify,
+}
+
+impl From<mermaid_runtime::ToolCategory> for ApprovalKind {
+    fn from(category: mermaid_runtime::ToolCategory) -> Self {
+        use mermaid_runtime::ToolCategory as C;
+        match category {
+            C::Edit => ApprovalKind::FileMutation,
+            C::Shell | C::Git | C::Process => ApprovalKind::Shell,
+            C::Web | C::Network | C::ExternalDirectory => ApprovalKind::Web,
+            C::Mcp => ApprovalKind::Mcp,
+            C::Subagent => ApprovalKind::Subagent,
+            C::ComputerUse => ApprovalKind::ComputerUse,
+            // `Read` and `Memory` resolve to Allow/Deny in `decide`, so neither
+            // reaches an approval prompt; the arm exists to keep the match
+            // total. The label is a poor fit and would read wrong if one ever
+            // did reach a prompt -- worth revisiting, but not in a move.
+            C::Read | C::Memory => ApprovalKind::Shell,
+        }
+    }
 }
 
 /// Severity carried on `Msg::CompactionFailed`. The compaction-failed handler

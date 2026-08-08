@@ -17,16 +17,16 @@ use mermaid_model::models::adapters::ModelLimits;
 use mermaid_model::models::adapters::openai_compat::OpenAICompatAdapter;
 use mermaid_model::models::{Model, ModelConfig, ModelError, ProviderProfile, Result};
 
-use super::super::capabilities::Capabilities;
 use super::super::ctx::{FinalResponse, StreamContext, StreamEvent};
 use super::{
     ContextSizing, ModelProvider, learn_output_cap, output_cap_from_error, resolve_limits_cached,
     retry_cap,
 };
+use mermaid_model::models::ModelCapabilities;
 
 pub struct OpenAICompatProvider {
     adapter: OpenAICompatAdapter,
-    capabilities: Capabilities,
+    capabilities: ModelCapabilities,
 }
 
 impl OpenAICompatProvider {
@@ -39,7 +39,7 @@ impl OpenAICompatProvider {
     ) -> Result<Self> {
         let adapter =
             OpenAICompatAdapter::new(profile, base_url, api_key, model_name, extra_headers)?;
-        let capabilities = Capabilities::from_legacy(adapter.capabilities());
+        let capabilities = adapter.capabilities().clone();
         Ok(Self {
             adapter,
             capabilities,
@@ -49,7 +49,7 @@ impl OpenAICompatProvider {
 
 #[async_trait]
 impl ModelProvider for OpenAICompatProvider {
-    fn capabilities(&self) -> &Capabilities {
+    fn capabilities(&self) -> &ModelCapabilities {
         &self.capabilities
     }
 

@@ -31,7 +31,7 @@ use mermaid_runtime::{SafetyMode, TaskStatus};
 use super::state::ApprovalChoice;
 use mermaid_model::question::QuestionResolution;
 
-use super::compaction::{CompactionArchive, CompactionRecord, CompactionRequest};
+use super::compaction::{CompactionArchive, CompactionEvent, CompactionRequest};
 use mermaid_model::ids::{ToolCallId, TurnId};
 use mermaid_model::tool_run::ManagedProcess;
 
@@ -181,7 +181,7 @@ pub enum Cmd {
     /// the stripped conversation is saved over the old one.
     SaveCompactionArchive {
         archive: CompactionArchive,
-        record: CompactionRecord,
+        record: CompactionEvent,
         conversation: ConversationHistory,
     },
     /// Persist a daemon-visible background process record.

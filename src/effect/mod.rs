@@ -79,6 +79,35 @@ pub type MsgSender = mpsc::Sender<Msg>;
 /// output.
 pub const MSG_CHANNEL_CAPACITY: usize = 512;
 
+/// Translate a domain `CompactionEvent` into the durable row.
+///
+/// The two types share a name-adjacent concept and almost nothing else: the
+/// domain event carries 14 fields describing what compaction did, the row
+/// carries 9 describing what a later reader needs. Only `id` and
+/// `archive_path` overlap. This lived as an anonymous struct literal inline in
+/// `persist_compaction`, which is where a field mapping goes to rot unnoticed.
+///
+/// It stays in `effect`, not in the pure core: "domain value -> SQLite row" is
+/// precisely what this layer is for, and the orphan rule permitting it
+/// elsewhere is not a reason to put row-shaped knowledge in the reducer.
+fn compaction_row(
+    record: &crate::domain::CompactionEvent,
+    archive_path: &std::path::Path,
+    task_id: Option<String>,
+    session_id: String,
+) -> mermaid_runtime::NewCompaction {
+    mermaid_runtime::NewCompaction {
+        id: Some(record.id.clone()),
+        task_id,
+        session_id: Some(session_id),
+        source_token_estimate: Some(record.before_tokens as i64),
+        summary_token_count: Some(record.summary_tokens as i64),
+        preserved_turns: Some(record.preserved_turn_count as i64),
+        archive_path: Some(archive_path.display().to_string()),
+        verification_status: Some(record.review_status.as_str().to_string()),
+    }
+}
+
 #[derive(Clone)]
 enum PersistenceJob {
     Conversation(Box<crate::session::ConversationHistory>),
@@ -88,7 +117,7 @@ enum PersistenceJob {
 #[derive(Clone)]
 struct PendingCompactionSave {
     archive: crate::domain::CompactionArchive,
-    record: crate::domain::CompactionRecord,
+    record: crate::domain::CompactionEvent,
     conversation: crate::session::ConversationHistory,
     task_id: Option<String>,
 }
@@ -217,16 +246,12 @@ impl PersistenceState {
         manager.save_conversation(&save.conversation)?;
 
         if let Ok(store) = mermaid_runtime::RuntimeStore::open_default() {
-            let _ = store.compactions().create(mermaid_runtime::NewCompaction {
-                id: Some(save.record.id.clone()),
-                task_id: save.task_id.clone(),
-                session_id: Some(save.archive.conversation_id.clone()),
-                source_token_estimate: Some(save.record.before_tokens as i64),
-                summary_token_count: Some(save.record.summary_tokens as i64),
-                preserved_turns: Some(save.record.preserved_turn_count as i64),
-                archive_path: Some(path.display().to_string()),
-                verification_status: Some(save.record.review_status.as_str().to_string()),
-            });
+            let _ = store.compactions().create(compaction_row(
+                &save.record,
+                &path,
+                save.task_id.clone(),
+                save.archive.conversation_id.clone(),
+            ));
         }
 
         Ok(PersistedCompaction {
@@ -1016,17 +1041,7 @@ impl EffectRunner {
             Cmd::SaveProcess(process) => {
                 let task_id = self.task_id.clone();
                 self.detached.spawn(async move {
-                    let status = match process.status {
-                        crate::domain::ManagedProcessStatus::Running => {
-                            mermaid_runtime::ProcessStatus::Running
-                        },
-                        crate::domain::ManagedProcessStatus::Exited => {
-                            mermaid_runtime::ProcessStatus::Exited
-                        },
-                        crate::domain::ManagedProcessStatus::Unknown => {
-                            mermaid_runtime::ProcessStatus::Unknown
-                        },
-                    };
+                    let status = process.status;
                     if let Ok(store) = mermaid_runtime::RuntimeStore::open_default() {
                         let _ = store.processes().upsert(mermaid_runtime::NewProcess {
                             id: Some(process.id),
@@ -2704,7 +2719,7 @@ async fn run_compaction(
         "compact_{}",
         chrono::Local::now().format("%Y%m%d_%H%M%S_%3f")
     );
-    let mut record = crate::domain::CompactionRecord {
+    let mut record = crate::domain::CompactionEvent {
         id,
         trigger: request.trigger,
         created_at: chrono::Local::now(),
@@ -2827,10 +2842,7 @@ async fn collect_compaction_text(
     crate::providers::model::collect_text(provider, turn, request, token).await
 }
 
-fn record_provider_capabilities(
-    model_id: &str,
-    caps: &crate::providers::capabilities::Capabilities,
-) {
+fn record_provider_capabilities(model_id: &str, caps: &mermaid_model::models::ModelCapabilities) {
     let (provider, model) = split_model_id(model_id);
     if let Ok(store) = mermaid_runtime::RuntimeStore::open_default() {
         for (key, value) in [
@@ -3629,6 +3641,47 @@ fn classify_error_for_ui(
 
 #[cfg(test)]
 mod tests {
+    /// Pins the domain-event -> durable-row field mapping. Only `id` and
+    /// `archive_path` share a name between the two types, so every other line
+    /// of `compaction_row` is a decision nothing else records.
+    #[test]
+    fn compaction_row_maps_every_field_it_claims_to() {
+        use crate::domain::{CompactionEvent, CompactionReviewStatus, CompactionTrigger};
+        let record = CompactionEvent {
+            id: "cmp-1".to_string(),
+            trigger: CompactionTrigger::Manual,
+            created_at: chrono::Local::now(),
+            before_tokens: 9_000,
+            after_tokens: 1_200,
+            archived_message_count: 40,
+            preserved_message_count: 6,
+            preserved_turn_count: 3,
+            summary_tokens: 450,
+            duration_secs: 1.5,
+            review_status: CompactionReviewStatus::Reviewed,
+            review_error: None,
+            focus: None,
+            archive_path: None,
+        };
+        let row = compaction_row(
+            &record,
+            std::path::Path::new("/tmp/archive.json"),
+            Some("task-7".to_string()),
+            "sess-3".to_string(),
+        );
+        assert_eq!(row.id.as_deref(), Some("cmp-1"));
+        assert_eq!(row.task_id.as_deref(), Some("task-7"));
+        assert_eq!(row.session_id.as_deref(), Some("sess-3"));
+        assert_eq!(row.source_token_estimate, Some(9_000));
+        assert_eq!(row.summary_token_count, Some(450));
+        assert_eq!(row.preserved_turns, Some(3));
+        assert!(row.archive_path.is_some_and(|p| p.contains("archive.json")));
+        assert_eq!(
+            row.verification_status.as_deref(),
+            Some(CompactionReviewStatus::Reviewed.as_str())
+        );
+    }
+
     use super::*;
     use crate::domain::ToolCallId;
     use std::time::Duration;
@@ -4148,7 +4201,7 @@ mod tests {
             created_at: now,
             messages: full.messages().to_vec(),
         };
-        let record = crate::domain::CompactionRecord {
+        let record = crate::domain::CompactionEvent {
             id: archive_id.to_string(),
             trigger: crate::domain::CompactionTrigger::Manual,
             created_at: now,

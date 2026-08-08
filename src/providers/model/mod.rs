@@ -23,8 +23,8 @@ use mermaid_model::models::adapters::ollama_sizing::NumCtxSource;
 use mermaid_model::models::{ModelError, Result, TokenUsage};
 use mermaid_runtime::{NewProviderProbe, RuntimeStore};
 
-use super::capabilities::Capabilities;
 use super::ctx::{FinalResponse, StreamContext, StreamEvent};
+use mermaid_model::models::ModelCapabilities;
 
 /// Resolved context sizing for a turn. For most providers `model_max ==
 /// effective` (the static advertised window). For Ollama they differ:
@@ -64,10 +64,10 @@ pub struct ModelPlacement {
 /// whole surface.
 #[async_trait]
 pub trait ModelProvider: Send + Sync {
-    /// Capabilities the provider advertises. The reducer reads this
+    /// ModelCapabilities the provider advertises. The reducer reads this
     /// when building the outgoing `ChatRequest` (e.g. whether to
     /// attach reasoning controls).
-    fn capabilities(&self) -> &Capabilities;
+    fn capabilities(&self) -> &ModelCapabilities;
 
     /// Resolve the *effective* context window for a turn (what the model will
     /// actually enforce). The default returns the static advertised window;

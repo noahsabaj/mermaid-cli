@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 use mermaid_cli::app::Config;
 use mermaid_cli::domain::{
-    Cmd, CompactionRecord, CompactionResult, CompactionTrigger, ContextUsageSnapshot, Msg,
+    Cmd, CompactionEvent, CompactionResult, CompactionTrigger, ContextUsageSnapshot, Msg,
     PendingToolCall, PromptTokenBreakdown, SlashCmd, State, ToolCallId, ToolOutcome, TurnId,
     TurnState, start_executing_tools, start_generating, update,
 };
@@ -479,7 +479,7 @@ fn compaction_finished_replaces_history_and_archives_head() {
         ChatMessage::user("new prompt"),
     ];
     let result = CompactionResult {
-        record: CompactionRecord {
+        record: CompactionEvent {
             id: "compact_test".to_string(),
             trigger: CompactionTrigger::Manual,
             created_at: chrono::Local::now(),
@@ -645,7 +645,7 @@ fn manual_compaction_finish_drains_queued_message() {
     let mut checkpoint = ChatMessage::user("MERMAID CONTEXT CHECKPOINT\n## Goal\n- continue");
     checkpoint.kind = ChatMessageKind::ContextCheckpoint;
     let result = CompactionResult {
-        record: CompactionRecord {
+        record: CompactionEvent {
             id: "compact_test".to_string(),
             trigger: CompactionTrigger::Manual,
             created_at: chrono::Local::now(),

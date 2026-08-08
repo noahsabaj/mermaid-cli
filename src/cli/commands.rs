@@ -11,7 +11,7 @@ use mermaid_model::models::{
 use crate::{
     app::{Config, get_config_dir, init_config, load_config_or_warn},
     domain::{
-        ChatRequest, Cmd, CompactionRecord, CompactionResult, CompactionTrigger, Msg, SlashCmd,
+        ChatRequest, Cmd, CompactionEvent, CompactionResult, CompactionTrigger, Msg, SlashCmd,
         State, build_replacement_messages, estimate_context_usage_for_request, prepare_compaction,
         update,
     },
@@ -245,7 +245,7 @@ pub(crate) struct DoctorReport {
     pub(crate) active_profile: Option<String>,
     pub(crate) active_model: Option<String>,
     pub(crate) model_error: Option<String>,
-    pub(crate) model_capabilities: Option<DoctorModelCapabilities>,
+    pub(crate) model_capabilities: Option<DoctorCapabilities>,
     pub(crate) safety_mode: String,
     pub(crate) checkpoint_on_mutation: bool,
     pub(crate) prompt_customized: bool,
@@ -261,7 +261,7 @@ pub(crate) struct DoctorReport {
 }
 
 #[derive(Debug, serde::Serialize)]
-pub(crate) struct DoctorModelCapabilities {
+pub(crate) struct DoctorCapabilities {
     pub(crate) provider: String,
     pub(crate) name: String,
     pub(crate) supports_tools: bool,
@@ -350,7 +350,7 @@ pub(crate) async fn build_doctor_report(
             (
                 Some(model),
                 None,
-                Some(DoctorModelCapabilities {
+                Some(DoctorCapabilities {
                     provider: snapshot.provider,
                     name: snapshot.model,
                     supports_tools: snapshot.supports_tools,
@@ -990,7 +990,7 @@ fn run_qa_compact_smoke(
     );
 
     let summary = deterministic_compaction_summary(&prepared, turns);
-    let mut record = CompactionRecord {
+    let mut record = CompactionEvent {
         id: format!("qa_compact_{}", fresh_qa_id()),
         trigger: CompactionTrigger::Manual,
         created_at: chrono::Local::now(),
@@ -1897,7 +1897,7 @@ fn handle_plugin(command: &PluginCommand) -> Result<()> {
 
 fn print_plugin_capability_preview(preview: &mermaid_runtime::PluginCapabilityPreview) {
     println!(
-        "Capabilities declared by plugin {} (advisory, not sandbox-enforced):",
+        "ModelCapabilities declared by plugin {} (advisory, not sandbox-enforced):",
         preview.name
     );
     if preview.declared_capabilities.is_empty() && preview.capabilities_toml.is_none() {

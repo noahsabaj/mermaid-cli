@@ -826,7 +826,7 @@ mod tests {
             Msg::CompactionFinished {
                 turn: TurnId(2),
                 result: crate::domain::CompactionResult {
-                    record: crate::domain::CompactionRecord {
+                    record: crate::domain::CompactionEvent {
                         id: "c1".to_string(),
                         trigger: crate::domain::CompactionTrigger::Manual,
                         created_at: fixed_ts(),

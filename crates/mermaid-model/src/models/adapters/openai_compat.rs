@@ -878,6 +878,7 @@ fn derive_capabilities(profile: &ProviderProfile, model_name: &str) -> ModelCapa
         // provider wrapper's `resolve_context_window` override.
         max_context_tokens: None,
         max_output_tokens: None,
+        emits_provider_continuation: false,
     }
 }
 

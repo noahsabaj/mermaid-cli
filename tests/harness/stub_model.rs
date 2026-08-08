@@ -35,9 +35,9 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use mermaid_cli::domain::ChatRequest;
-use mermaid_cli::providers::capabilities::Capabilities;
 use mermaid_cli::providers::model::ModelProvider;
 use mermaid_cli::providers::{FinalResponse, StreamContext, StreamEvent};
+use mermaid_model::models::ModelCapabilities;
 use mermaid_model::models::{
     FinishReason, FunctionCall, ReasoningCapability, Result, TokenUsage, ToolCall,
 };
@@ -100,7 +100,7 @@ impl Turn {
 /// A model that replays a fixed script.
 pub struct ScriptedModel {
     name: String,
-    capabilities: Capabilities,
+    capabilities: ModelCapabilities,
     script: Mutex<std::collections::VecDeque<Turn>>,
     /// Every request the loop made, in order. Lets a test assert on what the
     /// agent actually asked for — the system prompt a child was given, say.
@@ -111,7 +111,7 @@ impl ScriptedModel {
     pub fn new(script: impl IntoIterator<Item = Turn>) -> Arc<Self> {
         Arc::new(Self {
             name: "stub/scripted".to_string(),
-            capabilities: Capabilities {
+            capabilities: ModelCapabilities {
                 supports_tools: true,
                 supports_vision: false,
                 supports_reasoning: ReasoningCapability::Unsupported,
@@ -144,7 +144,7 @@ impl ScriptedModel {
 
 #[async_trait]
 impl ModelProvider for ScriptedModel {
-    fn capabilities(&self) -> &Capabilities {
+    fn capabilities(&self) -> &ModelCapabilities {
         &self.capabilities
     }
 

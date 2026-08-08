@@ -411,6 +411,7 @@ impl GeminiAdapter {
             ]),
             max_context_tokens: None,
             max_output_tokens: None,
+            emits_provider_continuation: false,
         };
 
         Ok(Self {

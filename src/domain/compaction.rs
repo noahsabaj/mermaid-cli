@@ -245,7 +245,7 @@ impl CompactionReviewStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CompactionRecord {
+pub struct CompactionEvent {
     pub id: String,
     pub trigger: CompactionTrigger,
     pub created_at: DateTime<Local>,
@@ -274,7 +274,7 @@ pub struct CompactionArchive {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CompactionResult {
-    pub record: CompactionRecord,
+    pub record: CompactionEvent,
     pub replacement_messages: Vec<ChatMessage>,
     pub archived_messages: Vec<ChatMessage>,
     pub before_snapshot: ContextUsageSnapshot,
@@ -608,7 +608,7 @@ pub fn build_verification_request(
 pub fn build_replacement_messages(
     summary: &str,
     prepared: &PreparedCompaction,
-    record: &CompactionRecord,
+    record: &CompactionEvent,
 ) -> Vec<ChatMessage> {
     // The summary is model-generated from the full conversation and is persisted
     // (replacement message + conversation file). Scrub any credential it echoed
@@ -651,7 +651,7 @@ pub fn build_replacement_messages(
     messages
 }
 
-pub fn compaction_receipt(record: &CompactionRecord) -> String {
+pub fn compaction_receipt(record: &CompactionEvent) -> String {
     let review = match record.review_status {
         CompactionReviewStatus::Reviewed => "Reviewed in a second pass.".to_string(),
         CompactionReviewStatus::DraftValidated => match &record.review_error {
@@ -1802,7 +1802,7 @@ mod tests {
             history_excerpt: "old".to_string(),
             summary_images: Vec::new(),
         };
-        let record = CompactionRecord {
+        let record = CompactionEvent {
             id: "c1".to_string(),
             trigger: CompactionTrigger::Manual,
             created_at: Local::now(),
@@ -1833,7 +1833,7 @@ mod tests {
             history_excerpt: "old".to_string(),
             summary_images: Vec::new(),
         };
-        let record = CompactionRecord {
+        let record = CompactionEvent {
             id: "c1".to_string(),
             trigger: CompactionTrigger::Manual,
             created_at: Local::now(),
