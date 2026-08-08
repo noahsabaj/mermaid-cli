@@ -64,7 +64,7 @@ pub struct ModelPlacement {
 /// whole surface.
 #[async_trait]
 pub trait ModelProvider: Send + Sync {
-    /// ModelCapabilities the provider advertises. The reducer reads this
+    /// `ModelCapabilities` the provider advertises. The reducer reads this
     /// when building the outgoing `ChatRequest` (e.g. whether to
     /// attach reasoning controls).
     fn capabilities(&self) -> &ModelCapabilities;

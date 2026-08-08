@@ -35,7 +35,7 @@ const SCRATCH_SUBDIR: &str = "scratchpad";
 /// [`sweep_stale`]. mermaidd overrides it via `daemon.scratchpad_retention_days`.
 pub use mermaid_model::constants::SCRATCHPAD_RETENTION_DAYS as RETENTION_DAYS;
 /// Cap on a sanitized path component — keeps the full scratchpad path
-/// well under PATH_MAX even for deeply nested project directories.
+/// well under `PATH_MAX` even for deeply nested project directories.
 const MAX_COMPONENT_LEN: usize = 96;
 /// Cap on the `/scratchpad` listing — keeps a scratch dir full of build
 /// output from flooding the transcript.

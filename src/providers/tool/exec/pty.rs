@@ -59,20 +59,20 @@ impl PtyDrain {
 /// scrubbing, tee log, and capture core.
 ///
 /// Load-bearing differences from the pipe path:
-/// - NO `setsid` pre_exec: on Unix portable-pty already setsids and sets
+/// - NO `setsid` `pre_exec`: on Unix portable-pty already setsids and sets
 ///   the controlling tty — the child is session+group leader, so
 ///   `terminate_tree`'s group-kill semantics are byte-identical. On
 ///   Windows `terminate_tree` kills the tree by pid (`taskkill /T`), so no
 ///   group setup is needed on either spawn path.
 /// - stdin is the pty slave (not /dev/null): a child that READS stdin now
 ///   hangs to timeout instead of instant EOF — mitigated by
-///   GIT_TERMINAL_PROMPT=0 (still set) and the command timeout.
+///   `GIT_TERMINAL_PROMPT=0` (still set) and the command timeout.
 /// - fixed 24x80 size: nothing resizes it (plumbing the live TUI size is
 ///   not worth a resize protocol for batch commands).
 ///
 /// Every fallible step happens BEFORE the child spawns, so an `Err` return
 /// can safely fall back to the pipe path without re-running side effects —
-/// openpty, clone_reader, and (Windows) the CPR priming write are the only
+/// openpty, `clone_reader`, and (Windows) the CPR priming write are the only
 /// `?` points ahead of `spawn_command`.
 #[expect(
     clippy::too_many_lines,

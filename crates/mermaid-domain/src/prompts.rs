@@ -387,7 +387,7 @@ mod tests {
 
     /// The Task Planning section must exist and teach the core mechanics:
     /// full initial plan in one call, skip trivial work, at most one
-    /// in_progress.
+    /// `in_progress`.
     #[test]
     fn prompt_has_task_planning_section() {
         let prompt = get_system_prompt();
@@ -489,7 +489,7 @@ mod tests {
         assert_eq!(adapt_prompt_for_plan_mode(custom), custom);
     }
 
-    /// PLAN_MODE_PROMPT is the single source naming the plan-authoring tools.
+    /// `PLAN_MODE_PROMPT` is the single source naming the plan-authoring tools.
     #[test]
     fn plan_mode_prompt_names_the_authoring_tools() {
         assert!(PLAN_MODE_PROMPT.contains("write_file"));
@@ -835,7 +835,7 @@ mod tests {
         );
     }
 
-    /// The read_only description must match the policy engine: local reads and
+    /// The `read_only` description must match the policy engine: local reads and
     /// subagent spawns run, while externally visible web egress asks once
     /// unless explicitly enabled; mutations, MCP, and computer-use are blocked
     /// (crates/mermaid-runtime/src/policy.rs).
@@ -858,7 +858,7 @@ mod tests {
         );
     }
 
-    /// full_access must not read as unlimited scope: the destructive
+    /// `full_access` must not read as unlimited scope: the destructive
     /// hard-deny, user deny overrides, and the external-writes floor gate
     /// every mode, and mode never widens the task.
     #[test]
@@ -913,7 +913,7 @@ mod tests {
         );
     }
 
-    /// Deferred MCP tools are only reachable through tool_search (deferral
+    /// Deferred MCP tools are only reachable through `tool_search` (deferral
     /// defaults on), and the authoritative-list rule would otherwise read
     /// as "they don't exist".
     #[test]
@@ -1000,7 +1000,7 @@ mod tests {
 
     /// Dependency discipline: repo's package manager, no lockfile
     /// hand-edits, system-scoped installs truthfully described as vetted
-    /// (the policy engine floors RiskClass::SystemMutation).
+    /// (the policy engine floors `RiskClass::SystemMutation`).
     #[test]
     fn prompt_teaches_dependency_discipline() {
         let prompt = get_system_prompt();
@@ -1104,7 +1104,7 @@ mod tests {
 
     /// Rendered prompts must never leak template placeholders; the plan-mode
     /// placeholders must stay present in the TEMPLATE for
-    /// system_prompt_for_state to substitute.
+    /// `system_prompt_for_state` to substitute.
     #[test]
     fn placeholders_are_substituted_or_present() {
         let prompt = get_system_prompt();
@@ -1122,8 +1122,8 @@ mod tests {
         );
     }
 
-    /// The five plan sections are a code contract: exit_plan_mode seeds the
-    /// checklist from "## Tasks" via parse_plan_tasks. Both the headings and
+    /// The five plan sections are a code contract: `exit_plan_mode` seeds the
+    /// checklist from "## Tasks" via `parse_plan_tasks`. Both the headings and
     /// the parser's acceptance of the advertised format are load-bearing.
     #[test]
     fn plan_prompt_format_matches_the_parser() {
@@ -1149,7 +1149,7 @@ mod tests {
     }
 
     /// Plan mode's capability story must stay truthful: writers blocked,
-    /// task_list readable, builds conditional on the capability line, and
+    /// `task_list` readable, builds conditional on the capability line, and
     /// the exit paths stated.
     #[test]
     fn plan_prompt_teaches_truthful_gating() {

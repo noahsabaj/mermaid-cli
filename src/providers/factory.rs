@@ -444,13 +444,13 @@ impl ProviderFactory {
 }
 
 /// Build a provider for the given `model_id`:
-///   1. `ollama/<model>` → OllamaProvider.
-///   2. `anthropic/<model>` → AnthropicProvider.
-///   3. `gemini/<model>` → GeminiProvider.
-///   4. `meta/<model>` → MetaProvider using the Responses API.
-///   5. Other builtin providers (openai, openrouter, groq, …) → OpenAICompatProvider.
-///   6. User-defined `[providers.<name>]` → custom OpenAICompatProvider.
-///   7. Bare model name → OllamaProvider.
+///   1. `ollama/<model>` → `OllamaProvider`.
+///   2. `anthropic/<model>` → `AnthropicProvider`.
+///   3. `gemini/<model>` → `GeminiProvider`.
+///   4. `meta/<model>` → `MetaProvider` using the Responses API.
+///   5. Other builtin providers (openai, openrouter, groq, …) → `OpenAICompatProvider`.
+///   6. User-defined `[providers.<name>]` → custom `OpenAICompatProvider`.
+///   7. Bare model name → `OllamaProvider`.
 async fn build_provider(config: &Config, model_id: &str) -> Result<Box<dyn ModelProvider>> {
     let (provider, model_name) = parse_model_id(model_id);
     let provider_lc = provider.to_lowercase();
@@ -596,7 +596,7 @@ static PROFILE_CACHE: std::sync::LazyLock<
 /// id*, so without a cache this leaked a fresh profile for every custom
 /// `provider/model` pair — a permanent, per-distinct-model_id growth, not the
 /// "0-3" the old comment claimed. The profile's content depends only on
-/// (provider name, base_url, api_key_env, compat) and NOT on the model, so we
+/// (provider name, `base_url`, `api_key_env`, compat) and NOT on the model, so we
 /// key the cache on exactly those and leak at most once per distinct
 /// combination; repeated resolves (including different models of the same custom
 /// provider) reuse the same `&'static`.
@@ -648,7 +648,7 @@ fn user_profile_to_static(
 
 /// Build Cloudflare Workers AI's account-scoped OpenAI-compatible base URL. The
 /// adapter appends `/chat/completions`, so this ends at `/ai/v1`. Kept pure and
-/// separate so it's directly unit-testable (a built provider exposes no base_url
+/// separate so it's directly unit-testable (a built provider exposes no `base_url`
 /// getter).
 fn cloudflare_base_url(account_id: &str) -> String {
     format!(
@@ -736,7 +736,7 @@ fn validate_provider_base_url(url: &str) -> Result<()> {
 ///   * validate the scheme via [`validate_provider_base_url`], which already
 ///     requires https for any non-loopback host, so an `http://` override can't
 ///     leak the key in cleartext (http stays allowed only for
-///     localhost/127.0.0.1/::1 local dev), and
+///     `localhost/127.0.0.1/::1` local dev), and
 ///   * emit a one-time warning naming the host the key will be sent to, so a
 ///     redirect to an unexpected host (e.g. `https://attacker.example`) is
 ///     visible rather than silent.

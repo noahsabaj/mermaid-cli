@@ -332,7 +332,7 @@ pub(crate) fn evict_stale_screenshots(mut messages: Vec<ChatMessage>) -> Vec<Cha
     messages
 }
 
-/// The user loosening the safety mode (e.g. read_only → full_access) leaves the
+/// The user loosening the safety mode (e.g. `read_only` → `full_access`) leaves the
 /// *old* read-only denials sitting in the conversation history, still asserting
 /// verbatim that mutations are blocked. A model trusts those concrete
 /// tool-results over the (correct, live) system-prompt line and so refuses to
@@ -346,12 +346,12 @@ pub(crate) fn evict_stale_screenshots(mut messages: Vec<ChatMessage>) -> Vec<Cha
 /// - the match is the *contiguous* denial signature (`blocked by policy:` +
 ///   [`mermaid_runtime::READ_ONLY_DENIAL_MARKER`]), so a `grep` hit that happens
 ///   to contain the marker text is not rewritten;
-/// - it is a no-op in read_only (the denials still apply) and self-corrects if
+/// - it is a no-op in `read_only` (the denials still apply) and self-corrects if
 ///   the user toggles back down.
 ///
 /// Runs on the CLONED request vec (like [`evict_stale_screenshots`]); the
 /// on-screen transcript is untouched, and only `content` changes so the
-/// tool_use/tool_result pairing is preserved.
+/// `tool_use/tool_result` pairing is preserved.
 pub(crate) fn neutralize_superseded_policy_denials(
     messages: &mut [ChatMessage],
     mode: mermaid_runtime::SafetyMode,

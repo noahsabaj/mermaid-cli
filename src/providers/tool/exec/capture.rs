@@ -114,7 +114,7 @@ pub(crate) const TEE_LOG_CAP_BYTES: usize = 64 * 1024 * 1024;
 /// Bounded head+tail capture core, shared by the pipe reader (`read_capped`)
 /// and the PTY drain. Keeps the HEAD (up to cap/2) and a bounded TAIL ring:
 /// command output puts the actual error / exit summary at the END, which
-/// head-only truncation used to discard. head_cap + tail_cap == cap, so any
+/// head-only truncation used to discard. `head_cap` + `tail_cap` == cap, so any
 /// total <= cap reconstructs exactly (no marker); only a genuine overflow
 /// drops the middle.
 pub(crate) struct CappedCapture {

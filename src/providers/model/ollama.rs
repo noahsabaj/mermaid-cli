@@ -464,7 +464,7 @@ mod tests {
     }
 
     /// F11 regression guard: Ollama hardware options in the user's app config
-    /// must land in the ModelConfig's backend_options so the adapter's
+    /// must land in the `ModelConfig`'s `backend_options` so the adapter's
     /// `build_request_body` emits them under `options`. `num_ctx` now arrives via
     /// the resolver param (not a direct config forward), and `num_predict` is
     /// always derived.
@@ -504,7 +504,7 @@ mod tests {
     }
 
     /// An explicit `max_tokens` is an exact cap, bounded by the room left in
-    /// num_ctx (no reasoning reserve added — hard means hard).
+    /// `num_ctx` (no reasoning reserve added — hard means hard).
     #[test]
     fn build_model_config_derives_num_predict() {
         let req = ChatRequest {
@@ -536,7 +536,7 @@ mod tests {
     }
 
     /// The minimax incident, recomputed: a learned provider cap bounds the
-    /// AUTO num_predict below the full window room, so the retry (and every
+    /// AUTO `num_predict` below the full window room, so the retry (and every
     /// later turn) sends a value Ollama Cloud accepts.
     #[test]
     fn build_model_config_caps_num_predict_at_learned_ceiling() {

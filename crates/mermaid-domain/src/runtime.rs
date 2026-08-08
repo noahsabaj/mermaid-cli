@@ -171,7 +171,7 @@ pub struct RuntimeState {
     #[serde(skip)]
     pub offload_warned: HashSet<String>,
     /// Model-call cycles since the task checklist last changed, while a task
-    /// sits in_progress. Drives the staleness nudge (see `push_call_model`);
+    /// sits `in_progress`. Drives the staleness nudge (see `push_call_model`);
     /// session-only, reset by every `Msg::TasksUpdated`.
     #[serde(skip)]
     pub calls_since_task_update: u32,
@@ -212,7 +212,7 @@ pub struct RuntimeState {
     /// time.
     #[serde(skip)]
     pub run_tokens: RunTokenCounter,
-    /// Lines added/removed by file-mutating tools (write_file, apply_patch)
+    /// Lines added/removed by file-mutating tools (`write_file`, `apply_patch`)
     /// across the whole run, summed from each outcome's exact metadata counts
     /// so the end-of-run summary can show `+N/-M` without the user totting up
     /// per-call diffs. Reset on submit alongside `run_tokens`. Session-only.

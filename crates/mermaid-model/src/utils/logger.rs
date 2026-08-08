@@ -175,7 +175,7 @@ where
     .with_filter(ring_filter())
 }
 
-/// If the log file exceeds MAX_LOG_SIZE, rename it to `.log.old`
+/// If the log file exceeds `MAX_LOG_SIZE`, rename it to `.log.old`
 /// (overwriting any prior `.log.old`). Best-effort — rotation failures
 /// are silent because logging is non-critical. Runs once per startup.
 fn rotate_if_large(path: &Path) {
@@ -195,7 +195,7 @@ fn rotate_if_large(path: &Path) {
 ///   `--verbose` exactly as before;
 /// - the always-on [`TraceRing`] with a fixed mermaid-at-TRACE filter, so
 ///   `mermaid feedback` can export recent events without a reproduce-under-
-///   RUST_LOG round trip.
+///   `RUST_LOG` round trip.
 pub fn init_logger(verbose: bool) {
     // If --verbose flag is set, override to debug level
     // Otherwise use RUST_LOG environment variable, default to warn level
@@ -412,7 +412,7 @@ mod tests {
     }
 
     /// Local (non-global) subscriber for ring tests — never touches the
-    /// `TRACE_RING` OnceLock, so tests can't interfere with each other.
+    /// `TRACE_RING` `OnceLock`, so tests can't interfere with each other.
     fn with_ring_subscriber(ring: TraceRing, f: impl FnOnce()) {
         let subscriber =
             tracing_subscriber::registry().with(RingLayer { ring }.with_filter(ring_filter()));

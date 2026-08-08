@@ -37,7 +37,7 @@ pub struct TurnScope {
     id: TurnId,
     token: CancellationToken,
     /// A second signal, parallel to `token`, meaning "background the running
-    /// work, don't kill it" (Ctrl+B). Tools that can detach (execute_command)
+    /// work, don't kill it" (Ctrl+B). Tools that can detach (`execute_command`)
     /// `select!` on it; everyone else ignores it.
     background: CancellationToken,
     web_bytes: Arc<AtomicUsize>,
@@ -117,7 +117,7 @@ impl TurnScope {
         self.joins.is_empty()
     }
 
-    /// Drain any already-completed tasks from the JoinSet without
+    /// Drain any already-completed tasks from the `JoinSet` without
     /// blocking. `JoinSet::is_empty` only flips to true after finished
     /// tasks are explicitly harvested via `join_next`; without this,
     /// `EffectRunner::reap_empty_scopes` would see finished-but-not-

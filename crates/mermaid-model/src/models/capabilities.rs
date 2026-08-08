@@ -8,7 +8,7 @@
 //! flags) and Codex CLI uses on `ModelPreset.supported_reasoning_efforts`.
 //!
 //! For Step 1 the values are hardcoded conservative defaults. A future
-//! step can add per-model lookup (similar to https://models.dev) or
+//! step can add per-model lookup (similar to <https://models.dev>) or
 //! runtime probing (Ollama `/api/show`).
 
 use super::reasoning::ReasoningCapability;

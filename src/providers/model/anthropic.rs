@@ -1,7 +1,7 @@
 //! Anthropic provider — wraps `models::adapters::anthropic::AnthropicAdapter`.
 //!
 //! Same pattern as `ollama.rs`: the adapter handles the wire format
-//! (cache_control blocks, extended-thinking signature round-trip);
+//! (`cache_control` blocks, extended-thinking signature round-trip);
 //! this wrapper plumbs `ChatRequest` / `StreamContext` into it.
 //!
 //! Anthropic is the one provider that emits a `provider_continuation`

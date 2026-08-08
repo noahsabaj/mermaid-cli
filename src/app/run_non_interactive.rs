@@ -414,7 +414,7 @@ const FORMAT_PROMPT: &str = "Convert your final answer into a single JSON object
 conforms to the provided schema. Respond with only the JSON object - no prose, no code fences.";
 
 /// Run the dedicated `--output-schema` formatting turn: set the schema rider
-/// on state (build_chat_request drops all tools + adapters engage native
+/// on state (`build_chat_request` drops all tools + adapters engage native
 /// constrained output), seed the format prompt, and drive to idle.
 #[expect(clippy::too_many_arguments)]
 async fn run_formatting_turn(
@@ -497,7 +497,7 @@ fn apply_schema_outcome(result: &mut RunResult, state: &State, schema: &serde_js
 }
 
 /// Trim a single wrapping markdown code fence (with optional info string) —
-/// models wrap JSON in ```json fences despite instructions.
+/// models wrap JSON in ` ```json ` fences despite instructions.
 fn strip_code_fences(text: &str) -> &str {
     let t = text.trim();
     let Some(rest) = t.strip_prefix("```") else {

@@ -212,7 +212,7 @@ impl ToolRegistry {
     /// reducer loops hit the same provider cache.
     ///
     /// Returns `Arc<Self>` so the effect runner can share a handle
-    /// across turns without cloning the underlying HashMap.
+    /// across turns without cloning the underlying `HashMap`.
     pub fn build(
         config: &mermaid_domain::Config,
         mode: TuiMode,

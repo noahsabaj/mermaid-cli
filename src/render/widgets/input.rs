@@ -75,7 +75,7 @@ impl Default for InputState {
     }
 }
 
-/// Props for InputWidget. The slash-command palette is rendered
+/// Props for `InputWidget`. The slash-command palette is rendered
 /// separately as `SlashPaletteWidget` in the bottom region (see
 /// `render.rs`); this widget just draws the bordered input box.
 pub struct InputWidget<'a> {

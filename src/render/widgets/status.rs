@@ -12,7 +12,7 @@ use mermaid_domain::{ContextUsageSnapshot, format_compact_count};
 use mermaid_model::models::{ReasoningLevel, TokenUsageSource};
 use mermaid_runtime::SafetyMode;
 
-/// Props for StatusWidget (stateless widget)
+/// Props for `StatusWidget` (stateless widget)
 pub struct StatusWidget<'a> {
     pub theme: &'a Theme,
     pub working_dir: &'a str,

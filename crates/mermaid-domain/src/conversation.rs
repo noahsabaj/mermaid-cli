@@ -89,7 +89,7 @@ pub struct ConversationHistory {
     pub cli_version: Option<String>,
     #[serde(default)]
     pub git_sha: Option<String>,
-    /// The task checklist (task_create/task_update tools + /tasks command).
+    /// The task checklist (`task_create/task_update` tools + /tasks command).
     /// Snapshotted on every save so --resume/--continue restore an in-flight
     /// plan; sessions saved before this field existed load an empty store.
     #[serde(default)]

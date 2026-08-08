@@ -68,7 +68,7 @@ pub enum ThinkingShape {
 /// Highest `output_config.effort` tier the model accepts (ordered). Consumed
 /// by the anthropic adapter only. Every xhigh-capable model also accepts
 /// `max` (verified against the effort doc), so one ordered ceiling encodes
-/// the old supports_effort / supports_max_effort / supports_xhigh_effort
+/// the old `supports_effort` / `supports_max_effort` / `supports_xhigh_effort`
 /// trio: `> None` ⇒ effort accepted, `>= Max` ⇒ "max" accepted,
 /// `>= XHigh` ⇒ "xhigh" accepted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

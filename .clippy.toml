@@ -1,9 +1,10 @@
 # Clippy configuration for Mermaid.
 #
 # INVARIANT: every key here configures a lint that is actually enabled — either
-# in a default group, or explicitly in the `[lints.clippy]` table carried by all
-# three manifests. A key for a lint nobody turned on is a claim the build does
-# not make.
+# in a default group, explicitly in the `[lints.clippy]` table carried by all
+# three manifests, or by name in `check_clippy_ratchet.py`'s `LINTS` (tracked,
+# not blocking, but measured on every push to main). A key for a lint nobody
+# turned on in any of those three ways is a claim the build does not make.
 #
 # That invariant is not decorative. `too-many-lines-threshold = 100` sat here
 # for the life of the repo while `clippy::too_many_lines` (a *pedantic* lint)
@@ -40,3 +41,43 @@ array-size-threshold = 512
 
 # `dbg!` is denied workspace-wide; tests may still use it.
 allow-dbg-in-tests = true
+
+# Words `clippy::doc_markdown` must stop demanding backticks around. The lint is
+# tracked by the ratchet job, not blocking (see `check_clippy_ratchet.py`), and
+# it is the single largest entry in `clippy_pedantic.txt` — but it fires on any
+# mixed-case word, so left unconfigured it says a product name in prose is code.
+# Backticks mean "this is an identifier"; writing `OpenAI` in a sentence about
+# the vendor is a false claim, and running `--fix` without this list produces
+# about a hundred of them.
+#
+# `".."` extends clippy's built-in list rather than replacing it. Only add a
+# word here when it is genuinely prose. Type, variant, and field names —
+# `TurnId`, `FullAccess`, `ReadOnly` — belong in backticks and must NOT be
+# listed; nor must literal tokens that merely look like prose, e.g. the SDDL
+# codes `GA`/`SY` or the SQL keyword `LIMIT`.
+doc-valid-idents = [
+    # Vendors and products.
+    "OpenAI",
+    "OpenRouter",
+    "OpenCode",
+    "DeepInfra",
+    "DeepSeek",
+    "MiniMax",
+    "SambaNova",
+    "LMStudio",
+    "SearXNG",
+    "ImageMagick",
+    "SQLite",
+    "CPython",
+    "PyPI",
+    # Platform technologies, named in prose rather than called.
+    "ConPTY",
+    "AppContainer",
+    "SELinux",
+    "HiDPI",
+    # Prose that happens to carry an acronym: a point of presence, and the
+    # past tense of the HTTP verb.
+    "PoP",
+    "POSTed",
+    "..",
+]

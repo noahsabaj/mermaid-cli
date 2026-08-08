@@ -20,7 +20,7 @@ const MAX_AGENT_ROWS: usize = 6;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentPanelRow {
     pub description: String,
-    /// Short stable label ("read_file…", "thinking"); empty = omitted.
+    /// Short stable label ("`read_file`…", "thinking"); empty = omitted.
     pub activity: String,
     /// Cumulative output-token estimate; 0 = omitted.
     pub tokens: usize,

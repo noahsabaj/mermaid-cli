@@ -133,7 +133,7 @@ pub struct ChatMessage {
     #[serde(default)]
     pub tool_calls: Option<Vec<crate::models::tool_call::ToolCall>>,
     /// Tool call ID for tool result messages (OpenAI-compatible format)
-    /// This links the tool result back to the original tool_call from the assistant
+    /// This links the tool result back to the original `tool_call` from the assistant
     #[serde(default)]
     pub tool_call_id: Option<String>,
     /// Tool name for tool result messages (required by Ollama API)

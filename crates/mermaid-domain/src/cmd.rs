@@ -148,7 +148,7 @@ pub enum Cmd {
     UserTaskEdit(crate::checklist::UserChecklistEdit),
 
     /// A task transitioned to completed: run the gated `task_completed`
-    /// plugin hook. A denying hook flips the task back to in_progress via
+    /// plugin hook. A denying hook flips the task back to `in_progress` via
     /// the broker and queues a notice for the model's next turn.
     NotifyTaskCompleted {
         task: crate::checklist::ChecklistItem,

@@ -966,7 +966,7 @@ impl ToolOutcome {
 }
 
 /// Live activity for one in-flight tool call (today: a subagent child).
-/// `activity` is a short stable label ("read_file…", "thinking"); `tokens`
+/// `activity` is a short stable label ("`read_file`…", "thinking"); `tokens`
 /// is the child's cumulative output-token estimate, throttled at the source.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LiveToolStatus {
@@ -1088,7 +1088,7 @@ pub struct UiState {
     pub live_tool_status: HashMap<ToolCallId, LiveToolStatus>,
     /// Up-arrow history navigation cursor into
     /// `session.conversation.input_history`. `None` = not
-    /// navigating (input_buffer is whatever the user typed).
+    /// navigating (`input_buffer` is whatever the user typed).
     /// `Some(i)` = currently displaying history entry at index `i`
     /// from the END (0 = newest).
     pub input_history_cursor: Option<usize>,

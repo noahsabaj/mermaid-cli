@@ -65,7 +65,7 @@ impl Backend {
     }
 
     /// Whether this backend can inject pointer + keyboard events (click,
-    /// type_text, press_key, scroll, mouse_move). X11 (xdotool) and Wayland
+    /// `type_text`, `press_key`, scroll, `mouse_move`). X11 (xdotool) and Wayland
     /// (ydotool/wtype) only; macOS capture works via `screencapture`, but the
     /// input verbs are unimplemented and `bail!` in the driver, so they must
     /// not be advertised there (#35). Windows is a stub.
@@ -188,7 +188,7 @@ pub(super) fn computer_use_success(
     )
 }
 
-/// Shared post-action auto-screenshot for click / type_text / press_key.
+/// Shared post-action auto-screenshot for click / `type_text` / `press_key`.
 ///
 /// When `computer_use.auto_screenshot` is enabled, captures the focused window,
 /// emits an inline `Artifact` preview on the progress channel, and returns

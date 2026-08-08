@@ -420,7 +420,7 @@ fn plan_level_decision(
 /// Apply the plan permission profile on top of the read-only floor's
 /// decision: soften the mode-default deny per category (plan file, memory,
 /// known-safe builds), and apply the explicit Web permission over the floor's
-/// default — including ReadOnly's one-shot approval, which the profile may
+/// default — including `ReadOnly`'s one-shot approval, which the profile may
 /// tighten or relax. Override denies and the destructive hard-deny carry
 /// different reasons and pass through untouched.
 ///
@@ -1108,7 +1108,7 @@ mod tests {
         req
     }
 
-    /// Plan-mode ctx: the reducer floors the mode to ReadOnly and stamps the
+    /// Plan-mode ctx: the reducer floors the mode to `ReadOnly` and stamps the
     /// plan file; mirror both here.
     fn ctx_plan() -> ExecContext {
         let mut c = ctx(SafetyMode::ReadOnly);

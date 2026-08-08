@@ -905,9 +905,9 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
 
 /// Emit `Cmd::SetTerminalTitle` iff the derived title changed since
 /// the last emission. Called from arms that actually mutate
-/// `state.session.conversation.title` (SubmitPrompt, ConversationLoaded,
-/// ConfirmAccepted → ClearConversation) — never at the tail of every
-/// update() so `Tick`/resize/etc. stay free.
+/// `state.session.conversation.title` (`SubmitPrompt`, `ConversationLoaded`,
+/// `ConfirmAccepted` → `ClearConversation`) — never at the tail of every
+/// `update()` so `Tick`/resize/etc. stay free.
 pub(crate) fn emit_title_if_changed(state: &mut State, cmds: &mut Vec<Cmd>) {
     let title = desired_title(state);
     if state.ui.last_title_dispatched.as_deref() != Some(title.as_str()) {
@@ -1987,7 +1987,7 @@ pub(crate) fn handle_rewind_picker_key(state: &mut State, cmds: &mut Vec<Cmd>, c
 /// with the selected message — edit and resend to branch the timeline.
 ///
 /// Idle-only by construction (the picker opens from an idle double-Esc), so
-/// there is no in-flight TurnId or scope to reconcile when the id swaps.
+/// there is no in-flight `TurnId` or scope to reconcile when the id swaps.
 /// Replace the render/persist copy of the checklist with the broker's
 /// snapshot, firing `Cmd::NotifyTaskCompleted` for each task that flipped to
 /// completed relative to the previous copy (a re-sent identical snapshot
@@ -2015,7 +2015,7 @@ pub(crate) fn handle_tasks_updated(
 }
 
 /// `/todos` — the user's side of the checklist. Bare `/todos` prints the
-/// list; edits route through `Cmd::UserTaskEdit` to the TaskBroker (single
+/// list; edits route through `Cmd::UserTaskEdit` to the `TaskBroker` (single
 /// writer), whose publish updates the band and whose notice tells the model.
 pub(crate) fn handle_todos_command(state: &mut State, cmds: &mut Vec<Cmd>, arg: Option<&str>) {
     use crate::UserChecklistEdit;
@@ -2111,7 +2111,7 @@ pub(crate) fn push_task_notice(state: &mut State, text: String) {
     state.pending_task_notices.push(text);
 }
 
-/// How many model-call cycles an in_progress task may sit untouched before
+/// How many model-call cycles an `in_progress` task may sit untouched before
 /// the reducer injects a staleness nudge (then re-arms for another window).
 const TASK_STALENESS_CALLS: u32 = 5;
 
@@ -2516,7 +2516,7 @@ pub(crate) fn history_nav_forward(state: &mut State) {
     state.ui.input_cursor = state.ui.input_buffer.len();
 }
 
-/// Cycle ReasoningLevel through every variant, wrapping around. Used
+/// Cycle `ReasoningLevel` through every variant, wrapping around. Used
 /// by Alt+T. Order matches the `Ord` impl so the cycle walks from
 /// lowest to highest and back to None.
 pub(crate) fn cycle_reasoning(
@@ -2534,8 +2534,8 @@ pub(crate) fn cycle_reasoning(
     }
 }
 
-/// Cycle SafetyMode by increasing permissiveness, wrapping around. Used by
-/// Shift+Tab: Plan → ReadOnly → Ask → Auto → FullAccess → Plan.
+/// Cycle `SafetyMode` by increasing permissiveness, wrapping around. Used by
+/// Shift+Tab: Plan → `ReadOnly` → Ask → Auto → `FullAccess` → Plan.
 ///
 /// Plan is a position in the cycle like any other mode — it is the strictest
 /// one (`permissiveness() == 0`), so the walk starts there. Entering it still
@@ -5230,7 +5230,7 @@ pub(crate) fn push_plan_reminder(state: &mut State, cmds: &mut Vec<Cmd>) {
 ///
 /// One predicate, two consumers: the advertised tool set and the task-staleness
 /// nudge. They disagreed — the nudge kept telling the model to "update it
-/// (task_update)" for a tool that was neither advertised nor permitted, and
+/// (`task_update`)" for a tool that was neither advertised nor permitted, and
 /// since only a successful update resets the counter, the contradiction
 /// re-injected itself every `TASK_STALENESS_CALLS` dispatches for the whole
 /// planning session.
@@ -5278,7 +5278,7 @@ pub(crate) fn push_call_model(state: &mut State, cmds: &mut Vec<Cmd>, turn: Turn
 /// [`note_safety_mode_change`] recognizes its own pending nudge to retract it.
 const SAFETY_NUDGE_PREFIX: &str = "Safety mode is now ";
 
-/// One-line note injected for the model when the user leaves read_only while
+/// One-line note injected for the model when the user leaves `read_only` while
 /// stale read-only denials are in history, so it re-attempts gated actions
 /// instead of trusting the old blocks. Stamped `RecoveryNudge`: hidden from the
 /// transcript (the status bar already shows the mode) and swept once the
@@ -5297,12 +5297,12 @@ pub(crate) fn safety_loosened_note(mode: mermaid_runtime::SafetyMode) -> String 
 /// loosened-mode nudge, always naming the current mode:
 ///
 /// - retracts any still-pending nudge first — it names a stale mode and, on a
-///   tighten back to read_only, would contradict the standing denials;
+///   tighten back to `read_only`, would contradict the standing denials;
 /// - (re-)injects one only while a leave-read_only event is pending: either
-///   this switch leaves read_only, or a pending nudge proves an unsent earlier
-///   leave (the user is still cycling, e.g. read_only → ask → auto).
+///   this switch leaves `read_only`, or a pending nudge proves an unsent earlier
+///   leave (the user is still cycling, e.g. `read_only` → ask → auto).
 ///
-/// A loosening long after read_only (no pending nudge) stays silent — the
+/// A loosening long after `read_only` (no pending nudge) stays silent — the
 /// per-request denial rewrite already covers it, and re-announcing on every
 /// loosening step was the old bug.
 pub(crate) fn note_safety_mode_change(
@@ -7055,7 +7055,7 @@ mod tests {
         assert_eq!(count_no_vision_notices(&state), 0);
     }
 
-    /// A probe that lands after a `/model` switch (model_id no longer matches the
+    /// A probe that lands after a `/model` switch (`model_id` no longer matches the
     /// active model) is dropped — no warning for the model now in use.
     #[test]
     fn stale_vision_probe_is_dropped() {
@@ -7118,7 +7118,7 @@ mod tests {
     }
 
     /// F14: a `Msg::ClipboardRead(Image)` (the Ctrl+V clipboard read result)
-    /// creates an Attachment entry and emits Cmd::WriteImageToTemp. This is the
+    /// creates an Attachment entry and emits `Cmd::WriteImageToTemp`. This is the
     /// existing contract; the test pins it so the Ctrl+V wiring has a
     /// known-good downstream to rely on.
     #[test]
@@ -8321,7 +8321,7 @@ mod tests {
         );
     }
 
-    /// Drive a natural run end (StreamDone with no tool calls) on a state
+    /// Drive a natural run end (`StreamDone` with no tool calls) on a state
     /// whose run anchor is set, returning the post-run state and cmds.
     fn finish_run(mut state: State) -> (State, Vec<Cmd>) {
         state.runtime.run_started =
@@ -12307,7 +12307,7 @@ mod tests {
         assert_eq!(plan_path_for(&state), plan_path_for(&state));
     }
 
-    /// While planning, the base prompt must stop recommending task_create and
+    /// While planning, the base prompt must stop recommending `task_create` and
     /// demanding implementation — the plan appendix owns behavior, and weak
     /// models resolve contradictions by momentum.
     #[test]
@@ -12382,7 +12382,7 @@ mod tests {
 
     /// Issue #282: plan mode and safety mode used to be orthogonal values, so
     /// Shift+Tab while planning set `full_access` live and the injector emitted
-    /// a permanent, never-swept "Safety mode changed … to full_access" marker
+    /// a permanent, never-swept "Safety mode changed … to `full_access`" marker
     /// while the plan read-only floor was still in force. The model read that
     /// as permission to mutate and collected denials — the exact loop the
     /// salience work exists to prevent.
@@ -13223,7 +13223,7 @@ mod tests {
         );
     }
 
-    /// Drive a single named tool call through StreamDone so the turn lands in
+    /// Drive a single named tool call through `StreamDone` so the turn lands in
     /// `ExecutingTools`, returning the allocated call id.
     fn drive_single_tool_call(state: &mut State, tool: &str) -> crate::ToolCallId {
         state.turn = TurnState::Generating {
@@ -14758,7 +14758,7 @@ mod tests {
         assert!(matches!(state.turn, TurnState::Idle));
     }
 
-    /// Build a one-call ExecutingTools state around an `agent` tool call,
+    /// Build a one-call `ExecutingTools` state around an `agent` tool call,
     /// shared by the subagent progress/rollup tests below.
     fn state_executing_agent_call() -> (State, mermaid_model::ids::ToolCallId) {
         let mut state = fresh_state();

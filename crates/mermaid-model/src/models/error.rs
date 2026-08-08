@@ -1,6 +1,6 @@
 //! Comprehensive error types for the model system
 //!
-//! Replaces scattered anyhow::Error usage with structured, actionable errors
+//! Replaces scattered `anyhow::Error` usage with structured, actionable errors
 //! that enable proper recovery, retry logic, and user-friendly messages.
 
 use serde::{Deserialize, Serialize};
@@ -596,14 +596,14 @@ impl std::error::Error for ConfigError {}
 /// Result type alias for model operations
 pub type Result<T> = std::result::Result<T, ModelError>;
 
-/// Conversion from anyhow::Error (for gradual migration)
+/// Conversion from `anyhow::Error` (for gradual migration)
 impl From<anyhow::Error> for ModelError {
     fn from(err: anyhow::Error) -> Self {
         ModelError::InvalidRequest(err.to_string())
     }
 }
 
-/// Conversion from reqwest::Error
+/// Conversion from `reqwest::Error`
 impl From<reqwest::Error> for ModelError {
     fn from(err: reqwest::Error) -> Self {
         if err.is_timeout() {
@@ -642,7 +642,7 @@ impl From<reqwest::Error> for ModelError {
     }
 }
 
-/// Conversion from serde_json::Error
+/// Conversion from `serde_json::Error`
 impl From<serde_json::Error> for ModelError {
     fn from(err: serde_json::Error) -> Self {
         ModelError::ParseError {

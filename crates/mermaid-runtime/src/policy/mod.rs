@@ -12,7 +12,7 @@ pub enum SafetyMode {
     /// the Shift+Tab cycle — the strictest one. It used to be a separate
     /// `Session.plan: Option<_>` orthogonal to `safety_mode`, which meant the
     /// two could disagree: Shift+Tab while planning set `full_access` and the
-    /// harness then told the model "safety mode changed to full_access" while
+    /// harness then told the model "safety mode changed to `full_access`" while
     /// the plan read-only floor was still in force — a contradiction the model
     /// resolved by attempting mutations and collecting denials. With one mode
     /// value that state is unrepresentable. `Session.plan` still carries the
@@ -39,7 +39,7 @@ impl SafetyMode {
         }
     }
 
-    /// Parse a canonical mode name. Accepts ONLY the canonical snake_case
+    /// Parse a canonical mode name. Accepts ONLY the canonical `snake_case`
     /// names — no legacy aliases (the old `"auto_review"` is gone).
     pub fn parse(s: &str) -> Option<Self> {
         match s {
@@ -58,8 +58,8 @@ impl SafetyMode {
         matches!(self, SafetyMode::Plan)
     }
 
-    /// Permissiveness rank for combining modes: plan/read_only are strictest,
-    /// full_access loosest. Plan ranks below read-only because its carve-outs
+    /// Permissiveness rank for combining modes: `plan/read_only` are strictest,
+    /// `full_access` loosest. Plan ranks below read-only because its carve-outs
     /// only ever open paths the gate re-checks, and a subagent must never
     /// inherit "planning" as a ceiling (children explore, they don't plan).
     pub fn permissiveness(self) -> u8 {
@@ -137,7 +137,7 @@ pub enum RiskClass {
     /// `pip install`, `brew`/`apt`/`winget` installs): they mutate the
     /// MACHINE, not the project — outside checkpoint reach, visible to every
     /// other project — so the `system_installs` floor vets them even in
-    /// full_access. Project-local installs (`npm install`, `cargo add`)
+    /// `full_access`. Project-local installs (`npm install`, `cargo add`)
     /// deliberately stay Process.
     SystemMutation,
     Destructive,
@@ -298,7 +298,7 @@ impl PolicyDecision {
 /// the mode's decision is strengthened to at least this level (severity
 /// order `Allow < Auto < Ask < Deny`). Default `Auto`: the intent
 /// classifier vets the call against the user's request — aligned runs
-/// silently, off-task escalates — even in full_access. `allow` restores
+/// silently, off-task escalates — even in `full_access`. `allow` restores
 /// the old unconditional-allow behavior per knob.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1456,7 +1456,7 @@ mod tests {
     /// An unquoted `<<` that is NOT a heredoc operator must not swallow the
     /// following lines as inert data. Each of these hid a real `git push`
     /// behind a phantom heredoc whose delimiter never terminates, classifying
-    /// the whole command ReadOnly — which `read_only` mode and the plan-mode
+    /// the whole command `ReadOnly` — which `read_only` mode and the plan-mode
     /// floor both auto-allow.
     #[test]
     fn phantom_heredocs_do_not_swallow_following_commands() {

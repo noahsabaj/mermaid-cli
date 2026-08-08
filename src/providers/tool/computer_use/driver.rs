@@ -963,7 +963,7 @@ fn read_png_height(bytes: &[u8]) -> Option<u32> {
 
 /// Downscale the PNG at `path` to at most `max_width` pixels wide,
 /// using ImageMagick `convert` or ffmpeg as a fallback. Returns the
-/// scale factor (original_width / max_width; 1.0 if no scaling was
+/// scale factor (`original_width` / `max_width`; 1.0 if no scaling was
 /// needed).
 async fn downscale_if_needed(path: &str, max_width: u32) -> Result<f64> {
     let bytes = tokio::fs::read(path).await?;

@@ -940,7 +940,7 @@ impl OpenAICompatAdapter {
 
     /// Cloudflare's OpenAI-compat surface carries no limit metadata; the
     /// account-level management endpoint `…/accounts/{id}/ai/models/search`
-    /// does (same bearer token). Derive it from the chat base_url when that
+    /// does (same bearer token). Derive it from the chat `base_url` when that
     /// is the canonical account-scoped shape (`…/ai/v1`). AI Gateway
     /// overrides (`…/workers-ai/v1`) don't end in `/ai/v1` and get `None` —
     /// generic discovery, same as before.
@@ -2283,7 +2283,7 @@ mod tests {
         assert!(body.get("reasoning").is_none());
     }
 
-    /// XHigh on an Effort-strategy provider round-trips intact as
+    /// `XHigh` on an Effort-strategy provider round-trips intact as
     /// `reasoning_effort: "xhigh"`. OpenAI GPT-5.2+ honors it; other
     /// providers on this strategy will 400 (explicit failure is
     /// preferable to silent downgrade).

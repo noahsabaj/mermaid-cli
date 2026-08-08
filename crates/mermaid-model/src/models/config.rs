@@ -1,6 +1,6 @@
 //! Unified configuration system for models and backends
 //!
-//! Replaces the fragmented app::Config + models::ModelConfig split
+//! Replaces the fragmented `app::Config` + `models::ModelConfig` split
 //! with a single, coherent, backend-agnostic configuration structure.
 
 use crate::constants::DEFAULT_TEMPERATURE;
@@ -53,7 +53,7 @@ pub struct ModelConfig {
     pub hide_reasoning_trace: bool,
 
     /// Backend-specific options (provider name -> key/value pairs)
-    /// Example: {"ollama": {"num_gpu": "10", "num_ctx": "8192"}}
+    /// Example: {"ollama": {"`num_gpu"`: "10", "`num_ctx"`: "8192"}}
     #[serde(default)]
     pub backend_options: HashMap<String, HashMap<String, String>>,
 
@@ -170,7 +170,7 @@ impl ModelConfig {
     }
 }
 
-/// Ollama-specific options (extracted from backend_options)
+/// Ollama-specific options (extracted from `backend_options`)
 #[derive(Debug, Clone, Default)]
 pub struct OllamaOptions {
     pub num_gpu: Option<i32>,
@@ -187,7 +187,7 @@ pub struct OllamaOptions {
 /// Backend connection configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BackendConfig {
-    /// Ollama server URL (default: http://localhost:11434)
+    /// Ollama server URL (default: <http://localhost:11434>)
     #[serde(default = "default_ollama_url")]
     pub ollama_url: String,
 

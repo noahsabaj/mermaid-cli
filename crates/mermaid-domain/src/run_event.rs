@@ -22,7 +22,7 @@ use mermaid_model::tool_run::{ToolMetadata, ToolStatus};
 pub const RUN_EVENT_PROTOCOL_VERSION: u32 = 1;
 
 /// One line of the `mermaid run --format ndjson` stream. Internally tagged on
-/// `type` (snake_case), matching the house style for stable wire unions
+/// `type` (`snake_case`), matching the house style for stable wire unions
 /// (`ToolMetadata`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -140,7 +140,7 @@ pub enum RunEvent {
         session_id: String,
         /// `--output-schema` runs: the response parsed as JSON, present only
         /// when it parsed AND validated against the schema. Additive
-        /// (defaulted) — protocol_version stays 1.
+        /// (defaulted) — `protocol_version` stays 1.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         structured_output: Option<serde_json::Value>,
     },
@@ -305,7 +305,7 @@ pub struct TaskLine {
     /// `pending` / `in_progress` / `completed`.
     pub status: String,
     pub active_form: String,
-    /// Seconds spent in_progress→completed, when both stamps exist.
+    /// Seconds spent `in_progress→completed`, when both stamps exist.
     #[serde(default)]
     pub elapsed_secs: Option<u64>,
     /// Completion tokens attributed while in progress, when known.
@@ -336,7 +336,7 @@ impl From<&crate::ChecklistItem> for TaskLine {
     }
 }
 
-/// Snake_case name of a finished tool, from its run-metadata tag. The exhaustive
+/// `Snake_case` name of a finished tool, from its run-metadata tag. The exhaustive
 /// match doubles as a drift guard: a new `ToolMetadata` variant forces a name
 /// mapping here.
 fn tool_name(detail: &ToolMetadata) -> String {

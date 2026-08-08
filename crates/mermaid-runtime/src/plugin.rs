@@ -629,7 +629,7 @@ mod tests {
         parse_hook_output("p", "h", stdout.as_bytes(), b"", Some(exit_status(0)))
     }
 
-    /// Build a real ExitStatus with the given code (portable enough: run a
+    /// Build a real `ExitStatus` with the given code (portable enough: run a
     /// shell that exits with it).
     fn exit_status(code: i32) -> std::process::ExitStatus {
         #[cfg(unix)]

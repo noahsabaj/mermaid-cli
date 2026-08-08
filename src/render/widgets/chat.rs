@@ -41,7 +41,7 @@ pub struct ImageClickTarget {
 /// State for the chat widget
 #[derive(Debug, Clone)]
 pub struct ChatState {
-    /// Manual scroll offset (only used when is_user_scrolling = true)
+    /// Manual scroll offset (only used when `is_user_scrolling` = true)
     scroll_offset: u16,
     /// Whether user is manually scrolling (not following bottom)
     is_user_scrolling: bool,
@@ -105,7 +105,7 @@ impl ChatState {
     }
 
     /// Get the scroll position for rendering
-    /// scroll_offset represents distance from bottom, convert to ratatui scroll position
+    /// `scroll_offset` represents distance from bottom, convert to ratatui scroll position
     pub fn get_scroll_position(&self, content_height: u16, viewport_height: u16) -> u16 {
         let max_scroll = content_height.saturating_sub(viewport_height);
         if self.is_user_scrolling {
@@ -146,7 +146,7 @@ impl ChatState {
     }
 
     /// Find an image click target at the given screen coordinates.
-    /// Returns Some((message_index, image_index)) if an image indicator was clicked.
+    /// Returns `Some((message_index`, `image_index`)) if an image indicator was clicked.
     pub fn find_image_at_screen_pos(&self, screen_row: u16) -> Option<&ImageClickTarget> {
         let (_, area_y, _, area_height) = self.last_chat_area?;
 
@@ -403,7 +403,7 @@ impl Default for ChatState {
     }
 }
 
-/// Props for ChatWidget
+/// Props for `ChatWidget`
 pub struct ChatWidget<'a> {
     pub messages: &'a [ChatMessage],
     pub theme: &'a Theme,
@@ -2231,7 +2231,7 @@ mod tests {
         assert_eq!(text, "    short");
     }
 
-    /// Build a ChatState whose last frame rendered `rows`, with a selection
+    /// Build a `ChatState` whose last frame rendered `rows`, with a selection
     /// already mapped to content coords, so `selected_text` can be tested
     /// without a real terminal.
     fn state_with_rows(rows: &[&str], sel: ((usize, usize), (usize, usize))) -> ChatState {
@@ -2491,7 +2491,7 @@ mod tests {
     /// hangs its continuation lines under the item text (col 6 = 2 gutter + 2
     /// nesting indent + 2 marker), instead of snapping back to the message gutter.
     /// Exercises the same span shape chat.rs builds, with the continuation indent
-    /// chat.rs derives via markdown::line_hanging_indent (4) + the gutter (2).
+    /// chat.rs derives via `markdown::line_hanging_indent` (4) + the gutter (2).
     #[test]
     fn wrap_styled_line_hangs_list_continuation_under_marker() {
         let line = Line::from(vec![

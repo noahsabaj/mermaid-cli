@@ -419,7 +419,7 @@ pub enum Msg {
     /// Mouse-wheel scroll in the chat pane. Positive delta = scroll
     /// toward older messages (up), negative = toward newer (down). The
     /// reducer accumulates into `ui.mouse_scroll_accum`; the render layer
-    /// diffs it and applies the delta to the ChatWidget's scroll offset.
+    /// diffs it and applies the delta to the `ChatWidget`'s scroll offset.
     MouseScroll {
         delta: i16,
     },
@@ -594,7 +594,7 @@ pub enum SlashCmd {
     List,
     Usage,
     /// The task checklist: no arg → show; `add <subject>` / `rm <id>` /
-    /// `done <id>` / `clear` edit it (routed through the TaskBroker).
+    /// `done <id>` / `clear` edit it (routed through the `TaskBroker`).
     Todos(Option<String>),
     /// Show the session scratch directory and a bounded listing of its
     /// contents (via `Cmd::ListScratchpad`).
@@ -804,7 +804,7 @@ pub enum MsgKind {
 }
 
 /// Helper for `app::event_source` — pass through the MCP config that
-/// effect::mcp needs to dispatch `InitMcpServers` as its first effect.
+/// `effect::mcp` needs to dispatch `InitMcpServers` as its first effect.
 /// Not a `Msg` because it's startup-only.
 #[derive(Debug, Clone)]
 pub struct StartupConfig {
