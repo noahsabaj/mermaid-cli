@@ -116,7 +116,10 @@ fn readme_doc_links_resolve() {
         .filter_map(|tail| tail.split(')').next())
         .filter_map(|link| link.split('#').next())
         .collect();
-    assert!(!targets.is_empty(), "expected the README to link into docs/");
+    assert!(
+        !targets.is_empty(),
+        "expected the README to link into docs/"
+    );
     for name in targets {
         assert!(
             docs.join(name).exists(),
