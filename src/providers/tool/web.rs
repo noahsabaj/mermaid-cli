@@ -247,6 +247,10 @@ pub struct WebSearchTool {
 
 const MAX_WEB_SEARCH_FAILURE_BYTES: usize = 1024;
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+)]
 #[async_trait]
 impl ToolExecutor for WebSearchTool {
     fn name(&self) -> &'static str {
@@ -720,6 +724,10 @@ where
     .map_err(|error| format!("web snapshot renderer failed: {error}"))
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+)]
 #[async_trait]
 impl ToolExecutor for WebFetchTool {
     fn name(&self) -> &'static str {

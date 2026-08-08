@@ -285,6 +285,10 @@ const DIM: Color = Color::DarkGray;
 /// Takes `&mut SelectorState` because the viewport height is only known here:
 /// it records how many entries fit (for follow-selection) and clamps the
 /// wheel-driven scroll offset to the valid range.
+#[expect(
+    clippy::too_many_lines,
+    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+)]
 pub fn render(f: &mut Frame, state: &mut SelectorState, now: DateTime<Local>) {
     let layout = Layout::default()
         .direction(Direction::Vertical)

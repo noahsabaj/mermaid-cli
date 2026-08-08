@@ -989,6 +989,10 @@ async fn handle_json_command(
 }
 
 #[cfg(any(unix, windows))]
+#[expect(
+    clippy::too_many_lines,
+    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+)]
 async fn handle_task_command(
     request: mermaid_cli::runtime::DaemonRequest,
 ) -> Result<serde_json::Value> {

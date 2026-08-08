@@ -62,6 +62,10 @@ fn tags_arg(args: &serde_json::Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+)]
 #[async_trait]
 impl ToolExecutor for MemoryTool {
     fn name(&self) -> &'static str {

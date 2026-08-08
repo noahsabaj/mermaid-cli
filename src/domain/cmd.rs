@@ -42,7 +42,7 @@ use super::runtime::ManagedProcess;
 // `ConversationHistory` / `ChatRequest`). Boxing them would churn ~20
 // construction + match sites for no real gain — `Cmd` values are short-lived
 // and moved, not stored in bulk.
-#[allow(clippy::large_enum_variant)]
+#[expect(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum Cmd {
     // ── Model + tool execution (the scope-spawning variants) ────────
@@ -542,6 +542,10 @@ impl Cmd {
     /// For traces + the `--record` file — some `Cmd` payloads are huge
     /// (think `ChatRequest::messages`). This returns a compact
     /// identifier that doesn't dump the full payload.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "predates the lint; see .github/baselines/expect_budget.txt"
+    )]
     pub fn summary(&self) -> String {
         match self {
             Cmd::CallModel { turn, request } => format!(

@@ -1,44 +1,42 @@
-# Clippy configuration for Mermaid
+# Clippy configuration for Mermaid.
+#
+# INVARIANT: every key here configures a lint that is actually enabled — either
+# in a default group, or explicitly in the `[lints.clippy]` table carried by all
+# three manifests. A key for a lint nobody turned on is a claim the build does
+# not make.
+#
+# That invariant is not decorative. `too-many-lines-threshold = 100` sat here
+# for the life of the repo while `clippy::too_many_lines` (a *pedantic* lint)
+# was never enabled, so AGENTS.md's "clippy caps functions at 100 lines" was
+# false and `update_step` reached 774 lines. Seven other keys were inert the
+# same way and have been deleted rather than left looking load-bearing. If you
+# want one back, enable its lint in the same commit.
 
-# Specify MSRV (Minimum Supported Rust Version)
-# `str::floor_char_boundary` (used in several places for UTF-8-safe slicing)
-# was stabilized in Rust 1.91.0 — verified via clippy::incompatible_msrv.
+# MSRV. `str::floor_char_boundary` (used in several places for UTF-8-safe
+# slicing) stabilized in Rust 1.91.0 — verified via clippy::incompatible_msrv.
 # Matches `Cargo.toml`'s `rust-version`.
 msrv = "1.91.0"
 
-# Maximum cognitive complexity allowed for a single function
-cognitive-complexity-threshold = 30
-
-# Maximum number of lines allowed for a single function
+# Maximum lines in a single function. Enabled via `too_many_lines = "deny"`;
+# going over needs an `#[expect]` plus a raised number in
+# `.github/baselines/expect_budget.txt`, which only ever shrinks.
 too-many-lines-threshold = 100
 
-# Maximum number of arguments allowed for a function
-too-many-arguments-threshold = 7
-
-# Maximum size for types on the stack
-type-complexity-threshold = 250
-
-# Maximum number of single character bindings in a scope
-single-char-binding-names-threshold = 4
-
-# Maximum nested control flow depth
-# Set to 8 to be less restrictive for complex logic
+# Maximum nested control-flow depth. Enabled via `excessive_nesting = "deny"`.
 excessive-nesting-threshold = 8
 
-# Maximum struct size that can be passed by value
-trivial-copy-size-limit = 8
+# Maximum arguments to a function (`too_many_arguments`, complexity group).
+too-many-arguments-threshold = 7
 
-# Maximum allowed enum variant size difference
+# Maximum type nesting before `type_complexity` fires (complexity group).
+type-complexity-threshold = 250
+
+# Maximum allowed size difference between enum variants (`large_enum_variant`,
+# perf group).
 enum-variant-size-threshold = 200
 
-# Maximum array size to avoid stack overflow
+# Maximum array size before `large_const_arrays` fires (perf group).
 array-size-threshold = 512
 
-# Allow common patterns
-allow-expect-in-tests = true
-allow-unwrap-in-tests = true
+# `dbg!` is denied workspace-wide; tests may still use it.
 allow-dbg-in-tests = true
-allow-print-in-tests = true
-
-# Enforce documentation on public items
-missing-docs-in-crate-items = true

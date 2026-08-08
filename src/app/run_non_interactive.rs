@@ -85,6 +85,10 @@ pub struct RunOptions {
 
 /// Drive one prompt to completion with explicit per-call options. Bounded by a
 /// generous 20-minute wall-clock so a runaway model doesn't hang a script.
+#[expect(
+    clippy::too_many_lines,
+    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+)]
 pub async fn run_non_interactive_with(
     mut config: Config,
     cwd: PathBuf,
@@ -401,7 +405,7 @@ conforms to the provided schema. Respond with only the JSON object - no prose, n
 /// Run the dedicated `--output-schema` formatting turn: set the schema rider
 /// on state (build_chat_request drops all tools + adapters engage native
 /// constrained output), seed the format prompt, and drive to idle.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 async fn run_formatting_turn(
     mut state: State,
     schema: serde_json::Value,

@@ -235,6 +235,10 @@ async fn handoff_model_candidates(ctx: &ExecContext) -> Vec<String> {
     out
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+)]
 #[async_trait]
 impl ToolExecutor for ExitPlanModeTool {
     fn name(&self) -> &'static str {

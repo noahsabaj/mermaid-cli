@@ -256,6 +256,8 @@ jobs:
         run: python3 .github/scripts/check_no_emoji.py
       - name: Layering + purity (domain, render, prompts)
         run: python3 .github/scripts/check_layering.py
+      - name: Lint-suppression budget
+        run: python3 .github/scripts/check_expect_budget.py
 
   # Heavier integration coverage that CI's default suite skips: the daemon
   # `#[ignore]`d tests (spawn a real mermaidd) and the deterministic, model-free

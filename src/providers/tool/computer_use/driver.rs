@@ -630,6 +630,10 @@ impl Drop for TempFileGuard {
 
 // ───── subprocess dispatch ─────────────────────────────────────────
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+)]
 async fn dispatch_capture(
     backend: Backend,
     spec: &ScreenshotSpec,

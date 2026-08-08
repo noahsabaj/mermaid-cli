@@ -13,6 +13,37 @@ license = "MIT OR Apache-2.0"
 # path dependency. `release.yml` publishes runtime -> core -> cli, in dependency
 # order.
 
+# Lint policy. DUPLICATED verbatim into all three manifests — `tests/lint_policy_drift.rs`
+# guards the duplication. Inheritance via `[workspace.lints]` + `lints.workspace = true`
+# is NOT usable here: the `isolated-crate-build` CI job copies `crates/.` to a directory
+# with no workspace root above it, where `lints.workspace = true` is a hard manifest-parse
+# error. That job exists because a manifest bug half-released v0.21.0; breaking it with a
+# manifest bug would be a poor trade.
+#
+# Everything is `deny`, not `warn`, and deliberately: CI runs `clippy -- -D warnings`, so
+# `warn` would be `deny` anyway. Writing `deny` makes the table say what it does, and keeps
+# it true if the `-D` is ever dropped.
+[lints.clippy]
+# Debug leftovers. All measured at zero across the workspace when this landed.
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+mem_forget = "deny"
+
+# The cap AGENTS.md names by number. `.clippy.toml` has set
+# `too-many-lines-threshold = 100` since forever while the lint itself was off, so the
+# doc's "clippy caps functions at 100 lines" was false and `update_step` reached 774.
+# Existing offenders carry `#[expect(clippy::too_many_lines, reason = ...)]`, counted in
+# `.github/baselines/expect_budget.txt`, which only goes down.
+too_many_lines = "deny"
+
+# `.clippy.toml` already sets excessive-nesting-threshold = 8.
+excessive_nesting = "deny"
+
+[lints.rust]
+# Stated here so a local `cargo clippy` without the CI flag reaches the same verdict.
+warnings = "deny"
+
 [dependencies]
 anyhow = "1.0"
 async-trait = "0.1"

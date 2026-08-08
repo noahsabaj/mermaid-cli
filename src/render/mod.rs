@@ -115,6 +115,10 @@ impl RenderCache {
 }
 
 /// The entrypoint. Call once per render pass from the main loop.
+#[expect(
+    clippy::too_many_lines,
+    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+)]
 pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
     // Resolve the palette from reducer state: NO_COLOR beats the theme
     // choice (colors off entirely); otherwise `/theme` picks dark/light.

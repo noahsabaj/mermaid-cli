@@ -203,6 +203,10 @@ fn action_detail(tool: &str, args: &serde_json::Value) -> Option<String> {
 /// override, read-only mode, and the destructive hard-deny all still block)
 /// and never applies to risks that act beyond the filesystem
 /// ([`scratch_downgrade_eligible`]).
+#[expect(
+    clippy::too_many_lines,
+    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+)]
 pub async fn gate(
     ctx: &ExecContext,
     request: ActionRequest,
@@ -623,7 +627,6 @@ fn approval_kind(category: crate::runtime::ToolCategory) -> ApprovalKind {
 /// Take a checkpoint (when configured), record an approval row, and return a
 /// blocking "approval required" outcome. Mirrors the pre-existing inline logic
 /// from `exec.rs`/`filesystem.rs` so behavior is unchanged for those tools.
-#[allow(clippy::too_many_arguments)]
 fn block_for_approval(
     ctx: &ExecContext,
     request: &ActionRequest,

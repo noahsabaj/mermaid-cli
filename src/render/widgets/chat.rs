@@ -598,6 +598,10 @@ pub(crate) fn frame_fingerprint(
 impl<'a> StatefulWidget for ChatWidget<'a> {
     type State = ChatState;
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "predates the lint; see .github/baselines/expect_budget.txt"
+    )]
     fn render(self, area: Rect, buf: &mut Buffer, state: &mut Self::State) {
         // Code-block lines are tagged with this background; computed once so
         // the markdown cache key can use it.
@@ -1243,6 +1247,10 @@ fn expand_tabs(s: &str) -> String {
     out
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+)]
 fn render_actions(
     actions: &[ActionDisplay],
     lines: &mut Vec<Line>,
@@ -1853,7 +1861,6 @@ fn wrap_text_with_indent(
 /// `current_line_width`, so its budget is the full `width`); wrapped rows use
 /// `continuation_capacity` (the caller's `available_width`, with the indent in
 /// a separate span and not counted).
-#[allow(clippy::too_many_arguments)]
 fn hard_break_styled_word(
     fragments: &[(String, Style)],
     result_lines: &mut Vec<Line<'static>>,
@@ -1902,6 +1909,10 @@ fn hard_break_styled_word(
 /// (`` `No image data found` ``) one continuous block instead of a row of
 /// disconnected per-word boxes, and still leaves the space in front of a link
 /// un-underlined (that space belongs to the preceding prose span).
+#[expect(
+    clippy::too_many_lines,
+    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+)]
 pub(crate) fn wrap_styled_line(
     line: Line<'static>,
     width: usize,

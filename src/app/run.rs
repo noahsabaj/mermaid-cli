@@ -55,6 +55,10 @@ pub struct InteractiveOptions {
 /// Interactive TUI main loop with explicit options. `recorder` (if
 /// provided) appends one JSONL line per reducer input to the file for
 /// debugging / replay.
+#[expect(
+    clippy::too_many_lines,
+    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+)]
 pub async fn run_interactive_with(
     mut config: Config,
     cwd: PathBuf,
@@ -166,7 +170,7 @@ pub async fn run_interactive_with(
     // `Msg` is the large variant, but this enum lives on the stack for one
     // loop iteration and `Msg` is passed by value everywhere already —
     // boxing it would add a per-event heap alloc on the hot input path.
-    #[allow(clippy::large_enum_variant)]
+    #[expect(clippy::large_enum_variant)]
     enum Sel {
         Msg(Option<Msg>),
         Term(Option<Result<crossterm::event::Event, std::io::Error>>),

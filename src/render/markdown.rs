@@ -65,6 +65,10 @@ pub fn line_hanging_indent(line: &Line, theme: &Theme) -> usize {
 /// Code-block lines also keep the theme's `code_background` on their base style
 /// (the gray panel look). Inline code carries the background on the *span*, not
 /// the line, so prose that merely contains `code` still word-wraps normally.
+#[expect(
+    clippy::too_many_lines,
+    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+)]
 pub fn parse_markdown(input: &str, theme: &Theme, width: usize) -> Vec<MarkdownLine> {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_STRIKETHROUGH);

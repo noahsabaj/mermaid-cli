@@ -7,7 +7,10 @@ tests hold the detail; this is what's easy to get wrong.
 
 - `src/domain/` is a **pure** Model-View-Update core. The reducer is
   `fn update(State, Msg) -> (State, Vec<Cmd>)`: synchronous, no `.await`, no
-  wildcard `_ =>` arms that hide new `Msg`s, no I/O, no wall clock (it reads
+  wildcard `_ =>` arms that hide new `Msg`s (`update_step` carries
+  `#[deny(clippy::wildcard_enum_match_arm, clippy::match_wildcard_for_single_variants)]`
+  — both, because the first only fires when `_` covers two or more remaining
+  variants), no I/O, no wall clock (it reads
   `state.now`, injected, so `--replay` is deterministic). Effects are **data**
   (`Cmd`); the impure shell (`src/effect/`) executes them. `render(&State)` is
   pure too — a function of domain state and nothing else.
@@ -40,8 +43,15 @@ tests hold the detail; this is what's easy to get wrong.
   same PR as the change.
 - **Never leak secrets.** Redact via `redact_secrets` / `redact_json` before any
   persisted or logged output; conversation and config files are `0600`.
-- Don't let `reducer.rs` grow unbounded — decompose into helpers (clippy caps
-  functions at 100 lines).
+- Don't let `reducer.rs` grow unbounded — decompose into helpers. Clippy denies
+  `too_many_lines` at 100 (`.clippy.toml` sets the threshold; every manifest's
+  `[lints.clippy]` enables the lint — for years only the first half was true).
+  Going over means adding `#[expect(clippy::too_many_lines, reason = "...")]`
+  **and** raising a number in `.github/baselines/expect_budget.txt` — a visible
+  act, against a budget that only shrinks. `#[expect]` over `#[allow]`
+  throughout: it warns once the suppression stops being necessary, so
+  shortening a function tells you to delete its attribute. Converting the
+  existing `#[allow]`s found four that were suppressing nothing.
 - UI surfaces get coverage; keep the render/reducer tests green.
 
 ## Ratchets
@@ -55,6 +65,7 @@ appended to would be a place debt goes to be forgotten.
 | baseline | guard | what it counts |
 |---|---|---|
 | `layering.txt` | `check_layering.py` | upward imports + impurity in `domain`/`render`/`prompts` |
+| `expect_budget.txt` | `check_expect_budget.py` | every `#[expect]` / `#[allow]` of a clippy lint |
 
 Run `just ratchet` and commit the result. The `N keys / M occurrences` header
 line of each file is the debt counter; it should be going down.

@@ -1,0 +1,51 @@
+# Ratchet baseline: lint-suppression budget
+#
+# Debt that predates the guard. This file may only SHRINK.
+# Regenerate with: just ratchet
+#
+# 45 keys / 69 occurrences
+expect|clippy::large_enum_variant|src/app/run.rs 1
+expect|clippy::large_enum_variant|src/domain/cmd.rs 1
+expect|clippy::should_implement_trait|crates/mermaid-model/src/ids.rs 1
+expect|clippy::too_many_arguments|src/app/run_non_interactive.rs 1
+expect|clippy::too_many_arguments|src/domain/state.rs 1
+expect|clippy::too_many_arguments|src/effect/mod.rs 1
+expect|clippy::too_many_arguments|src/providers/approval.rs 1
+expect|clippy::too_many_arguments|src/providers/ctx.rs 1
+expect|clippy::too_many_arguments|src/providers/tool/subagent.rs 1
+expect|clippy::too_many_arguments|src/render/widgets/status_line.rs 1
+expect|clippy::too_many_lines|crates/mermaid-model/src/models/adapters/anthropic.rs 2
+expect|clippy::too_many_lines|crates/mermaid-model/src/models/adapters/gemini.rs 1
+expect|clippy::too_many_lines|crates/mermaid-model/src/models/adapters/openai_compat.rs 2
+expect|clippy::too_many_lines|crates/mermaid-model/src/models/error.rs 1
+expect|clippy::too_many_lines|crates/mermaid-runtime/src/policy.rs 1
+expect|clippy::too_many_lines|crates/mermaid-runtime/src/storage.rs 2
+expect|clippy::too_many_lines|src/app/recorder.rs 1
+expect|clippy::too_many_lines|src/app/replay.rs 1
+expect|clippy::too_many_lines|src/app/run.rs 1
+expect|clippy::too_many_lines|src/app/run_non_interactive.rs 1
+expect|clippy::too_many_lines|src/bin/mermaidd.rs 1
+expect|clippy::too_many_lines|src/cli/commands.rs 4
+expect|clippy::too_many_lines|src/clipboard.rs 1
+expect|clippy::too_many_lines|src/domain/cmd.rs 1
+expect|clippy::too_many_lines|src/domain/reducer.rs 7
+expect|clippy::too_many_lines|src/domain/transition.rs 2
+expect|clippy::too_many_lines|src/effect/mod.rs 5
+expect|clippy::too_many_lines|src/mcp/client.rs 1
+expect|clippy::too_many_lines|src/mcp/transport.rs 1
+expect|clippy::too_many_lines|src/providers/factory.rs 1
+expect|clippy::too_many_lines|src/providers/tool/computer_use/driver.rs 1
+expect|clippy::too_many_lines|src/providers/tool/exec.rs 4
+expect|clippy::too_many_lines|src/providers/tool/exit_plan_mode.rs 1
+expect|clippy::too_many_lines|src/providers/tool/filesystem.rs 1
+expect|clippy::too_many_lines|src/providers/tool/memory.rs 1
+expect|clippy::too_many_lines|src/providers/tool/policy_gate.rs 1
+expect|clippy::too_many_lines|src/providers/tool/subagent.rs 2
+expect|clippy::too_many_lines|src/providers/tool/web.rs 2
+expect|clippy::too_many_lines|src/render/markdown.rs 1
+expect|clippy::too_many_lines|src/render/mod.rs 1
+expect|clippy::too_many_lines|src/render/widgets/chat.rs 3
+expect|clippy::too_many_lines|src/render/widgets/question.rs 1
+expect|clippy::too_many_lines|src/render/widgets/status_line.rs 1
+expect|clippy::too_many_lines|src/runtime/protocol.rs 1
+expect|clippy::too_many_lines|src/session/selector.rs 1

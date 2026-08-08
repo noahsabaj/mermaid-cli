@@ -78,7 +78,7 @@ impl ApprovalBroker {
     /// Prompt the user and block until they answer (or the turn is cancelled).
     /// Fail-safe: a dropped sender, a gone reducer, or a cancel all resolve to
     /// `Deny`.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub async fn request(
         &self,
         token: &CancellationToken,

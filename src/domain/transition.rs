@@ -220,6 +220,10 @@ pub fn action_display_for(call: &PendingToolCall, outcome: &ToolOutcome) -> Acti
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+)]
 fn action_details_for(
     call: &PendingToolCall,
     outcome: &ToolOutcome,
@@ -614,6 +618,10 @@ fn count_search_results(output: &str) -> usize {
 /// display ("Read src/main.rs", "Bash cargo test", etc). Matches on
 /// the wire-format tool name + arguments; unknown tools fall through
 /// to the raw function name.
+#[expect(
+    clippy::too_many_lines,
+    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+)]
 pub fn display_info_for(call: &PendingToolCall) -> (String, String) {
     let name = call.source.function.name.as_str();
     let args = &call.source.function.arguments;

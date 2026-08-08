@@ -406,7 +406,7 @@ impl ContextUsageSnapshot {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     fn new(
         used_tokens: usize,
         max_tokens: Option<usize>,

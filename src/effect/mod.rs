@@ -591,6 +591,10 @@ impl EffectRunner {
     /// Route a single `Cmd` into the appropriate spawn + handler.
     /// Returns immediately; handlers work asynchronously and emit
     /// `Msg` back through the sender channel.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "predates the lint; see .github/baselines/expect_budget.txt"
+    )]
     pub fn dispatch(&mut self, cmd: Cmd) {
         // F12: reap any drained scopes before touching the map. Keeps
         // `scope_count()` bounded as the session grows.
@@ -1757,6 +1761,10 @@ fn filter_suppressed(
         .collect()
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+)]
 async fn dispatch_call_model(
     msg_tx: MsgSender,
     providers: Option<Arc<ProviderFactory>>,
@@ -2326,6 +2334,10 @@ fn parse_prune_plan(text: &str) -> Option<PrunePlan> {
 /// `/consolidate-memory`: a one-shot model pass that names duplicate/obsolete
 /// facts to prune (never rewrites — that's the anti-drift rule). The pruned
 /// files are snapshotted into a checkpoint first, so the prune is reversible.
+#[expect(
+    clippy::too_many_lines,
+    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+)]
 async fn consolidate_memory(
     tx: MsgSender,
     providers: Option<Arc<ProviderFactory>>,
@@ -2588,6 +2600,10 @@ async fn dispatch_compact_conversation(
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+)]
 async fn run_compaction(
     provider: Arc<dyn ModelProvider>,
     turn: TurnId,
@@ -2911,7 +2927,11 @@ fn is_context_limit_error(error: &ModelError) -> bool {
 }
 
 /// Dispatch an `ExecuteTool` command.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+)]
 async fn dispatch_execute_tool(
     msg_tx: MsgSender,
     tools: Option<Arc<ToolRegistry>>,

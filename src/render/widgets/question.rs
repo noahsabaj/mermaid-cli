@@ -310,6 +310,10 @@ fn push_rank_lines(
 
 /// Build the modal's content lines. Shared by the widget and the height
 /// estimator so the reserved bottom-zone height always matches what's drawn.
+#[expect(
+    clippy::too_many_lines,
+    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+)]
 pub fn build_question_lines(
     set: &PendingQuestionSet,
     theme: &Theme,

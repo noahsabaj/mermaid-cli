@@ -21,11 +21,13 @@ check:
 guards:
     {{python}} .github/scripts/check_no_emoji.py
     {{python}} .github/scripts/check_layering.py
+    {{python}} .github/scripts/check_expect_budget.py
 
 # Re-record every guard's baseline. Review the diff: the `N keys / M
 # occurrences` header line is the debt counter, and it should be going down.
 ratchet:
     {{python}} .github/scripts/check_layering.py --write-baseline
+    {{python}} .github/scripts/check_expect_budget.py --write-baseline
 
 # Format the whole workspace.
 fmt:

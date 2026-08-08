@@ -76,7 +76,7 @@ impl IdAllocator {
     }
 
     /// Hand out the next ID.
-    #[allow(clippy::should_implement_trait)]
+    #[expect(clippy::should_implement_trait)]
     pub fn next(&mut self) -> u64 {
         let id = self.next;
         self.next = self.next.saturating_add(1);

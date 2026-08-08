@@ -860,6 +860,10 @@ impl RuntimeStore {
     /// `CREATE TABLE IF NOT EXISTS` plus the duplicate-tolerant `ensure_column`
     /// make a re-run a no-op, so a second concurrent opener that wins the lock
     /// after us does no harm.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "predates the lint; see .github/baselines/expect_budget.txt"
+    )]
     fn migrate_within_txn(&self, from_version: i32) -> Result<()> {
         self.conn.execute_batch(
             r#"
@@ -4006,6 +4010,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "predates the lint; see .github/baselines/expect_budget.txt"
+    )]
     fn gc_prunes_high_churn_and_old_terminal_rows_but_keeps_active() {
         // F22 (RC-F): GC prunes finished tool_runs, exited processes, old
         // compactions, and stale sessions/messages past the window — never active

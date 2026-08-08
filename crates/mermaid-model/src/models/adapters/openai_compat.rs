@@ -209,6 +209,10 @@ impl OpenAICompatAdapter {
 
     /// Build the JSON request body for `/chat/completions`. Shared
     /// between streaming and non-streaming paths.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "predates the lint; see .github/baselines/expect_budget.txt"
+    )]
     fn build_request_body(
         &self,
         messages: &[ChatMessage],
@@ -528,6 +532,10 @@ impl OpenAICompatAdapter {
 
     /// Stream the response, emit typed events through the callback,
     /// return the final accumulated `ModelResponse`.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "predates the lint; see .github/baselines/expect_budget.txt"
+    )]
     async fn handle_stream(
         &self,
         response: reqwest::Response,

@@ -196,6 +196,10 @@ mod tests {
 
     /// Golden-style: every variant round-trips through its EXACT wire form.
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "predates the lint; see .github/baselines/expect_budget.txt"
+    )]
     fn every_variant_round_trips_the_wire_shape() {
         let cases: Vec<(DaemonRequest, &str)> = vec![
             (DaemonRequest::Health, r#"{"command":"health"}"#),

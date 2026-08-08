@@ -68,6 +68,10 @@ impl CommandMode {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+)]
 #[async_trait]
 impl ToolExecutor for ExecuteCommandTool {
     fn name(&self) -> &'static str {
@@ -451,7 +455,10 @@ impl ToolExecutor for ExecuteCommandTool {
 /// sandbox-denial detection, detach registration, timeout/cancel/error
 /// shaping, and command metadata. Shared by the pipe and PTY paths so their
 /// user-visible semantics cannot drift.
-#[allow(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+)]
 fn finish_foreground_command(
     result: std::io::Result<CommandRunResult>,
     command: &str,
@@ -1649,6 +1656,10 @@ fn strip_ansi(input: &str) -> String {
     out
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+)]
 async fn run_command(
     mut cmd: Command,
     progress: tokio::sync::mpsc::Sender<ProgressEvent>,
@@ -1872,6 +1883,10 @@ impl PtyDrain {
 /// can safely fall back to the pipe path without re-running side effects —
 /// openpty, clone_reader, and (Windows) the CPR priming write are the only
 /// `?` points ahead of `spawn_command`.
+#[expect(
+    clippy::too_many_lines,
+    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+)]
 async fn run_command_pty(
     invocation: &ShellInvocation,
     workdir: &Path,

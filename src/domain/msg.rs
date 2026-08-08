@@ -51,7 +51,6 @@ use super::{CompactionResult, CompactionTrigger};
 /// automatically via the externally-tagged representation — no per-variant
 /// recording code to keep in sync.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(clippy::large_enum_variant)]
 pub enum Msg {
     // ── User intent ─────────────────────────────────────────────────
     /// Raw key event from crossterm, after the event source has

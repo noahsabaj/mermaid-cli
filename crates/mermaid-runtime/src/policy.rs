@@ -1466,6 +1466,10 @@ fn substitution_spans(chars: &[char]) -> Vec<std::ops::Range<usize>> {
 /// where parsing is imperfect: `contains_destructive_pattern` runs on the RAW
 /// command text before any segmentation, so a destructive command inside any
 /// heredoc body — quoted, unterminated, or otherwise — still hard-denies.
+#[expect(
+    clippy::too_many_lines,
+    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+)]
 fn split_command(command: &str) -> SplitCommand {
     fn flush(segments: &mut Vec<String>, current: &mut String) {
         let seg = current.trim();

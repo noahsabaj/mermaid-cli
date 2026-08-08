@@ -99,6 +99,30 @@ pub fn update(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
 /// Single-step reducer: one `Msg` in, new `State` + `Cmd`s out.
 /// Callers interested in re-entry (queued follow-up messages) go
 /// through `update()`; this function returns after a single pass.
+///
+/// The two wildcard lints are denied here and nowhere else. AGENTS.md promises
+/// "no wildcard `_ =>` arms that hide new `Msg`s", and until now nothing
+/// enforced it — the top-level `match msg` merely happened to stay exhaustive.
+/// With the deny, adding a `Msg` variant is a compile error until every arm has
+/// considered it, which is the property the promise was about.
+///
+/// Both lints, because either alone leaves a hole: `wildcard_enum_match_arm`
+/// fires when `_` covers two or more remaining variants, and
+/// `match_wildcard_for_single_variants` when it covers exactly one. A `_` arm
+/// added next to a single unhandled `Msg` would slip past the first lint
+/// entirely.
+///
+/// Function-scoped, so the nested matches on `KeyCode` and friends elsewhere in
+/// this file keep their legitimate `_ =>` arms — 96 of them workspace-wide, and
+/// not what this rule is about.
+#[expect(
+    clippy::too_many_lines,
+    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+)]
+#[deny(
+    clippy::wildcard_enum_match_arm,
+    clippy::match_wildcard_for_single_variants
+)]
 pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
     let mut cmds = Vec::new();
 
@@ -974,6 +998,10 @@ fn act_on_row(
 }
 
 /// Apply one keypress to the front question set, returning whether it resolves.
+#[expect(
+    clippy::too_many_lines,
+    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+)]
 fn apply_question_key(
     set: &mut super::question::PendingQuestionSet,
     code: KeyCode,
@@ -1276,6 +1304,10 @@ fn handle_question_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mo
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+)]
 fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMods) {
     // Ctrl+C: press twice to exit. The first press does the useful thing —
     // interrupts a running turn (like Esc) or clears typed input — and arms a
@@ -2754,6 +2786,10 @@ fn handle_submit_prompt(
     push_call_model(state, cmds, turn);
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+)]
 fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
     match cmd {
         SlashCmd::Model(None) => {
@@ -3689,6 +3725,10 @@ fn estimate_current_context(state: &State) -> super::state::ContextUsageSnapshot
         .with_additional_tokens(state.runtime.builtin_tool_schema_tokens)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+)]
 fn context_text(state: &State) -> String {
     let mut lines = Vec::new();
     lines.push("Context".to_string());
@@ -4330,6 +4370,10 @@ fn fold_token_usage(
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+)]
 fn handle_compaction_finished(
     state: &mut State,
     cmds: &mut Vec<Cmd>,
@@ -4668,6 +4712,10 @@ fn output_cap_hint(state: &State) -> String {
 /// burn tokens; past the cap the run stops with a hint.
 const MAX_EMPTY_CONTINUATIONS: u32 = 1;
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+)]
 fn handle_stream_done(
     state: &mut State,
     cmds: &mut Vec<Cmd>,

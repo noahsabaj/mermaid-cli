@@ -45,6 +45,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`just check` runs the source guards.** AGENTS.md called it "the exact
   pre-PR gate (also what CI runs)" while CI ran two guards it did not.
 
+- **The lints `.clippy.toml` had been configuring are now enabled.** AGENTS.md
+  said "clippy caps functions at 100 lines". It did not: `too_many_lines` is a
+  *pedantic* lint, no manifest carried a `[lints]` table, and CI ran stock
+  `clippy::all`. The threshold configured a lint that never ran, which is how
+  `update_step` reached 774 lines — and how a `#[allow(clippy::too_many_lines)]`
+  came to sit in `exec.rs` suppressing nothing.
+
+  All three manifests now carry an identical `[lints.clippy]` table denying
+  `too_many_lines`, `excessive_nesting`, `dbg_macro`, `todo`, `unimplemented`,
+  and `mem_forget`. The table is duplicated rather than inherited via
+  `[workspace.lints]`: the `isolated-crate-build` job copies `crates/.` to a
+  directory with no workspace root, where `lints.workspace = true` is a hard
+  manifest-parse error. `tests/lint_policy_drift.rs` guards the duplication and
+  pins that the threshold and the lint stay enabled together.
+
+  The 59 functions already over the cap carry
+  `#[expect(clippy::too_many_lines, reason = ...)]`, counted in
+  `.github/baselines/expect_budget.txt` (45 keys, 69 occurrences) which only
+  shrinks. Every pre-existing `#[allow(clippy::…)]` became `#[expect]` so
+  `unfulfilled_lint_expectations` reports a suppression that stops being
+  necessary — which immediately found four suppressing nothing
+  (`large_enum_variant` on `Msg`, `too_many_arguments` on `block_for_approval`
+  and `hard_break_styled_word`, `too_many_lines` on
+  `finish_foreground_command`). All four removed.
+
+  Seven now-inert keys were deleted from `.clippy.toml` rather than left
+  looking load-bearing, under a stated invariant: every key must configure a
+  lint that is actually enabled.
+
+- **`update_step` enforces its own no-wildcard rule.** AGENTS.md promised the
+  reducer has "no wildcard `_ =>` arms that hide new `Msg`s"; nothing checked
+  it, and the top-level `match msg` merely happened to stay exhaustive. It now
+  carries `#[deny(clippy::wildcard_enum_match_arm,
+  clippy::match_wildcard_for_single_variants)]`. Both, because the first only
+  fires when `_` covers two or more remaining variants — a `_` added beside a
+  single unhandled `Msg` would slip past it. Function-scoped, so the 96
+  legitimate `_ =>` arms on `KeyCode` and friends elsewhere are unaffected.
+
 ### Fixed
 
 - **`cargo doc` accepted broken intra-doc links.** The CI step ran without

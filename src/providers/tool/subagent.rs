@@ -385,6 +385,10 @@ impl SubagentTool {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+)]
 #[async_trait]
 impl ToolExecutor for SubagentTool {
     fn name(&self) -> &'static str {
@@ -872,6 +876,10 @@ impl SubagentTool {
     /// progress relay dies with the turn), and deliver the finished report
     /// through the queued-message path. Returns the immediate outcome the
     /// releasing turn reports to the model.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "predates the lint; see .github/baselines/expect_budget.txt"
+    )]
     fn detach_child<F>(&self, args: DetachArgs<F>) -> ToolOutcome
     where
         F: std::future::Future<Output = (Result<String, DriveError>, State)> + Send + 'static,
@@ -989,7 +997,7 @@ impl SubagentTool {
 /// an isolated child's work, cache the child for continuations (unless
 /// cancelled), roll up this drive's usage, and shape the model-facing
 /// outcome.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 async fn finish_drive(
     spawner: &SubagentSpawner,
     type_name: String,

@@ -21,6 +21,10 @@ use super::{Commands, GitHost, OutputFormat, PairCommand, PluginCommand, PrComma
 /// Handle CLI subcommands
 /// Returns Ok(true) if the command was handled and we should exit
 /// Returns Ok(false) if we should continue to the main application
+#[expect(
+    clippy::too_many_lines,
+    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+)]
 pub async fn handle_command(
     command: &Commands,
     config: &Config,
@@ -325,6 +329,10 @@ async fn show_doctor(
 
 /// Assemble the full readiness report without printing — shared by
 /// `mermaid doctor` and the `mermaid feedback` diagnostic bundle.
+#[expect(
+    clippy::too_many_lines,
+    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+)]
 pub(crate) async fn build_doctor_report(
     config: &Config,
     cwd: &Path,
@@ -925,6 +933,10 @@ impl QaCompactSmokeReport {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+)]
 fn run_qa_compact_smoke(
     config: &Config,
     cwd: &Path,
@@ -2374,6 +2386,10 @@ fn show_mcp_servers() {
 }
 
 /// Show status of all dependencies
+#[expect(
+    clippy::too_many_lines,
+    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+)]
 async fn show_status(config: &Config) -> Result<()> {
     println!("Mermaid Status:");
     println!();

@@ -390,6 +390,10 @@ fn coalesce_consecutive_roles(msgs: Vec<Value>) -> Vec<Value> {
 /// Assistant messages with `thinking + provider_continuation` emit a
 /// `thinking` content block paired with the text/tool_use blocks; the
 /// signature round-trips so subsequent turns don't 400.
+#[expect(
+    clippy::too_many_lines,
+    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+)]
 fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<Value>) {
     let mut system: Option<String> = None;
     let mut out: Vec<Value> = Vec::new();
@@ -926,6 +930,10 @@ impl AnthropicAdapter {
 
     /// Stream the response, emit typed events, return the final
     /// `ModelResponse`. Wave 3 implementation.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "predates the lint; see .github/baselines/expect_budget.txt"
+    )]
     async fn handle_stream(
         &self,
         response: reqwest::Response,

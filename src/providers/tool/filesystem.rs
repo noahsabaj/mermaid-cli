@@ -388,6 +388,10 @@ impl ToolExecutor for CreateDirectoryTool {
 /// `write_file` — write a single file, creating parent dirs as needed.
 pub struct WriteFileTool;
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+)]
 #[async_trait]
 impl ToolExecutor for WriteFileTool {
     fn name(&self) -> &'static str {

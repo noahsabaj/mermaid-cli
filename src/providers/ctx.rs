@@ -241,7 +241,7 @@ impl std::fmt::Debug for ExecContext {
 }
 
 impl ExecContext {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub fn new(
         token: CancellationToken,
         progress: mpsc::Sender<ProgressEvent>,
