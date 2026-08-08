@@ -429,11 +429,10 @@ pub struct ChatWidget<'a> {
     /// here instead would make `render()` a function of more than its
     /// arguments.
     ///
-    /// This keys the memo, it does not yet produce the label:
-    /// `format_relative_timestamp` still reads `Local::now()` itself, one crate
-    /// down in `mermaid-model`, which the layering guard does not cover. Live
-    /// the two agree, since `state.now` is re-seeded from the wall clock every
-    /// loop iteration.
+    /// It keys the memo *and* produces the label: it is handed to
+    /// `format_relative_timestamp`, which no longer reads the clock either. Key
+    /// and label therefore agree by construction rather than by both happening
+    /// to call `Local::now()` a microsecond apart.
     pub today: NaiveDate,
 }
 
@@ -897,7 +896,7 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                     }
                 } else {
                     // For User messages: format timestamp and display on right edge
-                    let formatted_timestamp = format_relative_timestamp(msg.timestamp);
+                    let formatted_timestamp = format_relative_timestamp(msg.timestamp, self.today);
                     // Display cells, not bytes — a CJK/emoji timestamp (or message)
                     // would otherwise mis-reserve space and push the right-aligned
                     // timestamp off its column (#104).

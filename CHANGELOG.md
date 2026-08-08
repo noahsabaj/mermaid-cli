@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A message's "Today"/"Yesterday" label now follows the injected clock, not
+  the machine's.** `format_relative_timestamp` called `Local::now()` itself to
+  pick between "Today at ...", "Yesterday at ...", and an absolute date. That
+  choice *is* the output, so the rendered string was a function of the wall
+  clock rather than of its arguments — the last clock read under the render
+  path, left behind when `ChatWidget::today` made the frame-memo key pure.
+  `mermaid-model` sits outside the layering guard's scope, so nothing flagged
+  it.
+
+  It takes `today: NaiveDate` now, threaded from `state.now` by the same route
+  `ChatWidget::today` already used. Key and label agree by construction instead
+  of by both calling `Local::now()` a microsecond apart, and `--replay` labels a
+  recorded transcript against the recorded date.
+
+  Twenty snapshots change: scene messages are stamped at the fixture clock, so
+  they render "Today at 3:04am" where they used to render "January 2nd, 2026 at
+  3:04am". That is what a user with that clock sees; the old string was an
+  artifact of the suite's fixture date being in the past while the formatter
+  read the real one. The fixture comment claiming the past date is what forces
+  the stable absolute-date branch is rewritten — the branch is now pinned by
+  construction, and the date being in the past is merely conventional.
+
+  `fixture_clock_reads_the_pinned_wall_clock` deliberately does *not* pass the
+  fixture's own date. It exists to pin the rendered date and time, and the
+  day-relative branches print neither; passing `fixed_now().date_naive()` would
+  render "Today at 3:04am", and a `fixed_now()` that drifted across midnight
+  would drag `today` with it and still say "Today". It passes a distant date so
+  the absolute branch keeps the assertion diagnostic.
+
+  The unit test gains the two branches it could not previously reach: with the
+  clock read inlined, "Yesterday" and the absolute date were unreachable from a
+  test on any given day.
+
 - **`clippy::doc_markdown` paid off, and `.clippy.toml` now tells it which
   words are prose.** It was the single largest entry in `clippy_pedantic.txt`
   at 345 occurrences — a quarter of the tracked debt, and the cheapest quarter,
