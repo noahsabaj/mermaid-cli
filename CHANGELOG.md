@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`clippy::uninlined_format_args` paid off: 463 occurrences down to 6.** The
+  third-largest entry in `clippy_pedantic.txt`, and the cheapest of the three
+  above it — `format!("{}", x)` becomes `format!("{x}")`, machine-applicable,
+  so `--fix` did the work. Tracked debt falls from 5,174 occurrences to 4,717.
+
+  Nothing needed second-guessing here, which is what separates it from the
+  `doc_markdown` payoff. That lint fires on any mixed-case word and wanted
+  `` `OpenAI` `` fifty times, so a third of its suggestions were wrong. This
+  one only fires when the argument is already a plain binding, so the rewrite
+  cannot change what is printed. The review was for readability, and the
+  collapse is a net win: 620 lines deleted against 481 added, because a
+  multi-line `format!` folds back onto one line once its arguments move into
+  the string.
+
+  The 6 that remain are inside inline `#[cfg(unix)]` items under `src/`, which
+  a `--fix` run on Windows never compiles and so never sees. The four
+  `#![cfg(...)]` test files were reachable by the technique `AGENTS.md`
+  documents — drop the gate, fix the target, restore the gate — and only
+  `pty_exit.rs` had any (9). `daemon_integration.rs` and the two sandbox files
+  compiled clean with zero hits.
+
 - **The README is 75% shorter, and the `docs/` directory it linked to now
   exists.** It had grown to 53 KB / 752 lines — a third of that a single
   annotated config TOML, and most of the rest reference material a reader
