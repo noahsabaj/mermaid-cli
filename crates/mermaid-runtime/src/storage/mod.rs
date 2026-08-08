@@ -547,11 +547,11 @@ impl RuntimeStore {
             );
             CREATE INDEX IF NOT EXISTS idx_tasks_project_status
                 ON tasks(project_path, status, updated_at);
-            -- F75: `reconcile_after_restart` filters `status = 'running' AND
-            -- owner_kind = ?`, which the (project_path, ...) index above cannot
-            -- serve (wrong leading column). This covering index does.
-            CREATE INDEX IF NOT EXISTS idx_tasks_status_owner
-                ON tasks(status, owner_kind);
+            -- `idx_tasks_status_owner` is NOT here. It indexes `owner_kind`,
+            -- which the `ensure_column` below adds, and on a pre-v2 DB the
+            -- `CREATE TABLE IF NOT EXISTS` above is a no-op against a table
+            -- that has no such column. See the ordered block after the
+            -- `ensure_column` calls.
 
             CREATE TABLE IF NOT EXISTS task_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -717,6 +717,24 @@ impl RuntimeStore {
         // enqueued for deferred daemon execution set it; the claim query treats
         // a NULL prompt as "metadata-only task, never claim".
         ensure_column(&self.conn, "tasks", "prompt", "TEXT")?;
+        // F75: `reconcile_after_restart` filters `status = 'running' AND
+        // owner_kind = ?`, which the (project_path, ...) index cannot serve
+        // (wrong leading column). This covering index does.
+        //
+        // AFTER the `ensure_column` above, for the same reason
+        // `idx_checkpoints_session` sits after its columns. It used to live in
+        // the baseline batch, which made every v1 DB unopenable: `CREATE TABLE
+        // IF NOT EXISTS tasks` is a no-op when the table already exists, so on
+        // a pre-v2 DB the index was created against a table with no
+        // `owner_kind` and failed with "no such column". `IF NOT EXISTS` does
+        // not help — it guards the index NAME, and SQLite still parses the
+        // column list. The failure landed inside the migration transaction, so
+        // it rolled back and `user_version` was never stamped, and the next
+        // open failed identically. Forever.
+        self.conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_tasks_status_owner
+                 ON tasks(status, owner_kind);",
+        )?;
         // Pairing-token TTL. When the column is first added to an existing DB,
         // backfill live tokens with a 30-day grace window from now rather than
         // expiring them instantly on upgrade. Fresh DBs already have the column
@@ -1331,6 +1349,122 @@ mod tests {
             "forward migration must recreate the F75 indexes"
         );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// Strip a current DB back to the SHAPE version `version` really had —
+    /// dropping the columns and tables added after it — rather than only
+    /// rolling `user_version` back.
+    ///
+    /// The distinction is the whole point. `upgrades_from_v2_to_current_and_
+    /// adds_indexes` drops two indexes and restamps, so the table it migrates
+    /// still has every column a current table has. A v1 `tasks` table does not
+    /// have `owner_kind`, and that is exactly what broke.
+    fn downgrade_schema_to(conn: &Connection, version: i32) {
+        // Indexes before the columns they cover: SQLite refuses to drop an
+        // indexed column.
+        if version < 6 {
+            conn.execute_batch(
+                "DROP INDEX IF EXISTS idx_checkpoints_session;
+                 ALTER TABLE checkpoints DROP COLUMN session_id;
+                 ALTER TABLE checkpoints DROP COLUMN message_index;",
+            )
+            .expect("undo v6");
+        }
+        if version < 5 {
+            conn.execute_batch("ALTER TABLE tasks DROP COLUMN prompt;")
+                .expect("undo v5");
+        }
+        if version < 4 {
+            conn.execute_batch("DROP TABLE IF EXISTS outcomes;")
+                .expect("undo v4");
+        }
+        if version < 3 {
+            conn.execute_batch(
+                "DROP INDEX IF EXISTS idx_approvals_pending;
+                 DROP INDEX IF EXISTS idx_tasks_status_owner;",
+            )
+            .expect("undo v3");
+        }
+        if version < 2 {
+            conn.execute_batch(
+                "DROP INDEX IF EXISTS idx_tasks_status_owner;
+                 ALTER TABLE tasks DROP COLUMN owner_kind;",
+            )
+            .expect("undo v2");
+        }
+        conn.execute_batch(&format!("PRAGMA user_version = {version};"))
+            .expect("restamp");
+    }
+
+    /// Every version `init_schema` claims to accept must actually upgrade.
+    ///
+    /// A v1 database could not. The F75 covering index was created in the
+    /// idempotent baseline, which runs before the `ensure_column` that adds
+    /// the column it indexes — so the migration threw "no such column:
+    /// owner_kind", rolled back inside its own transaction, left
+    /// `user_version` unstamped, and failed the same way on every open after.
+    /// Tasks, approvals, checkpoints, processes and the daemon were all
+    /// unreachable, permanently, with no way forward.
+    ///
+    /// It survived because the two existing migration tests start at v2 and
+    /// v5 — the versions that were convenient to construct. This covers the
+    /// whole accepted range, including 0, which `init_schema` also routes
+    /// through the migration branch.
+    #[test]
+    pub(crate) fn every_supported_older_version_upgrades_to_current() {
+        for version in 0..SCHEMA_VERSION {
+            let path = temp_db(&format!("upgrade_from_v{version}"));
+            {
+                let store = RuntimeStore::open(&path).expect("first open");
+                downgrade_schema_to(&store.conn, version);
+            }
+
+            let store = RuntimeStore::open(&path)
+                .unwrap_or_else(|e| panic!("a v{version} DB must upgrade, but: {e:#}"));
+
+            let stamped: i32 = store
+                .conn
+                .query_row("PRAGMA user_version", [], |r| r.get(0))
+                .expect("read user_version");
+            assert_eq!(
+                stamped, SCHEMA_VERSION,
+                "v{version} upgraded without stamping the current version"
+            );
+
+            // The column and its index are the specific pair that broke, so
+            // assert the end state rather than just "open returned Ok".
+            let indexes: i64 = store
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master
+                     WHERE type = 'index'
+                       AND name IN ('idx_tasks_status_owner', 'idx_approvals_pending',
+                                    'idx_checkpoints_session')",
+                    [],
+                    |r| r.get(0),
+                )
+                .expect("count indexes");
+            assert_eq!(indexes, 3, "v{version} upgrade left indexes missing");
+
+            // A write proves the migrated table is usable, not merely present.
+            // `owner_kind` is set deliberately: it is the column the broken
+            // migration never added, so a row carrying it is the end-to-end
+            // claim rather than a schema inspection.
+            store
+                .tasks()
+                .create(NewTask {
+                    title: "migrated".to_string(),
+                    project_path: "/p".to_string(),
+                    model_id: "m".to_string(),
+                    priority: TaskPriority::Normal,
+                    conversation_id: None,
+                    owner_kind: Some("daemon".to_string()),
+                    prompt: None,
+                })
+                .unwrap_or_else(|e| panic!("v{version} upgraded DB must accept writes: {e:#}"));
+
+            let _ = std::fs::remove_dir_all(path.parent().expect("temp dir"));
+        }
     }
 
     #[test]

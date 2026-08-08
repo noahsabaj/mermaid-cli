@@ -172,6 +172,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in this state repair themselves: a SQLITE_CANTOPEN on a file that exists
   restores owner access once, logs that it did, and retries.
 
+- **A runtime database older than schema v2 could never be upgraded.** The F75
+  covering index `idx_tasks_status_owner ON tasks(status, owner_kind)` was
+  created in the idempotent baseline, which runs *before* the `ensure_column`
+  that adds `owner_kind`. On a v0 or v1 database `CREATE TABLE IF NOT EXISTS
+  tasks` is a no-op against a table that has no such column, so the index
+  failed with `no such column: owner_kind`. `IF NOT EXISTS` does not help — it
+  guards the index *name*, and SQLite still parses the column list.
+
+  The failure landed inside the migration transaction, so it rolled back and
+  `user_version` was never stamped, and the next open failed identically.
+  Permanently: tasks, approvals, checkpoints, process listing and the daemon
+  were all unreachable with no way forward.
+
+  The index now sits after its `ensure_column`, exactly as
+  `idx_checkpoints_session` already did. Verified on a real 2.7 MB v1 database,
+  which now migrates to v6 with its data intact.
+
+  It survived because the two existing migration tests started at v2 and v5 —
+  the versions that were convenient to construct, and both of which already
+  have the column. `every_supported_older_version_upgrades_to_current` now
+  covers the whole accepted range and strips each database back to the *shape*
+  that version really had rather than only rolling `user_version` back.
+
 - **`cargo doc` accepted broken intra-doc links.** The CI step ran without
   `-D warnings`, so rustdoc printed unresolved links and exited 0. Twenty had
   accumulated, including `TaskBroker::note_tokens` — a method renamed to
