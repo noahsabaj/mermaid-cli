@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The README is 75% shorter, and the `docs/` directory it linked to now
+  exists.** It had grown to 53 KB / 752 lines — a third of that a single
+  annotated config TOML, and most of the rest reference material a reader
+  scrolls past to find the install command. A README's job is to say what this
+  is, get you running, and point at the rest; it was doing all three badly by
+  doing everything.
+
+  The reference material moved rather than died: `docs/configuration.md` (the
+  full schema, layering, project config, provider notes, web backends, API-key
+  precedence), `docs/cli-reference.md` (every flag, the keyboard table, the
+  slash-command list), `docs/sandbox.md`, `docs/runtime.md` (`mermaidd`,
+  logging, diagnostics), `docs/plugins.md` (skills, hooks, bundles), and
+  `docs/development.md` (the pre-PR gate, CI matrix, snapshot suites). The
+  README keeps what belongs there: features, install, first ten minutes, the
+  common commands, the tool table, safety, and the provider env-var table.
+
+  `docs/` is new because it did not exist. The README had linked to
+  `docs/architecture.md`, `docs/adding_tools.md`, `docs/adding_providers.md`
+  and `docs/replay_debugging.md` since before this change, and all four were
+  404s — a promise of a contributor guide that was never there. Those dead
+  links are gone; the recipes they named are still unwritten and are not
+  claimed to exist.
+
+  `tests/readme_drift.rs` follows the content. Its config-schema anchors
+  (`external_writes`, `system_installs` must stay documented) now assert
+  against `docs/configuration.md`, where that schema lives, while the README's
+  smaller starter config keeps its own must-parse check. A third guard,
+  `readme_doc_links_resolve`, walks every `](docs/...)` link in the README and
+  fails if the file is absent — the exact failure that shipped four dead links
+  and survived, because nothing looked.
+
 - **A message's "Today"/"Yesterday" label now follows the injected clock, not
   the machine's.** `format_relative_timestamp` called `Local::now()` itself to
   pick between "Today at ...", "Yesterday at ...", and an absolute date. That
