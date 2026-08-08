@@ -9,9 +9,9 @@
 //!
 //! Planning mutates nothing outside the session, so like `ask_user_question`
 //! these tools are ungated (they never touch the policy gate) and run in
-//! every safety mode, including read_only.
+//! every safety mode, including `read_only`.
 //!
-//! Discipline ("at most one in_progress", no pending->completed jumps) is
+//! Discipline ("at most one `in_progress`", no pending->completed jumps) is
 //! soft-enforced: violations come back as advisory notes in the tool result,
 //! never rejections — a hard reject risks retry loops, while silence (codex)
 //! lets malformed checklists render unremarked.

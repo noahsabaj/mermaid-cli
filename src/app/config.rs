@@ -607,7 +607,7 @@ pub fn persist_ollama_allow_ram_offload(enabled: bool) -> Result<()> {
     )
 }
 
-/// Resolve which model to use: CLI arg > last_used > `[default_model]` > a
+/// Resolve which model to use: CLI arg > `last_used` > `[default_model]` > a
 /// local Ollama model > a configured provider's `default_model`.
 pub async fn resolve_model_id(cli_model: Option<&str>, config: &Config) -> anyhow::Result<String> {
     if let Some(model) = cli_model {
@@ -1591,7 +1591,7 @@ model = "ollama/qwen3:8b"
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Older configs have neither the per-model num_ctx table nor the new
+    /// Older configs have neither the per-model `num_ctx` table nor the new
     /// `[ollama]` keys; loading must default cleanly (empty map, offload off).
     #[test]
     fn config_deserializes_without_ollama_context_keys() {

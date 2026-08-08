@@ -82,7 +82,7 @@ fn read_back(path: &Path) -> std::io::Result<String> {
 ///    terminal — a missing `$EDITOR` must not flicker the screen.
 /// 2. Drop the `EventStream` (its reader thread holds crossterm's internal
 ///    reader mutex, which would swallow terminal queries).
-/// 3. `restore_now()` (kitty Pop before LeaveAlternateScreen inside).
+/// 3. `restore_now()` (kitty Pop before `LeaveAlternateScreen` inside).
 /// 4. Run the editor to completion on a blocking thread.
 /// 5. `TerminalGuard::setup()` + a fresh `EventStream` — the setup-time
 ///    kitty probe is legal exactly because no stream exists yet. The fresh

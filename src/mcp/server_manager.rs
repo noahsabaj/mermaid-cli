@@ -23,7 +23,7 @@ use super::transport_http::HttpTransport;
 use mermaid_domain::McpToolSpec;
 use mermaid_domain::{McpServerConfig, TransportKind};
 
-/// Wall-clock bound for one server's spawn + initialize + list_tools.
+/// Wall-clock bound for one server's spawn + initialize + `list_tools`.
 /// The per-JSON-RPC request timeout inside the transport is 30s, so the
 /// slow-but-legitimate case (npx cold-downloading a package during
 /// `initialize`) already fits; this catches spawn-level hangs. A config
@@ -77,7 +77,7 @@ impl McpServerManager {
             .unwrap_or_else(|| sanitize::sanitize_segment(raw_name))
     }
 
-    /// Spawn + initialize + list_tools for one server, bounded by
+    /// Spawn + initialize + `list_tools` for one server, bounded by
     /// [`MCP_STARTUP_TIMEOUT`]; inserts the runtime and returns the
     /// sanitized specs for the reducer's `Msg::McpServerReady`.
     pub async fn start_server(

@@ -342,7 +342,7 @@ fn authority_of(base_url: &str) -> &str {
 
 /// Host part of an authority: `localhost:11434` → `localhost`,
 /// `[::1]:11434` → `[::1]` (brackets kept; `classify_host` strips them).
-/// Note: whether `ollama serve` itself accepts a bracketed IPv6 OLLAMA_HOST
+/// Note: whether `ollama serve` itself accepts a bracketed IPv6 `OLLAMA_HOST`
 /// is unverified — IPv6-loopback autostart is best-effort.
 fn host_of(authority: &str) -> &str {
     if let Some(end) = authority.rfind(']') {

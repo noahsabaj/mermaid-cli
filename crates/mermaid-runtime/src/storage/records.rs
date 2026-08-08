@@ -395,7 +395,7 @@ pub const OUTCOME_LABEL_UNKNOWN: &str = "unknown";
 
 /// A verifiable outcome / reward signal attached to a trajectory (a task, and
 /// optionally a specific tool run). The other durable tables record *what
-/// happened* (messages, tool_runs, checkpoints=diffs); `outcomes` records *how
+/// happened* (messages, `tool_runs`, checkpoints=diffs); `outcomes` records *how
 /// good it was* and *who says so* ([`source`](Self::source)) — the enrichment
 /// that turns logs into a training set for the self-improving loop.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

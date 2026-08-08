@@ -49,9 +49,11 @@ pub struct McpToolResult {
     pub is_error: bool,
 }
 
-/// A content block in an MCP tool result. Per the 2025-11-25 spec,
-/// servers may return text, image, audio, resource_link (URI reference),
-/// or embedded resource content. Older servers only emit text/image.
+/// A content block in an MCP tool result.
+///
+/// Per the 2025-11-25 spec, servers may return text, image, audio,
+/// `resource_link` (URI reference), or embedded resource content. Older
+/// servers only emit text/image.
 #[derive(Debug, Clone)]
 pub enum ContentBlock {
     Text(String),
@@ -75,7 +77,7 @@ pub enum ContentBlock {
         description: Option<String>,
         mime_type: Option<String>,
     },
-    /// Embedded resource — same shape as a read_resource response.
+    /// Embedded resource — same shape as a `read_resource` response.
     /// Either `text` or `blob` (base64) is present depending on the
     /// resource's kind. Rendered as text for the model.
     Resource {

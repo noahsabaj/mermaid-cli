@@ -199,7 +199,7 @@ pub(crate) const GIT_READ_ONLY: &[&str] = &[
     "version",
 ];
 
-/// Binaries that reach the network — never auto-run outside FullAccess.
+/// Binaries that reach the network — never auto-run outside `FullAccess`.
 pub(crate) const NETWORK_BINARIES: &[&str] = &[
     "curl", "wget", "nc", "ncat", "netcat", "socat", "ssh", "scp", "sftp", "rsync", "ftp", "telnet",
 ];

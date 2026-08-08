@@ -52,7 +52,7 @@ pub(crate) fn sandbox_probes() -> (bool, bool) {
     })
 }
 
-/// SIGSYS on Linux (x86_64/aarch64) — the signal the seccomp kill-switch raises.
+/// SIGSYS on Linux (`x86_64/aarch64`) — the signal the seccomp kill-switch raises.
 pub(crate) const SANDBOX_KILL_SIGNAL: i32 = 31;
 
 /// Which sandbox dimension a completed command's failure matches. `Ambiguous`

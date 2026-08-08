@@ -86,7 +86,7 @@ pub fn start_generating_with(id: TurnId, now: SystemTime, continuation: bool) ->
 }
 
 /// Transition `Generating → ExecutingTools`. Allocates `None` slots
-/// for every call so the invariant ("outcomes.len() == calls.len()")
+/// for every call so the invariant ("`outcomes.len()` == `calls.len()`")
 /// is upheld by construction. `now` is the reducer step's injected clock
 /// (`state.now`) so `started` is deterministic on replay (Cause 3).
 pub fn start_executing_tools(
@@ -147,7 +147,7 @@ pub fn commit_assistant_message(
 }
 
 /// Build the follow-up `tool` role messages from completed outcomes.
-/// The OpenAI-compatible wire format requires (tool_call_id, tool_name,
+/// The OpenAI-compatible wire format requires (`tool_call_id`, `tool_name`,
 /// content) — we pull name from the original call.
 pub fn tool_result_messages(
     calls: &[PendingToolCall],

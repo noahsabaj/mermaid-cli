@@ -1,6 +1,6 @@
 //! `scroll` — wheel scroll in "up" or "down" direction. Amount is
 //! clamped to `[1, MAX_SCROLL_AMOUNT]` so a runaway model can't
-//! request a million ticks (would blow ARG_MAX building xdotool's
+//! request a million ticks (would blow `ARG_MAX` building xdotool's
 //! argv on the X11 path).
 
 use std::sync::Arc;

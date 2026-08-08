@@ -91,7 +91,7 @@ pub(crate) fn build_sandboxed_shell(
 }
 
 /// Where the effective working directory landed: inside the project, inside
-/// the session scratchpad, or outside both (escalated to ExternalDirectory).
+/// the session scratchpad, or outside both (escalated to `ExternalDirectory`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CwdContainment {
     Project,

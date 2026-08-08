@@ -14,7 +14,7 @@ use mermaid_domain::PlanConfig;
 
 /// Row count (kept in sync with `plan_config_rows` and the reducer's key
 /// handler). Rows: preset, builds, web, memory, tasks, model, reasoning,
-/// auto_approve, post_approve.
+/// `auto_approve`, `post_approve`.
 pub const PLAN_CONFIG_ROWS: usize = 9;
 
 /// Pane height: rows + border(2) + hint line.

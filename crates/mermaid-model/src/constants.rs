@@ -24,7 +24,7 @@ pub const DEFAULT_TEMPERATURE: f32 = 0.7;
 pub const LEGACY_DEFAULT_MAX_TOKENS: usize = 4096;
 /// Meta's documented Muse Spark context and per-response output ceilings.
 /// Static-but-documented like the OpenAI gpt catalog rows: Meta's `/v1/models`
-/// exposes no limit metadata (Model schema is id/object/created/owned_by/
+/// exposes no limit metadata (Model schema is `id/object/created/owned_by`/
 /// metadata — verified against the API reference 2026-07-09), so live limits
 /// discovery has nothing to read. Consumed by the muse-spark catalog row
 /// (context) and `MetaProvider` capabilities (both).
@@ -175,7 +175,7 @@ pub const MAX_WEB_DOWNLOAD_CONCURRENCY: usize = 8;
 pub const MAX_WEB_PER_ORIGIN_CONCURRENCY: usize = 2;
 /// Maximum CPU-heavy extraction/snapshot jobs in flight process-wide.
 pub const MAX_WEB_EXTRACTION_CONCURRENCY: usize = 2;
-/// Maximum concurrent queries inside one batched web_search call.
+/// Maximum concurrent queries inside one batched `web_search` call.
 pub const MAX_WEB_SEARCH_CONCURRENCY: usize = 4;
 
 // UI Cache
@@ -221,7 +221,7 @@ pub const SCREENSHOT_REGISTRY_CAPACITY: usize = 16;
 /// the model knows what was dropped from context.
 pub const MAX_RETAINED_SCREENSHOTS: usize = 3;
 /// Per-command wall-clock cap for the synchronous geometry/probe helpers
-/// (xdotool getactivewindow/getwindowgeometry, xrandr --query, the list_windows
+/// (xdotool getactivewindow/getwindowgeometry, xrandr --query, the `list_windows`
 /// search). These return in tens of ms; a wedged display (dead X socket,
 /// detached SSH) must not hang the agent loop (#97).
 pub const COMPUTER_USE_CMD_TIMEOUT_SECS: u64 = 5;

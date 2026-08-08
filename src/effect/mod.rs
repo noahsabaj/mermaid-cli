@@ -278,7 +278,7 @@ async fn fire_compaction_hook(event: &PersistedCompaction) {
 pub struct EffectRunner {
     msg_tx: MsgSender,
     /// Per-turn scopes. Populated lazily: the first `Cmd` bearing a
-    /// TurnId creates a scope; `Cmd::CancelScope` tears it down.
+    /// `TurnId` creates a scope; `Cmd::CancelScope` tears it down.
     /// Empty (drained) scopes are reaped by `reap_empty_scopes`, which
     /// runs at the top of every `dispatch` call so the map stays
     /// bounded across long sessions (F12).
@@ -589,7 +589,7 @@ impl EffectRunner {
         });
     }
 
-    /// Harvest finished detached tasks. Without this the `detached` JoinSet
+    /// Harvest finished detached tasks. Without this the `detached` `JoinSet`
     /// grows for the whole session (every fire-and-forget effect lingers as a
     /// completed-but-unjoined handle), and a panicking detached task vanishes
     /// without a trace. Non-blocking — only already-finished tasks are taken (#38).
@@ -1748,7 +1748,7 @@ impl EffectRunner {
 /// `UpstreamError` so the reducer ends the turn cleanly.
 /// Report a completed request's completion tokens into the task broker's
 /// cumulative counter, so task cost deltas (`tokens_spent`) can be computed
-/// between in_progress and completed stamps.
+/// between `in_progress` and completed stamps.
 fn note_stream_usage(
     tasks: &crate::providers::TaskBroker,
     usage: &Option<mermaid_model::models::TokenUsage>,

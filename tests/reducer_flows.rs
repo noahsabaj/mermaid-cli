@@ -278,7 +278,7 @@ fn double_cancel_does_not_emit_a_second_cancel_scope() {
 }
 
 /// Full cancellation lifecycle: Idle → Generating → Cancelling →
-/// TurnCancelled → Idle. Before F1 the reducer had no arm for the
+/// `TurnCancelled` → Idle. Before F1 the reducer had no arm for the
 /// terminal event and the TUI stuck in `Cancelling` until an
 /// `UpstreamError` from the aborted provider happened to land — a
 /// side-effect that couldn't be relied on once providers started
@@ -304,7 +304,7 @@ fn cancel_then_turn_cancelled_returns_to_idle() {
 /// A `TurnCancelled` for a non-current turn is filtered out before the
 /// handler runs. Protects against the effect runner emitting a stale
 /// terminal event for a turn the reducer already finished via another
-/// path (e.g. successful StreamDone raced cancel).
+/// path (e.g. successful `StreamDone` raced cancel).
 #[test]
 fn stale_turn_cancelled_does_not_mutate_state() {
     let (state, _) = user_submit(fresh(), "active turn");

@@ -9,6 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`clippy::doc_markdown` paid off, and `.clippy.toml` now tells it which
+  words are prose.** It was the single largest entry in `clippy_pedantic.txt`
+  at 345 occurrences — a quarter of the tracked debt, and the cheapest quarter,
+  since the lint's suggestion is machine-applicable.
+
+  Running `--fix` blind would have been a mistake. The lint fires on any
+  mixed-case word, so of its first 313 suggestions roughly a hundred were
+  wrong: it wanted `` `OpenAI` `` (50 times), `` `OpenRouter` `` (26),
+  `` `SearXNG` `` (23), `` `SQLite` ``, `` `PyPI` ``, `` `ConPTY` ``, and
+  `` `POSTed` ``. Backticks mean "this is an identifier"; a vendor's name in a
+  sentence about the vendor is not one, and marking it up as code is a false
+  claim in 100 places.
+
+  So the nineteen genuine prose words are declared in `doc-valid-idents` (with
+  `".."`, extending clippy's built-in list rather than replacing it) and the
+  remaining 183 suggestions were applied. Those are real: type names, enum
+  variants, config keys, `find` flags, and the SDDL codes `GA`/`SY`, which
+  *are* literal tokens and do belong in backticks. Two more were fixed by hand
+  rather than by the tool — one where it backticked `len()` out of the middle
+  of an expression, and one unbalanced-backtick warning it could not fix at all
+  (a doc comment mentioning ```` ```json ```` fences).
+
+  `.clippy.toml`'s stated invariant — every key configures a lint that is
+  actually enabled — is widened rather than quietly broken: a key may now also
+  configure a lint named in `check_clippy_ratchet.py`'s `LINTS`, which is
+  tracked on every push to `main` without blocking a PR. `doc_markdown` stays
+  non-blocking; nothing here promotes it into the `[lints.clippy]` table.
+
+  `clippy_pedantic.txt` goes from 82 keys / 5519 occurrences to 81 / 5174 —
+  the `doc_markdown` key disappears entirely. The number is taken from the CI
+  log of a `workflow_dispatch` run on the branch, since the baseline is a Linux
+  measurement and this was authored on Windows; the `Lint Debt` job does not
+  run on pull requests, and `workflow_dispatch` is what satisfies its `if`.
+
+  One knock-on: backticking `resource_link` pushed `ContentBlock`'s doc comment
+  in `src/mcp/client.rs` two characters past the `too_long_first_doc_paragraph`
+  limit, which would have moved that key from 203 to 204. Split into a summary
+  line and a body rather than recorded — a baseline that only shrinks should
+  not absorb a rise just because it arrived in the same diff as a larger fall.
 - **The layering baseline is empty: 3 keys / 6 occurrences to 0 / 0.** The
   guard landed with its recorded debt intact; this pays the last of it, so
   `layering.txt` is now an assertion rather than an allowance.

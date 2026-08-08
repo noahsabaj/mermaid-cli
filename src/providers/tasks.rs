@@ -38,7 +38,7 @@ pub struct TaskBroker {
     store: Arc<Mutex<ChecklistStore>>,
     /// Session-monotonic completion-token counter, accumulated by the effect
     /// runner as providers report usage. Task cost deltas are computed
-    /// between the readings at in_progress and completed.
+    /// between the readings at `in_progress` and completed.
     tokens: Arc<AtomicU64>,
     msg_tx: mpsc::Sender<Msg>,
 }
@@ -62,7 +62,7 @@ impl TaskBroker {
     /// Accumulate a completed request's completion tokens into the
     /// session-monotonic counter. Called by the effect runner on every
     /// provider usage report; task cost deltas read this counter at the
-    /// in_progress and completed edges.
+    /// `in_progress` and completed edges.
     pub fn add_tokens(&self, completion_tokens: u64) {
         self.tokens.fetch_add(completion_tokens, Ordering::Relaxed);
     }

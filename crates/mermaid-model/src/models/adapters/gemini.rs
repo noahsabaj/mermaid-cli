@@ -821,7 +821,7 @@ impl StreamState {
 }
 
 /// Process one SSE event payload (already JSON-decoded). Mutates `state`
-/// and emits StreamEvents through `callback`. Returns Err on mid-stream
+/// and emits `StreamEvents` through `callback`. Returns Err on mid-stream
 /// error payloads or JSON parse failure.
 #[expect(
     clippy::too_many_lines,
@@ -1990,7 +1990,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::Mutex;
 
-    /// Build a callback that records every emitted StreamEvent into a
+    /// Build a callback that records every emitted `StreamEvent` into a
     /// shared Vec for test assertions.
     fn record_callback() -> (StreamCallback, Arc<Mutex<Vec<StreamEvent>>>) {
         let events: Arc<Mutex<Vec<StreamEvent>>> = Arc::new(Mutex::new(Vec::new()));

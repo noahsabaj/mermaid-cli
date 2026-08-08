@@ -785,7 +785,7 @@ mod tests {
         assert!(args[3].contains("echo hi"), "args: {args:?}");
     }
 
-    /// Without the powershell_wrap trailer, PowerShell collapses a native
+    /// Without the `powershell_wrap` trailer, PowerShell collapses a native
     /// child's exit code to 0/1 — `cargo build` failing with 101 would look
     /// clean. `cmd /c exit 7` is the minimal native command with a nonzero code.
     #[cfg(target_os = "windows")]

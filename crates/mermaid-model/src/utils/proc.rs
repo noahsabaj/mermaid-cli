@@ -3,7 +3,7 @@
 //! kill-on-timeout subprocess execution.
 //!
 //! Every tree we manage is spawned as a process-group leader (the exec tool's
-//! foreground path uses a `setsid` pre_exec — a new *session*, whose leader is
+//! foreground path uses a `setsid` `pre_exec` — a new *session*, whose leader is
 //! also a group leader, so the child additionally loses the controlling
 //! terminal; `mode=background` uses `setsid(1)`; mermaid-managed servers use
 //! `process_group(0)`; Windows kills the tree by pid via `taskkill /T`).

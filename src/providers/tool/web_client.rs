@@ -351,8 +351,8 @@ impl OllamaWebClient {
 
     /// Execute search via Ollama Cloud API.
     ///
-    /// The web_search API already returns full page content per result, so no
-    /// separate web_fetch calls are needed. Each result's content is truncated
+    /// The `web_search` API already returns full page content per result, so no
+    /// separate `web_fetch` calls are needed. Each result's content is truncated
     /// to prevent context bloat.
     async fn search_impl(
         &self,
@@ -447,7 +447,7 @@ impl OllamaWebClient {
         Ok(search_results)
     }
 
-    /// Fetch a URL's content via Ollama's web_fetch API.
+    /// Fetch a URL's content via Ollama's `web_fetch` API.
     async fn fetch_impl(&self, url: &str, budget: WebByteBudget) -> FetchResult<WebFetchResult> {
         let requested = ValidatedWebUrl::parse(url)?;
 

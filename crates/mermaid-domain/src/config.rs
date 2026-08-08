@@ -310,7 +310,7 @@ pub struct SafetyConfig {
     /// Enforcement floor for write-shaped MCP tools (no server-advertised
     /// `readOnlyHint`): `allow` | `auto` | `ask` | `deny`. Safety mode alone
     /// never authorizes an external side effect — with the default `auto`,
-    /// even full_access routes MCP writes through the intent classifier
+    /// even `full_access` routes MCP writes through the intent classifier
     /// (aligned runs silently, off-task escalates). `allow` restores the old
     /// unconditional-allow behavior.
     #[serde(default)]
@@ -319,7 +319,7 @@ pub struct SafetyConfig {
     /// `cargo install`, `pip install`, `brew`/`apt`/`winget` installs) —
     /// same levels and default as `external_writes`. They mutate the
     /// MACHINE, not the project (outside checkpoint reach), so even
-    /// full_access vets them. Project-local installs (`npm install`,
+    /// `full_access` vets them. Project-local installs (`npm install`,
     /// `cargo add`) are untouched.
     #[serde(default)]
     pub system_installs: mermaid_runtime::FloorLevel,
@@ -329,7 +329,7 @@ pub struct SafetyConfig {
     #[serde(default)]
     pub auto_classifier_model: Option<String>,
     /// Headless escape hatch: when true, non-replayable tools (web/mcp/
-    /// subagent/computer_use) are allowed to PROCEED on an `Ask` decision in a
+    /// `subagent/computer_use`) are allowed to PROCEED on an `Ask` decision in a
     /// headless run (no approval UI) instead of being blocked. Default `false`
     /// — `mermaid run` in `ask` mode otherwise refuses these. Set via
     /// `--allow-untrusted-tools` or config for CI that needs them.
@@ -519,7 +519,7 @@ pub struct PlanConfig {
     /// Pin what approval does. Unset (default) the dialog offers both
     /// "Approve and start" and "Approve and wait" every time; set, it
     /// collapses to a single Approve option with this behavior. Option +
-    /// skip_serializing keeps "unset" meaningful in saved configs (the
+    /// `skip_serializing` keeps "unset" meaningful in saved configs (the
     /// freeze-defaults rule).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub post_approve: Option<PlanPostApprove>,
@@ -688,7 +688,7 @@ fn nonzero_or(value: usize, fallback: usize) -> usize {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ComputerUseConfig {
-    /// After a successful click / type_text / press_key, auto-capture the
+    /// After a successful click / `type_text` / `press_key`, auto-capture the
     /// focused window and attach it inline so the model can verify the result.
     /// On by default (non-breaking); set false to cut the per-action capture
     /// cost + image tokens when visual feedback isn't needed. The model can

@@ -803,7 +803,7 @@ impl OllamaAdapter {
     /// block ~15s behind an otherwise generic spinner, and the spawned
     /// server outlives mermaid, so this one line covers latency feedback,
     /// discoverability, and consent at once. `ensure_running` invokes it
-    /// only when a spawn is actually committed (never on NotLocal /
+    /// only when a spawn is actually committed (never on `NotLocal` /
     /// Disabled / already-healthy / binary-missing), so no false notices
     /// reach the user.
     ///
@@ -1079,7 +1079,7 @@ fn append_reason_hint(error: ModelError, hint: &str) -> ModelError {
 /// of `OllamaStreamChunk`, so a direct typed parse fails with a generic
 /// `ParseError("missing field `message`")` and the real provider error survives
 /// only inside `raw`. Check for a top-level `error` string first and surface it
-/// as a typed `ProviderError` (mirrors openai_compat.rs / gemini.rs stream
+/// as a typed `ProviderError` (mirrors `openai_compat.rs` / gemini.rs stream
 /// paths) before falling back to the typed-chunk parse.
 fn parse_ollama_stream_frame(line: &str) -> Result<OllamaStreamChunk> {
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(line)

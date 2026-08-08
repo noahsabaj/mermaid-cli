@@ -507,8 +507,8 @@ impl HttpTransport {
     }
 
     /// Capture `MCP-Session-Id` from any response's headers (the normative
-    /// source is the InitializeResult response; accepting it from any response
-    /// is a safe superset). Lookup is case-insensitive by HeaderMap contract.
+    /// source is the `InitializeResult` response; accepting it from any response
+    /// is a safe superset). Lookup is case-insensitive by `HeaderMap` contract.
     fn capture_session(&self, headers: &HeaderMap) {
         if let Some(v) = headers.get(&SESSION_HEADER) {
             *self
@@ -607,7 +607,7 @@ impl SseMeta {
     }
 }
 
-/// Connect-time DNS vetting for MCP endpoints. Unlike web_fetch's resolver,
+/// Connect-time DNS vetting for MCP endpoints. Unlike `web_fetch`'s resolver,
 /// loopback is always allowed (local MCP servers are a first-class case);
 /// private / link-local / CGNAT / metadata addresses are blocked unless the
 /// config opts in with `allow_private_network` — plugin bundles ship MCP
@@ -646,9 +646,9 @@ impl reqwest::dns::Resolve for McpVettingResolver {
 }
 
 /// Canned-HTTP test fixture (project precedent: ollama/daemon tests), shared
-/// with the server_manager tests.
+/// with the `server_manager` tests.
 ///
-/// A tokio TcpListener that serves one canned reply per accepted connection,
+/// A tokio `TcpListener` that serves one canned reply per accepted connection,
 /// in order, recording each raw request. Every reply carries
 /// `Connection: close`, so reqwest opens a fresh connection per request and
 /// the accept loop stays strictly sequential.

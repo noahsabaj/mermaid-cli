@@ -27,7 +27,7 @@ use mermaid_domain::McpToolSpec;
 pub const MAX_TOOL_NAME_LEN: usize = 64;
 
 /// Maximum length of the sanitized server segment inside the full name.
-/// Keeps room for the tool segment: 64 - "mcp__".len() - "__".len() - 24
+/// Keeps room for the tool segment: `64 - "mcp__".len() - "__".len() - 24`
 /// leaves 33 chars for the tool.
 pub const SERVER_SEGMENT_MAX: usize = 24;
 

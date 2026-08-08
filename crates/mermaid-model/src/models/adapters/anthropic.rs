@@ -11,7 +11,7 @@
 //! MUST round-trip in conversation history when extended thinking is
 //! enabled. Mermaid's `ChatMessage::provider_continuation` field (Step 3
 //! Wave 1) holds it across turns. The signature is per-thinking-block
-//! server state — drop it and the API returns 400 invalid_request_error
+//! server state — drop it and the API returns 400 `invalid_request_error`
 //! claiming reasoning continuity is broken.
 //!
 //! Streaming uses standard SSE framing (reused from Step 2's
@@ -185,9 +185,9 @@ fn thinking_format_for(model: &str) -> ThinkingFormat {
 /// so it never exceeds `max_tokens - 1024` (the API rejects budgets that
 /// don't leave headroom for the actual output).
 ///
-/// Budgets climb monotonically with rank so XHigh (between High and Max)
+/// Budgets climb monotonically with rank so `XHigh` (between High and Max)
 /// gets a between-the-two budget rather than collapsing onto either
-/// neighbor. Legacy models don't expose XHigh on-paper, but the value
+/// neighbor. Legacy models don't expose `XHigh` on-paper, but the value
 /// preserves semantic ordering for callers that snap into this path.
 fn legacy_budget_for(level: ReasoningLevel, max_tokens: usize) -> Option<u32> {
     let proposed: u32 = match level {
@@ -388,7 +388,7 @@ fn coalesce_consecutive_roles(msgs: Vec<Value>) -> Vec<Value> {
 /// guarantees on the way out — no arm below has to maintain it.
 ///
 /// Assistant messages with `thinking + provider_continuation` emit a
-/// `thinking` content block paired with the text/tool_use blocks; the
+/// `thinking` content block paired with the `text/tool_use` blocks; the
 /// signature round-trips so subsequent turns don't 400.
 #[expect(
     clippy::too_many_lines,
@@ -1386,7 +1386,7 @@ enum ContentBlockOut {
 }
 
 /// Per-block-index streaming accumulator. Anthropic interleaves
-/// content_block events for multiple blocks (text + thinking + tool_use),
+/// `content_block` events for multiple blocks (text + thinking + `tool_use`),
 /// indexed by `index`. We keep one accumulator per active block.
 #[derive(Debug)]
 enum BlockAccumulator {
@@ -2277,7 +2277,7 @@ mod tests {
     }
 
     /// RC-H: Opus 4.8 / Fable 5 are on the 4.6+ adaptive line — adaptive
-    /// thinking, effort in output_config, and NO temperature (it 400s there).
+    /// thinking, effort in `output_config`, and NO temperature (it 400s there).
     #[test]
     fn build_request_body_adaptive_no_temperature_for_opus_4_8() {
         let adapter = AnthropicAdapter::new(
@@ -2321,7 +2321,7 @@ mod tests {
         assert!(body.get("effort").is_none(), "no top-level effort either");
     }
 
-    /// Opus 4.7 + XHigh maps to `xhigh` — the highest tier, available
+    /// Opus 4.7 + `XHigh` maps to `xhigh` — the highest tier, available
     /// only on Opus 4.7 per the official docs. Max on Opus 4.7 stays at
     /// `max` (distinct tier from xhigh).
     #[test]
@@ -2402,7 +2402,7 @@ mod tests {
         assert_eq!(body["thinking"]["display"], "summarized");
     }
 
-    /// Step 5c: when the user enables hide_reasoning_trace, send
+    /// Step 5c: when the user enables `hide_reasoning_trace`, send
     /// `display: "omitted"` so the API doesn't waste bandwidth streaming
     /// thinking tokens we'd just discard client-side.
     #[test]

@@ -145,7 +145,7 @@ pub struct FinalResponse {
 pub struct ExecContext {
     pub token: CancellationToken,
     /// Ctrl+B "background this" signal, parallel to `token`. Tools that can
-    /// detach a running child (execute_command, agent) select on it; the live
+    /// detach a running child (`execute_command`, agent) select on it; the live
     /// path sets it from the turn scope, tests leave it never-fired.
     pub background: CancellationToken,
     /// Turn-independent channel back to the main reducer loop. Detached work
@@ -334,7 +334,7 @@ impl ExecContext {
 
 /// Narrow shim from the reducer's `ChatRequest` to the adapter-facing
 /// messages. Providers often want to mutate the last assistant
-/// message (e.g. Anthropic cache_control injection); this helper
+/// message (e.g. Anthropic `cache_control` injection); this helper
 /// clones the slice as owned so the provider can do that without
 /// fighting the borrow checker.
 pub fn clone_messages(msgs: &[ChatMessage]) -> Vec<ChatMessage> {

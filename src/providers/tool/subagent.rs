@@ -1531,7 +1531,7 @@ fn build_child_registry(
 
 /// Whether a headless child can get past policy for this web tool without an
 /// inline approval broker. Mirrors the policy gate's explicit headless and
-/// ReadOnly opt-ins while also honoring user safety overrides.
+/// `ReadOnly` opt-ins while also honoring user safety overrides.
 fn headless_web_tool_is_executable(
     config: &mermaid_domain::Config,
     safety_mode: SafetyMode,

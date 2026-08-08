@@ -27,7 +27,7 @@ use super::path_safety::{
 };
 
 /// Small helper for building a `ToolDefinition` with a typical
-/// JSON-schema-shaped input_schema. Keeps the per-tool definitions
+/// JSON-schema-shaped `input_schema`. Keeps the per-tool definitions
 /// readable.
 fn defn(name: &str, description: &str, input_schema: serde_json::Value) -> ToolDefinition {
     ToolDefinition {
@@ -802,7 +802,7 @@ mod tests {
 
     /// Memory facts live outside the project/scratchpad roots and the index
     /// tells the model to `read_file` them — reads must resolve against the
-    /// memory roots (here the ProjectShared root, reached by putting the
+    /// memory roots (here the `ProjectShared` root, reached by putting the
     /// workdir in a subdir of the git root), while unrelated outside paths
     /// stay rejected.
     #[tokio::test]
@@ -1238,7 +1238,7 @@ mod tests {
 
     /// Build an `ExecContext` with an explicit safety mode, NO approval
     /// broker, and (optionally) a materialized scratchpad. Unlike
-    /// `test_exec_context` (pinned to FullAccess) this exercises the gate.
+    /// `test_exec_context` (pinned to `FullAccess`) this exercises the gate.
     fn scratch_ctx(
         mode: mermaid_runtime::SafetyMode,
         workdir: PathBuf,
@@ -1359,7 +1359,7 @@ mod tests {
         let _ = fs::remove_dir_all(project.parent().unwrap());
     }
 
-    /// ReadOnly still blocks scratchpad mutations — the bypass only skips
+    /// `ReadOnly` still blocks scratchpad mutations — the bypass only skips
     /// the approval flow, never the mode's mutation ban.
     #[tokio::test]
     async fn scratch_mutation_blocked_in_read_only() {
@@ -1416,7 +1416,7 @@ mod tests {
         let _ = fs::remove_dir_all(project.parent().unwrap());
     }
 
-    /// read_file follows a materialized scratchpad too.
+    /// `read_file` follows a materialized scratchpad too.
     #[tokio::test]
     async fn read_file_reads_from_scratchpad() {
         let (project, scratch) = scratch_fixture("read");

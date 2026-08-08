@@ -178,7 +178,7 @@ pub fn pipe_name_for_sid(sid: &str) -> String {
 }
 
 /// SDDL for the daemon pipe's DACL: protected (`P`, no inherited ACEs),
-/// granting `GA` (generic all) to `SY` (LocalSystem) and to the owning user's
+/// granting `GA` (generic all) to `SY` (`LocalSystem`) and to the owning user's
 /// SID — and to no one else, since a DACL denies anything it doesn't grant.
 /// This is the named-pipe analog of the 0600 unix socket + uid peer check
 /// (#66). Remote access is separately refused via

@@ -243,7 +243,7 @@ pub(crate) fn classify_awk(segment: &[String]) -> RiskClass {
 
 /// `find` only reads the tree unless it carries an action primitive. `-exec`/
 /// `-execdir`/`-ok`/`-okdir` run an arbitrary command (Process); `-delete`/
-/// `-fprint`/`-fprint0`/`-fprintf`/`-fls` write or delete (ShellMutation).
+/// `-fprint`/`-fprint0`/`-fprintf`/`-fls` write or delete (`ShellMutation`).
 pub(crate) fn classify_find(segment: &[String]) -> RiskClass {
     let mut worst = RiskClass::ReadOnly;
     for tok in segment.iter().skip(1) {

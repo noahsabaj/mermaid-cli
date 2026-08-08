@@ -24,7 +24,7 @@ pub enum ChecklistStatus {
     InProgress,
     /// Stalled on something outside the task itself (a failing dependency, a
     /// missing decision). Stays visibly blocked instead of masquerading as
-    /// pending; the blocker gets its own task, which becomes the in_progress
+    /// pending; the blocker gets its own task, which becomes the `in_progress`
     /// one.
     Blocked,
     Completed,
@@ -90,7 +90,7 @@ pub struct Stamp {
 pub struct ChecklistItem {
     /// Stable, monotonic, never reused.
     pub id: u32,
-    /// Short imperative description ("Wire the broker into ExecContext").
+    /// Short imperative description ("Wire the broker into `ExecContext`").
     pub subject: String,
     /// Present-tense form shown on the spinner line while in progress.
     pub active_form: String,

@@ -48,7 +48,7 @@ pub use rows::*;
 /// <dir>\sub\x.txt  ACEs=0 []                <- locked out
 /// ```
 ///
-/// SQLite then returns SQLITE_CANTOPEN (14) forever, and the sentinel — written
+/// SQLite then returns `SQLITE_CANTOPEN` (14) forever, and the sentinel — written
 /// on `icacls` exit 0, which it earned — stopped the block ever running again.
 ///
 /// # What replaces it
@@ -124,7 +124,7 @@ mod windows_acl {
 
 /// Open the connection, repairing a Windows ACL lockout once before giving up.
 ///
-/// Scoped to SQLITE_CANTOPEN on a file that exists: any other failure, or a
+/// Scoped to `SQLITE_CANTOPEN` on a file that exists: any other failure, or a
 /// missing file, means something the ACL cannot explain and must surface
 /// unchanged.
 #[cfg(windows)]
@@ -1401,7 +1401,7 @@ mod tests {
     /// A v1 database could not. The F75 covering index was created in the
     /// idempotent baseline, which runs before the `ensure_column` that adds
     /// the column it indexes — so the migration threw "no such column:
-    /// owner_kind", rolled back inside its own transaction, left
+    /// `owner_kind`", rolled back inside its own transaction, left
     /// `user_version` unstamped, and failed the same way on every open after.
     /// Tasks, approvals, checkpoints, processes and the daemon were all
     /// unreachable, permanently, with no way forward.

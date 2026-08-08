@@ -1,6 +1,6 @@
 //! Shared ordered bridge for the adapter's sync `StreamCallback`.
 //!
-//! The four provider wrappers (ollama, anthropic, gemini, openai_compat)
+//! The four provider wrappers (ollama, anthropic, gemini, `openai_compat`)
 //! all face the same problem: the legacy `StreamCallback` is a sync
 //! `Fn(ModelStreamEvent)` closure owned by the adapter, but the v0.7
 //! `StreamContext` sink is an async bounded `mpsc::Sender<StreamEvent>`.
