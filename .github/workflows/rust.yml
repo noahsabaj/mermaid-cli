@@ -203,21 +203,25 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: isolated-crate-build
-      - name: Build each workspace crate from its packaged tarball
+      - name: Build each crate outside the workspace
         run: |
           set -euo pipefail
+          # Copy the crates somewhere with no workspace root above them. Each
+          # then builds as its own root — no feature unification with
+          # `mermaid-cli` — which is exactly the isolation `cargo publish`
+          # applies, and exactly what hid the missing dep.
+          #
+          # Copying rather than `cargo package`: packaging resolves deps against
+          # the crates.io index, so a crate depending on an unreleased sibling
+          # version cannot be packaged before that sibling is published. That
+          # made the first version of this job fail on its own fix PR. Sibling
+          # path deps resolve fine here because the siblings are copied too.
+          ISO="$RUNNER_TEMP/isolated"
+          mkdir -p "$ISO"
+          cp -r crates/. "$ISO/"
           for crate in mermaid-runtime mermaid-model; do
-            echo "::group::$crate"
-            # `--no-verify` packages without building; we build the extraction
-            # ourselves so the failure points at the crate, not at cargo.
-            cargo package -p "$crate" --no-verify --allow-dirty
-            ver=$(cargo metadata --no-deps --format-version 1 \
-                  | python3 -c "import sys,json;print(next(p['version'] for p in json.load(sys.stdin)['packages'] if p['name']=='$crate'))")
-            tar xzf "target/package/$crate-$ver.crate" -C target/package
-            # Build with the crate as its own workspace root — no unification
-            # with the parent, which is the whole point.
-            ( cd "target/package/$crate-$ver" \
-              && cargo build --offline 2>/dev/null || cargo build )
+            echo "::group::$crate (standalone)"
+            ( cd "$ISO/$crate" && cargo build --all-targets )
             echo "::endgroup::"
           done
 
