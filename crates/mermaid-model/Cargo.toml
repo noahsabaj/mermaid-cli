@@ -32,17 +32,6 @@ tokio = { version = "1.44", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-[target.'cfg(target_os = "linux")'.dependencies]
-# Direct dep ONLY to turn on its `vendored` feature (static libdbus) for
-# keyring's sync-secret-service backend; nothing imports it directly.
-#
-# Mirrors the root crate, and it has to: `cargo publish` builds this crate
-# ALONE, without the workspace's feature unification. In the workspace the root
-# turned `vendored` on for everyone, so `cargo build` was green while this
-# manifest was incomplete — the gap only appeared when the packaged tarball was
-# verified on Linux, after `mermaid-runtime` had already been published.
-dbus-secret-service = { version = "4", features = ["vendored"] }
-
 [dev-dependencies]
 temp-env = "0.3"
 tempfile = "3.24"
