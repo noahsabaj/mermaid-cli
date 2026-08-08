@@ -51,12 +51,12 @@ fn id(base: &str) -> String {
 fn project(tag: &str, facts: &[(String, &str)]) -> Option<PathBuf> {
     let dir = std::env::temp_dir().join(format!("mermaid_mem_{tag}_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir_all(&dir).expect("the fixture needs its own temp directory");
     if git(&dir).args(["init", "-q"]).run().is_err() {
         return None;
     }
     let mem = dir.join(".mermaid").join("memory");
-    std::fs::create_dir_all(&mem).unwrap();
+    std::fs::create_dir_all(&mem).expect("the fixture needs a memory directory");
     for (id, body) in facts {
         std::fs::write(
             mem.join(format!("{id}.md")),
@@ -64,7 +64,7 @@ fn project(tag: &str, facts: &[(String, &str)]) -> Option<PathBuf> {
                 "---\nname: {id}\ndescription: fixture fact {id}\nmetadata:\n  type: project\n---\n\n{body}\n"
             ),
         )
-        .unwrap();
+        .expect("writing a fixture fact must succeed");
     }
     Some(dir)
 }

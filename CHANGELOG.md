@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`clippy::unwrap_used` is down to five, and none of the five is ours.** The
+  `allow-unwrap-in-tests` change left a residue of 15: `unwrap()` in `tests/`
+  *helper* functions, which carry no `#[test]` attribute for the allowance to
+  recognize. They are `.expect()` now, with messages that separate "the fixture
+  could not be built" from "the assertion failed" — the distinction that
+  `a368c1b` argued for when it made the same change to one test.
+
+  What is left is the five `clap` `default_value_t` expansions, where the
+  `unwrap()` belongs to the derive macro. So the count of unwraps this repo
+  actually wrote is **zero**, and any rise in the number is now real by
+  construction rather than needing triage.
+
 - **The two biggest `Result` families got real `# Errors` sections:
   `missing_errors_doc` 265 down to 153.** The only entry near the top of
   `clippy_pedantic.txt` with no machine-applicable fix — clippy cannot write

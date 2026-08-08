@@ -53,7 +53,7 @@ fn spawner(models: Vec<Arc<ScriptedModel>>) -> Arc<SubagentSpawner> {
 
 fn workdir() -> PathBuf {
     let dir = std::env::temp_dir().join(format!("mermaid_sublife_{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir_all(&dir).expect("the fixture needs its own temp directory");
     dir
 }
 
