@@ -54,7 +54,7 @@ enum CommandMode {
 }
 
 impl CommandMode {
-    fn parse(args: &serde_json::Value) -> Result<Self, String> {
+    pub(crate) fn parse(args: &serde_json::Value) -> Result<Self, String> {
         match args.get("mode").and_then(|v| v.as_str()).unwrap_or("wait") {
             "wait" | "foreground" => Ok(Self::Wait),
             "background" => Ok(Self::Background),
@@ -598,1520 +598,17 @@ fn finish_foreground_command(
     }
 }
 
-#[derive(Debug)]
-struct BackgroundStartup {
-    ready_message: String,
-    log_excerpt: String,
-    detected_url: Option<String>,
-}
-
-async fn run_background_command(
-    command: &str,
-    workdir: &Path,
-    startup_timeout_secs: u64,
-    ready_pattern: Option<&str>,
-    open_url: Option<&str>,
-    ctx: ExecContext,
-) -> ToolOutcome {
-    let start = Instant::now();
-
-    {
-        let log_path = background_log_path();
-        let pid =
-            match launch_background_process(command, workdir, &log_path, ctx.scratchpad.as_deref())
-                .await
-            {
-                Ok(pid) => pid,
-                Err(error) => {
-                    return ToolOutcome::error(error, start.elapsed().as_secs_f64());
-                },
-            };
-
-        let startup = match wait_for_background_startup(
-            pid,
-            &log_path,
-            startup_timeout_secs,
-            ready_pattern,
-            &ctx,
-        )
-        .await
-        {
-            Ok(startup) => startup,
-            Err(BackgroundWaitError::Cancelled) => {
-                mermaid_model::utils::terminate_tree(pid, mermaid_model::utils::Grace::Graceful)
-                    .await;
-                return ToolOutcome::cancelled();
-            },
-            Err(BackgroundWaitError::ExitedEarly(log_excerpt)) => {
-                return ToolOutcome::error(
-                    format!(
-                        "Background command exited during startup. Log: {}\n\n{}",
-                        log_path.display(),
-                        log_excerpt
-                    ),
-                    start.elapsed().as_secs_f64(),
-                );
-            },
-        };
-
-        let opened = if let Some(url) = open_url {
-            Some((url.to_string(), open_browser_url(url).await))
-        } else {
-            None
-        };
-
-        let mut output = format!(
-            "Background command started.\nPID: {}\nLog: {}\n{}\n",
-            pid,
-            log_path.display(),
-            startup.ready_message
-        );
-        if let Some(url) = startup.detected_url.as_ref() {
-            output.push_str(&format!("Detected URL: {}\n", url));
-        }
-        if let Some((url, result)) = opened {
-            match result {
-                Ok(()) => output.push_str(&format!("Opened URL: {}\n", url)),
-                Err(error) => output.push_str(&format!("Open URL failed: {} ({})\n", url, error)),
-            }
-        }
-        if !startup.log_excerpt.trim().is_empty() {
-            output.push_str("\n--- startup output ---\n");
-            output.push_str(&startup.log_excerpt);
-        }
-
-        let duration_secs = start.elapsed().as_secs_f64();
-        let log_path_str = log_path.display().to_string();
-        let detected_urls = startup.detected_url.iter().cloned().collect::<Vec<_>>();
-        let process = ManagedProcess {
-            id: format!("bg-{}", pid),
-            pid,
-            command: command.to_string(),
-            cwd: Some(workdir.display().to_string()),
-            log_path: log_path_str.clone(),
-            detected_url: startup.detected_url.clone(),
-            status: mermaid_runtime::ProcessStatus::Running,
-        };
-        let byte_count = output.len();
-        let mut metadata = command_metadata(CommandMetadataInput {
-            command: command.to_string(),
-            working_dir: Some(workdir.display().to_string()),
-            exit_code: None,
-            timed_out: false,
-            background: true,
-            stdout_lines: startup.log_excerpt.lines().count(),
-            stderr_lines: 0,
-            detected_urls,
-            pid: Some(pid),
-            log_path: Some(log_path_str),
-            byte_count: Some(byte_count),
-        });
-        metadata.process = Some(process);
-        ToolOutcome::success(output, "background process started", duration_secs)
-            .with_metadata(metadata)
-    }
-}
-
-#[cfg(not(target_os = "windows"))]
-async fn launch_background_process(
-    command: &str,
-    workdir: &Path,
-    log_path: &Path,
-    scratchpad: Option<&Path>,
-) -> Result<u32, String> {
-    // Pre-create the log owner-only with O_EXCL BEFORE the launcher runs, so a
-    // symlink pre-planted at the predictable path can't redirect the script's
-    // `: > "$log"` / output redirects to a victim file (#F15), and the captured
-    // output stays owner-readable on top of the 0700 private dir (#F14). The
-    // launcher then truncates this regular file in place, preserving its perms.
-    create_log_file_blocking(log_path).map_err(|e| {
-        format!(
-            "failed to create background log {}: {e}",
-            log_path.display()
-        )
-    })?;
-    let mut launcher = Command::new("sh");
-    launcher
-        .arg("-c")
-        .arg(
-            // `setsid` (when present) makes the backgrounded command a new
-            // session/process-group leader, so its pid (`$!`) IS its group id and
-            // `terminate_tree` can later group-kill the whole subtree rather than
-            // orphaning grandchildren. Falls back to `nohup` on hosts without
-            // setsid (e.g. stock macOS), where the bare-pid kill still applies.
-            r#"log=$MERMAID_BG_LOG
-cmd=$MERMAID_BG_COMMAND
-: > "$log" || exit 125
-if command -v setsid >/dev/null 2>&1; then
-  setsid sh -c "$cmd" > "$log" 2>&1 < /dev/null &
-else
-  nohup sh -c "$cmd" > "$log" 2>&1 < /dev/null &
-fi
-printf '%s\n' "$!""#,
-        )
-        .env("MERMAID_BG_LOG", log_path)
-        .env("MERMAID_BG_COMMAND", command)
-        .current_dir(workdir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    scrub_secret_env(&mut launcher);
-    harden_noninteractive_env(&mut launcher);
-    export_scratchpad_env(&mut launcher, scratchpad);
-
-    let output = launcher
-        .output()
-        .await
-        .map_err(|e| format!("failed to launch background command: {}", e))?;
-    if !output.status.success() {
-        return Err(format!(
-            "background launcher failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    stdout.trim().parse::<u32>().map_err(|e| {
-        format!(
-            "background launcher did not return a pid: {} ({})",
-            stdout, e
-        )
-    })
-}
-
-/// Windows: spawn the command detached (no console, own process group) with
-/// output redirected to the log file, and return its PID. tokio's `Child`
-/// defaults to `kill_on_drop(false)`, so dropping the handle leaves the
-/// process running — the OS owns its lifetime from here.
-#[cfg(target_os = "windows")]
-async fn launch_background_process(
-    command: &str,
-    workdir: &Path,
-    log_path: &Path,
-    scratchpad: Option<&Path>,
-) -> Result<u32, String> {
-    use mermaid_model::utils::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
-    let log = std::fs::File::create(log_path).map_err(|e| {
-        format!(
-            "failed to create background log {}: {e}",
-            log_path.display()
-        )
-    })?;
-    let log_err = log
-        .try_clone()
-        .map_err(|e| format!("failed to clone background log handle: {e}"))?;
-    let mut launcher = Command::new(powershell_program());
-    launcher
-        .args(["-NoProfile", "-NonInteractive", "-Command"])
-        .arg(command)
-        .current_dir(workdir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(log))
-        .stderr(Stdio::from(log_err))
-        // CREATE_NO_WINDOW, not DETACHED_PROCESS: PowerShell needs a console
-        // (hidden is fine) or it dies during startup; see proc.rs.
-        .creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
-    scrub_secret_env(&mut launcher);
-    harden_noninteractive_env(&mut launcher);
-    export_scratchpad_env(&mut launcher, scratchpad);
-    let child = launcher
-        .spawn()
-        .map_err(|e| format!("failed to launch background command: {e}"))?;
-    child
-        .id()
-        .ok_or_else(|| "background command produced no pid".to_string())
-}
-
-#[derive(Debug)]
-enum BackgroundWaitError {
-    Cancelled,
-    ExitedEarly(String),
-}
-
-async fn wait_for_background_startup(
-    pid: u32,
-    log_path: &Path,
-    startup_timeout_secs: u64,
-    ready_pattern: Option<&str>,
-    ctx: &ExecContext,
-) -> Result<BackgroundStartup, BackgroundWaitError> {
-    let start = Instant::now();
-    let startup_timeout = Duration::from_secs(startup_timeout_secs);
-
-    loop {
-        if ctx.token.is_cancelled() {
-            return Err(BackgroundWaitError::Cancelled);
-        }
-
-        let last_log = read_log_lossy(log_path).await;
-        let detected_url = first_url(&last_log);
-
-        if !process_running(pid).await {
-            return Err(BackgroundWaitError::ExitedEarly(tail_lines(&last_log, 40)));
-        }
-
-        if let Some(pattern) = ready_pattern {
-            if last_log.contains(pattern) {
-                return Ok(BackgroundStartup {
-                    ready_message: format!("Ready: matched pattern {:?}", pattern),
-                    log_excerpt: tail_lines(&last_log, 40),
-                    detected_url,
-                });
-            }
-        } else if start.elapsed() >= Duration::from_secs(1) || !last_log.is_empty() {
-            return Ok(BackgroundStartup {
-                ready_message:
-                    "Ready: no ready_pattern provided; process is running after startup check"
-                        .to_string(),
-                log_excerpt: tail_lines(&last_log, 40),
-                detected_url,
-            });
-        }
-
-        if start.elapsed() >= startup_timeout {
-            let ready_message = if let Some(pattern) = ready_pattern {
-                format!(
-                    "Ready: pattern {:?} was not seen within {}s; process is still running",
-                    pattern, startup_timeout_secs
-                )
-            } else {
-                format!(
-                    "Ready: startup check reached {}s; process is still running",
-                    startup_timeout_secs
-                )
-            };
-            return Ok(BackgroundStartup {
-                ready_message,
-                log_excerpt: tail_lines(&last_log, 40),
-                detected_url,
-            });
-        }
-
-        tokio::select! {
-            _ = ctx.token.cancelled() => return Err(BackgroundWaitError::Cancelled),
-            _ = tokio::time::sleep(Duration::from_millis(200)) => {},
-        }
-    }
-}
-
-async fn read_log_lossy(path: &Path) -> String {
-    tokio::fs::read_to_string(path).await.unwrap_or_default()
-}
-
-#[cfg(not(target_os = "windows"))]
-async fn process_running(pid: u32) -> bool {
-    Command::new("kill")
-        .arg("-0")
-        .arg(pid.to_string())
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await
-        .map(|status| status.success())
-        .unwrap_or(false)
-}
-
-/// Windows: `tasklist` filtered by PID prints the process row only when it
-/// exists (otherwise an "INFO: No tasks…" line that doesn't contain the PID).
-#[cfg(target_os = "windows")]
-async fn process_running(pid: u32) -> bool {
-    Command::new("tasklist")
-        .args(["/FI", &format!("PID eq {pid}"), "/NH"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .await
-        .map(|out| String::from_utf8_lossy(&out.stdout).contains(&pid.to_string()))
-        .unwrap_or(false)
-}
-
-// Process-tree termination lives in `mermaid_model::utils::terminate_tree` — the single
-// primitive shared by the Esc-cancel path, the foreground timeout, the
-// Ctrl+B-detached cleanup, and the daemon's `/stop`/`/restart`. It kills the
-// process group (catching grandchildren), not just the direct pid.
-
-/// Build a unique, hard-to-predict path for a command's tee log inside the
-/// per-user `0700` private temp dir (#F14). Command stdout/stderr is tee'd here
-/// and can contain secrets (`cat .env`, `gh auth token`), so it must NOT land in
-/// the world-readable shared system temp dir. Falls back to the system temp dir
-/// only if the private dir can't be created — the owner-only + `O_EXCL` create
-/// at the use-site (`create_log_file_blocking`) still applies there.
-fn background_log_path() -> PathBuf {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or_default();
-    let name = format!("mermaid-bg-{}-{}.log", std::process::id(), nanos);
-    match mermaid_model::utils::private_temp_dir() {
-        Ok(dir) => dir.join(name),
-        Err(_) => std::env::temp_dir().join(name),
-    }
-}
-
-/// Create (exclusively) the tee log at `path`. On Unix the file is owner-only
-/// (`0600`) and opened `O_CREAT | O_EXCL` (via `create_new`): per POSIX that
-/// refuses to open — and refuses to follow — a symlink someone pre-planted at
-/// the predictable name, so the log write can't be redirected to a victim file
-/// (#F15). The `0600` mode keeps the captured stdout/stderr owner-readable on
-/// top of the `0700` private dir (#F14).
-#[cfg(unix)]
-fn create_log_file_blocking(path: &Path) -> std::io::Result<std::fs::File> {
-    use std::os::unix::fs::OpenOptionsExt;
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)
-}
-
-/// Create the foreground tee log, returning a `tokio` handle. Unix uses the
-/// hardened owner-only + `O_EXCL` create above; other platforms fall back to a
-/// plain create (the log already lives in the private dir). Best-effort: `None`
-/// means "no tee log", which only costs `/logs` tail-ability, not correctness.
-fn create_tee_log_blocking(path: &Path) -> Option<tokio::fs::File> {
-    #[cfg(unix)]
-    let std_file = create_log_file_blocking(path).ok();
-    #[cfg(not(unix))]
-    let std_file = std::fs::File::create(path).ok();
-    std_file.map(tokio::fs::File::from_std)
-}
-
-struct CommandMetadataInput {
-    command: String,
-    working_dir: Option<String>,
-    exit_code: Option<i32>,
-    timed_out: bool,
-    background: bool,
-    stdout_lines: usize,
-    stderr_lines: usize,
-    detected_urls: Vec<String>,
-    pid: Option<u32>,
-    log_path: Option<String>,
-    byte_count: Option<usize>,
-}
-
-fn command_metadata(input: CommandMetadataInput) -> ToolRunMetadata {
-    ToolRunMetadata {
-        detail: ToolMetadata::ExecuteCommand {
-            command: input.command,
-            working_dir: input.working_dir,
-            exit_code: input.exit_code,
-            timed_out: input.timed_out,
-            background: input.background,
-            stdout_lines: input.stdout_lines,
-            stderr_lines: input.stderr_lines,
-            detected_urls: input.detected_urls,
-            pid: input.pid,
-            log_path: input.log_path,
-            // Set by the completion arm when a sandbox denial is detected; the
-            // metadata builder itself never sees the terminating signal.
-            denied_by_sandbox: false,
-        },
-        line_count: Some(input.stdout_lines + input.stderr_lines),
-        byte_count: input.byte_count,
-        ..ToolRunMetadata::default()
-    }
-}
-
-/// The cached OS-sandbox availability probes (network kill-switch, filesystem
-/// write-confinement). Probed once per process — platform capability cannot
-/// change mid-run, and the Linux probe assembles a BPF program each call.
-fn sandbox_probes() -> (bool, bool) {
-    static PROBES: std::sync::OnceLock<(bool, bool)> = std::sync::OnceLock::new();
-    *PROBES.get_or_init(|| {
-        (
-            mermaid_runtime::network_killswitch_available(),
-            mermaid_runtime::fs_confinement_available(),
-        )
-    })
-}
-
-/// SIGSYS on Linux (x86_64/aarch64) — the signal the seccomp kill-switch raises.
-const SANDBOX_KILL_SIGNAL: i32 = 31;
-
-/// Which sandbox dimension a completed command's failure matches. `Ambiguous`
-/// exists for macOS with both policies active: Seatbelt denies network AND
-/// filesystem access with the same `EPERM` text and no signal, so the two
-/// cannot be told apart.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DenialKind {
-    Network,
-    Filesystem,
-    Ambiguous,
-}
-
-/// Map a completed run onto a sandbox-denial kind, gated on which policies
-/// were actually active for this spawn (so an ordinary permission failure or
-/// `exit 159` is never mislabeled when the sandbox was off).
-///
-/// Signatures per platform:
-/// - Linux network: precise — the shell died with SIGSYS or reaped a
-///   SIGSYS-killed child (`128 + SIGSYS`). Nothing else produces it.
-/// - Linux filesystem: hedged — Landlock denials are ordinary `EACCES` text.
-/// - macOS (Seatbelt): both dimensions are hedged `EPERM` "Operation not
-///   permitted" text with no signal; with both policies active the match is
-///   [`DenialKind::Ambiguous`].
-fn detect_denial(
-    run: &CommandRunOutput,
-    sandbox_network: bool,
-    sandbox_fs: bool,
-) -> Option<DenialKind> {
-    if cfg!(target_os = "linux") {
-        if sandbox_network && is_sigsys_denial(run) {
-            return Some(DenialKind::Network);
-        }
-        if sandbox_fs && is_permission_denial(run) {
-            return Some(DenialKind::Filesystem);
-        }
-        return None;
-    }
-    if !is_permission_denial(run) {
-        return None;
-    }
-    match (sandbox_network, sandbox_fs) {
-        (true, true) => Some(DenialKind::Ambiguous),
-        (true, false) => Some(DenialKind::Network),
-        (false, true) => Some(DenialKind::Filesystem),
-        (false, false) => None,
-    }
-}
-
-/// Message shown when the Linux network kill-switch blocks a command (the
-/// precise SIGSYS signature). States the cause and the three ways to allow it.
-/// No emojis.
-const NETWORK_DENIED_MESSAGE: &str = "Blocked by the network sandbox: this command tried to open an internet socket, which is denied because network access is off (safety.network = \"deny\" / --no-network). Re-run without --no-network, approve the command, or use full-access mode to allow network access.";
-
-/// Hedged network-denial message for platforms without a precise signal
-/// (macOS Seatbelt denies with plain EPERM). No emojis.
-const HEDGED_NETWORK_DENIED_MESSAGE: &str = "Command failed with a permission error while the network sandbox was active (safety.network = \"deny\" / --no-network); a network access was likely denied. Re-run without --no-network, approve the command, or use full-access mode to allow network access.";
-
-/// Message shown when a command's failure matches the filesystem-sandbox denial
-/// signature. Hedged ("likely") because write denials surface as ordinary
-/// permission errors (Linux Landlock EACCES, macOS Seatbelt EPERM), unlike the
-/// unambiguous SIGSYS of the Linux network kill-switch. No emojis.
-const FS_DENIED_MESSAGE: &str = "Command failed with a permission error while the filesystem sandbox was active (safety.filesystem = \"project\" / --confine-fs); a write outside the project directory, the system temp directory, or /dev was likely denied. Write inside the project, or re-run without --confine-fs to allow it.";
-
-/// Combined hedged message for [`DenialKind::Ambiguous`] (macOS, both
-/// policies active — the EPERM signature cannot say which one fired). No
-/// emojis.
-const AMBIGUOUS_DENIED_MESSAGE: &str = "Command failed with a permission error while the network and filesystem sandboxes were active (--no-network / --confine-fs); a network access or a write outside the allowed directories was likely denied. Write inside the project, or re-run without the sandbox flags to allow it.";
-
-/// Whether a completed command was terminated by the Linux seccomp
-/// kill-switch: the shell itself died with SIGSYS, or (more often) it reaped a
-/// SIGSYS-killed child and exited `128 + SIGSYS`.
-fn is_sigsys_denial(run: &CommandRunOutput) -> bool {
-    run.signal == Some(SANDBOX_KILL_SIGNAL) || run.exit_code == Some(128 + SANDBOX_KILL_SIGNAL)
-}
-
-/// Whether a completed command's failure looks like a sandbox permission
-/// denial: non-zero exit plus the shell/tool permission-error text. A
-/// signature match, not a proof — [`detect_denial`] gates on "the sandbox was
-/// active for this spawn", and the surfaced messages hedge accordingly.
-fn is_permission_denial(run: &CommandRunOutput) -> bool {
-    let failed = matches!(run.exit_code, Some(code) if code != 0);
-    failed
-        && (run.output.contains("Permission denied")
-            || run.output.contains("Operation not permitted"))
-}
-
-/// Build the shell `Command` for a model command, optionally wrapped in the
-/// `__sandbox-exec` launcher for the network kill-switch and/or filesystem
-/// write-confinement (platform backend chosen by the launcher). The caller
-/// sets stdio, process group, cwd, and env scrubbing on the returned command.
-/// The resolved program + argv for a foreground command — one description
-/// consumed by BOTH spawn paths (tokio pipes and the Unix PTY), so the PTY
-/// child execs the exact same `__sandbox-exec` launcher (seccomp/Landlock
-/// unchanged) as the pipe child.
-struct ShellInvocation {
-    program: PathBuf,
-    args: Vec<std::ffi::OsString>,
-}
-
-/// The PowerShell executable model commands run under on Windows: PowerShell 7
-/// (`pwsh`) when installed, else the always-present Windows PowerShell 5.1.
-/// Resolved once — a PATH scan per spawn would be pure waste.
-fn powershell_program() -> &'static str {
-    static PROGRAM: std::sync::LazyLock<&'static str> = std::sync::LazyLock::new(|| {
-        let has_pwsh = std::env::var_os("PATH").is_some_and(|path| {
-            std::env::split_paths(&path).any(|dir| dir.join("pwsh.exe").is_file())
-        });
-        if has_pwsh { "pwsh" } else { "powershell" }
-    });
-    &PROGRAM
-}
-
-/// Wrap a model command for `-Command` so PowerShell behaves like a
-/// non-interactive script runner: cmdlet errors terminate instead of limping
-/// on, and the process exit code is the last native command's exit code
-/// rather than PowerShell's bare 0/1. Same shape GitHub Actions uses for its
-/// `powershell`/`pwsh` shells — without the trailer, `cargo build` failing
-/// with 101 surfaces as exit 0.
-fn powershell_wrap(command: &str) -> String {
-    format!(
-        "$ErrorActionPreference='Stop'\n{command}\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE)) {{ exit $LASTEXITCODE }}"
-    )
-}
-
-fn shell_invocation(
-    command: &str,
-    sandbox_network: bool,
-    confine_writes: Option<&[PathBuf]>,
-) -> ShellInvocation {
-    if sandbox_network || confine_writes.is_some() {
-        // `mermaid __sandbox-exec [--no-network] [--confine-writes <dir>]… --
-        // sh -c <command>`: the launcher installs the requested confinement on
-        // itself, then execs the shell. Unix-only path — Windows never sets
-        // these flags.
-        let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("mermaid"));
-        let mut args: Vec<std::ffi::OsString> = vec!["__sandbox-exec".into()];
-        if sandbox_network {
-            args.push("--no-network".into());
-        }
-        for dir in confine_writes.unwrap_or_default() {
-            args.push("--confine-writes".into());
-            args.push(dir.into());
-        }
-        args.extend(["--".into(), "sh".into(), "-c".into(), command.into()]);
-        ShellInvocation { program: exe, args }
-    } else if cfg!(target_os = "windows") {
-        ShellInvocation {
-            program: PathBuf::from(powershell_program()),
-            args: vec![
-                "-NoProfile".into(),
-                "-NonInteractive".into(),
-                "-Command".into(),
-                powershell_wrap(command).into(),
-            ],
-        }
-    } else {
-        ShellInvocation {
-            program: PathBuf::from("sh"),
-            args: vec!["-c".into(), command.into()],
-        }
-    }
-}
-
-fn build_sandboxed_shell(
-    command: &str,
-    sandbox_network: bool,
-    confine_writes: Option<&[PathBuf]>,
-) -> Command {
-    let invocation = shell_invocation(command, sandbox_network, confine_writes);
-    let mut cmd = Command::new(&invocation.program);
-    cmd.args(&invocation.args);
-    cmd
-}
-
-/// Where the effective working directory landed: inside the project, inside
-/// the session scratchpad, or outside both (escalated to ExternalDirectory).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CwdContainment {
-    Project,
-    Scratchpad,
-    External,
-}
-
-/// Classify the (already-canonicalized) effective workdir. The scratchpad
-/// check canonicalizes the scratch root itself; if that fails (dir missing,
-/// permissions) the cwd fails closed to `External` — never to a downgrade.
-fn classify_cwd(
-    within_project: bool,
-    effective_workdir: &Path,
-    scratchpad: Option<&Path>,
-) -> CwdContainment {
-    if within_project {
-        return CwdContainment::Project;
-    }
-    match scratchpad.and_then(|s| std::fs::canonicalize(s).ok()) {
-        Some(scratch) if effective_workdir.starts_with(&scratch) => CwdContainment::Scratchpad,
-        _ => CwdContainment::External,
-    }
-}
-
-/// Fail-closed lexical prover: true only when the command, run with its cwd
-/// inside the scratchpad, provably cannot touch anything outside it. Any
-/// construct we cannot reason about — shell metacharacters, substitutions,
-/// expansions, `..`, absolute or embedded paths pointing elsewhere, even a
-/// parse failure — fails the proof and the command keeps its normal gating.
-/// Over-rejecting is fine here (the command merely prompts as usual);
-/// under-rejecting would silently skip an approval.
-fn command_provably_in_scratch(command: &str, scratch: &Path) -> bool {
-    // Metacharacters make the command opaque to token-level reasoning:
-    // separators/pipes can chain arbitrary commands, redirection retargets
-    // writes, `$`/backtick substitute or expand unseen text, `~`/globs
-    // re-expand at run time, and grouping braces/parens introduce subshells.
-    // Checked on the RAW string so even quoted occurrences fail closed.
-    const OPAQUE: &[char] = &[
-        ';', '|', '&', '<', '>', '$', '`', '~', '*', '?', '[', ']', '(', ')', '{', '}', '!', '\n',
-        '\r',
-    ];
-    if command.contains(OPAQUE) {
-        return false;
-    }
-    let Ok(tokens) = shell_words::split(command) else {
-        return false;
-    };
-    if tokens.is_empty() {
-        return false;
-    }
-    tokens.iter().all(|t| token_provably_in_scratch(t, scratch))
-}
-
-/// One token of a scratch-candidate command. Rules, all fail-closed:
-/// - `..` anywhere: rejected (can climb out of the scratch cwd).
-/// - `:/` anywhere: rejected (URL / remote-host / list-of-paths shapes).
-/// - Drive-designator shape (`C:x`, `c:\x`): rejected on every platform —
-///   on Windows it targets a drive root or a per-drive cwd, never scratch.
-/// - No path separator: fine — a bare word, flag, or PATH-resolved argv0.
-/// - Rooted: must sit lexically inside the scratchpad. `has_root`, not
-///   `is_absolute` — on Windows `/etc/passwd` is rooted but not "absolute"
-///   (no drive prefix), yet still escapes the scratch cwd via the drive
-///   root, so every rooted token gets the containment check.
-/// - Relative with a separator: accepted only as a PLAIN path (no leading
-///   `-`, no `=`) so flag-embedded paths (`-t/etc`, `--output=/etc/x`,
-///   `VAR=/etc`) can't smuggle a target past the rooted check.
-fn token_provably_in_scratch(token: &str, scratch: &Path) -> bool {
-    if token.contains("..") || token.contains(":/") {
-        return false;
-    }
-    let bytes = token.as_bytes();
-    if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
-        return false;
-    }
-    if !token.contains(['/', '\\']) {
-        return true;
-    }
-    if Path::new(token).has_root() {
-        return Path::new(token).starts_with(scratch);
-    }
-    !token.starts_with('-') && !token.contains('=')
-}
-
-/// Advertised to spawned commands so scripts have a ready-made place for
-/// throwaway files that never dirties the project tree.
-const SCRATCHPAD_ENV_VAR: &str = "MERMAID_SCRATCHPAD";
-
-/// Export the session scratchpad to a child command (pipe + background spawn
-/// paths; the PTY path sets the same variable on its `CommandBuilder`). No-op
-/// when the session has no scratchpad materialized.
-fn export_scratchpad_env(cmd: &mut Command, scratchpad: Option<&Path>) {
-    if let Some(dir) = scratchpad {
-        cmd.env(SCRATCHPAD_ENV_VAR, dir);
-    }
-}
-
-fn tail_lines(text: &str, max_lines: usize) -> String {
-    let lines: Vec<&str> = text.lines().collect();
-    let start = lines.len().saturating_sub(max_lines);
-    lines[start..].join("\n")
-}
-
-fn first_url(text: &str) -> Option<String> {
-    text.split_whitespace()
-        .find(|part| part.starts_with("http://") || part.starts_with("https://"))
-        .map(|url| {
-            url.trim_matches(|c: char| matches!(c, ')' | ']' | '}' | ',' | ';' | '"' | '\''))
-                .to_string()
-        })
-}
-
-fn all_urls(text: &str) -> Vec<String> {
-    text.split_whitespace()
-        .filter(|part| part.starts_with("http://") || part.starts_with("https://"))
-        .map(|url| {
-            url.trim_matches(|c: char| matches!(c, ')' | ']' | '}' | ',' | ';' | '"' | '\''))
-                .to_string()
-        })
-        .collect()
-}
-
-async fn open_browser_url(url: &str) -> Result<(), String> {
-    // Only ever hand a plain http(s) URL to the OS launcher — reject
-    // `file:`/`javascript:`/`data:`/etc. supplied by the model. On Windows this
-    // is also what lets us drop the `cmd` shell below safely.
-    super::web::require_http_scheme(url)?;
-
-    #[cfg(target_os = "macos")]
-    let mut command = {
-        let mut cmd = Command::new("open");
-        cmd.arg(url);
-        cmd
-    };
-
-    #[cfg(target_os = "linux")]
-    let mut command = {
-        let mut cmd = Command::new("xdg-open");
-        cmd.arg(url);
-        cmd
-    };
-
-    #[cfg(target_os = "windows")]
-    let mut command = {
-        // Launch via `rundll32` (a real executable) rather than `cmd /C start`,
-        // so the URL is passed as a single argv and never re-parsed by a shell —
-        // `& | > ^ "` in a model-supplied URL can't break out into arbitrary
-        // commands the way they can inside `cmd`.
-        let mut cmd = Command::new("rundll32");
-        cmd.args(["url.dll,FileProtocolHandler", url]);
-        cmd
-    };
-
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .kill_on_drop(false)
-        .spawn()
-        .map(|_| ())
-        .map_err(|e| e.to_string())
-}
-
-/// Drive the child process, pumping stdout+stderr concurrently so
-/// the kernel pipe buffer never wedges the child. Emits
-/// `ProgressEvent::Output` chunks on `ExecContext::progress` for
-/// any future consumer that wants to show live subprocess output.
-#[derive(Debug, Clone)]
-struct CommandRunOutput {
-    output: String,
-    exit_code: Option<i32>,
-    /// Terminating signal (Unix), when the process was killed by one — e.g.
-    /// SIGSYS from the seccomp network kill-switch. `None` on a normal exit or
-    /// on non-Unix.
-    signal: Option<i32>,
-    stdout_lines: usize,
-    stderr_lines: usize,
-}
-
-/// Result of driving a foreground command: ran to completion, was detached
-/// (Ctrl+B), was cancelled (the turn token fired), or hit its timeout. The
-/// cancelled and timed-out arms both tree-kill the process group and abort the
-/// driver before returning, so neither can leak the child.
-enum CommandRunResult {
-    Completed(CommandRunOutput),
-    Detached { pid: u32, log_path: PathBuf },
-    Cancelled,
-    TimedOut,
-}
-
-/// Names that must never be inherited by a spawned command. Provider API
-/// keys + the daemon token live in the parent's environment; a model-driven
-/// shell command could otherwise read them via `env`/`printenv` and
-/// exfiltrate them. We strip these by exact name in addition to the
-/// pattern match in [`scrub_secret_env`].
-const SECRET_ENV_VARS: &[&str] = &[
-    "ANTHROPIC_API_KEY",
-    "OPENAI_API_KEY",
-    "GEMINI_API_KEY",
-    "GOOGLE_API_KEY",
-    "OLLAMA_API_KEY",
-    "GROQ_API_KEY",
-    "MISTRAL_API_KEY",
-    "DEEPSEEK_API_KEY",
-    "OPENROUTER_API_KEY",
-    "XAI_API_KEY",
-    "TOGETHER_API_KEY",
-    "MERMAID_DAEMON_TOKEN",
-];
-
-/// Tell child processes they have no human to talk to. A spawned command runs
-/// session-detached with stdin on `/dev/null`, so any interactive credential
-/// prompt can only fail or hang — git is the one common tool that would
-/// otherwise sit on a prompt until the command timeout. Set unconditionally:
-/// any other value guarantees a hang in this environment. (Same value the
-/// plugin git hooks already use — see `mermaid-runtime`'s plugin module.)
-fn harden_noninteractive_env(cmd: &mut Command) {
-    cmd.env("GIT_TERMINAL_PROMPT", "0");
-}
-
-/// Remove secret-bearing environment variables from a child command. Uses a
-/// denylist (known provider keys + name patterns) rather than an allowlist so
-/// ordinary build/run commands keep `PATH`, `CARGO_HOME`, language toolchain
-/// vars, `XAUTHORITY`, etc. and still work.
-fn scrub_secret_env(cmd: &mut Command) {
-    for name in secret_env_names() {
-        cmd.env_remove(&name);
-    }
-}
-
-/// The concrete secret-bearing names present in THIS process's environment —
-/// shared by the pipe path (`scrub_secret_env`) and the PTY path
-/// (`CommandBuilder::env_remove`), so the two spawn paths can't drift.
-fn secret_env_names() -> Vec<String> {
-    std::env::vars()
-        .map(|(name, _)| name)
-        .filter(|name| is_secret_env_name(name))
-        .collect()
-}
-
-/// True if an env var name looks like it carries a secret/credential and must
-/// not leak into a model-run child process. Denylist (not allowlist) so
-/// ordinary build/run vars (`PATH`, toolchain, `XAUTHORITY`, …) survive.
-fn is_secret_env_name(name: &str) -> bool {
-    let upper = name.to_ascii_uppercase();
-    SECRET_ENV_VARS.contains(&upper.as_str())
-        || upper.contains("API_KEY")
-        || upper.contains("APIKEY")
-        || upper.contains("ACCESS_KEY")
-        || upper.contains("PRIVATE_KEY")
-        || upper.contains("SECRET")
-        || upper.contains("PASSWORD")
-        || upper.contains("PASSWD")
-        || upper.contains("CREDENTIAL")
-        || upper.contains("TOKEN")
-        || upper.contains("WEBHOOK")
-        || upper.contains("DATABASE_URL")
-        || upper.ends_with("_DSN")
-        || upper.contains("CONNECTION_STRING")
-        || upper == "KUBECONFIG"
-        || upper == "SSH_AUTH_SOCK"
-}
-
-/// Drain a child stream, capping the captured bytes at `cap` so a chatty or
-/// newline-less command can't exhaust memory. Bytes are accumulated raw and
-/// decoded once at the end (lossy) so a multibyte char split across reads is
-/// not corrupted by the cap. Returns `(text, truncated)`.
-/// On-disk cap for the per-stream tee log (#126). The in-memory buffer is
-/// capped at `MAX_TOOL_OUTPUT_BYTES`; the log may grow larger (it stays
-/// tail-able for a backgrounded process) but must not be unbounded — a command
-/// spewing gigabytes would otherwise fill the temp dir.
-const TEE_LOG_CAP_BYTES: usize = 64 * 1024 * 1024;
-
-/// Bounded head+tail capture core, shared by the pipe reader (`read_capped`)
-/// and the PTY drain. Keeps the HEAD (up to cap/2) and a bounded TAIL ring:
-/// command output puts the actual error / exit summary at the END, which
-/// head-only truncation used to discard. head_cap + tail_cap == cap, so any
-/// total <= cap reconstructs exactly (no marker); only a genuine overflow
-/// drops the middle.
-struct CappedCapture {
-    head_cap: usize,
-    tail_cap: usize,
-    head: Vec<u8>,
-    tail: std::collections::VecDeque<u8>,
-    total: usize,
-}
-
-impl CappedCapture {
-    fn new(cap: usize) -> Self {
-        let head_cap = cap / 2;
-        Self {
-            head_cap,
-            tail_cap: cap - head_cap,
-            head: Vec::new(),
-            tail: std::collections::VecDeque::new(),
-            total: 0,
-        }
-    }
-
-    fn push(&mut self, mut chunk: &[u8]) {
-        self.total += chunk.len();
-        // Fill the head first; everything past head_cap flows into the
-        // bounded tail ring so the last tail_cap bytes always survive.
-        if self.head.len() < self.head_cap {
-            let take = (self.head_cap - self.head.len()).min(chunk.len());
-            self.head.extend_from_slice(&chunk[..take]);
-            chunk = &chunk[take..];
-        }
-        if !chunk.is_empty() {
-            self.tail.extend(chunk.iter().copied());
-            while self.tail.len() > self.tail_cap {
-                self.tail.pop_front();
-            }
-        }
-    }
-
-    /// `(text, truncated)` — bytes decoded lossily once at the end so a
-    /// multibyte char split across reads is not corrupted by the cap.
-    fn finish(self) -> (String, bool) {
-        let truncated = self.total > self.head_cap + self.tail_cap;
-        let tail_bytes: Vec<u8> = self.tail.into_iter().collect();
-        let mut out = String::from_utf8_lossy(&self.head).into_owned();
-        if truncated {
-            let dropped = self.total - self.head.len() - tail_bytes.len();
-            out.push_str(&format!("\n…[output truncated, {dropped} bytes elided]…\n"));
-        }
-        out.push_str(&String::from_utf8_lossy(&tail_bytes));
-        (out, truncated)
-    }
-}
-
-async fn read_capped<R: AsyncRead + Unpin>(
-    mut reader: R,
-    cap: usize,
-    log_cap: usize,
-    progress: Option<tokio::sync::mpsc::Sender<ProgressEvent>>,
-    log: Option<std::sync::Arc<tokio::sync::Mutex<tokio::fs::File>>>,
-) -> (String, bool) {
-    let mut buf = [0u8; 8192];
-    let mut capture = CappedCapture::new(cap);
-    let mut logged: usize = 0;
-    let mut log_capped = false;
-    loop {
-        match reader.read(&mut buf).await {
-            Ok(0) => break,
-            Ok(n) => {
-                // Tee raw bytes to the shared log file so a backgrounded
-                // (Ctrl+B) process stays tail-able via /logs — bounded at
-                // `TEE_LOG_CAP_BYTES` so a runaway command can't fill the disk
-                // (#126). Once capped we write a one-time marker and stop.
-                if let Some(file) = &log
-                    && !log_capped
-                {
-                    let mut f = file.lock().await;
-                    if logged + n <= log_cap {
-                        let _ = f.write_all(&buf[..n]).await;
-                        logged += n;
-                    } else {
-                        let remaining = log_cap - logged;
-                        let _ = f.write_all(&buf[..remaining]).await;
-                        let _ = f.write_all(b"\n...[log truncated]...\n").await;
-                        log_capped = true;
-                    }
-                    let _ = f.flush().await;
-                }
-                if let Some(tx) = &progress {
-                    let chunk = String::from_utf8_lossy(&buf[..n]);
-                    for line in chunk.split('\n') {
-                        if !line.is_empty() {
-                            let _ = tx.send(ProgressEvent::Output(line.to_string())).await;
-                        }
-                    }
-                }
-                capture.push(&buf[..n]);
-            },
-            Err(_) => break,
-        }
-    }
-    capture.finish()
-}
-
-/// Strip terminal escape sequences and normalize PTY line discipline for
-/// model-facing text: CSI (`ESC[…final`), OSC (`ESC]…BEL|ESC\\`), string
-/// sequences (DCS/SOS/PM/APC — `ESC P/X/^/_ … ST`, payload included), and
-/// other two-byte ESC sequences are dropped; a bare BEL is dropped; a
-/// backspace erases the previous character (ConPTY repaints emit both);
-/// `\r\n` (ONLCR — every PTY line) normalizes to `\n`; a lone `\r`
-/// (progress-bar rewrite) becomes `\n` so rewrites read as lines, bounded
-/// upstream by the output cap.
-fn strip_ansi(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let mut chars = input.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '\u{1b}' => match chars.next() {
-                // CSI: parameters/intermediates until a final byte 0x40..=0x7E.
-                Some('[') => {
-                    for f in chars.by_ref() {
-                        if ('\u{40}'..='\u{7e}').contains(&f) {
-                            break;
-                        }
-                    }
-                },
-                // OSC: terminated by BEL or ST (ESC \).
-                Some(']') => {
-                    let mut prev_esc = false;
-                    for f in chars.by_ref() {
-                        if f == '\u{7}' || (prev_esc && f == '\\') {
-                            break;
-                        }
-                        prev_esc = f == '\u{1b}';
-                    }
-                },
-                // DCS/SOS/PM/APC string sequences: the whole PAYLOAD is
-                // device data, not text, so it must be consumed through the
-                // ST terminator (ESC \) — dropping only the introducer
-                // would leak the payload into the capture.
-                Some('P' | 'X' | '^' | '_') => {
-                    let mut prev_esc = false;
-                    for f in chars.by_ref() {
-                        if prev_esc && f == '\\' {
-                            break;
-                        }
-                        prev_esc = f == '\u{1b}';
-                    }
-                },
-                // Other two-byte escapes (charset selection, keypad modes…):
-                // the consumed char IS the sequence.
-                Some(_) | None => {},
-            },
-            // Bare BEL rings the bell; it is never text.
-            '\u{7}' => {},
-            // Backspace: the terminal would erase the previous cell, so pop
-            // the previous character — but never across a line break.
-            '\u{8}' => {
-                if out.ends_with(|p: char| p != '\n') {
-                    out.pop();
-                }
-            },
-            '\r' => {
-                if chars.peek() == Some(&'\n') {
-                    chars.next();
-                }
-                out.push('\n');
-            },
-            _ => out.push(c),
-        }
-    }
-    out
-}
-
-#[expect(
-    clippy::too_many_lines,
-    reason = "predates the lint; see .github/baselines/expect_budget.txt"
-)]
-async fn run_command(
-    mut cmd: Command,
-    progress: tokio::sync::mpsc::Sender<ProgressEvent>,
-    token: tokio_util::sync::CancellationToken,
-    background: tokio_util::sync::CancellationToken,
-    timeout: Duration,
-) -> std::io::Result<CommandRunResult> {
-    let mut child = cmd.spawn()?;
-    let pid = child.id();
-
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| std::io::Error::other("child stdout unavailable"))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| std::io::Error::other("child stderr unavailable"))?;
-
-    // Tee combined output to a log file so that, if the user backgrounds the
-    // command (Ctrl+B), it stays tail-able via /logs. Removed on normal exit.
-    // Lives in the 0700 private temp dir, created owner-only + O_EXCL (#F14/#F15).
-    let log_path = background_log_path();
-    let log =
-        create_tee_log_blocking(&log_path).map(|f| std::sync::Arc::new(tokio::sync::Mutex::new(f)));
-
-    let cap = mermaid_model::constants::MAX_TOOL_OUTPUT_BYTES;
-    let stdout_task = tokio::spawn(read_capped(
-        stdout,
-        cap,
-        TEE_LOG_CAP_BYTES,
-        Some(progress.clone()),
-        log.clone(),
-    ));
-    let stderr_task = tokio::spawn(read_capped(
-        stderr,
-        cap,
-        TEE_LOG_CAP_BYTES,
-        None,
-        log.clone(),
-    ));
-
-    // A driver task owns the child + drain tasks and runs to completion no
-    // matter what. On normal exit it ships the result back. If we detach, we
-    // just stop listening — the driver (and its child) keep running, the log
-    // keeps filling — until the child exits or Mermaid quits.
-    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
-    let driver = tokio::spawn(async move {
-        let (output, _) = stdout_task.await.unwrap_or_default();
-        let (errors, _) = stderr_task.await.unwrap_or_default();
-        let status = child.wait().await;
-        let _ = done_tx.send((output, errors, status));
-    });
-
-    let timeout_fut = tokio::time::sleep(timeout);
-
-    tokio::select! {
-        biased;
-        _ = background.cancelled() => {
-            match pid {
-                // Ctrl+B: detach. Dropping `driver`'s JoinHandle does NOT abort
-                // the task — it runs on, keeping the child alive and the log
-                // filling.
-                Some(pid) => {
-                    drop(driver);
-                    Ok(CommandRunResult::Detached { pid, log_path })
-                }
-                // No OS pid means the child was already polled to completion —
-                // there is nothing left to background. Report cancellation
-                // rather than minting a phantom `bg-0` process that a later
-                // `/stop` could mis-signal.
-                None => {
-                    driver.abort();
-                    let _ = tokio::fs::remove_file(&log_path).await;
-                    Ok(CommandRunResult::Cancelled)
-                }
-            }
-        }
-        _ = token.cancelled() => {
-            // Turn cancelled (Esc): the detached `driver` would otherwise keep
-            // the child (and any grandchild it forked) alive until it exited on
-            // its own. Kill the whole tree/group, abort the driver, drop the log.
-            if let Some(p) = pid {
-                mermaid_model::utils::terminate_tree(p, mermaid_model::utils::Grace::Immediate).await;
-            }
-            // This is the one deliberate `JoinHandle::abort` in the codebase.
-            // `driver` is a raw (non-scoped) `tokio::spawn` because it must be
-            // able to outlive the turn on Ctrl+B detach; on Esc-cancel we've
-            // just force-killed its whole process tree, so its `await`s would
-            // unblock at EOF momentarily anyway — the abort just makes teardown
-            // immediate before we drop the tee log. See the doc note in
-            // `src/domain/reducer.rs` and `docs/architecture.md`.
-            driver.abort();
-            let _ = tokio::fs::remove_file(&log_path).await;
-            Ok(CommandRunResult::Cancelled)
-        }
-        res = done_rx => {
-            // Normal completion — drop the tee log.
-            drop(log);
-            let _ = tokio::fs::remove_file(&log_path).await;
-            let (output, errors, status) = res
-                .map_err(|_| std::io::Error::other("command driver dropped before completing"))?;
-            let status = status?;
-            let stdout_lines = output.lines().count();
-            let stderr_lines = errors.lines().count();
-            let mut full_output = output;
-            if !errors.is_empty() {
-                full_output.push_str("\n--- stderr ---\n");
-                full_output.push_str(&errors);
-            }
-            if !status.success() {
-                full_output.push_str(&format!(
-                    "\n--- Command exited with status: {} ---",
-                    status.code().unwrap_or(-1)
-                ));
-            }
-            // Preserve the terminating signal so the caller can distinguish a
-            // seccomp SIGSYS denial from an ordinary failure (mirrors
-            // `mcp/transport.rs`). `None` on non-Unix / normal exit.
-            #[cfg(unix)]
-            let signal = {
-                use std::os::unix::process::ExitStatusExt;
-                status.signal()
-            };
-            #[cfg(not(unix))]
-            let signal = None;
-            Ok(CommandRunResult::Completed(CommandRunOutput {
-                output: full_output,
-                exit_code: status.code(),
-                signal,
-                stdout_lines,
-                stderr_lines,
-            }))
-        }
-        _ = timeout_fut => {
-            // Foreground timeout: same teardown as Esc. The old outer-`select!`
-            // form dropped the `run_command` future on timeout, which only
-            // DETACHED the spawned `driver` that owns the Child — so the whole
-            // tree leaked despite the "was killed" message. Tree-kill the group,
-            // abort the driver, drop the tee log, then report TimedOut.
-            if let Some(p) = pid {
-                mermaid_model::utils::terminate_tree(p, mermaid_model::utils::Grace::Immediate).await;
-            }
-            driver.abort();
-            let _ = tokio::fs::remove_file(&log_path).await;
-            Ok(CommandRunResult::TimedOut)
-        }
-    }
-}
-
-/// PTY drain state: tees raw bytes to the log, emits sanitized complete
-/// lines as progress, and feeds the bounded capture. One merged stream —
-/// a PTY has no stdout/stderr split (`stderr_lines` reports 0).
-struct PtyDrain {
-    capture: CappedCapture,
-    log: Option<std::sync::Arc<tokio::sync::Mutex<tokio::fs::File>>>,
-    logged: usize,
-    log_capped: bool,
-    line_buf: String,
-    progress: tokio::sync::mpsc::Sender<ProgressEvent>,
-}
-
-impl PtyDrain {
-    async fn push(&mut self, chunk: &[u8]) {
-        // Tee RAW bytes (ANSI kept — tailing a backgrounded log renders
-        // correctly); same bound as the pipe path (#126).
-        if let Some(file) = &self.log
-            && !self.log_capped
-        {
-            let mut f = file.lock().await;
-            if self.logged + chunk.len() <= TEE_LOG_CAP_BYTES {
-                let _ = f.write_all(chunk).await;
-                self.logged += chunk.len();
-            } else {
-                let remaining = TEE_LOG_CAP_BYTES - self.logged;
-                let _ = f.write_all(&chunk[..remaining]).await;
-                let _ = f.write_all(b"\n...[log truncated]...\n").await;
-                self.log_capped = true;
-            }
-            let _ = f.flush().await;
-        }
-        // Progress: sanitize, then emit complete lines only (an escape split
-        // across chunks is cosmetic here; the final output sanitizes whole).
-        self.line_buf
-            .push_str(&strip_ansi(&String::from_utf8_lossy(chunk)));
-        while let Some(i) = self.line_buf.find('\n') {
-            let line: String = self.line_buf.drain(..=i).collect();
-            let line = line.trim_end();
-            if !line.is_empty() {
-                let _ = self
-                    .progress
-                    .send(ProgressEvent::Output(line.to_string()))
-                    .await;
-            }
-        }
-        // Cap applies to RAW bytes pre-strip (bounded memory).
-        self.capture.push(chunk);
-    }
-}
-
-/// Foreground command on a pseudo-terminal (openpty on Unix, ConPTY on
-/// Windows): `tty`/`isatty` report a terminal, spinner-heavy tools behave,
-/// and on Unix `/dev/tty` resolves to THIS captured pty instead of
-/// scribbling over the TUI. Mirrors `run_command`'s select shape (detach /
-/// cancel / done / timeout) and reuses the same sandbox launcher, env
-/// scrubbing, tee log, and capture core.
-///
-/// Load-bearing differences from the pipe path:
-/// - NO `setsid` pre_exec: on Unix portable-pty already setsids and sets
-///   the controlling tty — the child is session+group leader, so
-///   `terminate_tree`'s group-kill semantics are byte-identical. On
-///   Windows `terminate_tree` kills the tree by pid (`taskkill /T`), so no
-///   group setup is needed on either spawn path.
-/// - stdin is the pty slave (not /dev/null): a child that READS stdin now
-///   hangs to timeout instead of instant EOF — mitigated by
-///   GIT_TERMINAL_PROMPT=0 (still set) and the command timeout.
-/// - fixed 24x80 size: nothing resizes it (plumbing the live TUI size is
-///   not worth a resize protocol for batch commands).
-///
-/// Every fallible step happens BEFORE the child spawns, so an `Err` return
-/// can safely fall back to the pipe path without re-running side effects —
-/// openpty, clone_reader, and (Windows) the CPR priming write are the only
-/// `?` points ahead of `spawn_command`.
-#[expect(
-    clippy::too_many_lines,
-    reason = "predates the lint; see .github/baselines/expect_budget.txt"
-)]
-async fn run_command_pty(
-    invocation: &ShellInvocation,
-    workdir: &Path,
-    scratchpad: Option<&Path>,
-    progress: tokio::sync::mpsc::Sender<ProgressEvent>,
-    token: tokio_util::sync::CancellationToken,
-    background: tokio_util::sync::CancellationToken,
-    timeout: Duration,
-) -> std::io::Result<CommandRunResult> {
-    use portable_pty::{CommandBuilder, PtySize, native_pty_system};
-
-    let pty = native_pty_system();
-    let pair = pty
-        .openpty(PtySize {
-            rows: 24,
-            cols: 80,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .map_err(std::io::Error::other)?;
-    // Clone the reader BEFORE spawning: after this point nothing may fail
-    // fallibly (a post-spawn fallback would re-run the command).
-    let mut reader = pair
-        .master
-        .try_clone_reader()
-        .map_err(std::io::Error::other)?;
-
-    // portable-pty opens the ConPTY with PSEUDOCONSOLE_INHERIT_CURSOR, so
-    // conhost emits a cursor-position query (ESC[6n) and stalls ALL output
-    // until it reads a reply. Prime it once with "cursor at 1;1": conhost
-    // consumes the reply itself, so the child never sees these bytes. The
-    // writer must then live exactly as long as the master (an early close
-    // can detach the pseudoconsole), so it moves into the waiter below and
-    // drops alongside the master. Both steps sit BEFORE the spawn, so a
-    // failure here still falls back to pipes without double-running.
-    #[cfg(windows)]
-    let writer = {
-        use std::io::Write as _;
-        let mut writer = pair.master.take_writer().map_err(std::io::Error::other)?;
-        writer.write_all(b"\x1b[1;1R")?;
-        writer
-    };
-
-    let mut builder = CommandBuilder::new(&invocation.program);
-    builder.args(&invocation.args);
-    builder.cwd(workdir);
-    for name in secret_env_names() {
-        builder.env_remove(name);
-    }
-    // Still load-bearing on a PTY: git COULD prompt here and nothing feeds
-    // the master, so it must fail fast instead of sitting on the prompt.
-    builder.env("GIT_TERMINAL_PROMPT", "0");
-    builder.env("TERM", "xterm-256color");
-    // Same export the pipe/background paths apply via `export_scratchpad_env`
-    // — keep the spawn paths from drifting.
-    if let Some(dir) = scratchpad {
-        builder.env(SCRATCHPAD_ENV_VAR, dir);
-    }
-
-    let mut child = pair
-        .slave
-        .spawn_command(builder)
-        .map_err(std::io::Error::other)?;
-    // Drop the slave so the master reads EOF when the child exits.
-    drop(pair.slave);
-    let pid = child.process_id();
-    let master = pair.master;
-
-    let log_path = background_log_path();
-    let log =
-        create_tee_log_blocking(&log_path).map(|f| std::sync::Arc::new(tokio::sync::Mutex::new(f)));
-
-    // Reader thread: blocking pty reads into a bounded channel.
-    let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(32);
-    let reader_thread = tokio::task::spawn_blocking(move || {
-        let mut buf = [0u8; 8192];
-        loop {
-            match reader.read(&mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    if chunk_tx.blocking_send(buf[..n].to_vec()).is_err() {
-                        break;
-                    }
-                },
-            }
-        }
-    });
-
-    let drain = tokio::spawn(async move {
-        let mut drain = PtyDrain {
-            capture: CappedCapture::new(mermaid_model::constants::MAX_TOOL_OUTPUT_BYTES),
-            log,
-            logged: 0,
-            log_capped: false,
-            line_buf: String::new(),
-            progress,
-        };
-        while let Some(chunk) = chunk_rx.recv().await {
-            drain.push(&chunk).await;
-        }
-        drain.capture.finish()
-    });
-
-    // Waiter owns the child AND the master: the master must outlive the
-    // child (dropping it early can SIGHUP the session on Unix / detach the
-    // ConPTY on Windows), and dropping it right after `wait` returns
-    // unblocks the reader thread — EOF/EIO on Unix; on Windows the master
-    // and (already-dropped) slave share the pseudoconsole, so the last drop
-    // runs ClosePseudoConsole, conhost exits, and the reader's duplicated
-    // handle EOFs — the drain always finishes. (A reader wedged by a hung
-    // conhost would leak bounded-by-process; the timeout arm below is an
-    // independent backstop, so no read timeout on the drain.)
-    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
-    let driver = tokio::spawn(async move {
-        let status = tokio::task::spawn_blocking(move || {
-            let status = child.wait();
-            // The CPR priming writer must drop WITH the master, never
-            // before it (early close = detach risk).
-            #[cfg(windows)]
-            drop(writer);
-            drop(master);
-            status
-        })
-        .await;
-        let (output, truncated) = drain.await.unwrap_or_default();
-        let _ = reader_thread.await;
-        let _ = done_tx.send((output, truncated, status));
-    });
-
-    let timeout_fut = tokio::time::sleep(timeout);
-
-    tokio::select! {
-        biased;
-        _ = background.cancelled() => {
-            match pid {
-                // Ctrl+B detach: stop listening; the blocking wait/read
-                // threads keep running, the log keeps filling, and the child
-                // survives Mermaid's exit (nothing is kill-on-drop here).
-                Some(pid) => {
-                    drop(driver);
-                    Ok(CommandRunResult::Detached { pid, log_path })
-                },
-                None => {
-                    driver.abort();
-                    let _ = tokio::fs::remove_file(&log_path).await;
-                    Ok(CommandRunResult::Cancelled)
-                },
-            }
-        }
-        _ = token.cancelled() => {
-            // Unix: the child is the session/group leader (portable-pty
-            // setsids), so the group-kill takes the whole tree, exactly like
-            // the pipe path; the reader then unblocks at EOF/EIO. Windows:
-            // `terminate_tree` kills the tree by pid (`taskkill /T`); the
-            // waiter's `wait` then returns and drops the master, which
-            // closes the pseudoconsole and EOFs the reader. Neither arm
-            // reads the exit status, so killed-child exit-code quirks on
-            // Windows never surface here.
-            if let Some(p) = pid {
-                mermaid_model::utils::terminate_tree(p, mermaid_model::utils::Grace::Immediate).await;
-            }
-            driver.abort();
-            let _ = tokio::fs::remove_file(&log_path).await;
-            Ok(CommandRunResult::Cancelled)
-        }
-        res = done_rx => {
-            let _ = tokio::fs::remove_file(&log_path).await;
-            let (raw, _truncated, status) = res
-                .map_err(|_| std::io::Error::other("pty driver dropped before completing"))?;
-            let status = status
-                .map_err(|e| std::io::Error::other(format!("pty waiter panicked: {e}")))?
-                .map_err(std::io::Error::other)?;
-            // Sanitize the WHOLE capture once (escape sequences can span
-            // chunk boundaries; per-chunk stripping is progress-only).
-            let mut output = strip_ansi(&raw);
-            // portable-pty reports a terminating signal by NAME; SIGSYS is
-            // the one downstream consumer (the seccomp denial mapping) —
-            // `128 + SIGSYS` shell-reaped exits flow through exit_code as-is.
-            // On Windows `signal()` is always None, so the exit-code arm is
-            // taken unconditionally (the seccomp sandbox is Linux-only
-            // anyway) — no cfg needed on these arms.
-            let (exit_code, signal) = match status.signal() {
-                Some(name) if name.eq_ignore_ascii_case("bad system call") => {
-                    (None, Some(SANDBOX_KILL_SIGNAL))
-                },
-                Some(_) => (None, None),
-                None => (Some(status.exit_code() as i32), None),
-            };
-            if !status.success() {
-                output.push_str(&format!(
-                    "\n--- Command exited with status: {} ---",
-                    exit_code.unwrap_or(-1)
-                ));
-            }
-            let stdout_lines = output.lines().count();
-            Ok(CommandRunResult::Completed(CommandRunOutput {
-                output,
-                exit_code,
-                signal,
-                // One merged stream on a PTY — there is no stderr split.
-                stdout_lines,
-                stderr_lines: 0,
-            }))
-        }
-        _ = timeout_fut => {
-            if let Some(p) = pid {
-                mermaid_model::utils::terminate_tree(p, mermaid_model::utils::Grace::Immediate).await;
-            }
-            driver.abort();
-            let _ = tokio::fs::remove_file(&log_path).await;
-            Ok(CommandRunResult::TimedOut)
-        }
-    }
-}
-
-/// Defense-in-depth pre-check for obviously destructive commands, run before
-/// the policy engine. Delegates to `mermaid_runtime::is_destructive_command`,
-/// which segments the command the way `sh -c` would and classifies each head on
-/// the TOKENIZED form — so spacing, case, quoting, flag bundling, and chaining
-/// can't trivially evade it (the substring blocklist this replaced could be
-/// dodged by `RM -RF /`, `rm  -rf  /`, or `echo x; rm -rf /` — #114). NOT a
-/// security boundary: the real boundary is deny-by-default + the policy engine,
-/// whose hard-deny this mirrors.
-fn contains_dangerous_command(command: &str) -> bool {
-    mermaid_runtime::is_destructive_command(command)
-}
+pub(crate) mod background;
+pub(crate) mod capture;
+pub(crate) mod pty;
+pub(crate) mod sandbox;
+pub(crate) mod shell;
+
+pub(crate) use background::*;
+pub(crate) use capture::*;
+pub(crate) use pty::*;
+pub(crate) use sandbox::*;
+pub(crate) use shell::*;
 
 #[cfg(test)]
 mod tests {
@@ -2121,7 +618,7 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn network_denial_detects_sigsys_and_reaped_child_exit() {
+    pub(crate) fn network_denial_detects_sigsys_and_reaped_child_exit() {
         let out = |exit: Option<i32>, signal: Option<i32>| CommandRunOutput {
             output: String::new(),
             exit_code: exit,
@@ -2140,7 +637,7 @@ mod tests {
     }
 
     #[test]
-    fn detect_denial_gates_on_active_policies() {
+    pub(crate) fn detect_denial_gates_on_active_policies() {
         let out = |exit: Option<i32>, signal: Option<i32>, output: &str| CommandRunOutput {
             output: output.to_string(),
             exit_code: exit,
@@ -2196,7 +693,7 @@ mod tests {
     }
 
     #[test]
-    fn fs_denial_requires_failure_and_permission_signature() {
+    pub(crate) fn fs_denial_requires_failure_and_permission_signature() {
         let out = |exit: Option<i32>, output: &str| CommandRunOutput {
             output: output.to_string(),
             exit_code: exit,
@@ -2224,7 +721,7 @@ mod tests {
     }
 
     #[test]
-    fn sandboxed_shell_wraps_only_when_requested() {
+    pub(crate) fn sandboxed_shell_wraps_only_when_requested() {
         let plain = build_sandboxed_shell("echo hi", false, None);
         let plain_prog = plain.as_std().get_program().to_string_lossy().into_owned();
         assert!(
@@ -2245,7 +742,7 @@ mod tests {
     }
 
     #[test]
-    fn sandboxed_shell_passes_confine_writes_dirs() {
+    pub(crate) fn sandboxed_shell_passes_confine_writes_dirs() {
         let dirs = vec![PathBuf::from("/proj"), PathBuf::from("/dev")];
         let wrapped = build_sandboxed_shell("echo hi", false, Some(&dirs));
         let args: Vec<String> = wrapped
@@ -2266,7 +763,7 @@ mod tests {
     }
 
     #[test]
-    fn powershell_wrap_carries_stop_pref_and_exit_code_trailer() {
+    pub(crate) fn powershell_wrap_carries_stop_pref_and_exit_code_trailer() {
         let wrapped = powershell_wrap("cargo build");
         assert!(wrapped.starts_with("$ErrorActionPreference='Stop'\n"));
         assert!(wrapped.contains("cargo build"));
@@ -2275,7 +772,7 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn windows_shell_invocation_is_powershell() {
+    pub(crate) fn windows_shell_invocation_is_powershell() {
         let inv = shell_invocation("echo hi", false, None);
         let prog = inv.program.to_string_lossy().into_owned();
         assert!(prog == "pwsh" || prog == "powershell", "program: {prog}");
@@ -2350,7 +847,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn tee_log_created_owner_only_and_refuses_existing() {
+    pub(crate) fn tee_log_created_owner_only_and_refuses_existing() {
         // #F14/#F15: the tee log (which can capture secret-bearing stdout) must
         // be owner-only, and the O_EXCL create must refuse a pre-existing path —
         // the same guard that refuses to follow a symlink planted at the
@@ -2376,7 +873,7 @@ mod tests {
     }
 
     #[test]
-    fn secret_env_name_denylist_covers_common_carriers() {
+    pub(crate) fn secret_env_name_denylist_covers_common_carriers() {
         // #4: secrets the old denylist missed.
         for name in [
             "ANTHROPIC_API_KEY",
@@ -2650,7 +1147,7 @@ mod tests {
     }
 
     /// Pipe-mode context: `[exec] pty = false` pins the pipe spawn path.
-    fn pipes_ctx() -> (
+    pub(crate) fn pipes_ctx() -> (
         crate::providers::ctx::ExecContext,
         tokio::sync::mpsc::Receiver<mermaid_domain::ProgressEvent>,
     ) {
@@ -2770,7 +1267,7 @@ mod tests {
     }
 
     #[test]
-    fn strip_ansi_drops_escapes_and_normalizes_line_endings() {
+    pub(crate) fn strip_ansi_drops_escapes_and_normalizes_line_endings() {
         // CSI color + cursor movement, OSC title (BEL and ST terminated),
         // two-byte ESC, CRLF and lone CR.
         assert_eq!(strip_ansi("\u{1b}[31mRED\u{1b}[0m"), "RED");
@@ -2801,7 +1298,7 @@ mod tests {
     }
 
     #[test]
-    fn capped_capture_keeps_head_and_tail() {
+    pub(crate) fn capped_capture_keeps_head_and_tail() {
         // Under the cap: byte-exact round trip.
         let mut c = CappedCapture::new(64);
         c.push(b"hello ");
@@ -2822,7 +1319,7 @@ mod tests {
     }
 
     #[test]
-    fn secret_env_names_reports_planted_secret() {
+    pub(crate) fn secret_env_names_reports_planted_secret() {
         // Uses the process env (read-only) — plant via temp_env.
         temp_env::with_var("MERMAID_TEST_PLANTED_API_KEY", Some("v"), || {
             let names = secret_env_names();
@@ -2835,7 +1332,7 @@ mod tests {
     }
 
     #[test]
-    fn harden_env_sets_git_terminal_prompt() {
+    pub(crate) fn harden_env_sets_git_terminal_prompt() {
         let mut cmd = Command::new("sh");
         harden_noninteractive_env(&mut cmd);
         let set = cmd
@@ -3074,7 +1571,7 @@ mod tests {
         }
     }
 
-    fn parse_pid(output: &str) -> Option<u32> {
+    pub(crate) fn parse_pid(output: &str) -> Option<u32> {
         output
             .lines()
             .find_map(|line| line.strip_prefix("PID: "))
@@ -3082,7 +1579,7 @@ mod tests {
     }
 
     #[test]
-    fn dangerous_detection_covers_known_shapes() {
+    pub(crate) fn dangerous_detection_covers_known_shapes() {
         assert!(contains_dangerous_command("rm -rf /"));
         assert!(contains_dangerous_command(":(){ :|:& };:"));
         assert!(contains_dangerous_command("ncat -l 8080"));
@@ -3094,7 +1591,7 @@ mod tests {
     }
 
     #[test]
-    fn dangerous_detection_resists_substring_evasion() {
+    pub(crate) fn dangerous_detection_resists_substring_evasion() {
         // The old lowercased-substring blocklist let these through; the
         // tokenized, segment-aware check now catches them (#114).
         assert!(contains_dangerous_command("RM -RF /"));
@@ -3132,7 +1629,7 @@ mod tests {
     }
 
     #[test]
-    fn scratch_prover_accepts_only_provably_contained_commands() {
+    pub(crate) fn scratch_prover_accepts_only_provably_contained_commands() {
         let scratch = Path::new("/tmp/mermaid_scratch/proj/sess");
 
         // Provable: bare words, flags, relative paths under the scratch cwd,
@@ -3183,7 +1680,7 @@ mod tests {
     }
 
     #[test]
-    fn classify_cwd_three_way_containment() {
+    pub(crate) fn classify_cwd_three_way_containment() {
         let base = std::env::temp_dir().join(format!("mermaid_cwd3_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let project = base.join("project");
