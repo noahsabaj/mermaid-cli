@@ -964,6 +964,7 @@ fn run_qa_compact_smoke(
         cwd.to_path_buf(),
         qa_model_id(config),
         chrono::Local::now(),
+        std::env::temp_dir(),
     );
     for message in synthetic_compaction_messages(turns) {
         state.session.append(message, state.now);

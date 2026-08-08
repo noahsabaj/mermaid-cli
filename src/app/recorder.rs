@@ -586,6 +586,7 @@ mod tests {
             PathBuf::from("/tmp/project"),
             "ollama/test".to_string(),
             fixed_ts(),
+            std::path::PathBuf::from("/tmp"),
         )
         .session;
         {

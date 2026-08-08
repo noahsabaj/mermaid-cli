@@ -693,6 +693,7 @@ impl ToolExecutor for SubagentTool {
                     cwd.clone(),
                     model_id.clone(),
                     chrono::Local::now(),
+                    std::env::temp_dir(),
                 ),
                 TokenUsageTotals::default(),
             ),
@@ -1587,6 +1588,7 @@ mod tests {
             PathBuf::from("/tmp"),
             "ollama/test".to_string(),
             chrono::Local::now(),
+            PathBuf::from("/tmp"),
         )
     }
 
@@ -1706,6 +1708,7 @@ mod tests {
             PathBuf::from("/tmp"),
             "ollama/test".to_string(),
             chrono::Local::now(),
+            PathBuf::from("/tmp"),
         );
         // The bug source: State::new picks up the config default…
         assert_eq!(child_state.session.safety_mode, SafetyMode::FullAccess);
@@ -1943,6 +1946,7 @@ mod tests {
                 PathBuf::from("/tmp"),
                 "ollama/test".to_string(),
                 chrono::Local::now(),
+                PathBuf::from("/tmp"),
             )
         };
         let mk = || CachedAgent {

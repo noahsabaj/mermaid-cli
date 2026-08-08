@@ -72,9 +72,11 @@ pub struct State {
     /// receive it via `ExecContext::workdir` and spawned subprocesses
     /// inherit it. Centralized here so tests can inject a fake cwd.
     pub cwd: PathBuf,
-    /// System temp dir, captured once at startup (`std::env::temp_dir()`).
-    /// Pasted-image attachments build their scratch path from it; holding it
-    /// here keeps the reducer free of the env read it used to do inline (#54).
+    /// System temp dir, injected once at startup by the shell (which reads
+    /// `std::env::temp_dir()`). Pasted-image attachments build their scratch
+    /// path from it; holding it here keeps the reducer free of the env read it
+    /// used to do inline (#54), and injecting it keeps the read out of this
+    /// crate entirely.
     pub temp_dir: PathBuf,
     pub ids: IdAllocatorBundle,
     /// When `Some`, the next render should pop up a modal confirmation
@@ -124,10 +126,19 @@ impl State {
     ///
     /// Pure given its inputs: `now` seeds the injected clock and derives the
     /// initial conversation's id/title, so `--replay` reconstructs the same
-    /// starting state from a recorded header. (The one environment read left
-    /// is `env::temp_dir()` — stable within a machine, and only feeds paste
-    /// scratch paths.) Nothing here touches the filesystem or tokio.
-    pub fn new(settings: Config, cwd: PathBuf, model_id: String, now: DateTime<Local>) -> Self {
+    /// starting state from a recorded header. Nothing here reads the
+    /// environment, the filesystem, or the clock.
+    ///
+    /// `temp_dir` is last rather than beside `cwd` on purpose: two adjacent
+    /// `PathBuf` parameters are silently swappable, and nothing in the type
+    /// system would catch it.
+    pub fn new(
+        settings: Config,
+        cwd: PathBuf,
+        model_id: String,
+        now: DateTime<Local>,
+        temp_dir: PathBuf,
+    ) -> Self {
         let project_path = cwd.display().to_string();
         let conversation = ConversationHistory::new(project_path, model_id.clone(), now);
         let initial_title = conversation.title.clone();
@@ -190,7 +201,7 @@ impl State {
             pending_hook_context: Vec::new(),
             pending_task_notices: Vec::new(),
             cwd,
-            temp_dir: std::env::temp_dir(),
+            temp_dir,
             ids: IdAllocatorBundle::default(),
             confirm: None,
             pending_approval: VecDeque::new(),
@@ -1464,6 +1475,7 @@ mod tests {
             PathBuf::from("/tmp/project"),
             "ollama/test".to_string(),
             chrono::Local::now(),
+            PathBuf::from("/tmp"),
         )
     }
 
@@ -1481,6 +1493,7 @@ mod tests {
             PathBuf::from("/tmp/project"),
             model_id.to_string(),
             chrono::Local::now(),
+            PathBuf::from("/tmp"),
         )
     }
 

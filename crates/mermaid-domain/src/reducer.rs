@@ -5979,6 +5979,7 @@ mod tests {
             PathBuf::from("/tmp/project"),
             "ollama/test".to_string(),
             chrono::Local::now(),
+            std::path::PathBuf::from("/tmp"),
         )
     }
 

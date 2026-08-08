@@ -63,9 +63,12 @@ pub struct RenderCache {
     /// without per-frame `Theme` construction. `None` (fresh cache) keeps the
     /// `Theme::dark()` default until the first frame resolves it.
     applied_theme: Option<(mermaid_domain::ThemeChoice, bool)>,
-    /// Host + user for the status bar's `user@host:cwd` line, read once at
+    /// Host + user for the status bar's `user@host:cwd` line, injected once at
     /// startup so `StatusWidget::render` doesn't hit the environment on every
-    /// frame (#55). Process-constant, so caching here is exact.
+    /// frame (#55). Process-constant, so caching here is exact. The shell reads
+    /// the environment and passes the result to [`RenderCache::new`]; render
+    /// itself never does, which is what keeps this module a pure function of
+    /// its inputs.
     pub hostname: String,
     pub username: String,
     /// App version for the status footer. Defaults to the compile-time crate
@@ -81,27 +84,6 @@ pub struct RenderCache {
     last_scroll_to_bottom_seq: u32,
 }
 
-impl Default for RenderCache {
-    fn default() -> Self {
-        Self {
-            chat: ChatState::new(),
-            wrapped_line_cache: FxHashMap::default(),
-            theme: theme::Theme::dark(),
-            hostname: std::env::var("HOSTNAME")
-                .or_else(|_| std::env::var("HOST"))
-                .unwrap_or_else(|_| "localhost".to_string()),
-            username: std::env::var("USER")
-                .or_else(|_| std::env::var("USERNAME"))
-                .unwrap_or_else(|_| "user".to_string()),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            stitched: None,
-            applied_theme: None,
-            last_mouse_scroll_accum: 0,
-            last_scroll_to_bottom_seq: 0,
-        }
-    }
-}
-
 /// See [`RenderCache::stitched`].
 struct StitchedMemo {
     key: u64,
@@ -109,8 +91,25 @@ struct StitchedMemo {
 }
 
 impl RenderCache {
-    pub fn new() -> Self {
-        Self::default()
+    /// `hostname` and `username` are parameters rather than environment reads
+    /// because this module is covered by the layering guard: a `std::env` call
+    /// anywhere under `src/render` is impurity in a tree that is supposed to be
+    /// a pure function of `State`. The shell resolves them once at startup
+    /// (`app::run::host_identity`); the snapshot and bench rigs pass pinned
+    /// literals, which is how their frames stay byte-stable across machines.
+    pub fn new(hostname: String, username: String) -> Self {
+        Self {
+            chat: ChatState::new(),
+            wrapped_line_cache: FxHashMap::default(),
+            theme: theme::Theme::dark(),
+            hostname,
+            username,
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            stitched: None,
+            applied_theme: None,
+            last_mouse_scroll_accum: 0,
+            last_scroll_to_bottom_seq: 0,
+        }
     }
 }
 
@@ -467,6 +466,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         wrapped_line_cache: &mut rstate.wrapped_line_cache,
         show_reasoning: state.ui.show_reasoning,
         blink_on,
+        today: state.now.date_naive(),
     };
     frame.render_stateful_widget(chat_widget, chat_area, &mut rstate.chat);
 
@@ -1165,17 +1165,24 @@ mod tests {
             PathBuf::from("/tmp/p"),
             "ollama/test".to_string(),
             chrono::Local::now(),
+            PathBuf::from("/tmp"),
         )
     }
 
+    /// Pinned `user@host`, so a frame rendered here is the same on every
+    /// machine — the reason `RenderCache::new` takes them as arguments.
+    fn test_cache() -> RenderCache {
+        RenderCache::new("testhost".to_string(), "testuser".to_string())
+    }
+
     fn render_to_string(state: &State) -> String {
-        render_frame(state, &mut RenderCache::new(), 80, 24)
+        render_frame(state, &mut test_cache(), 80, 24)
     }
 
     fn render_to_buffer(state: &State) -> ratatui::buffer::Buffer {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).expect("terminal");
-        let mut rstate = RenderCache::new();
+        let mut rstate = test_cache();
         terminal
             .draw(|f| render(state, &mut rstate, f))
             .expect("draw");
@@ -1203,7 +1210,7 @@ mod tests {
     #[test]
     fn theme_memo_swaps_palette_on_state_change() {
         let mut state = mock_state();
-        let mut rstate = RenderCache::new();
+        let mut rstate = test_cache();
         render_frame(&state, &mut rstate, 80, 24);
         assert_eq!(rstate.theme.name, "Dark");
         state.ui.theme = mermaid_domain::ThemeChoice::Light;

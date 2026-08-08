@@ -24,6 +24,7 @@ fn fresh() -> State {
         PathBuf::from("/tmp/flow"),
         "ollama/test".to_string(),
         chrono::Local::now(),
+        PathBuf::from("/tmp"),
     )
 }
 
@@ -856,6 +857,7 @@ fn configured_mcp_servers_seed_state_and_ready_updates() {
         PathBuf::from("/tmp/p"),
         "ollama/test".to_string(),
         chrono::Local::now(),
+        PathBuf::from("/tmp"),
     );
 
     // Seed placed the entry in Starting status before any effects run.

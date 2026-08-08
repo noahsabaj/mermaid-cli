@@ -110,6 +110,7 @@ fn fold(base_ts_offset: i64) -> State {
         PathBuf::from("/tmp/determinism"),
         "ollama/test".to_string(),
         fixed_ts(base_ts_offset),
+        PathBuf::from("/tmp"),
     );
     for (offset, msg) in script() {
         state.now = fixed_ts(base_ts_offset + offset);
@@ -175,12 +176,14 @@ fn tick_is_a_reducer_noop() {
         PathBuf::from("/tmp/tick"),
         "ollama/test".to_string(),
         fixed_ts(0),
+        PathBuf::from("/tmp"),
     );
     let mut busy = State::new(
         Config::default(),
         PathBuf::from("/tmp/tick"),
         "ollama/test".to_string(),
         fixed_ts(0),
+        PathBuf::from("/tmp"),
     );
     busy.turn = start_generating(TurnId(1), std::time::SystemTime::from(fixed_ts(0)));
     let after_session = fold(0); // full script: transcript + should_exit
