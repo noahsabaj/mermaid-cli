@@ -155,6 +155,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `<provider>/<model>` placeholders that rustdoc parsed as unclosed HTML tags.
   All fixed, and the gate is now `RUSTDOCFLAGS: -D warnings`.
 
+- **`mermaid self-test` said the runtime store failed to open without saying
+  why.** The error was rendered with `err.to_string()`, which prints an
+  `anyhow::Error`'s outermost context and drops the chain — and the outermost
+  context is always the same `failed to open runtime DB <path>`. `{err:#}`
+  now carries the cause, which is the sentence that distinguishes a locked
+  file from a permissions denial from a schema this build will not migrate.
+
 ## [0.21.1] - 2026-08-07
 
 ### Fixed
