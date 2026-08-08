@@ -119,9 +119,10 @@ pub enum TextValidate {
     Regex(String),
 }
 
-/// Validate a typed input value against its question kind. `Ok(())` means valid
-/// (an empty value is treated as "skipped"). Pure — performs no filesystem I/O,
-/// so `Path { must_exist }` is not enforced here.
+/// Validate a typed input value against its question kind.
+///
+/// `Ok(())` means valid (an empty value is treated as "skipped"). Pure —
+/// performs no filesystem I/O, so `Path { must_exist }` is not enforced here.
 ///
 /// # Errors
 ///
