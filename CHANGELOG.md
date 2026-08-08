@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Two seeded test repos no longer share a base commit, which is what made
+  the worktree flake stick.** `4b3133b` already found the real cause of that
+  failure — `!listed.contains("a1")` matched the abbreviated commit hash in
+  `git worktree list` output — and fixed it. What it documented but left in
+  place was the second half: `init_project` wrote identical content under an
+  identical `init` message, and git stamps commits to the second, so every
+  test repo seeded inside one second got the *same* commit. Measured here,
+  three repos in a row: `db33a16` all three times, a hash that happens to
+  contain `a1`.
+
+  That is why a 2.3% flake did not clear on retry. A nextest retry lands in
+  the same second, rebuilds the same commit, and fails identically, so the
+  failure reads as a race in `destroy` rather than as an unlucky hash. The
+  seed message now carries the repo's unique directory name — the message and
+  not the tree, because `tracked.txt` reads `"one\n"` in a dozen assertions.
+  `two_project_repos_do_not_share_a_base_commit` pins it, and fails twice in a
+  row against the old behavior, which is the property it exists to prevent.
+
+  `porcelain()`'s doc comment has said "never the plain form" since that fix,
+  while a call site four hundred lines below it stayed on
+  `git worktree list` anyway. That one only counted lines, so it was harmless
+  — but a comment is not a constraint. It is porcelain now, and
+  `every_worktree_list_here_is_porcelain` reads this file's own source and
+  fails with the offending line number if the plain form comes back.
+
 - **The tracked `clippy::unwrap_used` count now measures shipped code, not the
   test suite.** It stood at 1,353 — 26% of all tracked debt and the single
   largest entry. Splitting the measurement showed what it was actually

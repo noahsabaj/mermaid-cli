@@ -549,6 +549,62 @@ mod tests {
             .unwrap()
     }
 
+    fn head_of(project: &Path) -> String {
+        git(project)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .expect("a seeded repo has a HEAD")
+            .trim()
+            .to_string()
+    }
+
+    /// Two seeded repos must not share a base commit.
+    ///
+    /// They did. Identical tree, identical `init` message, identical author,
+    /// and git stamps commits to the second, so anything seeded inside one
+    /// second collided — measured `db33a16` three times running. This is the
+    /// property that made #319's flake stick to a retry instead of clearing,
+    /// and nothing pinned it, so nothing would notice it coming back.
+    #[test]
+    fn two_project_repos_do_not_share_a_base_commit() {
+        let first = unique_dir("hash_first");
+        let second = unique_dir("hash_second");
+        if !init_project(&first) || !init_project(&second) {
+            return;
+        }
+        assert_ne!(
+            head_of(&first),
+            head_of(&second),
+            "seeded repos collided on a base commit; a retry inside the same \
+             second will now reproduce a hash-sensitive failure exactly"
+        );
+    }
+
+    /// The porcelain rule, enforced rather than merely written down.
+    ///
+    /// `porcelain`'s doc comment has said "never the plain form" since #319,
+    /// and a call site four hundred lines below it stayed on the plain form
+    /// anyway. That one only counted lines, so it was harmless — but a
+    /// comment is not a constraint, and the next person to tighten an
+    /// assertion into a substring match re-earns the original bug.
+    #[test]
+    fn every_worktree_list_here_is_porcelain() {
+        // Built rather than written, so this line does not match itself.
+        let call = format!("{}\"worktree\", \"{}\"", "", "list");
+        let offenders: Vec<String> = include_str!("worktree.rs")
+            .lines()
+            .enumerate()
+            .filter(|(_, l)| l.contains(&call) && !l.contains("--porcelain"))
+            .map(|(i, l)| format!("  line {}: {}", i + 1, l.trim()))
+            .collect();
+        assert!(
+            offenders.is_empty(),
+            "`git worktree list` prints `<path> <abbrev-hash> [<branch>]`, so \
+             its output is unsafe to match against. Use `porcelain()`:\n{}",
+            offenders.join("\n")
+        );
+    }
+
     /// The checkout directory's own name — `a1-<pid>-<seq>`, see
     /// `WORKTREE_SEQ`. Specific enough that no abbreviated hash can spell it,
     /// which is what the bare agent id was not.
@@ -575,13 +631,33 @@ mod tests {
 
     /// A project with one commit and one tracked file. `false` when git is
     /// missing, which no-ops every test here.
+    /// Seed a project repo whose base commit hash is its own.
+    ///
+    /// The message carries the repo's unique directory name for one reason:
+    /// without it, every test repo seeded in the same second gets the *same*
+    /// commit. Identical tree, identical message, identical author, and git
+    /// stamps commits to the second — three repos initialized back to back
+    /// measured `db33a16` all three times.
+    ///
+    /// That is what turned the `contains("a1")` bug (#319) from a 2.3% flake
+    /// into a stuck one. A nextest retry lands in the same second, rebuilds
+    /// the same commit, and fails identically, so the failure reads as a race
+    /// in `destroy` rather than as a hash that happens to spell the needle.
+    /// Whatever the next hash-sensitive assertion turns out to be, it should
+    /// get a fresh draw on retry instead of the same rigged one.
     fn init_project(dir: &Path) -> bool {
         if git(dir).args(["init", "-q"]).run().is_err() {
             return false;
         }
+        let id = dir.file_name().and_then(|n| n.to_str()).unwrap_or("repo");
         std::fs::write(dir.join("tracked.txt"), "one\n").unwrap();
         git(dir).args(["add", "-A"]).run().unwrap();
-        git(dir).args(["commit", "-qm", "init"]).run().unwrap();
+        // The message, not the tree: `tracked.txt` reads "one\n" in a dozen
+        // assertions and must stay that way.
+        git(dir)
+            .args(["commit", "-qm", &format!("init {id}")])
+            .run()
+            .unwrap();
         true
     }
 
@@ -969,10 +1045,17 @@ mod tests {
                 .expect("create/destroy churn must not fail");
         }
         // The repo is still usable and knows about no leftover worktrees.
-        let listed = git(&project).args(["worktree", "list"]).output().unwrap();
+        // Porcelain like everywhere else here: this assertion counts lines
+        // rather than matching substrings, so the plain form was not itself a
+        // bug, but leaving one call site on it keeps the trap loaded for
+        // whoever tightens this into a substring check later.
+        let listed = porcelain(&project);
+        let checkouts = listed
+            .lines()
+            .filter(|l| l.starts_with("worktree "))
+            .count();
         assert_eq!(
-            listed.lines().count(),
-            1,
+            checkouts, 1,
             "only the main worktree should remain: {listed}"
         );
     }
