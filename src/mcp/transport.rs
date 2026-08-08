@@ -333,16 +333,14 @@ impl StdioTransport {
                     drop(stdin);
                     self.pending.lock().await.remove(&id);
                     return Err(e).with_context(|| {
-                        format!("Failed to write to MCP server stdin (method: {})", method)
+                        format!("Failed to write to MCP server stdin (method: {method})")
                     });
                 },
                 Err(_) => {
                     drop(stdin);
                     self.pending.lock().await.remove(&id);
                     return Err(anyhow!(
-                        "Timed out after {}s writing to MCP server stdin (method: {})",
-                        WRITE_TIMEOUT_SECS,
-                        method
+                        "Timed out after {WRITE_TIMEOUT_SECS}s writing to MCP server stdin (method: {method})"
                     ));
                 },
             }
@@ -352,16 +350,14 @@ impl StdioTransport {
                     drop(stdin);
                     self.pending.lock().await.remove(&id);
                     return Err(e).with_context(|| {
-                        format!("Failed to flush MCP server stdin (method: {})", method)
+                        format!("Failed to flush MCP server stdin (method: {method})")
                     });
                 },
                 Err(_) => {
                     drop(stdin);
                     self.pending.lock().await.remove(&id);
                     return Err(anyhow!(
-                        "Timed out after {}s flushing MCP server stdin (method: {})",
-                        WRITE_TIMEOUT_SECS,
-                        method
+                        "Timed out after {WRITE_TIMEOUT_SECS}s flushing MCP server stdin (method: {method})"
                     ));
                 },
             }
@@ -379,9 +375,7 @@ impl StdioTransport {
             Err(_) => {
                 self.pending.lock().await.remove(&id);
                 return Err(anyhow!(
-                    "MCP request timed out after {}s: {}",
-                    response_timeout_secs,
-                    method
+                    "MCP request timed out after {response_timeout_secs}s: {method}"
                 ));
             },
         };
@@ -406,10 +400,10 @@ impl StdioTransport {
             stdin.write_all(msg.as_bytes()),
         )
         .await
-        .map_err(|_| anyhow!("Timed out writing MCP notification (method: {})", method))??;
+        .map_err(|_| anyhow!("Timed out writing MCP notification (method: {method})"))??;
         timeout(Duration::from_secs(WRITE_TIMEOUT_SECS), stdin.flush())
             .await
-            .map_err(|_| anyhow!("Timed out flushing MCP notification (method: {})", method))??;
+            .map_err(|_| anyhow!("Timed out flushing MCP notification (method: {method})"))??;
         Ok(())
     }
 
@@ -576,7 +570,7 @@ pub(super) fn extract_jsonrpc_result(response: Value) -> Result<Value> {
             .get("message")
             .and_then(|m| m.as_str())
             .unwrap_or("Unknown error");
-        return Err(anyhow!("MCP error (code {}): {}", code, message));
+        return Err(anyhow!("MCP error (code {code}): {message}"));
     }
     response
         .get("result")

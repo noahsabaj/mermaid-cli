@@ -325,7 +325,7 @@ pub async fn validate_argv(
             }
         )
     })?
-    .map_err(|e| anyhow!("Failed to spawn server: {}", e))?;
+    .map_err(|e| anyhow!("Failed to spawn server: {e}"))?;
 
     let mut client = McpClient::new(transport.into());
 
@@ -393,7 +393,7 @@ fn convention_patterns(name: &str) -> Vec<String> {
 /// special char unescaped, probing the wrong URL (false negative/positive).
 fn npm_packument_url(package: &str) -> Result<reqwest::Url> {
     let mut url = reqwest::Url::parse("https://registry.npmjs.org/")
-        .map_err(|e| anyhow!("failed to build npm packument base URL: {}", e))?;
+        .map_err(|e| anyhow!("failed to build npm packument base URL: {e}"))?;
     url.path_segments_mut()
         // Infallible for an https base, but `path_segments_mut` is fallible for
         // cannot-be-a-base URLs, so handle it rather than unwrap.
@@ -417,14 +417,12 @@ async fn npm_package_exists(client: &reqwest::Client, package: &str) -> Result<b
         .header("Accept", "application/vnd.npm.install-v1+json")
         .send()
         .await
-        .map_err(|e| anyhow!("npm registry lookup failed (network unavailable?): {}", e))?;
+        .map_err(|e| anyhow!("npm registry lookup failed (network unavailable?): {e}"))?;
     match response.status() {
         reqwest::StatusCode::OK => Ok(true),
         reqwest::StatusCode::NOT_FOUND => Ok(false),
         other => Err(anyhow!(
-            "npm registry returned HTTP {} for '{}'",
-            other,
-            package
+            "npm registry returned HTTP {other} for '{package}'"
         )),
     }
 }
@@ -433,7 +431,7 @@ async fn npm_package_exists(client: &reqwest::Client, package: &str) -> Result<b
 /// lookup), NOT by spawning them (the #10 RCE). Returns the first that exists.
 async fn try_conventions(client: &reqwest::Client, name: &str) -> Option<String> {
     for pattern in convention_patterns(name) {
-        println!("  Checking npm for {}...", pattern);
+        println!("  Checking npm for {pattern}...");
         if npm_package_exists(client, &pattern).await.unwrap_or(false) {
             return Some(pattern);
         }
@@ -505,19 +503,19 @@ fn confirm_registry_launch(package: &str, command: &str, assume_yes: bool) -> Re
 /// serializer. No hand-rolled escaping — special characters in `name`
 /// (%, &, =, UTF-8, …) are all handled correctly.
 async fn search_npm(client: &reqwest::Client, name: &str) -> Result<Option<(String, String)>> {
-    let query = format!("{} mcp server", name);
+    let query = format!("{name} mcp server");
 
     let url = reqwest::Url::parse_with_params(
         "https://registry.npmjs.org/-/v1/search",
         &[("text", query.as_str()), ("size", "5")],
     )
-    .map_err(|e| anyhow!("Failed to build npm search URL: {}", e))?;
+    .map_err(|e| anyhow!("Failed to build npm search URL: {e}"))?;
 
     let response = client
         .get(url)
         .send()
         .await
-        .map_err(|e| anyhow!("npm registry search failed (network unavailable?): {}", e))?;
+        .map_err(|e| anyhow!("npm registry search failed (network unavailable?): {e}"))?;
 
     if !response.status().is_success() {
         return Err(anyhow!("npm registry returned HTTP {}", response.status()));
@@ -551,7 +549,7 @@ async fn search_npm(client: &reqwest::Client, name: &str) -> Result<Option<(Stri
             .unwrap_or_default();
 
         // Check if this looks like an MCP server
-        let combined = format!("{} {} {}", pkg_name, description, keywords).to_lowercase();
+        let combined = format!("{pkg_name} {description} {keywords}").to_lowercase();
         if combined.contains("mcp") {
             return Ok(Some((pkg_name.to_string(), description.to_string())));
         }
@@ -598,12 +596,9 @@ pub async fn resolve(name: &str, assume_yes: bool) -> Result<ResolvedServer> {
     if let Some(package) = try_conventions(&client, name).await {
         // Refuse a dash-leading/empty name before it reaches the launcher (F78).
         validate_package_name(&package)?;
-        println!("Found: {}", package);
+        println!("Found: {package}");
         if !confirm_untrusted_package(&package, "npx", assume_yes)? {
-            bail!(
-                "Cancelled: did not confirm running untrusted package '{}'.",
-                package
-            );
+            bail!("Cancelled: did not confirm running untrusted package '{package}'.");
         }
         return Ok(ResolvedServer {
             command: "npx".to_string(),
@@ -621,12 +616,9 @@ pub async fn resolve(name: &str, assume_yes: bool) -> Result<ResolvedServer> {
         Ok(Some((package, description))) => {
             // Refuse a dash-leading/empty name before it reaches the launcher (F78).
             validate_package_name(&package)?;
-            println!("Found: {} — {}", package, description);
+            println!("Found: {package} — {description}");
             if !confirm_untrusted_package(&package, "npx", assume_yes)? {
-                bail!(
-                    "Cancelled: did not confirm running untrusted package '{}'.",
-                    package
-                );
+                bail!("Cancelled: did not confirm running untrusted package '{package}'.");
             }
             Ok(ResolvedServer {
                 command: "npx".to_string(),
@@ -636,22 +628,18 @@ pub async fn resolve(name: &str, assume_yes: bool) -> Result<ResolvedServer> {
             })
         },
         Ok(None) => Err(anyhow!(
-            "Could not find MCP server '{}'\n\n\
+            "Could not find MCP server '{name}'\n\n\
             You can add it manually in ~/.config/mermaid/config.toml:\n\
-            [mcp_servers.{}]\n\
+            [mcp_servers.{name}]\n\
             command = \"npx\"\n\
-            args = [\"-y\", \"PACKAGE_NAME\"]",
-            name,
-            name
+            args = [\"-y\", \"PACKAGE_NAME\"]"
         )),
         Err(e) => Err(anyhow!(
-            "Convention-based lookup failed, and npm search also failed: {}\n\n\
+            "Convention-based lookup failed, and npm search also failed: {e}\n\n\
             You can add it manually in ~/.config/mermaid/config.toml:\n\
-            [mcp_servers.{}]\n\
+            [mcp_servers.{name}]\n\
             command = \"npx\"\n\
-            args = [\"-y\", \"PACKAGE_NAME\"]",
-            e,
-            name
+            args = [\"-y\", \"PACKAGE_NAME\"]"
         )),
     }
 }

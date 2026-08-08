@@ -814,7 +814,7 @@ impl RuntimeService {
             .store
             .tasks()
             .get(id)?
-            .with_context(|| format!("task not found: {}", id))?;
+            .with_context(|| format!("task not found: {id}"))?;
         let events = self.store.tasks().events(id)?;
         let session = match task.conversation_id.as_deref() {
             Some(session_id) => self.store.sessions().get(session_id)?,
@@ -879,7 +879,7 @@ impl RuntimeService {
             .store
             .approvals()
             .get(id)?
-            .with_context(|| format!("approval not found: {}", id))?;
+            .with_context(|| format!("approval not found: {id}"))?;
         let checkpoint = match approval.checkpoint_id.as_deref() {
             Some(checkpoint_id) => self.store.checkpoints().get(checkpoint_id)?,
             None => None,
@@ -913,7 +913,7 @@ impl RuntimeService {
             .store
             .checkpoints()
             .get(id)?
-            .with_context(|| format!("checkpoint not found: {}", id))?;
+            .with_context(|| format!("checkpoint not found: {id}"))?;
         let approval = match checkpoint.approval_id.as_deref() {
             Some(approval_id) => self.store.approvals().get(approval_id)?,
             None => None,
@@ -966,10 +966,10 @@ impl RuntimeService {
             .store
             .processes()
             .get(id)?
-            .with_context(|| format!("process not found: {}", id))?;
+            .with_context(|| format!("process not found: {id}"))?;
         let path = process
             .log_path
-            .with_context(|| format!("process has no log path: {}", id))?;
+            .with_context(|| format!("process has no log path: {id}"))?;
         let tail = tail_bytes.unwrap_or(32 * 1024).min(512 * 1024);
         // Seek to the tail rather than reading the whole file: a long-running
         // dev server can produce a multi-GB log, and we only ever return the
@@ -977,17 +977,17 @@ impl RuntimeService {
         // in RAM first (#41).
         use std::io::{Read, Seek, SeekFrom};
         let mut file =
-            std::fs::File::open(&path).with_context(|| format!("failed to read {}", path))?;
+            std::fs::File::open(&path).with_context(|| format!("failed to read {path}"))?;
         let len = file.metadata().map(|m| m.len()).unwrap_or(0);
         let start = len.saturating_sub(tail);
         if start > 0 {
             file.seek(SeekFrom::Start(start))
-                .with_context(|| format!("failed to seek {}", path))?;
+                .with_context(|| format!("failed to seek {path}"))?;
         }
         let mut bytes = Vec::new();
         file.take(tail)
             .read_to_end(&mut bytes)
-            .with_context(|| format!("failed to read {}", path))?;
+            .with_context(|| format!("failed to read {path}"))?;
         Ok(RuntimeProcessLog {
             ok: true,
             content: String::from_utf8_lossy(&bytes).into_owned(),
@@ -999,7 +999,7 @@ impl RuntimeService {
             .store
             .processes()
             .get(id)?
-            .with_context(|| format!("process not found: {}", id))?;
+            .with_context(|| format!("process not found: {id}"))?;
         // Best-effort group kill (SIGTERM → grace → SIGKILL) so workers the dev
         // server forked die with it; then mark the row stopped regardless.
         mermaid_model::utils::terminate_tree_blocking(
@@ -1024,7 +1024,7 @@ impl RuntimeService {
             .store
             .processes()
             .get(id)?
-            .with_context(|| format!("process not found: {}", id))?;
+            .with_context(|| format!("process not found: {id}"))?;
         // #63: the command comes from a `processes` row; a tampered DB could swap
         // in a destructive command. Refuse to respawn it (mirrors exec.rs's
         // execute_command pre-check) before killing or spawning anything.
@@ -1067,7 +1067,7 @@ impl RuntimeService {
                 .create(true)
                 .append(true)
                 .open(path)
-                .with_context(|| format!("failed to open process log {}", path))?;
+                .with_context(|| format!("failed to open process log {path}"))?;
             let stderr = file.try_clone()?;
             command
                 .stdout(Stdio::from(file))
@@ -1092,11 +1092,11 @@ impl RuntimeService {
             .store
             .processes()
             .get(id)?
-            .with_context(|| format!("process not found: {}", id))?;
+            .with_context(|| format!("process not found: {id}"))?;
         let target = process
             .detected_url
             .or(process.log_path)
-            .with_context(|| format!("process has no URL or log path: {}", id))?;
+            .with_context(|| format!("process has no URL or log path: {id}"))?;
         validate_open_target(&target)?;
         mermaid_model::utils::open_file(target.clone());
         Ok(RuntimeProcessOpen { ok: true, target })
@@ -1134,7 +1134,7 @@ impl RuntimeService {
 
     pub fn set_safety_mode(&self, mode: &str) -> Result<mermaid_domain::SafetyConfig> {
         let parsed = mermaid_runtime::SafetyMode::parse(mode)
-            .ok_or_else(|| anyhow::anyhow!("unknown safety mode: {}", mode))?;
+            .ok_or_else(|| anyhow::anyhow!("unknown safety mode: {mode}"))?;
         // Rewrite only `safety.mode` in the user file (never the whole merged
         // config), then report back the resulting user-scope safety section.
         crate::app::update_user_config_key(

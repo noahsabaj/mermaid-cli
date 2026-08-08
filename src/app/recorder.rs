@@ -112,7 +112,7 @@ impl Recorder {
     pub fn record_header(&mut self, header: &SessionHeader) -> Result<()> {
         let mut value = serde_json::to_value(header).context("serialize session header")?;
         mermaid_model::utils::redact_json(&mut value);
-        writeln!(self.writer, "{}", value).context("write header line")?;
+        writeln!(self.writer, "{value}").context("write header line")?;
         self.flush()
     }
 
@@ -154,7 +154,7 @@ impl Recorder {
             "turn": msg.turn_id().map(|t| t.0),
             "msg": body,
         });
-        writeln!(self.writer, "{}", entry).context("write jsonl line")?;
+        writeln!(self.writer, "{entry}").context("write jsonl line")?;
         Ok(())
     }
 
@@ -168,7 +168,7 @@ impl Recorder {
             final_session_fingerprint: session_fingerprint(session),
         };
         let line = serde_json::to_string(&trailer).context("serialize session trailer")?;
-        writeln!(self.writer, "{}", line).context("write trailer line")?;
+        writeln!(self.writer, "{line}").context("write trailer line")?;
         self.flush()
     }
 

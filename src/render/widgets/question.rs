@@ -61,7 +61,7 @@ fn push_wrapped(lines: &mut Vec<Line<'static>>, line: Line<'static>, width: usiz
 /// `fg` is the theme background so the label stays readable on the accent.
 fn chip(label: &str, fg: Color, bg: Color) -> Span<'static> {
     Span::styled(
-        format!(" {} ", label),
+        format!(" {label} "),
         Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
     )
 }
@@ -140,7 +140,7 @@ fn push_choice_lines(
             push_wrapped(
                 lines,
                 Line::from(Span::styled(
-                    format!("     {}", desc),
+                    format!("     {desc}"),
                     Style::default().fg(dim),
                 )),
                 width,
@@ -335,10 +335,7 @@ pub fn build_question_lines(
             if qi == set.active {
                 spans.push(chip(&label, theme.colors.background.to_color(), brand));
             } else {
-                spans.push(Span::styled(
-                    format!(" {} ", label),
-                    Style::default().fg(dim),
-                ));
+                spans.push(Span::styled(format!(" {label} "), Style::default().fg(dim)));
             }
             spans.push(Span::raw(" "));
         }
@@ -377,7 +374,7 @@ pub fn build_question_lines(
             push_wrapped(
                 &mut lines,
                 Line::from(Span::styled(
-                    format!("   -> {}", value),
+                    format!("   -> {value}"),
                     Style::default().fg(brand),
                 )),
                 width,
@@ -714,7 +711,7 @@ mod tests {
     fn q_with_header(header: &str) -> Question {
         Question {
             header: header.to_string(),
-            question: format!("Which {}?", header),
+            question: format!("Which {header}?"),
             kind: mermaid_domain::QuestionKind::Select,
             options: vec![opt_with_preview("A", None), opt_with_preview("B", None)],
             memory_key: None,

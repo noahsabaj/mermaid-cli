@@ -1255,7 +1255,7 @@ impl EffectRunner {
                     let text = crate::runtime_client::RuntimeClient::auto()
                         .process_log(&id, None)
                         .map(|log| format!("Process log {}\n\n{}", id, log.content))
-                        .unwrap_or_else(|err| format!("Process log error: {}", err));
+                        .unwrap_or_else(|err| format!("Process log error: {err}"));
                     let _ = tx.blocking_send(Msg::RuntimeText(text));
                 });
             },
@@ -1267,7 +1267,7 @@ impl EffectRunner {
                             text: format!("Stopped process {} (pid {})", id, response.item.pid),
                         },
                         Err(err) => Msg::TransientStatus {
-                            text: format!("Process stop failed: {}", err),
+                            text: format!("Process stop failed: {err}"),
                         },
                     };
                     let _ = tx.blocking_send(msg);
@@ -1308,7 +1308,7 @@ impl EffectRunner {
                             text: format!("Restarted process {} (pid {})", id, response.item.pid),
                         },
                         Err(err) => Msg::TransientStatus {
-                            text: format!("Process restart failed: {}", err),
+                            text: format!("Process restart failed: {err}"),
                         },
                     };
                     let _ = tx.blocking_send(msg);
@@ -1335,7 +1335,7 @@ impl EffectRunner {
                     let text = crate::runtime_client::RuntimeClient::auto()
                         .ports()
                         .map(|ports| format!("Listening TCP ports\n\n{}", ports.ports))
-                        .unwrap_or_else(|err| format!("Port inspection failed: {}", err));
+                        .unwrap_or_else(|err| format!("Port inspection failed: {err}"));
                     let _ = tx.blocking_send(Msg::RuntimeText(text));
                 });
             },
@@ -1362,11 +1362,11 @@ impl EffectRunner {
                             text: if result.replayed {
                                 format!("Approval {} {}: {}", id, decision, result.summary)
                             } else {
-                                format!("Approval {} {}", id, decision)
+                                format!("Approval {id} {decision}")
                             },
                         },
                         Err(err) => Msg::TransientStatus {
-                            text: format!("Approval update failed: {}", err),
+                            text: format!("Approval update failed: {err}"),
                         },
                     };
                     let _ = tx.blocking_send(msg);
@@ -1422,10 +1422,10 @@ impl EffectRunner {
                                 .update_status(&id, status, final_report.as_deref())
                         }) {
                             Ok(()) => Msg::TransientStatus {
-                                text: format!("Task {} -> {}", id, status),
+                                text: format!("Task {id} -> {status}"),
                             },
                             Err(err) => Msg::TransientStatus {
-                                text: format!("Task update failed: {}", err),
+                                text: format!("Task update failed: {err}"),
                             },
                         };
                     let _ = tx.blocking_send(msg);
@@ -1452,7 +1452,7 @@ impl EffectRunner {
                             ),
                         },
                         Err(err) => Msg::TransientStatus {
-                            text: format!("Checkpoint failed: {}", err),
+                            text: format!("Checkpoint failed: {err}"),
                         },
                     };
                     let _ = tx.blocking_send(msg);
@@ -1477,7 +1477,7 @@ impl EffectRunner {
                             ),
                         },
                         Err(err) => Msg::TransientStatus {
-                            text: format!("Restore failed: {}", err),
+                            text: format!("Restore failed: {err}"),
                         },
                     };
                     let _ = tx.blocking_send(msg);
@@ -1567,7 +1567,7 @@ impl EffectRunner {
                 // frame draws, so it doesn't corrupt them.
                 self.detached.spawn_blocking(move || {
                     use std::io::Write;
-                    let seq = format!("\x1b]2;{}\x07", title);
+                    let seq = format!("\x1b]2;{title}\x07");
                     let mut stdout = std::io::stdout();
                     let _ = stdout.write_all(seq.as_bytes());
                     let _ = stdout.flush();

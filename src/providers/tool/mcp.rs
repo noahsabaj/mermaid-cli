@@ -92,7 +92,7 @@ impl ToolExecutor for McpToolProxy {
         let read_only_hint = manager.read_only_hint(server_name, tool_name);
         if let Some(blocked) = super::policy_gate::gate_external_mcp(
             &ctx,
-            format!("mcp {}__{}", server_name, tool_name),
+            format!("mcp {server_name}__{tool_name}"),
             &args,
             read_only_hint,
         )
@@ -115,7 +115,7 @@ impl ToolExecutor for McpToolProxy {
                     start.elapsed().as_secs_f64(),
                 ),
                 Err(e) => ToolOutcome::error(
-                    format!("mcp_proxy({}:{}): {}", server_name, tool_name, e),
+                    format!("mcp_proxy({server_name}:{tool_name}): {e}"),
                     start.elapsed().as_secs_f64(),
                 )
                 .with_metadata(mcp_metadata(server_name, tool_name)),
@@ -156,7 +156,7 @@ fn outcome_from_mcp(
     // must precede with_images — with_metadata replaces the metadata box).
     let mut outcome = ToolOutcome::success(
         text,
-        format!("{}:{} {}", server_name, tool_name, verb),
+        format!("{server_name}:{tool_name} {verb}"),
         duration_secs,
     )
     .with_metadata(mcp_metadata(server_name, tool_name));

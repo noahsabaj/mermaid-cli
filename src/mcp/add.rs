@@ -34,7 +34,7 @@ pub async fn add_server(
         return add_command_server(name, cmd, command_args, env_pairs).await;
     }
 
-    println!("\nResolving '{}'...", name);
+    println!("\nResolving '{name}'...");
 
     // Resolve the server package via A → B → C. A non-registry result requires
     // explicit confirmation (or --yes) before it is returned (#10).
@@ -45,7 +45,7 @@ pub async fn add_server(
     if !resolved.env_vars.is_empty() {
         println!("\nThis server requires:");
         for (var_name, description) in &resolved.env_vars {
-            println!("  {}: {}", var_name, description);
+            println!("  {var_name}: {description}");
         }
         println!();
 
@@ -54,10 +54,7 @@ pub async fn add_server(
             if let Ok(existing) = std::env::var(var_name)
                 && !existing.is_empty()
             {
-                print!(
-                    "Enter {} [press Enter to use existing from environment]: ",
-                    var_name
-                );
+                print!("Enter {var_name} [press Enter to use existing from environment]: ");
                 io::stdout().flush()?;
                 let mut input = String::new();
                 io::stdin().read_line(&mut input)?;
@@ -69,15 +66,14 @@ pub async fn add_server(
                 }
                 env.insert(var_name.clone(), input.to_string());
             } else {
-                print!("Enter {}: ", var_name);
+                print!("Enter {var_name}: ");
                 io::stdout().flush()?;
                 let mut input = String::new();
                 io::stdin().read_line(&mut input)?;
                 let input = input.trim();
                 if input.is_empty() {
                     return Err(anyhow!(
-                        "Required environment variable '{}' not provided. Setup cancelled.",
-                        var_name
+                        "Required environment variable '{var_name}' not provided. Setup cancelled."
                     ));
                 }
                 env.insert(var_name.clone(), input.to_string());
@@ -142,7 +138,7 @@ pub async fn add_server(
 fn confirm_overwrite(name: &str) -> Result<bool> {
     let config = load_config()?;
     if config.mcp_servers.contains_key(name) {
-        print!("'{}' is already configured. Overwrite? [y/N]: ", name);
+        print!("'{name}' is already configured. Overwrite? [y/N]: ");
         io::stdout().flush()?;
         let mut input = String::new();
         io::stdin().read_line(&mut input)?;
@@ -282,9 +278,9 @@ fn parse_env_pairs(pairs: &[String]) -> Result<HashMap<String, String>> {
 /// Remove an MCP server from the config.
 pub async fn remove_server(name: &str) -> Result<()> {
     if remove_user_config_key(&["mcp_servers", name])? {
-        println!("Removed MCP server '{}' from config.", name);
+        println!("Removed MCP server '{name}' from config.");
     } else {
-        println!("MCP server '{}' is not configured.", name);
+        println!("MCP server '{name}' is not configured.");
         let config = load_config()?;
         if !config.mcp_servers.is_empty() {
             println!(

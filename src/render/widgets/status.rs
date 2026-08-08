@@ -159,7 +159,7 @@ fn format_context_snapshot(snapshot: &ContextUsageSnapshot) -> String {
             format_compact_count(max),
             percent
         ),
-        _ => format!("context: {}{} / unknown", source, used),
+        _ => format!("context: {source}{used} / unknown"),
     }
 }
 

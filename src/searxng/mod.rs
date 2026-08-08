@@ -527,15 +527,14 @@ fn settings_yml(server_secret: &str) -> String {
         \x20     - ahmia\n\
         \x20     - torch\n\
          server:\n\
-        \x20 secret_key: \"{}\"\n\
+        \x20 secret_key: \"{server_secret}\"\n\
         \x20 limiter: false\n\
          search:\n\
         \x20 formats:\n\
         \x20   - html\n\
         \x20   - json\n\
          valkey:\n\
-        \x20 url: false\n",
-        server_secret
+        \x20 url: false\n"
     )
 }
 

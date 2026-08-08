@@ -353,7 +353,7 @@ impl ConversationManager {
     /// Load a specific conversation by ID
     pub fn load_conversation(&self, id: &str) -> Result<ConversationHistory> {
         validate_conversation_id(id)?;
-        let filename = format!("{}.json", id);
+        let filename = format!("{id}.json");
         let path = self.conversations_dir.join(filename);
 
         let json = read_conversation_capped(&path)?;
@@ -486,12 +486,12 @@ impl ConversationManager {
     /// Delete a conversation (and its metadata sidecar).
     pub fn delete_conversation(&self, id: &str) -> Result<()> {
         validate_conversation_id(id)?;
-        let path = self.conversations_dir.join(format!("{}.json", id));
+        let path = self.conversations_dir.join(format!("{id}.json"));
         if path.exists() {
             fs::remove_file(path)?;
         }
         // Best-effort sidecar cleanup — its absence is harmless.
-        let _ = fs::remove_file(self.conversations_dir.join(format!("{}.meta", id)));
+        let _ = fs::remove_file(self.conversations_dir.join(format!("{id}.meta")));
         // Cascade to the session's scratch directory (skipped if another
         // live mermaid still holds its pid lock). Best-effort: the sweep
         // eventually reaps whatever this misses.
@@ -819,7 +819,7 @@ mod tests {
     fn test_input_history_capped_at_100() {
         let mut conv = ConversationHistory::new("/tmp".into(), "m".into(), Local::now());
         for i in 0..110 {
-            conv.add_to_input_history(format!("msg{}", i));
+            conv.add_to_input_history(format!("msg{i}"));
         }
         assert_eq!(conv.input_history.len(), 100);
         assert_eq!(conv.input_history.front().unwrap(), "msg10");

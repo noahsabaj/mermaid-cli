@@ -309,7 +309,7 @@ mod tests {
             }
         });
 
-        let url = format!("http://{}/x", addr);
+        let url = format!("http://{addr}/x");
         reqwest::get(url).await.expect("send")
     }
 
@@ -333,7 +333,7 @@ mod tests {
             }
         });
 
-        let url = format!("http://{}/x", addr);
+        let url = format!("http://{addr}/x");
         reqwest::get(url).await.expect("send")
     }
 
@@ -362,7 +362,7 @@ mod tests {
             }
         });
 
-        let url = format!("http://{}/x", addr);
+        let url = format!("http://{addr}/x");
         reqwest::get(url).await.expect("send")
     }
 
@@ -460,8 +460,7 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         assert!(
             elapsed >= Duration::from_millis(850),
-            "expected Retry-After (1s) to drive the 503 wait, waited only {:?}",
-            elapsed
+            "expected Retry-After (1s) to drive the 503 wait, waited only {elapsed:?}"
         );
     }
 
@@ -595,8 +594,7 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         assert!(
             elapsed >= Duration::from_millis(1_500),
-            "expected the 429 schedule (~2s first delay) to drive the wait, waited only {:?}",
-            elapsed
+            "expected the 429 schedule (~2s first delay) to drive the wait, waited only {elapsed:?}"
         );
     }
 

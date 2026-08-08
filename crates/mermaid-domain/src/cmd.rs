@@ -570,10 +570,10 @@ impl Cmd {
                 "execute_tool(turn={}, call={}, fn={})",
                 turn, call_id, source.function.name
             ),
-            Cmd::CancelScope(turn) => format!("cancel_scope(turn={})", turn),
-            Cmd::BackgroundScope(turn) => format!("background_scope(turn={})", turn),
+            Cmd::CancelScope(turn) => format!("cancel_scope(turn={turn})"),
+            Cmd::BackgroundScope(turn) => format!("background_scope(turn={turn})"),
             Cmd::ResolveApproval { call_id, decision } => {
-                format!("resolve_approval(call={}, {:?})", call_id, decision)
+                format!("resolve_approval(call={call_id}, {decision:?})")
             },
             Cmd::ResolveQuestion {
                 call_id,
@@ -586,13 +586,13 @@ impl Cmd {
                     QuestionResolution::Dismissed => "dismissed".to_string(),
                     QuestionResolution::Reformulate => "reformulate".to_string(),
                 };
-                format!("resolve_question(call={}, {})", call_id, kind)
+                format!("resolve_question(call={call_id}, {kind})")
             },
             Cmd::PersistPlanConfig(_) => "persist_plan_config".to_string(),
             Cmd::SyncTaskStore(store) => {
                 format!("sync_task_store(tasks={})", store.tasks.len())
             },
-            Cmd::UserTaskEdit(edit) => format!("user_task_edit({:?})", edit),
+            Cmd::UserTaskEdit(edit) => format!("user_task_edit({edit:?})"),
             Cmd::NotifyTaskCompleted {
                 task,
                 completed,
@@ -602,7 +602,7 @@ impl Cmd {
                 task.id, completed, total
             ),
             Cmd::EnsureScratchpad { session_id } => {
-                format!("ensure_scratchpad(session={})", session_id)
+                format!("ensure_scratchpad(session={session_id})")
             },
             Cmd::ListScratchpad { path } => {
                 format!("list_scratchpad({})", path.display())
@@ -615,42 +615,42 @@ impl Cmd {
                 archive.conversation_id, record.id
             ),
             Cmd::SaveProcess(p) => format!("save_process(id={}, pid={})", p.id, p.pid),
-            Cmd::PersistLastModel(m) => format!("persist_last_model({})", m),
+            Cmd::PersistLastModel(m) => format!("persist_last_model({m})"),
             Cmd::PersistReasoningFor { model_id, level } => {
-                format!("persist_reasoning_for({}, {:?})", model_id, level)
+                format!("persist_reasoning_for({model_id}, {level:?})")
             },
             Cmd::PersistOllamaNumCtxFor { model_id, num_ctx } => {
-                format!("persist_ollama_num_ctx_for({}, {:?})", model_id, num_ctx)
+                format!("persist_ollama_num_ctx_for({model_id}, {num_ctx:?})")
             },
             Cmd::PersistOllamaOffload(enabled) => {
-                format!("persist_ollama_offload({})", enabled)
+                format!("persist_ollama_offload({enabled})")
             },
             Cmd::PersistUiTheme(theme) => format!("persist_ui_theme({})", theme.as_str()),
             Cmd::ListMemory => "list_memory".to_string(),
             Cmd::RememberMemory { .. } => "remember_memory".to_string(),
             Cmd::ForgetMemory { .. } => "forget_memory".to_string(),
             Cmd::ConsolidateMemory { .. } => "consolidate_memory".to_string(),
-            Cmd::LoadConversation(id) => format!("load_conversation({})", id),
+            Cmd::LoadConversation(id) => format!("load_conversation({id})"),
             Cmd::ListConversations => "list_conversations".to_string(),
             Cmd::ListAvailableModels => "list_available_models".to_string(),
             Cmd::ListProjectFiles => "list_project_files".to_string(),
-            Cmd::ListRuntimeTasks { limit } => format!("list_runtime_tasks(limit={})", limit),
-            Cmd::LoadRuntimeTask { id } => format!("load_runtime_task({})", id),
+            Cmd::ListRuntimeTasks { limit } => format!("list_runtime_tasks(limit={limit})"),
+            Cmd::LoadRuntimeTask { id } => format!("load_runtime_task({id})"),
             Cmd::ListRuntimeProcesses { limit } => {
-                format!("list_runtime_processes(limit={})", limit)
+                format!("list_runtime_processes(limit={limit})")
             },
-            Cmd::ShowRuntimeProcessLogs { id } => format!("show_runtime_process_logs({})", id),
-            Cmd::StopRuntimeProcess { id } => format!("stop_runtime_process({})", id),
+            Cmd::ShowRuntimeProcessLogs { id } => format!("show_runtime_process_logs({id})"),
+            Cmd::StopRuntimeProcess { id } => format!("stop_runtime_process({id})"),
             Cmd::KillBackgroundAgent { agent_id } => format!(
                 "kill_background_agent({})",
                 agent_id.as_deref().unwrap_or("all")
             ),
-            Cmd::RestartRuntimeProcess { id } => format!("restart_runtime_process({})", id),
-            Cmd::OpenRuntimeTarget { target } => format!("open_runtime_target({})", target),
+            Cmd::RestartRuntimeProcess { id } => format!("restart_runtime_process({id})"),
+            Cmd::OpenRuntimeTarget { target } => format!("open_runtime_target({target})"),
             Cmd::ShowRuntimePorts => "show_runtime_ports".to_string(),
             Cmd::ListRuntimeApprovals => "list_runtime_approvals".to_string(),
             Cmd::DecideRuntimeApproval { id, decision } => {
-                format!("decide_runtime_approval({}, {})", id, decision)
+                format!("decide_runtime_approval({id}, {decision})")
             },
             Cmd::ListForkCheckpoints {
                 session_id,
@@ -659,20 +659,20 @@ impl Cmd {
                 format!("list_fork_checkpoints({session_id} > {message_index})")
             },
             Cmd::ListRuntimeCheckpoints { limit } => {
-                format!("list_runtime_checkpoints(limit={})", limit)
+                format!("list_runtime_checkpoints(limit={limit})")
             },
             Cmd::ListRuntimePlugins => "list_runtime_plugins".to_string(),
             Cmd::UpdateRuntimeTaskStatus { id, status, .. } => {
-                format!("update_runtime_task_status({}, {})", id, status)
+                format!("update_runtime_task_status({id}, {status})")
             },
             Cmd::CreateRuntimeCheckpoint { paths } => {
                 format!("create_runtime_checkpoint(n={})", paths.len())
             },
-            Cmd::RestoreRuntimeCheckpoint { id } => format!("restore_runtime_checkpoint({})", id),
-            Cmd::ShowRuntimeModelInfo { model } => format!("show_runtime_model_info({})", model),
+            Cmd::RestoreRuntimeCheckpoint { id } => format!("restore_runtime_checkpoint({id})"),
+            Cmd::ShowRuntimeModelInfo { model } => format!("show_runtime_model_info({model})"),
             Cmd::InitMcpServers(m) => format!("init_mcp_servers(n={})", m.len()),
-            Cmd::StopMcpServer { name } => format!("stop_mcp_server({})", name),
-            Cmd::PullOllamaModel { model } => format!("pull_ollama_model({})", model),
+            Cmd::StopMcpServer { name } => format!("stop_mcp_server({name})"),
+            Cmd::PullOllamaModel { model } => format!("pull_ollama_model({model})"),
             Cmd::ProbeVision { model_id, warn } => format!("probe_vision({model_id}, warn={warn})"),
             Cmd::OpenInSystem(p) => format!("open_in_system({})", p.display()),
             Cmd::WriteImageToTemp {
@@ -691,7 +691,7 @@ impl Cmd {
                 format!("compose_in_editor(n={})", text.chars().count())
             },
             Cmd::Exit => "exit".to_string(),
-            Cmd::SetTerminalTitle(t) => format!("set_terminal_title({})", t),
+            Cmd::SetTerminalTitle(t) => format!("set_terminal_title({t})"),
             Cmd::AlertUser => "alert_user".to_string(),
         }
     }

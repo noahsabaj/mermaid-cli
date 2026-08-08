@@ -365,7 +365,7 @@ mod tests {
         let index = render_index(&entries);
         assert!(index.contains("skill-000"));
         assert!(index.contains(&format!("skill-{:03}", MAX_SKILLS - 1)));
-        assert!(!index.contains(&format!("skill-{:03}", MAX_SKILLS)));
+        assert!(!index.contains(&format!("skill-{MAX_SKILLS:03}")));
         assert!(index.contains("(+5 more not listed)"));
     }
 

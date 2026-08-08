@@ -91,8 +91,7 @@ pub(super) async fn dispatch_execute_tool(
         start_runtime_tool_run(task_id.as_deref(), turn, call_id, tool_key, &args).await;
 
     let Some(tool) = registry.get(tool_key) else {
-        let outcome =
-            mermaid_domain::ToolOutcome::error(format!("unknown tool: {}", tool_key), 0.0);
+        let outcome = mermaid_domain::ToolOutcome::error(format!("unknown tool: {tool_key}"), 0.0);
         finish_runtime_tool_run(tool_run_id.as_deref(), &outcome);
         let _ = msg_tx
             .send(Msg::ToolFinished {
@@ -383,8 +382,7 @@ pub(super) async fn dispatch_pull_ollama_model(tx: MsgSender, model: String) {
         Err(e) => {
             let _ = tx
                 .send(Msg::ModelPullProgress(format!(
-                    "ollama pull failed to start: {}",
-                    e
+                    "ollama pull failed to start: {e}"
                 )))
                 .await;
             return;
@@ -419,8 +417,7 @@ pub(super) async fn dispatch_pull_ollama_model(tx: MsgSender, model: String) {
         Err(e) => {
             let _ = tx
                 .send(Msg::ModelPullProgress(format!(
-                    "ollama pull wait error: {}",
-                    e
+                    "ollama pull wait error: {e}"
                 )))
                 .await;
         },
@@ -496,18 +493,18 @@ pub(super) async fn dispatch_read_clipboard(tx: MsgSender) {
         if crate::clipboard::has_image() {
             match crate::clipboard::read_image_bytes() {
                 Ok((bytes, format)) => Outcome::Image { bytes, format },
-                Err(e) => Outcome::Error(format!("Clipboard image read failed: {}", e)),
+                Err(e) => Outcome::Error(format!("Clipboard image read failed: {e}")),
             }
         } else {
             match crate::clipboard::read_text() {
                 Ok(t) if !t.is_empty() => Outcome::Text(t),
                 Ok(_) => Outcome::Empty,
-                Err(e) => Outcome::Error(format!("Clipboard empty / read failed: {}", e)),
+                Err(e) => Outcome::Error(format!("Clipboard empty / read failed: {e}")),
             }
         }
     })
     .await
-    .unwrap_or_else(|e| Outcome::Error(format!("clipboard spawn_blocking: {}", e)));
+    .unwrap_or_else(|e| Outcome::Error(format!("clipboard spawn_blocking: {e}")));
 
     // Route ALL four outcomes through `Msg::ClipboardRead` (not `Msg::Paste` /
     // `Msg::TransientStatus`): the reducer decrements `clipboard_reads_pending`

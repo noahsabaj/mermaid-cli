@@ -833,7 +833,7 @@ impl AnthropicAdapter {
         }
         let info: AnthropicModelInfo =
             response.json().await.map_err(|e| ModelError::ParseError {
-                message: format!("Failed to parse Anthropic model info: {}", e),
+                message: format!("Failed to parse Anthropic model info: {e}"),
                 raw: None,
             })?;
         Ok(info.into())
@@ -851,7 +851,7 @@ impl AnthropicAdapter {
 
         let json: AnthropicResponse =
             response.json().await.map_err(|e| ModelError::ParseError {
-                message: format!("Failed to parse Anthropic response: {}", e),
+                message: format!("Failed to parse Anthropic response: {e}"),
                 raw: None,
             })?;
 
@@ -987,7 +987,7 @@ impl AnthropicAdapter {
                     Ok(v) => v,
                     Err(e) => {
                         return Err(ModelError::ParseError {
-                            message: format!("Failed to parse Anthropic stream chunk: {}", e),
+                            message: format!("Failed to parse Anthropic stream chunk: {e}"),
                             raw: Some(payload),
                         });
                     },
@@ -1429,9 +1429,8 @@ async fn http_error_from_response(response: reqwest::Response) -> ModelError {
                 provider: "anthropic".to_string(),
                 code: Some(err_type.to_string()),
                 message: format!(
-                    "{} (thinking-block round-trip failed; this is a Mermaid bug — \
-                         please open an issue with the conversation that triggered it)",
-                    err_msg
+                    "{err_msg} (thinking-block round-trip failed; this is a Mermaid bug — \
+                         please open an issue with the conversation that triggered it)"
                 ),
                 debug: debug.clone(),
             });
@@ -1712,14 +1711,12 @@ mod tests {
             assert_eq!(
                 adaptive_effort_for(ReasoningLevel::Max, m),
                 None,
-                "model {} does not support the effort parameter at all",
-                m
+                "model {m} does not support the effort parameter at all"
             );
             assert_eq!(
                 adaptive_effort_for(ReasoningLevel::XHigh, m),
                 None,
-                "model {} does not support the effort parameter at all",
-                m
+                "model {m} does not support the effort parameter at all"
             );
         }
         // Opus 4.5: supports effort but not `max` → snap down to `high`.
@@ -2537,8 +2534,7 @@ mod tests {
         for tool in &tools[..tools.len() - 1] {
             assert!(
                 tool.get("cache_control").is_none(),
-                "non-last tool should not carry cache_control: {:?}",
-                tool
+                "non-last tool should not carry cache_control: {tool:?}"
             );
         }
         // The last tool MUST have cache_control: ephemeral.
@@ -2574,7 +2570,7 @@ mod tests {
                 assert!(levels.contains(&ReasoningLevel::None));
                 assert!(levels.contains(&ReasoningLevel::Max));
             },
-            other => panic!("expected Levels, got {:?}", other),
+            other => panic!("expected Levels, got {other:?}"),
         }
     }
 

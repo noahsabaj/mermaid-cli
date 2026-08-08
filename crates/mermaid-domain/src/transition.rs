@@ -582,7 +582,7 @@ fn format_duration(seconds: f64) -> String {
     if seconds < 1.0 {
         format!("{}ms", (seconds * 1000.0).round().max(1.0) as u64)
     } else if seconds < 10.0 {
-        format!("{:.1}s", seconds)
+        format!("{seconds:.1}s")
     } else {
         format!("{}s", seconds.round() as u64)
     }
@@ -603,7 +603,7 @@ fn pluralize(word: &str, count: usize) -> String {
     if count == 1 {
         word.to_string()
     } else {
-        format!("{}s", word)
+        format!("{word}s")
     }
 }
 
@@ -636,7 +636,7 @@ pub fn display_info_for(call: &PendingToolCall) -> (String, String) {
                         .map(|a| match a.len() {
                             0 => "(no paths)".to_string(),
                             1 => a[0].as_str().unwrap_or("").to_string(),
-                            n => format!("{} files", n),
+                            n => format!("{n} files"),
                         })
                 })
                 .unwrap_or_default();
@@ -668,7 +668,7 @@ pub fn display_info_for(call: &PendingToolCall) -> (String, String) {
                                 .and_then(|q| q.as_str())
                                 .unwrap_or("")
                                 .to_string(),
-                            n => format!("{} queries", n),
+                            n => format!("{n} queries"),
                         })
                 })
                 .unwrap_or_default();
@@ -757,7 +757,7 @@ mod tests {
         PendingToolCall {
             call_id: ToolCallId(id),
             source: ModelToolCall {
-                id: Some(format!("c{}", id)),
+                id: Some(format!("c{id}")),
                 function: FunctionCall {
                     name: name.to_string(),
                     arguments,
@@ -844,7 +844,7 @@ mod tests {
                 assert!(!text.contains("Success"), "no Success prefix: {text}");
                 assert!(text.contains("took 1.2s"));
             },
-            other => panic!("expected preview details, got {:?}", other),
+            other => panic!("expected preview details, got {other:?}"),
         }
     }
 
@@ -882,7 +882,7 @@ mod tests {
                 assert!(diff.contains("+ a"));
                 assert!(!diff.contains("+++"), "no diff header clutter");
             },
-            other => panic!("expected diff details, got {:?}", other),
+            other => panic!("expected diff details, got {other:?}"),
         }
     }
 
@@ -922,7 +922,7 @@ mod tests {
                     "got {summary}"
                 );
             },
-            other => panic!("expected diff details, got {:?}", other),
+            other => panic!("expected diff details, got {other:?}"),
         }
     }
 
@@ -1011,7 +1011,7 @@ mod tests {
                 assert!(diff.contains("- old"));
                 assert!(diff.contains("+ new"));
             },
-            other => panic!("expected diff details, got {:?}", other),
+            other => panic!("expected diff details, got {other:?}"),
         }
     }
 
@@ -1055,7 +1055,7 @@ mod tests {
                 assert!(!text.contains("Success"), "no Success prefix: {text}");
                 assert!(text.contains("took 15s"));
             },
-            other => panic!("expected preview details, got {:?}", other),
+            other => panic!("expected preview details, got {other:?}"),
         }
         let metadata = action.metadata.expect("metadata");
         assert_eq!(metadata.result_count, Some(2));
@@ -1160,7 +1160,7 @@ mod tests {
                 assert!(text.contains("Detected URL: http://127.0.0.1:5173"));
                 assert!(!text.contains("startup output"));
             },
-            other => panic!("expected preview details, got {:?}", other),
+            other => panic!("expected preview details, got {other:?}"),
         }
         let metadata = action.metadata.expect("metadata");
         let process = metadata.process.expect("process metadata");

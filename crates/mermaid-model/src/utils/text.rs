@@ -132,18 +132,18 @@ pub fn continuation_overlap(prev: &str, continuation: &str) -> usize {
 pub fn format_duration(total_secs: f64) -> String {
     let secs = total_secs as u64;
     if secs < 60 {
-        return format!("{:.1}s", total_secs);
+        return format!("{total_secs:.1}s");
     }
     let days = secs / 86400;
     let hours = (secs % 86400) / 3600;
     let mins = (secs % 3600) / 60;
     let remainder = secs % 60;
     if days > 0 {
-        format!("{}d {}h {}m {}s", days, hours, mins, remainder)
+        format!("{days}d {hours}h {mins}m {remainder}s")
     } else if hours > 0 {
-        format!("{}h {}m {}s", hours, mins, remainder)
+        format!("{hours}h {mins}m {remainder}s")
     } else {
-        format!("{}m {}s", mins, remainder)
+        format!("{mins}m {remainder}s")
     }
 }
 

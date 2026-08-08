@@ -60,7 +60,7 @@ pub(crate) fn help_text(plugin_commands: &[crate::PluginCommand]) -> String {
             let suffix = if hint.is_empty() {
                 String::new()
             } else {
-                format!(" {}", hint)
+                format!(" {hint}")
             };
             lines.push(format!(
                 "  /{}{}{} - {}",
@@ -207,8 +207,8 @@ pub(crate) fn usage_text(state: &State) -> String {
                     .unwrap_or_else(|| " / unknown".to_string()),
                 context
                     .used_percent
-                    .map(|p| format!(" ({}%, {})", p, source))
-                    .unwrap_or_else(|| format!(" ({})", source))
+                    .map(|p| format!(" ({p}%, {source})"))
+                    .unwrap_or_else(|| format!(" ({source})"))
             ));
         },
         None => lines.push("Current context: n/a".to_string()),
@@ -499,7 +499,7 @@ pub(crate) fn context_text(state: &State) -> String {
             }
         ));
         if let Some(path) = &last.archive_path {
-            lines.push(format!("- archive: {}", path));
+            lines.push(format!("- archive: {path}"));
         }
         lines.push("- inspect: use the archive path above to review the raw messages Mermaid removed from context.".to_string());
     } else {
@@ -577,13 +577,13 @@ pub(crate) fn processes_text(processes: &[mermaid_runtime::ProcessRecord]) -> St
             process.command
         ));
         if let Some(task_id) = &process.task_id {
-            lines.push(format!("  task: {}", task_id));
+            lines.push(format!("  task: {task_id}"));
         }
         if let Some(url) = &process.detected_url {
-            lines.push(format!("  url: {}", url));
+            lines.push(format!("  url: {url}"));
         }
         if let Some(log_path) = &process.log_path {
-            lines.push(format!("  log: {}", log_path));
+            lines.push(format!("  log: {log_path}"));
         }
     }
     lines.join("\n")
@@ -601,7 +601,7 @@ pub(crate) fn approvals_text(approvals: &[mermaid_runtime::ApprovalRecord]) -> S
             approval.id, approval.risk_classification, approval.proposed_action
         ));
         if let Some(checkpoint_id) = &approval.checkpoint_id {
-            lines.push(format!("  checkpoint: {}", checkpoint_id));
+            lines.push(format!("  checkpoint: {checkpoint_id}"));
         }
         if approval.pending_action_json.is_some() {
             lines.push("  pending action: recorded".to_string());

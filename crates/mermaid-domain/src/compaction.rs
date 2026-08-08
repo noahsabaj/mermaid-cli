@@ -775,9 +775,9 @@ fn format_scaled(value: usize, divisor: usize, suffix: &str) -> String {
     let whole = value / divisor;
     let decimal = ((value % divisor) * 10) / divisor;
     if decimal == 0 {
-        format!("{}{}", whole, suffix)
+        format!("{whole}{suffix}")
     } else {
-        format!("{}.{}{}", whole, decimal, suffix)
+        format!("{whole}.{decimal}{suffix}")
     }
 }
 
@@ -960,10 +960,10 @@ fn format_history_excerpt(
             out.push_str(&format!("kind: {:?}\n", msg.kind));
         }
         if let Some(name) = &msg.tool_name {
-            out.push_str(&format!("tool_name: {}\n", name));
+            out.push_str(&format!("tool_name: {name}\n"));
         }
         if let Some(id) = &msg.tool_call_id {
-            out.push_str(&format!("tool_call_id: {}\n", id));
+            out.push_str(&format!("tool_call_id: {id}\n"));
         }
         if let Some(calls) = &msg.tool_calls {
             for call in calls {
@@ -995,7 +995,7 @@ fn format_history_excerpt(
                 action.action_type, action.target, action.duration_seconds
             ));
             if let Some(metadata) = &action.metadata {
-                out.push_str(&format!("action_metadata: {:?}\n", metadata));
+                out.push_str(&format!("action_metadata: {metadata:?}\n"));
             }
         }
         let cap = if msg.role == MessageRole::Tool {

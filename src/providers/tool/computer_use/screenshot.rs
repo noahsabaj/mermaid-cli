@@ -93,7 +93,7 @@ impl ToolExecutor for ScreenshotTool {
             Ok(c) => c,
             Err(e) => {
                 return ToolOutcome::error(
-                    format!("screenshot capture failed: {}", e),
+                    format!("screenshot capture failed: {e}"),
                     started.elapsed().as_secs_f64(),
                 );
             },
@@ -161,8 +161,7 @@ fn parse_spec(args: &Value) -> Result<ScreenshotSpec, String> {
             Ok(ScreenshotSpec::Window(title))
         },
         other => Err(format!(
-            "Unknown screenshot mode '{}'. Valid: fullscreen|focused|monitor|region|window",
-            other
+            "Unknown screenshot mode '{other}'. Valid: fullscreen|focused|monitor|region|window"
         )),
     }
 }
@@ -172,25 +171,24 @@ fn parse_region(s: &str) -> Result<ScreenshotSpec, String> {
     let parts: Vec<&str> = s.splitn(3, ',').collect();
     if parts.len() != 3 {
         return Err(format!(
-            "Invalid region '{}'. Expected 'X,Y,WIDTHxHEIGHT' (e.g. '100,50,800x600').",
-            s
+            "Invalid region '{s}'. Expected 'X,Y,WIDTHxHEIGHT' (e.g. '100,50,800x600')."
         ));
     }
     let x: i32 = parts[0]
         .parse()
-        .map_err(|_| format!("Invalid X in region '{}'", s))?;
+        .map_err(|_| format!("Invalid X in region '{s}'"))?;
     let y: i32 = parts[1]
         .parse()
-        .map_err(|_| format!("Invalid Y in region '{}'", s))?;
+        .map_err(|_| format!("Invalid Y in region '{s}'"))?;
     let (w, h) = parts[2]
         .split_once('x')
-        .ok_or_else(|| format!("Invalid WIDTHxHEIGHT in region '{}'", s))?;
+        .ok_or_else(|| format!("Invalid WIDTHxHEIGHT in region '{s}'"))?;
     let width: u32 = w
         .parse()
-        .map_err(|_| format!("Invalid width in region '{}'", s))?;
+        .map_err(|_| format!("Invalid width in region '{s}'"))?;
     let height: u32 = h
         .parse()
-        .map_err(|_| format!("Invalid height in region '{}'", s))?;
+        .map_err(|_| format!("Invalid height in region '{s}'"))?;
     Ok(ScreenshotSpec::Region(x, y, width, height))
 }
 

@@ -21,18 +21,18 @@ pub fn format_relative_timestamp(timestamp: DateTime<Local>, today: NaiveDate) -
 
     // Check if today
     if msg_date == today {
-        return format!("Today at {}", time_str);
+        return format!("Today at {time_str}");
     }
 
     // Check if yesterday
     let yesterday = today.pred_opt().unwrap_or(today);
     if msg_date == yesterday {
-        return format!("Yesterday at {}", time_str);
+        return format!("Yesterday at {time_str}");
     }
 
     // Older dates: "March 21st, 2025 at 8:16pm"
     let date_str = format_date(msg_date);
-    format!("{} at {}", date_str, time_str)
+    format!("{date_str} at {time_str}")
 }
 
 /// Format time as "6:41pm" (12-hour with AM/PM)
@@ -47,7 +47,7 @@ fn format_time(timestamp: DateTime<Local>) -> String {
         _ => (hour - 12, "pm"),
     };
 
-    format!("{:}:{:02}{}", hour_12, minute, period)
+    format!("{hour_12:}:{minute:02}{period}")
 }
 
 /// Format date as "March 21st, 2025"
@@ -65,7 +65,7 @@ fn format_date(date: chrono::NaiveDate) -> String {
         _ => "th",
     };
 
-    format!("{} {}{}, {}", month, day, ordinal, year)
+    format!("{month} {day}{ordinal}, {year}")
 }
 
 #[cfg(test)]

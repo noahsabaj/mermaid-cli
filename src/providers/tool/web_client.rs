@@ -362,8 +362,7 @@ impl OllamaWebClient {
     ) -> Result<Vec<SearchResult>> {
         if count == 0 || count > 10 {
             return Err(anyhow!(
-                "Result count must be between 1 and 10, got {}",
-                count
+                "Result count must be between 1 and 10, got {count}"
             ));
         }
 
@@ -377,7 +376,7 @@ impl OllamaWebClient {
         // JSON all sit OUTSIDE: re-acquiring permits per attempt was a
         // resource pattern nobody designed, and retrying a parse failure three
         // times is pure waste.
-        let endpoint = reqwest::Url::parse(&format!("{}/web_search", OLLAMA_API_BASE))
+        let endpoint = reqwest::Url::parse(&format!("{OLLAMA_API_BASE}/web_search"))
             .map_err(|e| anyhow!("invalid Ollama web search endpoint: {e}"))?;
         let download_permits = acquire_download_permits(&endpoint).await?;
         let response = retry_transient_http(|| {
@@ -388,7 +387,7 @@ impl OllamaWebClient {
             async move {
                 client
                     .post(endpoint)
-                    .header("Authorization", format!("Bearer {}", api_key))
+                    .header("Authorization", format!("Bearer {api_key}"))
                     .json(&serde_json::json!({
                         "query": query,
                         "max_results": count,
@@ -420,8 +419,7 @@ impl OllamaWebClient {
                 status: status.as_u16(),
             })
             .context(format!(
-                "Ollama web search API returned error {}: {}",
-                status, body
+                "Ollama web search API returned error {status}: {body}"
             )));
         }
 
@@ -433,7 +431,7 @@ impl OllamaWebClient {
         .await?;
         drop(download_permits);
         let ollama_response: OllamaSearchResponse = serde_json::from_slice(&body)
-            .map_err(|e| anyhow!("Failed to parse Ollama search response: {}", e))?;
+            .map_err(|e| anyhow!("Failed to parse Ollama search response: {e}"))?;
 
         let search_results = map_search_results(
             ollama_response
@@ -458,7 +456,7 @@ impl OllamaWebClient {
         // Only the send retries; permits, status, capped read and parse are
         // hoisted out. Same reasoning as the search path above.
         let safe_url = mermaid_model::utils::sanitize_url_for_display(&url_owned);
-        let endpoint = reqwest::Url::parse(&format!("{}/web_fetch", OLLAMA_API_BASE))
+        let endpoint = reqwest::Url::parse(&format!("{OLLAMA_API_BASE}/web_fetch"))
             .map_err(|e| anyhow!("invalid Ollama web fetch endpoint: {e}"))
             .map_err(|error| map_cloud_fetch_error(error, requested.as_str()))?;
         let download_permits = acquire_download_permits(&endpoint)
@@ -472,7 +470,7 @@ impl OllamaWebClient {
             async move {
                 client
                     .post(endpoint)
-                    .header("Authorization", format!("Bearer {}", api_key))
+                    .header("Authorization", format!("Bearer {api_key}"))
                     .json(&serde_json::json!({ "url": url }))
                     .timeout(Duration::from_secs(15))
                     .send()
@@ -498,7 +496,7 @@ impl OllamaWebClient {
         drop(download_permits);
         let source_bytes = body.len();
         let parsed: OllamaFetchResponse = serde_json::from_slice(&body)
-            .map_err(|e| anyhow!("Failed to parse fetch response: {}", e))
+            .map_err(|e| anyhow!("Failed to parse fetch response: {e}"))
             .map_err(|error| map_cloud_fetch_error(error, requested.as_str()))?;
         let response = (parsed, source_bytes);
 
@@ -636,17 +634,15 @@ impl SearchProvider for SearxngClient {
             .await
             .map_err(|e| {
                 anyhow::Error::new(e).context(format!(
-                    "Failed to reach SearXNG at {} — is it running?",
-                    safe_base
+                    "Failed to reach SearXNG at {safe_base} — is it running?"
                 ))
             })?;
 
         if !response.status().is_success() {
             let status = response.status();
             return Err(anyhow!(
-                "SearXNG at {} returned {status}. A 403 usually means the JSON format is \
-                 disabled — add `json` to `search.formats` in its settings.yml.",
-                safe_base
+                "SearXNG at {safe_base} returned {status}. A 403 usually means the JSON format is \
+                 disabled — add `json` to `search.formats` in its settings.yml."
             ));
         }
 

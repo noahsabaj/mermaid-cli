@@ -175,12 +175,12 @@ impl McpServerManager {
         client
             .initialize()
             .await
-            .map_err(|e| anyhow!("MCP server '{}' initialization failed: {}", name, e))?;
+            .map_err(|e| anyhow!("MCP server '{name}' initialization failed: {e}"))?;
 
         let tools = client
             .list_tools()
             .await
-            .map_err(|e| anyhow!("MCP server '{}' tool discovery failed: {}", name, e))?;
+            .map_err(|e| anyhow!("MCP server '{name}' tool discovery failed: {e}"))?;
 
         Ok((client, tools))
     }
@@ -268,12 +268,13 @@ impl McpServerManager {
             let (raw_server, runtime) = match guard.get_key_value(server) {
                 Some(hit) => hit,
                 None => {
-                    let raw = self.aliases.get(server).ok_or_else(|| {
-                        anyhow!("MCP server '{}' not found or not running", server)
-                    })?;
-                    guard.get_key_value(raw.as_str()).ok_or_else(|| {
-                        anyhow!("MCP server '{}' not found or not running", server)
-                    })?
+                    let raw = self
+                        .aliases
+                        .get(server)
+                        .ok_or_else(|| anyhow!("MCP server '{server}' not found or not running"))?;
+                    guard
+                        .get_key_value(raw.as_str())
+                        .ok_or_else(|| anyhow!("MCP server '{server}' not found or not running"))?
                 },
             };
             // The advertised name is `mcp__<alias>__<tool>`; resolve the raw
@@ -288,7 +289,7 @@ impl McpServerManager {
             (Arc::clone(&runtime.client), raw_tool)
         };
         if client.is_shutdown() {
-            return Err(anyhow!("MCP server '{}' has been stopped", server));
+            return Err(anyhow!("MCP server '{server}' has been stopped"));
         }
 
         client.call_tool(&raw_tool, arguments).await
@@ -309,7 +310,7 @@ impl McpServerManager {
                 ContentBlock::Image { data, .. } => images.push(data.clone()),
                 ContentBlock::Audio { data, mime_type } => {
                     images.push(data.clone());
-                    text_parts.push(format!("[audio attachment: {}]", mime_type));
+                    text_parts.push(format!("[audio attachment: {mime_type}]"));
                 },
                 ContentBlock::ResourceLink {
                     uri,
@@ -321,8 +322,7 @@ impl McpServerManager {
                     let desc = description.as_deref().unwrap_or("");
                     let mime = mime_type.as_deref().unwrap_or("");
                     text_parts.push(format!(
-                        "[resource link: {} ({}) — {} → {}]",
-                        label, mime, desc, uri
+                        "[resource link: {label} ({mime}) — {desc} → {uri}]"
                     ));
                 },
                 ContentBlock::Resource {
@@ -333,7 +333,7 @@ impl McpServerManager {
                 } => {
                     let mime = mime_type.as_deref().unwrap_or("");
                     if let Some(t) = text {
-                        text_parts.push(format!("[resource {}]:\n{}", uri, t));
+                        text_parts.push(format!("[resource {uri}]:\n{t}"));
                     } else if let Some(b) = blob {
                         text_parts.push(format!(
                             "[resource {} ({}): {} bytes of base64]",
@@ -342,7 +342,7 @@ impl McpServerManager {
                             b.len()
                         ));
                     } else {
-                        text_parts.push(format!("[resource {} ({})]", uri, mime));
+                        text_parts.push(format!("[resource {uri} ({mime})]"));
                     }
                 },
             }

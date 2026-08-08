@@ -1885,7 +1885,7 @@ mod tests {
                 assert!(levels.contains(&ReasoningLevel::Medium));
                 assert!(levels.contains(&ReasoningLevel::Max));
             },
-            other => panic!("expected Levels for openai, got {:?}", other),
+            other => panic!("expected Levels for openai, got {other:?}"),
         }
     }
 

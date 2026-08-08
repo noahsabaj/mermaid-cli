@@ -101,7 +101,7 @@ impl ToolExecutor for ClickTool {
         };
         if let Err(e) = click_res {
             return ToolOutcome::error(
-                format!("click failed: {}", e),
+                format!("click failed: {e}"),
                 started.elapsed().as_secs_f64(),
             );
         }
@@ -110,10 +110,7 @@ impl ToolExecutor for ClickTool {
         // auto-screenshot captures the result.
         tokio::time::sleep(std::time::Duration::from_millis(POST_CLICK_DELAY_MS)).await;
 
-        let mut msg = format!(
-            "Clicked {} at ({}, {}) [screen: ({}, {})]",
-            button, x, y, sx, sy
-        );
+        let mut msg = format!("Clicked {button} at ({x}, {y}) [screen: ({sx}, {sy})]");
         if let Some(warning) = self.driver.check_cursor_landed(sx, sy).await {
             msg.push('\n');
             msg.push_str(&warning);
@@ -126,7 +123,7 @@ impl ToolExecutor for ClickTool {
             };
 
         let final_output = match &summary {
-            Some(s) => format!("{}\n[auto-screenshot: {}]", msg, s),
+            Some(s) => format!("{msg}\n[auto-screenshot: {s}]"),
             None => msg,
         };
         let mut outcome =

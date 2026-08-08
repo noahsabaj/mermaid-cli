@@ -185,13 +185,7 @@ impl HttpTransport {
             self.request_roundtrip(method, id, &request),
         )
         .await
-        .map_err(|_| {
-            anyhow!(
-                "MCP request timed out after {}s: {}",
-                response_timeout_secs,
-                method
-            )
-        })?
+        .map_err(|_| anyhow!("MCP request timed out after {response_timeout_secs}s: {method}"))?
     }
 
     /// Send a JSON-RPC notification. The server answers a client notification

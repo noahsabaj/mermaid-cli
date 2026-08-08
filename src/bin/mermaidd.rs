@@ -639,7 +639,7 @@ async fn maybe_spawn_tcp_listener() {
                         ),
                     }
                 }
-                println!("mermaidd tcp listening on {}", local_addr);
+                println!("mermaidd tcp listening on {local_addr}");
             }
             tokio::spawn(async move {
                 loop {
@@ -1111,7 +1111,7 @@ async fn handle_task_command(
                 "completed" => mermaid_runtime::TaskStatus::Completed,
                 "failed" => mermaid_runtime::TaskStatus::Failed,
                 "cancelled" => mermaid_runtime::TaskStatus::Cancelled,
-                other => anyhow::bail!("unknown task status: {}", other),
+                other => anyhow::bail!("unknown task status: {other}"),
             };
             store
                 .tasks()

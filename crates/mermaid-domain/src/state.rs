@@ -864,7 +864,7 @@ impl ToolOutcome {
         Self {
             status: ToolStatus::Error,
             summary: error.clone(),
-            model_content: format!("Error: {}", error),
+            model_content: format!("Error: {error}"),
             error: Some(error),
             metadata: Box::new(ToolRunMetadata {
                 duration_secs: duration,

@@ -603,7 +603,7 @@ pub fn format_result(result: &RunResult, format: OutputFormat) -> String {
             if !result.errors.is_empty() {
                 out.push_str("\n\n---\n\n## Errors\n\n");
                 for e in &result.errors {
-                    out.push_str(&format!("- {}\n", e));
+                    out.push_str(&format!("- {e}\n"));
                 }
             }
             out

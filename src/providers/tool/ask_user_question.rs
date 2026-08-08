@@ -39,7 +39,7 @@ fn format_answers(answers: &[QuestionAnswer]) -> String {
         };
         out.push_str(&format!("- {} -> {}\n", a.question, value));
         if let Some(note) = &a.note {
-            out.push_str(&format!("  (note: {})\n", note));
+            out.push_str(&format!("  (note: {note})\n"));
         }
     }
     out

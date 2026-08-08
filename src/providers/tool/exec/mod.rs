@@ -59,8 +59,7 @@ impl CommandMode {
             "wait" | "foreground" => Ok(Self::Wait),
             "background" => Ok(Self::Background),
             other => Err(format!(
-                "execute_command: mode must be 'wait' or 'background', got '{}'",
-                other
+                "execute_command: mode must be 'wait' or 'background', got '{other}'"
             )),
         }
     }
@@ -121,7 +120,7 @@ impl ToolExecutor for ExecuteCommandTool {
         };
 
         if contains_dangerous_command(command) {
-            return ToolOutcome::error(format!("Dangerous command blocked: {}", command), 0.0);
+            return ToolOutcome::error(format!("Dangerous command blocked: {command}"), 0.0);
         }
 
         // Resolve the effective working directory and decide containment. A
@@ -556,9 +555,8 @@ fn finish_foreground_command(
         Ok(CommandRunResult::Cancelled) => ToolOutcome::cancelled(),
         Ok(CommandRunResult::TimedOut) => {
             let message = format!(
-                "Command timed out after {} seconds and was killed. \
-                     For dev servers, GUI apps, or other long-running commands, call execute_command with mode=\"background\".",
-                timeout_secs
+                "Command timed out after {timeout_secs} seconds and was killed. \
+                     For dev servers, GUI apps, or other long-running commands, call execute_command with mode=\"background\"."
             );
             let duration_secs = start.elapsed().as_secs_f64();
             ToolOutcome::error(message, duration_secs).with_metadata(command_metadata(
@@ -579,7 +577,7 @@ fn finish_foreground_command(
         },
         Err(e) => {
             let duration_secs = start.elapsed().as_secs_f64();
-            ToolOutcome::error(format!("Command failed: {}", e), duration_secs).with_metadata(
+            ToolOutcome::error(format!("Command failed: {e}"), duration_secs).with_metadata(
                 command_metadata(CommandMetadataInput {
                     command: command.clone(),
                     working_dir: Some(effective_workdir.display().to_string()),
@@ -1061,7 +1059,7 @@ mod tests {
         let outcome = ExecuteCommandTool
             .execute(serde_json::json!({"command": "echo 'hello world'"}), ctx)
             .await;
-        assert!(outcome.is_success(), "expected success: {:?}", outcome);
+        assert!(outcome.is_success(), "expected success: {outcome:?}");
         assert!(outcome.output().contains("hello world"));
     }
 
@@ -1382,8 +1380,7 @@ mod tests {
         // guard above.
         assert!(
             elapsed < Duration::from_secs(10),
-            "cancellation took {:?} — far slower than expected (regression?)",
-            elapsed
+            "cancellation took {elapsed:?} — far slower than expected (regression?)"
         );
     }
 
@@ -1507,8 +1504,7 @@ mod tests {
 
         assert!(
             outcome.is_success(),
-            "expected background success on Windows: {:?}",
-            outcome
+            "expected background success on Windows: {outcome:?}"
         );
         let output = outcome.output().to_string();
         assert!(output.contains("Background command started"));
@@ -1552,8 +1548,7 @@ mod tests {
 
         assert!(
             outcome.is_success(),
-            "backgrounding should yield success: {:?}",
-            outcome
+            "backgrounding should yield success: {outcome:?}"
         );
         let output = outcome.output().to_string();
         assert!(output.contains("Moved to background"), "got: {output}");

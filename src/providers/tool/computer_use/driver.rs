@@ -192,9 +192,8 @@ impl ComputerUseDriver {
         let meta = match screenshot_id {
             Some(id) => reg.get(id).cloned().ok_or_else(|| {
                 format!(
-                    "Screenshot id {} not found in registry (likely evicted — capacity {}). \
-                     Take a fresh screenshot and retry with the new id.",
-                    id, SCREENSHOT_REGISTRY_CAPACITY
+                    "Screenshot id {id} not found in registry (likely evicted — capacity {SCREENSHOT_REGISTRY_CAPACITY}). \
+                     Take a fresh screenshot and retry with the new id."
                 )
             })?,
             None => reg.latest().cloned().ok_or_else(|| {
@@ -268,8 +267,8 @@ impl ComputerUseDriver {
         // Write screenshots into the 0700 per-user scratch dir, not a
         // world-readable fixed path in shared /tmp where another local user
         // could read the captured frame (#33).
-        let temp_path = mermaid_model::utils::private_temp_dir()?
-            .join(format!("mermaid-screenshot-{}.png", seq));
+        let temp_path =
+            mermaid_model::utils::private_temp_dir()?.join(format!("mermaid-screenshot-{seq}.png"));
         let temp_str = temp_path.to_string_lossy().to_string();
         let _guard = TempFileGuard(temp_path.clone());
 
@@ -308,13 +307,12 @@ impl ComputerUseDriver {
         let base64_png = general_purpose::STANDARD.encode(&raw_bytes);
 
         let offset_info = if offset_x != 0 || offset_y != 0 {
-            format!(", offset: +{}+{}", offset_x, offset_y)
+            format!(", offset: +{offset_x}+{offset_y}")
         } else {
             String::new()
         };
         let summary = format!(
-            "Screenshot captured (id: {}, {}, {}x{}, scale: {:.2}x{})",
-            id, kind, width, height, scale_factor, offset_info
+            "Screenshot captured (id: {id}, {kind}, {width}x{height}, scale: {scale_factor:.2}x{offset_info})"
         );
 
         Ok(CaptureResult {
@@ -370,9 +368,8 @@ impl ComputerUseDriver {
             || (ay - sy).abs() > CURSOR_LANDED_TOLERANCE_PX
         {
             Some(format!(
-                "WARNING: cursor at ({}, {}), expected ({}, {}). Window may have moved \
-                 or focus changed before the click landed.",
-                ax, ay, sx, sy
+                "WARNING: cursor at ({ax}, {ay}), expected ({sx}, {sy}). Window may have moved \
+                 or focus changed before the click landed."
             ))
         } else {
             None
@@ -434,7 +431,7 @@ impl ComputerUseDriver {
                 )
                 .await?;
                 run_cmd_cancellable(
-                    Command::new("ydotool").args(["click", &format!("0x{}", code)]),
+                    Command::new("ydotool").args(["click", &format!("0x{code}")]),
                     token,
                 )
                 .await
@@ -685,47 +682,34 @@ async fn dispatch_capture(
         },
         (Backend::X11, ScreenshotSpec::Region(x, y, w, h)) => {
             run_cmd_cancellable(
-                Command::new("scrot").args([
-                    "-a",
-                    &format!("{},{},{},{}", x, y, w, h),
-                    "-o",
-                    out_path,
-                ]),
+                Command::new("scrot").args(["-a", &format!("{x},{y},{w},{h}"), "-o", out_path]),
                 token,
             )
             .await?;
-            Ok((*x, *y, format!("region {}x{}+{}+{}", w, h, x, y)))
+            Ok((*x, *y, format!("region {w}x{h}+{x}+{y}")))
         },
         (Backend::Wayland, ScreenshotSpec::Region(x, y, w, h)) => {
             run_cmd_cancellable(
-                Command::new("grim").args(["-g", &format!("{},{} {}x{}", x, y, w, h), out_path]),
+                Command::new("grim").args(["-g", &format!("{x},{y} {w}x{h}"), out_path]),
                 token,
             )
             .await?;
-            Ok((*x, *y, format!("region {}x{}+{}+{}", w, h, x, y)))
+            Ok((*x, *y, format!("region {w}x{h}+{x}+{y}")))
         },
         (Backend::X11, ScreenshotSpec::Monitor(name)) => {
             let (mx, my, mw, mh) = parse_monitor_geometry_x11(name).await.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Monitor '{}' not found. Run `xrandr --query` to list outputs.",
-                    name
-                )
+                anyhow::anyhow!("Monitor '{name}' not found. Run `xrandr --query` to list outputs.")
             })?;
             run_cmd_cancellable(
-                Command::new("scrot").args([
-                    "-a",
-                    &format!("{},{},{},{}", mx, my, mw, mh),
-                    "-o",
-                    out_path,
-                ]),
+                Command::new("scrot").args(["-a", &format!("{mx},{my},{mw},{mh}"), "-o", out_path]),
                 token,
             )
             .await?;
-            Ok((mx, my, format!("monitor {}", name)))
+            Ok((mx, my, format!("monitor {name}")))
         },
         (Backend::Wayland, ScreenshotSpec::Monitor(name)) => {
             run_cmd_cancellable(Command::new("grim").args(["-o", name, out_path]), token).await?;
-            Ok((0, 0, format!("monitor {}", name)))
+            Ok((0, 0, format!("monitor {name}")))
         },
         (Backend::X11, ScreenshotSpec::Window(title)) => {
             // Search for window by name, activate it, sync, then
@@ -739,9 +723,8 @@ async fn dispatch_capture(
                 .map(str::to_string)
                 .ok_or_else(|| {
                     anyhow::anyhow!(
-                        "No window found matching '{}'. Use list_windows to see available \
-                         windows.",
-                        title
+                        "No window found matching '{title}'. Use list_windows to see available \
+                         windows."
                     )
                 })?;
             run_cmd_cancellable(
@@ -758,7 +741,7 @@ async fn dispatch_capture(
                 .map(|(x, y, _, _)| (x, y))
                 .unwrap_or((0, 0));
             run_cmd_cancellable(Command::new("scrot").args(["-u", "-o", out_path]), token).await?;
-            Ok((wx, wy, format!("window \"{}\"", title)))
+            Ok((wx, wy, format!("window \"{title}\"")))
         },
         (Backend::Wayland, ScreenshotSpec::Window(_)) => anyhow::bail!(
             "Mode 'window' not supported on Wayland (grim has no window-by-name capture). \
@@ -820,7 +803,7 @@ async fn run_cmd_cancellable_with_timeout(
         biased;
         _ = token.cancelled() => anyhow::bail!("cancelled"),
         _ = tokio::time::sleep(timeout) => {
-            anyhow::bail!("subprocess timed out after {:?}", timeout)
+            anyhow::bail!("subprocess timed out after {timeout:?}")
         }
         res = cmd.output() => {
             let out = res.context("subprocess spawn")?;
@@ -853,7 +836,7 @@ async fn run_cmd_stdout_with_timeout(
     cmd.kill_on_drop(true);
     let out = match tokio::time::timeout(timeout, cmd.output()).await {
         Ok(res) => res.context("subprocess spawn")?,
-        Err(_) => anyhow::bail!("subprocess timed out after {:?}", timeout),
+        Err(_) => anyhow::bail!("subprocess timed out after {timeout:?}"),
     };
     if !out.status.success() {
         anyhow::bail!(
@@ -972,7 +955,7 @@ async fn downscale_if_needed(path: &str, max_width: u32) -> Result<f64> {
         return Ok(1.0);
     }
     let scale_factor = original_width as f64 / max_width as f64;
-    let scaled = format!("{}.scaled.png", path);
+    let scaled = format!("{path}.scaled.png");
     // F58: the caller's TempFileGuard only tracks the original temp file, not this
     // sibling. Guard the scaled file here so every exit path removes it — most
     // importantly a successful encode followed by a failed `rename(&scaled, path)`,
@@ -989,7 +972,7 @@ async fn downscale_if_needed(path: &str, max_width: u32) -> Result<f64> {
     let convert = tokio::time::timeout(
         downscale_timeout,
         Command::new("convert")
-            .args([path, "-resize", &format!("{}x", max_width), &scaled])
+            .args([path, "-resize", &format!("{max_width}x"), &scaled])
             .kill_on_drop(true)
             .output(),
     )
@@ -1009,7 +992,7 @@ async fn downscale_if_needed(path: &str, max_width: u32) -> Result<f64> {
                 "-i",
                 path,
                 "-vf",
-                &format!("scale={}:-1", max_width),
+                &format!("scale={max_width}:-1"),
                 &scaled,
             ])
             .kill_on_drop(true)
@@ -1115,8 +1098,7 @@ mod tests {
         let err = d.scale_coords(0, 0, Some(0)).unwrap_err();
         assert!(
             err.contains("evicted"),
-            "expected eviction message, got: {}",
-            err
+            "expected eviction message, got: {err}"
         );
     }
 
@@ -1251,7 +1233,7 @@ mod tests {
         let scale = downscale_if_needed(&path_str, 1920).await.unwrap();
         assert_eq!(scale, 1.0);
         assert!(
-            !std::path::Path::new(&format!("{}.scaled.png", path_str)).exists(),
+            !std::path::Path::new(&format!("{path_str}.scaled.png")).exists(),
             "no scaled sibling for an already-small capture"
         );
     }

@@ -81,7 +81,7 @@ impl ToolExecutor for TypeTextTool {
         };
         if let Err(e) = res {
             return ToolOutcome::error(
-                format!("type_text failed: {}", e),
+                format!("type_text failed: {e}"),
                 started.elapsed().as_secs_f64(),
             );
         }
@@ -89,7 +89,7 @@ impl ToolExecutor for TypeTextTool {
         tokio::time::sleep(std::time::Duration::from_millis(POST_TYPE_DELAY_MS)).await;
 
         let typed_preview: String = text.chars().take(50).collect();
-        let base_msg = format!("Typed: {}", typed_preview);
+        let base_msg = format!("Typed: {typed_preview}");
 
         let (summary, image) = match super::emit_auto_screenshot(
             &self.driver,
@@ -103,7 +103,7 @@ impl ToolExecutor for TypeTextTool {
         };
 
         let out = match &summary {
-            Some(s) => format!("{}\n[auto-screenshot: {}]", base_msg, s),
+            Some(s) => format!("{base_msg}\n[auto-screenshot: {s}]"),
             None => base_msg,
         };
         let mut outcome =

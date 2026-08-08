@@ -872,7 +872,7 @@ impl OllamaAdapter {
 
         let json: OllamaStreamChunk =
             response.json().await.map_err(|e| ModelError::ParseError {
-                message: format!("Failed to parse response: {}", e),
+                message: format!("Failed to parse response: {e}"),
                 raw: None,
             })?;
 
@@ -934,7 +934,7 @@ impl Model for OllamaAdapter {
 
         let tags: OllamaTagsResponse =
             response.json().await.map_err(|e| ModelError::ParseError {
-                message: format!("Failed to parse tags response: {}", e),
+                message: format!("Failed to parse tags response: {e}"),
                 raw: None,
             })?;
 
@@ -1093,7 +1093,7 @@ fn parse_ollama_stream_frame(line: &str) -> Result<OllamaStreamChunk> {
         }));
     }
     serde_json::from_str(line).map_err(|e| ModelError::ParseError {
-        message: format!("Failed to parse Ollama response: {}", e),
+        message: format!("Failed to parse Ollama response: {e}"),
         raw: Some(line.to_string()),
     })
 }
@@ -1173,7 +1173,7 @@ fn normalize_url(url: &str) -> String {
         } else {
             "https"
         };
-        normalized = format!("{}://{}", scheme, normalized);
+        normalized = format!("{scheme}://{normalized}");
     }
 
     // Add default Ollama port if missing (only for http; https keeps its default 443).
@@ -1185,7 +1185,7 @@ fn normalize_url(url: &str) -> String {
             None => (after_scheme, ""),
         };
         if !authority.contains(':') {
-            normalized = format!("http://{}:11434{}", authority, path);
+            normalized = format!("http://{authority}:11434{path}");
         }
     }
     // For https:// without a port, don't add :11434 — the default port (443) is correct

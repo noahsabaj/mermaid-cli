@@ -71,13 +71,10 @@ pub async fn ensure_model(model_name: &str, config: &Config) -> Result<()> {
     // Check if the requested model exists (exact match or implicit :latest)
     let model_exists = models
         .iter()
-        .any(|m| m == model || (!model.contains(':') && *m == format!("{}:latest", model)));
+        .any(|m| m == model || (!model.contains(':') && *m == format!("{model}:latest")));
 
     if !model_exists {
-        println!(
-            "Model '{}' not found locally. Pulling from Ollama...\n",
-            model
-        );
+        println!("Model '{model}' not found locally. Pulling from Ollama...\n");
 
         // Auto-pull using subprocess with inherited stdio for native progress display
         let status = std::process::Command::new("ollama")
@@ -90,16 +87,15 @@ pub async fn ensure_model(model_name: &str, config: &Config) -> Result<()> {
 
         match status {
             Ok(exit_status) if exit_status.success() => {
-                println!("\nModel '{}' pulled successfully.\n", model);
+                println!("\nModel '{model}' pulled successfully.\n");
             },
             Ok(_) => {
                 anyhow::bail!(
-                    "Failed to pull model '{}'. Check if the model name is correct: https://ollama.com/library",
-                    model
+                    "Failed to pull model '{model}'. Check if the model name is correct: https://ollama.com/library"
                 );
             },
             Err(e) => {
-                anyhow::bail!("Failed to run 'ollama pull': {}", e);
+                anyhow::bail!("Failed to run 'ollama pull': {e}");
             },
         }
     }

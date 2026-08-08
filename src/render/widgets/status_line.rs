@@ -111,7 +111,7 @@ pub fn build_status_lines(
         ""
     };
 
-    let head = format!("{}... ", status_text);
+    let head = format!("{status_text}... ");
     let meta = format!(
         "({exit_hint}esc to interrupt{bg_hint} • {}s • {} {}{} tokens)",
         elapsed_secs,

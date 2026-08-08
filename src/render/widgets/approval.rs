@@ -52,7 +52,7 @@ impl<'a> Widget for ApprovalModalWidget<'a> {
                     .fg(self.theme.colors.text_primary.to_color())
                     .add_modifier(Modifier::BOLD)
             };
-            lines.push(Line::from(Span::styled(format!("  {}", opt), style)));
+            lines.push(Line::from(Span::styled(format!("  {opt}"), style)));
         }
         Paragraph::new(lines).block(block).render(area, buf);
     }

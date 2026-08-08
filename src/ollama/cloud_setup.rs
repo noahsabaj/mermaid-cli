@@ -59,7 +59,7 @@ pub fn prompt_cloud_setup_if_needed(model_name: &str) -> Result<bool> {
     }
 
     println!("\nCloud model requested but OLLAMA_API_KEY is not set.");
-    println!("   Model: {}\n", model_name);
+    println!("   Model: {model_name}\n");
 
     setup_cloud_interactive()
 }
