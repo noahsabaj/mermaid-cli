@@ -274,6 +274,12 @@ impl RuntimeClient {
         }
     }
 
+    /// # Errors
+    ///
+    /// Errors if the daemon rejects the request or answers with an unexpected
+    /// shape, and -- when the call falls back to the local database -- if that read
+    /// fails. A daemon that is simply not running is not an error: the client falls
+    /// back.
     pub fn health(&self) -> Result<RuntimeRead<RuntimeHealth>> {
         self.read(
             crate::runtime_client::DaemonRequest::Health.to_wire(),
@@ -281,6 +287,12 @@ impl RuntimeClient {
         )
     }
 
+    /// # Errors
+    ///
+    /// Errors if the daemon rejects the request or answers with an unexpected
+    /// shape, and -- when the call falls back to the local database -- if that read
+    /// fails. A daemon that is simply not running is not an error: the client falls
+    /// back.
     pub fn snapshot(&self) -> Result<RuntimeRead<RuntimeSnapshot>> {
         self.read(
             crate::runtime_client::DaemonRequest::Snapshot.to_wire(),
@@ -288,6 +300,12 @@ impl RuntimeClient {
         )
     }
 
+    /// # Errors
+    ///
+    /// Errors if the daemon rejects the request or answers with an unexpected
+    /// shape, and -- when the call falls back to the local database -- if that read
+    /// fails. A daemon that is simply not running is not an error: the client falls
+    /// back.
     pub fn dashboard(&self) -> Result<RuntimeRead<RuntimeDashboard>> {
         self.read(
             crate::runtime_client::DaemonRequest::RuntimeDashboard.to_wire(),
@@ -295,6 +313,12 @@ impl RuntimeClient {
         )
     }
 
+    /// # Errors
+    ///
+    /// Errors if the daemon rejects the request or answers with an unexpected
+    /// shape, and -- when the call falls back to the local database -- if that read
+    /// fails. A daemon that is simply not running is not an error: the client falls
+    /// back.
     pub fn diagnostics(&self) -> Result<RuntimeRead<RuntimeDiagnostics>> {
         self.read(
             crate::runtime_client::DaemonRequest::RuntimeDiagnostics.to_wire(),
@@ -302,6 +326,12 @@ impl RuntimeClient {
         )
     }
 
+    /// # Errors
+    ///
+    /// Errors if the daemon rejects the request or answers with an unexpected
+    /// shape, and -- when the call falls back to the local database -- if that read
+    /// fails. A daemon that is simply not running is not an error: the client falls
+    /// back.
     pub fn hygiene_preview(&self) -> Result<RuntimeRead<RuntimeHygienePreview>> {
         self.read(
             crate::runtime_client::DaemonRequest::RuntimeHygienePreview.to_wire(),
@@ -309,6 +339,12 @@ impl RuntimeClient {
         )
     }
 
+    /// # Errors
+    ///
+    /// Errors if the daemon rejects the action or answers with an unexpected shape,
+    /// and -- when the call falls back to acting on the local database -- if that
+    /// fails. A daemon that is simply not running is not an error: the client falls
+    /// back.
     pub fn hygiene_archive(&self) -> Result<RuntimeRead<RuntimeHygieneArchive>> {
         self.read_inner(
             crate::runtime_client::DaemonRequest::RuntimeHygieneArchive.to_wire(),
@@ -317,6 +353,12 @@ impl RuntimeClient {
         )
     }
 
+    /// # Errors
+    ///
+    /// Errors if the daemon rejects the request or answers with an unexpected
+    /// shape, and -- when the call falls back to the local database -- if that read
+    /// fails. A daemon that is simply not running is not an error: the client falls
+    /// back.
     pub fn task_detail(&self, id: &str) -> Result<RuntimeRead<RuntimeTaskDetail>> {
         self.read(
             crate::runtime_client::DaemonRequest::RuntimeTaskDetail { id: id.to_string() }
@@ -325,6 +367,12 @@ impl RuntimeClient {
         )
     }
 
+    /// # Errors
+    ///
+    /// Errors if the daemon rejects the request or answers with an unexpected
+    /// shape, and -- when the call falls back to the local database -- if that read
+    /// fails. A daemon that is simply not running is not an error: the client falls
+    /// back.
     pub fn approval_detail(&self, id: &str) -> Result<RuntimeRead<RuntimeApprovalDetail>> {
         self.read(
             crate::runtime_client::DaemonRequest::RuntimeApprovalDetail { id: id.to_string() }
@@ -333,6 +381,12 @@ impl RuntimeClient {
         )
     }
 
+    /// # Errors
+    ///
+    /// Errors if the daemon rejects the request or answers with an unexpected
+    /// shape, and -- when the call falls back to the local database -- if that read
+    /// fails. A daemon that is simply not running is not an error: the client falls
+    /// back.
     pub fn checkpoint_detail(&self, id: &str) -> Result<RuntimeRead<RuntimeCheckpointDetail>> {
         self.read(
             crate::runtime_client::DaemonRequest::RuntimeCheckpointDetail { id: id.to_string() }
@@ -341,6 +395,12 @@ impl RuntimeClient {
         )
     }
 
+    /// # Errors
+    ///
+    /// Errors if the daemon rejects the action or answers with an unexpected shape,
+    /// and -- when the call falls back to acting on the local database -- if that
+    /// fails. A daemon that is simply not running is not an error: the client falls
+    /// back.
     pub fn list_tasks(&self, limit: usize) -> Result<RuntimeRead<Vec<TaskRecord>>> {
         self.list(
             crate::runtime_client::DaemonRequest::RuntimeTasks {
@@ -351,6 +411,12 @@ impl RuntimeClient {
         )
     }
 
+    /// # Errors
+    ///
+    /// Errors if the daemon rejects the action or answers with an unexpected shape,
+    /// and -- when the call falls back to acting on the local database -- if that
+    /// fails. A daemon that is simply not running is not an error: the client falls
+    /// back.
     pub fn list_processes(&self, limit: usize) -> Result<RuntimeRead<Vec<ProcessRecord>>> {
         self.list(
             crate::runtime_client::DaemonRequest::RuntimeProcesses {
@@ -361,6 +427,12 @@ impl RuntimeClient {
         )
     }
 
+    /// # Errors
+    ///
+    /// Errors if the daemon rejects the action or answers with an unexpected shape,
+    /// and -- when the call falls back to acting on the local database -- if that
+    /// fails. A daemon that is simply not running is not an error: the client falls
+    /// back.
     pub fn list_approvals(&self) -> Result<RuntimeRead<Vec<ApprovalRecord>>> {
         self.list(
             crate::runtime_client::DaemonRequest::RuntimeApprovals.to_wire(),
@@ -368,6 +440,12 @@ impl RuntimeClient {
         )
     }
 
+    /// # Errors
+    ///
+    /// Errors if the daemon rejects the action or answers with an unexpected shape,
+    /// and -- when the call falls back to acting on the local database -- if that
+    /// fails. A daemon that is simply not running is not an error: the client falls
+    /// back.
     pub fn list_tool_runs(&self, limit: usize) -> Result<RuntimeRead<Vec<ToolRunRecord>>> {
         self.list(
             crate::runtime_client::DaemonRequest::RuntimeToolRuns {
@@ -378,6 +456,12 @@ impl RuntimeClient {
         )
     }
 
+    /// # Errors
+    ///
+    /// Errors if the daemon rejects the action or answers with an unexpected shape,
+    /// and -- when the call falls back to acting on the local database -- if that
+    /// fails. A daemon that is simply not running is not an error: the client falls
+    /// back.
     pub fn list_checkpoints(&self, limit: usize) -> Result<RuntimeRead<Vec<CheckpointRecord>>> {
         self.list(
             crate::runtime_client::DaemonRequest::RuntimeCheckpoints {
@@ -388,6 +472,12 @@ impl RuntimeClient {
         )
     }
 
+    /// # Errors
+    ///
+    /// Errors if the daemon rejects the action or answers with an unexpected shape,
+    /// and -- when the call falls back to acting on the local database -- if that
+    /// fails. A daemon that is simply not running is not an error: the client falls
+    /// back.
     pub fn list_plugins(&self) -> Result<RuntimeRead<Vec<PluginInstallRecord>>> {
         self.list(
             crate::runtime_client::DaemonRequest::RuntimePlugins.to_wire(),
@@ -395,6 +485,12 @@ impl RuntimeClient {
         )
     }
 
+    /// # Errors
+    ///
+    /// Errors if the daemon rejects the action or answers with an unexpected shape,
+    /// and -- when the call falls back to acting on the local database -- if that
+    /// fails. A daemon that is simply not running is not an error: the client falls
+    /// back.
     pub fn process_log(&self, id: &str, tail_bytes: Option<u64>) -> Result<RuntimeProcessLog> {
         self.action(
             crate::runtime_client::DaemonRequest::Logs {
@@ -406,6 +502,12 @@ impl RuntimeClient {
         )
     }
 
+    /// # Errors
+    ///
+    /// Errors if the daemon rejects the action or answers with an unexpected shape,
+    /// and -- when the call falls back to acting on the local database -- if that
+    /// fails. A daemon that is simply not running is not an error: the client falls
+    /// back.
     pub fn stop_process(&self, id: &str) -> Result<RuntimeOne<ProcessRecord>> {
         // Non-idempotent: `terminate_tree` must not fire twice (RC-G/F25).
         self.action_authed_non_idempotent(
@@ -418,6 +520,12 @@ impl RuntimeClient {
         )
     }
 
+    /// # Errors
+    ///
+    /// Errors if the daemon rejects the action or answers with an unexpected shape,
+    /// and -- when the call falls back to acting on the local database -- if that
+    /// fails. A daemon that is simply not running is not an error: the client falls
+    /// back.
     pub fn restart_process(&self, id: &str) -> Result<RuntimeOne<ProcessRecord>> {
         // Non-idempotent: kills then respawns — a duplicate run double-signals
         // (possibly a since-reused PID) and can spawn two servers (RC-G/F25).
@@ -431,6 +539,12 @@ impl RuntimeClient {
         )
     }
 
+    /// # Errors
+    ///
+    /// Errors if the daemon rejects the action or answers with an unexpected shape,
+    /// and -- when the call falls back to acting on the local database -- if that
+    /// fails. A daemon that is simply not running is not an error: the client falls
+    /// back.
     pub fn open_process(&self, id: &str) -> Result<RuntimeProcessOpen> {
         self.action_authed(
             crate::runtime_client::DaemonRequest::OpenProcess { id: id.to_string() }.to_wire(),
@@ -438,6 +552,12 @@ impl RuntimeClient {
         )
     }
 
+    /// # Errors
+    ///
+    /// Errors if the daemon rejects the action or answers with an unexpected shape,
+    /// and -- when the call falls back to acting on the local database -- if that
+    /// fails. A daemon that is simply not running is not an error: the client falls
+    /// back.
     pub fn ports(&self) -> Result<RuntimePorts> {
         self.action(
             crate::runtime_client::DaemonRequest::Ports.to_wire(),
@@ -445,6 +565,12 @@ impl RuntimeClient {
         )
     }
 
+    /// # Errors
+    ///
+    /// Errors if the daemon rejects the action or answers with an unexpected shape,
+    /// and -- when the call falls back to acting on the local database -- if that
+    /// fails. A daemon that is simply not running is not an error: the client falls
+    /// back.
     pub fn approve(&self, id: &str) -> Result<RuntimeApprovalDecision> {
         // Non-idempotent: replays the approved action, so a duplicate run could
         // execute that side effect twice (RC-G/F25).
@@ -454,6 +580,12 @@ impl RuntimeClient {
         )
     }
 
+    /// # Errors
+    ///
+    /// Errors if the daemon rejects the action or answers with an unexpected shape,
+    /// and -- when the call falls back to acting on the local database -- if that
+    /// fails. A daemon that is simply not running is not an error: the client falls
+    /// back.
     pub fn deny(&self, id: &str) -> Result<RuntimeApprovalDecision> {
         self.action_authed(
             crate::runtime_client::DaemonRequest::Deny { id: id.to_string() }.to_wire(),
@@ -461,6 +593,12 @@ impl RuntimeClient {
         )
     }
 
+    /// # Errors
+    ///
+    /// Errors if the daemon rejects the action or answers with an unexpected shape,
+    /// and -- when the call falls back to acting on the local database -- if that
+    /// fails. A daemon that is simply not running is not an error: the client falls
+    /// back.
     pub fn restore_checkpoint(&self, id: &str) -> Result<RuntimeCheckpointRestore> {
         // Non-idempotent: rewrites working-tree files from the snapshot — a
         // duplicate run could clobber edits made between the two runs (RC-G/F25).
@@ -476,6 +614,12 @@ impl RuntimeClient {
         )
     }
 
+    /// # Errors
+    ///
+    /// Errors if the daemon rejects the action or answers with an unexpected shape,
+    /// and -- when the call falls back to acting on the local database -- if that
+    /// fails. A daemon that is simply not running is not an error: the client falls
+    /// back.
     pub fn set_plugin_enabled(&self, id: &str, enabled: bool) -> Result<()> {
         self.action_authed::<Value, _>(
             crate::runtime_client::DaemonRequest::SetPluginEnabled {
@@ -491,6 +635,12 @@ impl RuntimeClient {
         Ok(())
     }
 
+    /// # Errors
+    ///
+    /// Errors if the daemon rejects the action or answers with an unexpected shape,
+    /// and -- when the call falls back to acting on the local database -- if that
+    /// fails. A daemon that is simply not running is not an error: the client falls
+    /// back.
     pub fn model_info(&self, model: &str) -> Result<Value> {
         self.action(
             crate::runtime_client::DaemonRequest::ModelInfo {
@@ -501,6 +651,12 @@ impl RuntimeClient {
         )
     }
 
+    /// # Errors
+    ///
+    /// Errors if the daemon rejects the action or answers with an unexpected shape,
+    /// and -- when the call falls back to acting on the local database -- if that
+    /// fails. A daemon that is simply not running is not an error: the client falls
+    /// back.
     pub fn set_safety_mode(&self, mode: &str) -> Result<Value> {
         self.action_authed(
             crate::runtime_client::DaemonRequest::SetSafetyMode {
@@ -651,6 +807,9 @@ impl RuntimeClient {
 }
 
 impl RuntimeService {
+    /// # Errors
+    ///
+    /// Errors if the runtime database cannot be opened, created, or migrated.
     pub fn open_default() -> Result<Self> {
         Ok(Self {
             store: RuntimeStore::open_default()?,
@@ -661,6 +820,9 @@ impl RuntimeService {
         Self { store }
     }
 
+    /// # Errors
+    ///
+    /// Errors if a store query fails.
     pub fn health(&self) -> Result<RuntimeHealth> {
         Ok(RuntimeHealth {
             ok: true,
@@ -669,6 +831,9 @@ impl RuntimeService {
         })
     }
 
+    /// # Errors
+    ///
+    /// Errors if a store query fails.
     pub fn snapshot(&self) -> Result<RuntimeSnapshot> {
         Ok(RuntimeSnapshot {
             ok: true,
@@ -689,6 +854,9 @@ impl RuntimeService {
         })
     }
 
+    /// # Errors
+    ///
+    /// Errors if a store query fails.
     pub fn dashboard(&self) -> Result<RuntimeDashboard> {
         let sessions = self.store.sessions().list(100)?;
         let tasks = self.store.tasks().list(200)?;
@@ -746,6 +914,9 @@ impl RuntimeService {
         })
     }
 
+    /// # Errors
+    ///
+    /// Errors if a store query fails.
     pub fn diagnostics(&self) -> Result<RuntimeDiagnostics> {
         let snapshot = self.snapshot()?;
         let hygiene = self.hygiene_preview()?;
@@ -766,6 +937,9 @@ impl RuntimeService {
         })
     }
 
+    /// # Errors
+    ///
+    /// Errors if a store query fails.
     pub fn hygiene_preview(&self) -> Result<RuntimeHygienePreview> {
         let preview = self.raw_hygiene_preview()?;
         Ok(RuntimeHygienePreview {
@@ -781,6 +955,9 @@ impl RuntimeService {
         })
     }
 
+    /// # Errors
+    ///
+    /// Errors if a store query fails.
     pub fn hygiene_archive(&self) -> Result<RuntimeHygieneArchive> {
         let preview = self.raw_hygiene_preview()?;
         let approval_ids = preview
@@ -813,6 +990,9 @@ impl RuntimeService {
         })
     }
 
+    /// # Errors
+    ///
+    /// Errors if no task has that id, or if a store query fails.
     pub fn task_detail(&self, id: &str) -> Result<RuntimeTaskDetail> {
         let task = self
             .store
@@ -878,6 +1058,9 @@ impl RuntimeService {
         })
     }
 
+    /// # Errors
+    ///
+    /// Errors if no approval has that id, or if a store query fails.
     pub fn approval_detail(&self, id: &str) -> Result<RuntimeApprovalDetail> {
         let approval = self
             .store
@@ -912,6 +1095,9 @@ impl RuntimeService {
         })
     }
 
+    /// # Errors
+    ///
+    /// Errors if no checkpoint has that id, or if a store query fails.
     pub fn checkpoint_detail(&self, id: &str) -> Result<RuntimeCheckpointDetail> {
         let checkpoint = self
             .store
@@ -941,30 +1127,51 @@ impl RuntimeService {
         })
     }
 
+    /// # Errors
+    ///
+    /// Errors if a store query fails.
     pub fn list_tasks(&self, limit: usize) -> Result<Vec<TaskRecord>> {
         self.store.tasks().list(limit)
     }
 
+    /// # Errors
+    ///
+    /// Errors if a store query fails.
     pub fn list_processes(&self, limit: usize) -> Result<Vec<ProcessRecord>> {
         self.store.processes().list(limit)
     }
 
+    /// # Errors
+    ///
+    /// Errors if a store query fails.
     pub fn list_approvals(&self) -> Result<Vec<ApprovalRecord>> {
         self.store.approvals().list_pending()
     }
 
+    /// # Errors
+    ///
+    /// Errors if a store query fails.
     pub fn list_tool_runs(&self, limit: usize) -> Result<Vec<ToolRunRecord>> {
         self.store.tool_runs().list(limit)
     }
 
+    /// # Errors
+    ///
+    /// Errors if a store query fails.
     pub fn list_checkpoints(&self, limit: usize) -> Result<Vec<CheckpointRecord>> {
         self.store.checkpoints().list(limit)
     }
 
+    /// # Errors
+    ///
+    /// Errors if a store query fails.
     pub fn list_plugins(&self) -> Result<Vec<PluginInstallRecord>> {
         self.store.plugins().list()
     }
 
+    /// # Errors
+    ///
+    /// Errors if no record has that id, or if a store query fails.
     pub fn process_log(&self, id: &str, tail_bytes: Option<u64>) -> Result<RuntimeProcessLog> {
         let process = self
             .store
@@ -998,6 +1205,9 @@ impl RuntimeService {
         })
     }
 
+    /// # Errors
+    ///
+    /// Errors if no record has that id, or if a store query fails.
     pub fn stop_process(&self, id: &str) -> Result<ProcessRecord> {
         let process = self
             .store
@@ -1023,6 +1233,9 @@ impl RuntimeService {
         })
     }
 
+    /// # Errors
+    ///
+    /// Errors if no record has that id, or if a store query fails.
     pub fn restart_process(&self, id: &str) -> Result<ProcessRecord> {
         let process = self
             .store
@@ -1091,6 +1304,9 @@ impl RuntimeService {
         })
     }
 
+    /// # Errors
+    ///
+    /// Errors if no record has that id, or if a store query fails.
     pub fn open_process(&self, id: &str) -> Result<RuntimeProcessOpen> {
         let process = self
             .store
@@ -1106,6 +1322,9 @@ impl RuntimeService {
         Ok(RuntimeProcessOpen { ok: true, target })
     }
 
+    /// # Errors
+    ///
+    /// Errors if a store query fails.
     pub fn resolve_open_target(&self, target: &str) -> Result<String> {
         if let Some(process) = self.store.processes().get(target)?
             && let Some(target) = process.detected_url.or(process.log_path)
@@ -1115,6 +1334,9 @@ impl RuntimeService {
         Ok(target.to_string())
     }
 
+    /// # Errors
+    ///
+    /// Errors if a store query fails.
     pub fn ports(&self) -> Result<RuntimePorts> {
         let output = if cfg!(windows) {
             Command::new("netstat").arg("-ano").output()?
@@ -1130,12 +1352,18 @@ impl RuntimeService {
         })
     }
 
+    /// # Errors
+    ///
+    /// Errors if a store query fails.
     pub fn set_plugin_enabled(&self, id: &str, enabled: bool) -> Result<()> {
         self.store.plugins().set_enabled(id, enabled)?;
         mermaid_runtime::write_plugin_lockfile()?;
         Ok(())
     }
 
+    /// # Errors
+    ///
+    /// Errors if a store query fails.
     pub fn set_safety_mode(&self, mode: &str) -> Result<mermaid_domain::SafetyConfig> {
         let parsed = mermaid_runtime::SafetyMode::parse(mode)
             .ok_or_else(|| anyhow::anyhow!("unknown safety mode: {mode}"))?;
@@ -1199,6 +1427,9 @@ impl RuntimeService {
         })
     }
 
+    /// # Errors
+    ///
+    /// Errors if a store query fails.
     pub fn approval_decision(result: ApprovalReplayResult) -> Result<RuntimeApprovalDecision> {
         Ok(RuntimeApprovalDecision {
             ok: true,
