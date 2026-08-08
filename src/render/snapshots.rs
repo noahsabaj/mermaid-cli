@@ -4,10 +4,11 @@
 //! instead of slipping past the substring assertions in `tests`.
 //!
 //! Determinism: every input the frame can observe is pinned — the injected
-//! clock (`fixed_now`, a PAST date so user timestamps take the absolute-date
-//! branch regardless of when the suite runs), the `RenderCache` host/user
-//! strings, busy-turn start times (derived from the fixture clock), and the
-//! cwd (a literal, so it prints the same on Windows).
+//! clock (`fixed_now`, which now also decides the day-relative timestamp
+//! branch, since the widget derives `today` from it rather than from the
+//! wall clock), the `RenderCache` host/user strings, busy-turn start times
+//! (derived from the fixture clock), and the cwd (a literal, so it prints the
+//! same on Windows).
 //! `determinism_same_scene_twice` guards the harness itself: if a residual
 //! env or clock read sneaks into `render()`, it fails here before the pinned
 //! snapshots start flaking across machines.
@@ -42,9 +43,7 @@ use mermaid_model::models::{ChatMessage, ChatMessageKind};
 /// roomy modern terminal (exercises wrapping and layout at both extremes).
 const SIZES: [(u16, u16); 2] = [(80, 24), (120, 40)];
 
-/// Fixture clock: a fixed PAST *local wall clock* (relative-timestamp rendering
-/// falls through to the absolute-date branch, immune to the live "Today"
-/// boundary).
+/// Fixture clock: a fixed *local wall clock*.
 ///
 /// Local, not a fixed instant: the frame prints this through
 /// `format_relative_timestamp`, which formats in local time. A fixed instant
@@ -52,6 +51,18 @@ const SIZES: [(u16, u16); 2] = [(80, 24), (120, 40)];
 /// clock renders the same one everywhere, which is what lets the same `.snap`
 /// files serve every platform (#296). Scene-relative times are all derived by
 /// subtracting from this, so their differences stay invariant too.
+///
+/// It used to matter that this date was in the PAST: `format_relative_timestamp`
+/// read `Local::now()` internally, so a fixture date near today would have
+/// flipped scenes between "Today at ..." and an absolute date depending on the
+/// day the suite ran, and the fixed past date was what forced every user
+/// timestamp down the stable absolute-date branch.
+///
+/// That is no longer why it works. The formatter takes `today` as an argument
+/// and the widget derives it from `state.now` — this same fixture — so the
+/// branch is now pinned by construction and scenes render "Today at ...". The
+/// date being in the past is now merely conventional; any fixed date would be
+/// equally stable.
 fn fixed_now() -> chrono::DateTime<chrono::Local> {
     use chrono::TimeZone;
     // `earliest` rather than `single`: a DST fold would make this ambiguous.
@@ -570,8 +581,15 @@ fn determinism_same_scene_twice() {
 /// UTC, not because the pinning worked.
 #[test]
 fn fixture_clock_reads_the_pinned_wall_clock() {
+    // A date deliberately far from the fixture's, NOT `fixed_now().date_naive()`.
+    // This assertion exists to pin the rendered date and time, and the
+    // day-relative branches print neither: passing the fixture's own date would
+    // render "Today at 3:04am", and a `fixed_now()` that drifted across midnight
+    // would drag `today` with it and still say "Today". Forcing the
+    // absolute-date branch is what keeps the string diagnostic.
+    let far_future = chrono::NaiveDate::from_ymd_opt(2026, 3, 21).expect("real date");
     assert_eq!(
-        mermaid_model::utils::format_relative_timestamp(fixed_now()),
+        mermaid_model::utils::format_relative_timestamp(fixed_now(), far_future),
         "January 2nd, 2026 at 3:04am",
         "the fixture clock must be a fixed LOCAL wall clock, not a fixed instant"
     );

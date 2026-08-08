@@ -1,9 +1,8 @@
 ---
 source: src/render/snapshots.rs
-assertion_line: 67
 expression: frame
 ---
- > run tests and audit in parallel                                                          January 2nd, 2026 at 3:04am 
+ > run tests and audit in parallel                                                                      Today at 3:04am 
                                                                                                                         
  ● Bash(cargo test)                                                                                                     
                                                                                                                         
