@@ -15,10 +15,12 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 
-use crate::domain::{
+use mermaid_model::question::{
     OptionPreview, Question, QuestionAnswer, QuestionKind, QuestionOption, QuestionResolution,
-    TextValidate, ToolDefinition, ToolMetadata, ToolOutcome, ToolRunMetadata,
+    TextValidate,
 };
+
+use crate::domain::{ToolDefinition, ToolMetadata, ToolOutcome, ToolRunMetadata};
 
 use super::super::ctx::ExecContext;
 use super::ToolExecutor;

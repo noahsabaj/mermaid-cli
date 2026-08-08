@@ -903,10 +903,11 @@ fn tick_never_mutates_visible_state() {
 // seeding a pending question set directly (the broker/effect round-trip is
 // unit-tested separately in `providers::questions`).
 
-use mermaid_cli::domain::{
-    Key, KeyCode, KeyMods, PendingQuestionSet, Question, QuestionKind, QuestionOption,
-    QuestionResolution, TextValidate,
+use mermaid_model::question::{
+    PendingQuestionSet, Question, QuestionKind, QuestionOption, QuestionResolution, TextValidate,
 };
+
+use mermaid_cli::domain::{Key, KeyCode, KeyMods};
 
 fn opt(label: &str) -> QuestionOption {
     QuestionOption {

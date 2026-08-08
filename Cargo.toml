@@ -65,7 +65,6 @@ warnings = "deny"
 [dependencies]
 # Async runtime. 1.44 closes RUSTSEC-2025-0023 (broadcast channel unsoundness).
 tokio = { version = "1.44", features = ["full"] }
-tokio-stream = "0.1"
 # `CancellationToken` for per-turn structured concurrency in
 # `src/effect/`. The v0.7 architecture uses one token per `TurnScope`
 # so cancelling a turn aborts every child task at its next await —
@@ -98,7 +97,6 @@ anyhow = "1.0"
 thiserror = "2.0"
 async-trait = "0.1"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 chrono = { version = "0.4", features = ["serde"] }
 directories = "6.0"
 which = "8.0"  # Find executables
@@ -120,7 +118,6 @@ rpassword = "7.4.0"
 unicode-width = "0.2"
 unicode-normalization = "0.1.25"
 caseless = "0.2.2"
-sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
 # Native `web_fetch`: readability extraction + HTML-to-markdown, so a URL fetch
 # runs in-process without Ollama Cloud.
 dom_smoothie = "0.18.0"

@@ -41,11 +41,10 @@ pub use checkpoint::{
     create_checkpoint_for_task, gc_old_checkpoint_dirs, restore_checkpoint,
 };
 pub use daemon::{
-    DEFAULT_PAIRING_TTL_DAYS, clamp_pairing_ttl_days, daemon_socket_path, generate_pairing_token,
-    hash_pairing_token, pairing_expiry_from_now, request_daemon_json, request_daemon_text,
-    subscribe_daemon_lines,
+    DEFAULT_PAIRING_TTL_DAYS, clamp_pairing_ttl_days, generate_pairing_token, hash_pairing_token,
+    pairing_expiry_from_now, request_daemon_json, request_daemon_text, subscribe_daemon_lines,
 };
-pub use git::{GitCommand, is_work_tree};
+
 pub use pathguard::{
     OpenIntent, create_dir_all_beneath, open_beneath, remove_file_beneath, write_atomic_beneath,
 };
@@ -64,16 +63,12 @@ pub use sandbox::{
     Enforcement, SandboxPolicy, enforce, fs_confinement_available, network_killswitch_available,
 };
 pub use storage::{
-    ApprovalRecord, ApprovalsRepo, CheckpointRecord, CheckpointsRepo, CompactionRecord,
-    CompactionsRepo, MessageRecord, MessagesRepo, NewApproval, NewCheckpoint, NewCompaction,
-    NewMessage, NewOutcome, NewPluginInstall, NewProcess, NewProviderProbe, NewSession, NewTask,
-    NewToolRun, OUTCOME_LABEL_ACCEPTED, OUTCOME_LABEL_FAILURE, OUTCOME_LABEL_PARTIAL,
-    OUTCOME_LABEL_REJECTED, OUTCOME_LABEL_SUCCESS, OUTCOME_LABEL_UNKNOWN, OUTCOME_SOURCE_MODEL,
-    OUTCOME_SOURCE_SYSTEM, OUTCOME_SOURCE_USER, OUTCOME_SOURCE_VERIFIER, OutcomeRecord,
-    OutcomesRepo, PairingTokenRecord, PairingTokensRepo, PluginInstallRecord, PluginsRepo,
-    ProcessRecord, ProcessStatus, ProcessesRepo, ProviderProbeRecord, ProviderProbesRepo,
-    RuntimeStore, SessionRecord, SessionsRepo, TaskPriority, TaskRecord, TaskStatus,
-    TaskTimelineEvent, TasksRepo, ToolRunRecord, ToolRunsRepo, data_dir,
+    ApprovalRecord, CheckpointRecord, CompactionRecord, MessageRecord, NewApproval, NewCheckpoint,
+    NewCompaction, NewOutcome, NewPluginInstall, NewProcess, NewProviderProbe, NewTask, NewToolRun,
+    OUTCOME_LABEL_FAILURE, OUTCOME_LABEL_SUCCESS, OUTCOME_LABEL_UNKNOWN, OUTCOME_SOURCE_SYSTEM,
+    PairingTokenRecord, PluginInstallRecord, ProcessRecord, ProcessStatus, ProviderProbeRecord,
+    RuntimeStore, SessionRecord, TaskPriority, TaskRecord, TaskStatus, TaskTimelineEvent,
+    ToolRunRecord, data_dir,
 };
 pub use worktree::{AgentWorktree, MergeOutcome, gc_orphaned_worktrees};
 // Unix-only: backs the `#[cfg(unix)]` daemon singleton via `flock`.

@@ -76,4 +76,3 @@ dbus-secret-service = { version = "4", features = ["vendored"] }
 
 [dev-dependencies]
 temp-env = "0.3"
-tempfile = "3.24"

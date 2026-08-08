@@ -15,9 +15,9 @@ use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 use unicode_width::UnicodeWidthStr;
 
 use super::truncate_to_cells;
-use crate::domain::{OptionPreview, PendingQuestionSet, Question, QuestionSelection};
 use crate::render::theme::Theme;
 use crate::render::widgets::chat::wrap_styled_line;
+use mermaid_model::question::{OptionPreview, PendingQuestionSet, Question, QuestionSelection};
 
 pub struct QuestionModalWidget<'a> {
     pub theme: &'a Theme,

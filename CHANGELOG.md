@@ -83,6 +83,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   single unhandled `Msg` would slip past it. Function-scoped, so the 96
   legitimate `_ =>` arms on `KeyCode` and friends elsewhere are unaffected.
 
+- **The re-export shims are gone.** AGENTS.md bans back-compat shims; the two
+  largest covered ~1,046 call sites against 2 that named a crate directly. That
+  ratio is now 0 to 1,059. `crate::models::` read as a local module, so nothing
+  in a diff showed `src/domain` reaching across a crate boundary — the exact
+  property the crate split exists to make visible.
+
+  Deleted: `src/lib.rs`'s re-exports (including
+  `pub use app::{Config, load_config, persist_last_model}`, which had zero
+  consumers), `pub use mermaid_runtime::*`, the three 100%-shim files
+  `src/domain/{action,ids,question}.rs`, the embedded `tool_run` re-export in
+  `src/domain/runtime.rs`, `src/effect`'s re-export of `models::retry` (which
+  no consumer could reach), and `crates/mermaid-model/src/utils/redact.rs`.
+  Plus 34 dead `pub use` names and 4 unused dependencies (`sysinfo`,
+  `tokio-stream`, `tracing-subscriber`, `tempfile`).
+
+  `src/runtime/` is now `src/runtime_client/`. It is the daemon client and sits
+  *above* `mermaid-runtime`; sharing a name with the crate it wraps is what made
+  `crate::runtime::Foo` ambiguous.
+
 ### Fixed
 
 - **`cargo doc` accepted broken intra-doc links.** The CI step ran without
