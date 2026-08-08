@@ -5982,6 +5982,72 @@ mod tests {
         )
     }
 
+    /// The bug this replaced: provenance used to be stamped by
+    /// `app::stamp_session_provenance(&mut State, ..)` outside the reducer, so
+    /// `--replay` re-probed git live and wrote the replaying machine's branch
+    /// over the recording's. As a `Msg` it replays like everything else — and
+    /// the reducer only fills blanks, so a session loaded from disk keeps what
+    /// it was saved with.
+    #[test]
+    fn resolved_provenance_fills_blanks_and_never_overwrites() {
+        let probed = || crate::SessionProvenance {
+            git_branch: Some("replaying-machine".to_string()),
+            git_sha: Some("ffffffff".to_string()),
+            cli_version: Some("9.9.9".to_string()),
+        };
+
+        // A fresh session has none of the three; the probe supplies all.
+        let state = fresh_state();
+        assert_eq!(state.session.conversation.git_branch, None);
+        let (state, cmds) = update(state, Msg::SessionProvenanceResolved(probed()));
+        assert!(cmds.is_empty(), "stamping provenance is not an effect");
+        assert_eq!(
+            state.session.conversation.git_branch.as_deref(),
+            Some("replaying-machine")
+        );
+        assert_eq!(
+            state.session.conversation.git_sha.as_deref(),
+            Some("ffffffff")
+        );
+        assert_eq!(
+            state.session.conversation.cli_version.as_deref(),
+            Some("9.9.9")
+        );
+
+        // A resumed session already carries its own; the probe must not win.
+        let mut state = fresh_state();
+        state.session.conversation.git_branch = Some("recorded-branch".to_string());
+        state.session.conversation.git_sha = Some("a614aa9f".to_string());
+        state.session.conversation.cli_version = Some("0.21.1".to_string());
+        let (state, _) = update(state, Msg::SessionProvenanceResolved(probed()));
+        assert_eq!(
+            state.session.conversation.git_branch.as_deref(),
+            Some("recorded-branch")
+        );
+        assert_eq!(
+            state.session.conversation.git_sha.as_deref(),
+            Some("a614aa9f")
+        );
+        assert_eq!(
+            state.session.conversation.cli_version.as_deref(),
+            Some("0.21.1")
+        );
+
+        // Each field is independent — a detached HEAD records a SHA and no
+        // branch, and the blank must still fill.
+        let mut state = fresh_state();
+        state.session.conversation.git_sha = Some("a614aa9f".to_string());
+        let (state, _) = update(state, Msg::SessionProvenanceResolved(probed()));
+        assert_eq!(
+            state.session.conversation.git_branch.as_deref(),
+            Some("replaying-machine")
+        );
+        assert_eq!(
+            state.session.conversation.git_sha.as_deref(),
+            Some("a614aa9f")
+        );
+    }
+
     #[test]
     fn focus_changed_toggles_terminal_unfocused() {
         let state = fresh_state();
