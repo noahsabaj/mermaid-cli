@@ -619,6 +619,10 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             state.ui.queued_messages.clear();
             state.session.conversation = history;
             state.turn = TurnState::Idle;
+            // The abandoned run's summary counters die with it: a leaked
+            // `run_started` would otherwise let a later `finish_run` (quit)
+            // stamp the OLD run's summary into the conversation loaded here.
+            reset_run_counters(&mut state);
             state.ui.mode = UiMode::EditingInput;
             // The pause belonged to the previous conversation's failing
             // compaction; the loaded one starts fresh.
@@ -3661,6 +3665,10 @@ pub(crate) fn request_exit(state: &mut State, cmds: &mut Vec<Cmd>) {
     seal_orphaned_tool_calls(state);
     // The run is over — any live recovery nudge is spent; don't persist it.
     sweep_spent_nudges(state);
+    // Quitting mid-run still ends the run: the saved log records how long it
+    // worked and what it spent, after the interrupted partial above so the
+    // summary reads in order.
+    finish_run(state, cmds, RunEnd::Interrupted);
     cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
     cmds.push(Cmd::Exit);
 }
@@ -3703,6 +3711,9 @@ pub(crate) fn handle_confirm_accepted(state: &mut State, cmds: &mut Vec<Cmd>) {
             state.session.conversation.git_branch = git_branch;
             state.session.last_token_usage = None;
             state.session.cumulative_token_usage = TokenUsageTotals::default();
+            // Same rationale as `ConversationLoaded`: the cleared-away run's
+            // summary counters must not survive into the fresh conversation.
+            reset_run_counters(state);
             // A cleared conversation is not a conversation of unknown size — it
             // is a KNOWN, non-zero one: the system prompt and every advertised
             // tool schema still ride the next request, routinely tens of
@@ -4551,59 +4562,102 @@ pub(crate) fn handle_stream_done(
         return;
     }
 
-    // The run is fully done (no tool calls, not recovering). If it began with a
-    // user submit, emit a one-line "Worked for … · used … tokens" summary where
-    // the spinner was, then clear `run_started` so it fires exactly once per run.
-    // It's a display-only line — `build_chat_request` keeps it out of the model
-    // context.
-    if let Some(started) = state.runtime.run_started.take() {
-        let elapsed = std::time::SystemTime::from(state.now)
-            .duration_since(started)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let run_tokens = state.runtime.run_tokens;
-        let mut summary = format!(
-            "Worked for {} · used {}{} tokens",
-            super::transition::format_run_duration(elapsed),
-            if run_tokens.contains_estimate {
-                "~"
-            } else {
-                ""
-            },
-            format_compact_count(run_tokens.output_tokens),
-        );
-        // Total line changes across the run's file mutations, so the user
-        // doesn't have to sum each tool call's diff by hand. Omitted when the
-        // run changed nothing — a read-only run stays a two-part summary.
-        let changes = state.runtime.run_line_changes;
-        if !changes.is_empty() {
-            summary.push_str(&format!(" · +{}/-{}", changes.added, changes.removed));
-        }
-        // Checklist retirement: a fully-completed checklist's lifetime is the
-        // run's — the harness owns "the work is done" (models demonstrably
-        // don't clean up after themselves, and a zombie list re-renders on
-        // every later run and haunts saves). The summary line absorbs the
-        // count, so retirement reads as completion, not data loss. Fires only
-        // HERE — the natural-completion path — so a cancelled or errored run
-        // keeps its list, and lists with unfinished work always carry over.
-        let tasks = &state.session.conversation.tasks;
-        if tasks.all_done() {
-            let completed = tasks.visible().count();
-            summary.push_str(&format!(
-                " · {completed} task{} completed",
-                if completed == 1 { "" } else { "s" }
-            ));
-            state.session.conversation.tasks = crate::ChecklistStore::default();
-            cmds.push(Cmd::SyncTaskStore(crate::ChecklistStore::default()));
-        }
-        state
-            .session
-            .append(ChatMessage::run_summary(summary), state.now);
-        cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
-    }
+    // The run is fully done (no tool calls, not recovering). Emit the
+    // end-of-run summary where the spinner was.
+    finish_run(state, cmds, RunEnd::Completed);
 
     // No tool calls — turn ends here. Drain the queued-message FIFO.
     drain_next_queued_message(state);
+}
+
+/// Drop the current run's summary counters without emitting a summary. For
+/// the two paths that replace the conversation's identity out from under a
+/// run (`/clear`, loading another conversation): the abandoned run's summary
+/// belongs to a transcript that no longer exists in this session, so the
+/// counters must not survive to stamp it into the new one.
+pub(crate) fn reset_run_counters(state: &mut State) {
+    state.runtime.run_started = None;
+    state.runtime.run_tokens = super::runtime::RunTokenCounter::default();
+    state.runtime.run_line_changes = super::runtime::RunLineChanges::default();
+}
+
+/// How a run reached its end, for [`finish_run`]. Natural completion is the
+/// only shape that retires a fully-completed checklist — an interrupted run
+/// keeps its list so the next run carries the work forward — and an
+/// interrupted summary says so, because "Worked for 2m" alone reads as a
+/// finished job.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RunEnd {
+    Completed,
+    /// Errored, cancelled, or the session is exiting mid-run.
+    Interrupted,
+}
+
+/// End-of-run bookkeeping shared by EVERY way a run can end: the one-line
+/// "Worked for … · used … tokens" summary, line-change totals, and (on
+/// natural completion only) retirement of a fully-completed checklist.
+///
+/// Fires exactly once per run — `run_started` is taken here — and no-ops
+/// for turns that never began with a user submit (compaction turns,
+/// probes). Every terminal path calls this: normal completion, upstream
+/// error, cancellation, and quit-mid-run. A saved log with no summary
+/// previously meant "the run did not end normally" (observed in the field:
+/// 20260704_155044 has none at all) — which is exactly when the duration
+/// and spend matter most. It's a display-only line — `build_chat_request`
+/// keeps it out of the model context.
+pub(crate) fn finish_run(state: &mut State, cmds: &mut Vec<Cmd>, end: RunEnd) {
+    let Some(started) = state.runtime.run_started.take() else {
+        return;
+    };
+    let elapsed = std::time::SystemTime::from(state.now)
+        .duration_since(started)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let run_tokens = state.runtime.run_tokens;
+    let mut summary = format!(
+        "Worked for {} · used {}{} tokens",
+        super::transition::format_run_duration(elapsed),
+        if run_tokens.contains_estimate {
+            "~"
+        } else {
+            ""
+        },
+        format_compact_count(run_tokens.output_tokens),
+    );
+    // Total line changes across the run's file mutations, so the user
+    // doesn't have to sum each tool call's diff by hand. Omitted when the
+    // run changed nothing — a read-only run stays a two-part summary.
+    let changes = state.runtime.run_line_changes;
+    if !changes.is_empty() {
+        summary.push_str(&format!(" · +{}/-{}", changes.added, changes.removed));
+    }
+    match end {
+        RunEnd::Completed => {
+            // Checklist retirement: a fully-completed checklist's lifetime is
+            // the run's — the harness owns "the work is done" (models
+            // demonstrably don't clean up after themselves, and a zombie list
+            // re-renders on every later run and haunts saves). The summary
+            // line absorbs the count, so retirement reads as completion, not
+            // data loss. Fires only on natural completion — a cancelled or
+            // errored run keeps its list, and lists with unfinished work
+            // always carry over.
+            let tasks = &state.session.conversation.tasks;
+            if tasks.all_done() {
+                let completed = tasks.visible().count();
+                summary.push_str(&format!(
+                    " · {completed} task{} completed",
+                    if completed == 1 { "" } else { "s" }
+                ));
+                state.session.conversation.tasks = crate::ChecklistStore::default();
+                cmds.push(Cmd::SyncTaskStore(crate::ChecklistStore::default()));
+            }
+        },
+        RunEnd::Interrupted => summary.push_str(" · interrupted"),
+    }
+    state
+        .session
+        .append(ChatMessage::run_summary(summary), state.now);
+    cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
 }
 
 /// Handle `Msg::OpenImageAt`. Resolves the base64 payload from the committed
@@ -4672,6 +4726,9 @@ pub(crate) fn handle_turn_cancelled(state: &mut State, cmds: &mut Vec<Cmd>, turn
         TurnState::Cancelling { id, .. } if id == turn => {
             state.turn = TurnState::Idle;
             state.ui.live_tool_status.clear();
+            // The cancel ends the run: record how long it worked and what it
+            // spent before this point.
+            finish_run(state, cmds, RunEnd::Interrupted);
             // The cancelled turn abandoned whatever recovery its nudge was
             // steering — retire it so the hidden instruction can't leak into
             // the user's next, unrelated request.
@@ -4766,6 +4823,10 @@ pub(crate) fn handle_upstream_error(
         provider_continuation: None,
     };
     state.session.append(msg, state.now);
+
+    // The error ends the run: record how long it worked and what it spent —
+    // an errored run's log is exactly where those numbers matter.
+    finish_run(state, cmds, RunEnd::Interrupted);
 
     // A provider error ends the turn just like a normal completion — persist
     // the session too, so an errored headless run's emitted session id points
@@ -8426,6 +8487,162 @@ mod tests {
             2,
             "cancel is not completion; the checklist stays"
         );
+        // ...but the run still ended: its summary fires (marked interrupted),
+        // without the retirement note a natural completion would add.
+        let summary = state
+            .session
+            .messages()
+            .iter()
+            .find(|m| m.kind == mermaid_model::models::ChatMessageKind::RunSummary)
+            .expect("a cancelled run still records its summary");
+        assert!(
+            summary.content.contains("interrupted") && !summary.content.contains("completed"),
+            "{:?}",
+            summary.content
+        );
+    }
+
+    /// Every way a run ends leaves a summary in the saved log. The natural
+    /// path is pinned above; these are the abnormal ends the field logs
+    /// showed skipping it entirely (20260704_155044 has none at all —
+    /// precisely the runs whose duration and spend matter most).
+    #[test]
+    fn upstream_error_still_emits_an_interrupted_run_summary() {
+        let mut state = fresh_state();
+        state.runtime.run_started =
+            Some(std::time::SystemTime::from(state.now) - std::time::Duration::from_secs(72));
+        state.runtime.run_tokens.add_provider(1_500);
+        state.turn = start_generating(TurnId(5), std::time::SystemTime::now());
+        let err = mermaid_model::models::UserFacingError {
+            summary: "Server error".to_string(),
+            message: "500 internal".to_string(),
+            suggestion: "retry".to_string(),
+            category: mermaid_model::models::ErrorCategory::Temporary,
+            recoverable: true,
+        };
+        let (state, cmds) = update(
+            state,
+            Msg::UpstreamError {
+                turn: TurnId(5),
+                error: err,
+            },
+        );
+        let summary = state
+            .session
+            .messages()
+            .iter()
+            .find(|m| m.kind == mermaid_model::models::ChatMessageKind::RunSummary)
+            .expect("an errored run still records its summary");
+        assert!(
+            summary.content.contains("Worked for 1m 12s"),
+            "{:?}",
+            summary.content
+        );
+        // Provider-reported totals carry into the summary unmarked — the
+        // `~` taint is reserved for estimator-filled gaps (the matched pair
+        // is `run_end_appends_a_display_only_summary_once`, whose usage-less
+        // final phase must show `used ~`).
+        assert!(
+            summary.content.contains("used 1.5k tokens") && !summary.content.contains('~'),
+            "{:?}",
+            summary.content
+        );
+        assert!(
+            summary.content.contains("interrupted"),
+            "{:?}",
+            summary.content
+        );
+        assert!(
+            state.runtime.run_started.is_none(),
+            "the summary fires exactly once per run"
+        );
+        assert!(cmds.iter().any(|c| matches!(c, Cmd::SaveConversation(_))));
+        // Transcript order: the error line first, then the run's summary.
+        assert_eq!(state.session.messages().len(), 2);
+        assert_eq!(
+            state.session.messages()[1].kind,
+            mermaid_model::models::ChatMessageKind::RunSummary
+        );
+    }
+
+    #[test]
+    fn cancelling_emits_the_summary_only_when_the_turn_actually_ends() {
+        let mut state = fresh_state();
+        state.runtime.run_started = Some(std::time::SystemTime::from(state.now));
+        state.turn = start_generating(TurnId(5), std::time::SystemTime::now());
+        let (state, _) = update(state, Msg::CancelTurn);
+        assert!(
+            !state
+                .session
+                .messages()
+                .iter()
+                .any(|m| m.kind == mermaid_model::models::ChatMessageKind::RunSummary),
+            "no summary while Cancelling — the run has not ended yet"
+        );
+        let (state, _) = update(state, Msg::TurnCancelled(TurnId(5)));
+        assert!(
+            state
+                .session
+                .messages()
+                .iter()
+                .any(|m| m.kind == mermaid_model::models::ChatMessageKind::RunSummary),
+            "the terminal TurnCancelled ends the run and records its summary"
+        );
+        assert!(state.runtime.run_started.is_none());
+    }
+
+    #[test]
+    fn quitting_mid_run_records_the_summary_in_the_final_save() {
+        let mut state = fresh_state();
+        state.runtime.run_started = Some(std::time::SystemTime::from(state.now));
+        state.turn = start_generating(TurnId(5), std::time::SystemTime::now());
+        let mut cmds = Vec::new();
+        super::request_exit(&mut state, &mut cmds);
+        assert!(
+            state.session.messages().iter().any(|m| m.kind
+                == mermaid_model::models::ChatMessageKind::RunSummary
+                && m.content.contains("interrupted")),
+            "quit mid-run still records the run summary"
+        );
+        // The final save's snapshot — what `--continue` reloads — carries it.
+        let last_save = cmds
+            .iter()
+            .rev()
+            .find_map(|c| match c {
+                Cmd::SaveConversation(snapshot) => Some(snapshot),
+                _ => None,
+            })
+            .expect("exit saves the conversation");
+        assert!(
+            last_save
+                .messages()
+                .iter()
+                .any(|m| m.kind == mermaid_model::models::ChatMessageKind::RunSummary),
+        );
+        assert!(cmds.iter().any(|c| matches!(c, Cmd::Exit)));
+    }
+
+    /// Matched pair for the counter reset: a run abandoned by loading another
+    /// conversation belongs to the OLD transcript — quitting afterwards must
+    /// not stamp its summary into the newly loaded one.
+    #[test]
+    fn switching_conversations_drops_the_abandoned_runs_summary() {
+        let mut state = fresh_state();
+        state.runtime.run_started = Some(std::time::SystemTime::from(state.now));
+        state.runtime.run_tokens.add_provider(500);
+        state.turn = start_generating(TurnId(5), std::time::SystemTime::now());
+        let history = fresh_state().session.conversation.clone();
+        let (mut state, _) = update(state, Msg::ConversationLoaded(history));
+        let mut cmds = Vec::new();
+        super::request_exit(&mut state, &mut cmds);
+        assert!(
+            !state
+                .session
+                .messages()
+                .iter()
+                .any(|m| m.kind == mermaid_model::models::ChatMessageKind::RunSummary),
+            "the abandoned run's summary must not land in the loaded conversation"
+        );
     }
 
     /// Resume normalization: a save carrying an all-done checklist (written
@@ -8511,6 +8728,11 @@ mod tests {
             summary.content.contains("used ~"),
             "a usage-less final phase falls back to a chars/4 estimate and \
              must mark the total `~`, got {:?}",
+            summary.content
+        );
+        assert!(
+            !summary.content.contains("interrupted"),
+            "a naturally-completed run is not interrupted: {:?}",
             summary.content
         );
     }
