@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-08-08
+
 ### Changed
 
 - **`clippy::missing_errors_doc` is at zero: the remaining 153 got real
@@ -254,6 +256,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   clock read inlined, "Yesterday" and the absolute date were unreachable from a
   test on any given day.
 
+- **`/web` fetch and search retry on the same ladder the model adapters use,
+  and a search in backoff is now cancellable.** Two retry implementations
+  existed; `web_client` was the last consumer of the weaker one, and it wrapped
+  the wrong scope. `acquire_download_permits`, the status check, the capped
+  body read, the redaction and the JSON parse all sat inside the retry closure,
+  so a malformed response cost three attempts and every attempt re-acquired the
+  download permits — a resource pattern nobody designed.
+
+  Both sites hoist those five steps out and retry only `.send()`, which is the
+  shape all four model adapters already had. What a user sees: a 429 now honors
+  `Retry-After` and backs off on the rate-limit ladder `[2000, 5000]`; Esc
+  interrupts a `/web` search that is sleeping between attempts, which was
+  previously uninterruptible; fetch moves from 200 ms / 2 attempts to
+  500 ms / 3; and a parse failure is terminal instead of retried three times.
+
+  `web_error_is_retryable` is deleted rather than kept beside its replacement.
+  The audit is what justified that: it retried exactly 429 + 5xx +
+  timeout/connect, which is what `models::retry::classify` already decides. Its
+  test went with it — a duplicate assertion of a duplicate rule.
+  `utils/retry.rs` drops from 233 lines to `jitter` alone.
+
 - **`clippy::doc_markdown` paid off, and `.clippy.toml` now tells it which
   words are prose.** It was the single largest entry in `clippy_pedantic.txt`
   at 345 occurrences — a quarter of the tracked debt, and the cheapest quarter,
@@ -408,6 +431,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   single unhandled `Msg` would slip past it. Function-scoped, so the 96
   legitimate `_ =>` arms on `KeyCode` and friends elsewhere are unaffected.
 
+- **`mermaid-domain`: the pure core is now a crate, and the compiler enforces
+  it.** Same play as `mermaid-model` in v0.21.0, applied to the layer above.
+  `src/domain` had spent this release losing its 34 upward edges one type at a
+  time; a fourth crate makes them unrepresentable rather than merely absent.
+  The workspace reads
+  `mermaid-runtime <- mermaid-model <- mermaid-domain <- mermaid-cli`, and all
+  four publish to crates.io in that order because a published crate cannot
+  depend on an unpublished path dependency.
+
+  Verified by matched pair rather than asserted, and the first attempt proved
+  nothing — a probe inserted above the `//!` module doc gives a syntax error,
+  which is not the fence firing. Placed correctly, `use crate::app::Config;`
+  is `E0432 unresolved import` and `use tokio::sync::mpsc;` is `E0433 cannot
+  find crate`. The second one is the part worth noticing: what is *absent* from
+  `crates/mermaid-domain/Cargo.toml` is now enforcement. No `tokio`, `reqwest`,
+  `rusqlite`, `directories`, `crossterm` or `clap`, so four of the layering
+  guard's forbidden patterns became manifest-enforced and the script is left
+  owning only `std::fs`, `std::process`, `std::net` and the wall clock — the
+  properties no manifest can express.
+
+  The orphan rule forced a distinction that had been optional. Five inherent
+  impls in `mermaid-cli` were written for domain-owned types; four
+  (`LoadedInstructions::approx_tokens`, `MemoryScope::as_str`,
+  `LoadedMemory::approx_tokens`, `SkillSource::label`) are pure value methods
+  and moved down with their types, while `SessionFlags::apply` needs the merge
+  helpers and became a free `session_flags_table()` in `app`.
+
+  The win to measure is not build time. `cargo test -p mermaid-domain` runs 497
+  reducer, state, compaction and transition tests in 11 seconds without
+  building `providers` (26,755 lines), `effect` (4,753) or `render`
+  (11,395) — the inner loop for the code that changes most.
+
+  The name was confirmed unclaimed on crates.io before the crate was written.
+  `mermaid-core` was the earlier attempt at this and discovered the name was
+  taken at `cargo publish`, after the rename cost was already paid.
+
 - **The re-export shims are gone.** AGENTS.md bans back-compat shims; the two
   largest covered ~1,046 call sites against 2 that named a crate directly. That
   ratio is now 0 to 1,059. `crate::models::` read as a local module, so nothing
@@ -547,6 +606,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   have the column. `every_supported_older_version_upgrades_to_current` now
   covers the whole accepted range and strips each database back to the *shape*
   that version really had rather than only rolling `user_version` back.
+
+- **`--replay` stamped the replaying machine's git branch over the
+  recording's.** `app::stamp_session_provenance(&mut State, cwd)` reached into
+  the reducer's state from outside it, contradicting `state.rs`'s own opening
+  rule that mutation happens only inside `update(state, msg)`. The layering was
+  the visible half; the bug was the other one. Because the stamp was an
+  out-of-band mutation, not a recorded `Msg`, a replay re-ran the two `git`
+  probes live and wrote the *current* branch and SHA over the values the
+  recording captured — so replaying a session recorded on another branch
+  silently rewrote its provenance.
+
+  `session::probe_session_provenance(cwd) -> SessionProvenance` is a value the
+  shell resolves once at startup and delivers as
+  `Msg::SessionProvenanceResolved`. Being a `Msg`, it is recorded and replayed
+  like everything else, and the reducer owns the fill-blanks-only rule, so a
+  resumed session still keeps what it was saved with.
+  `every_msg_kind_has_a_round_trip_sample` caught the missing sample at
+  once — a `Msg` variant without one is a variant `--replay` would drop.
 
 - **`cargo doc` accepted broken intra-doc links.** The CI step ran without
   `-D warnings`, so rustdoc printed unresolved links and exited 0. Twenty had
@@ -3974,7 +4051,11 @@ MERMAID.md project instructions, MCP spec bump, and a security update.
 - rustfmt and clippy configuration
 - Docker compose setup for LiteLLM proxy
 
-[Unreleased]: https://github.com/noahsabaj/mermaid-cli/compare/v0.19.1...HEAD
+[Unreleased]: https://github.com/noahsabaj/mermaid-cli/compare/v0.22.0...HEAD
+[0.22.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.21.1...v0.22.0
+[0.21.1]: https://github.com/noahsabaj/mermaid-cli/compare/v0.21.0...v0.21.1
+[0.21.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.20.0...v0.21.0
+[0.20.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.19.1...v0.20.0
 [0.19.1]: https://github.com/noahsabaj/mermaid-cli/compare/v0.19.0...v0.19.1
 [0.19.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.17.0...v0.18.0
