@@ -508,8 +508,15 @@ fn wrap_assistant_content(
 /// `std::fmt::Write` shim that streams a value's formatted bytes straight into
 /// a hasher, so a `Debug`/`Display` value can be folded into a fingerprint
 /// without allocating an intermediate `String`.
+///
+/// Gated to match `frame_fingerprint`, its only constructor. Without the gate
+/// a `--release` build strips the consumer and leaves the struct dead, which
+/// `[lints.rust] warnings = "deny"` turns into a build failure — one that no
+/// debug-profile job can see.
+#[cfg(debug_assertions)]
 struct HashWrite<'a, H: Hasher>(&'a mut H);
 
+#[cfg(debug_assertions)]
 impl<H: Hasher> std::fmt::Write for HashWrite<'_, H> {
     fn write_str(&mut self, s: &str) -> std::fmt::Result {
         self.0.write(s.as_bytes());

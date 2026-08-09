@@ -288,6 +288,39 @@ jobs:
             echo "::endgroup::"
           done
 
+  # The root crate must compile in `--release`, which is a different set of
+  # source files than any other job compiles.
+  #
+  # `[lints.rust] warnings = "deny"` applies to both profiles, but every other
+  # job builds debug: `clippy --all-targets`, `nextest`, and the standalone
+  # crate builds above. So `#[cfg(debug_assertions)]` items exist everywhere CI
+  # looks, and anything whose only consumer is one of them reads as live code.
+  # In `--release` the consumer is stripped and the item becomes `dead_code`,
+  # which `deny` turns into a build failure.
+  #
+  # That is not hypothetical: v0.22.0 was tagged with `HashWrite` in
+  # `render/widgets/chat.rs` constructed only by a `#[cfg(debug_assertions)]`
+  # fingerprint helper. Every check on the PR and on `main` was green, and all
+  # five platform builds then failed on the tag — after the version bump had
+  # already merged. Nothing published, because the release job depends on the
+  # builds, but the tag had to be moved.
+  #
+  # `--release` and not `--profile release --all-targets`: this mirrors what
+  # `release.yml` actually runs for the shipped binaries.
+  release-build:
+    name: Release Build (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: release-build
+      - name: Build the workspace in release
+        run: cargo build --workspace --release
+
   # Dependency-free source guards: no emoji in user-facing output; the pure
   # `src/domain` / `src/render` / `src/prompts.rs` layers only reach downward
   # and stay free of I/O and the wall clock.
