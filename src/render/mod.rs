@@ -26,7 +26,6 @@ use ratatui::{
     text::{Line, Span},
 };
 use rustc_hash::FxHashMap;
-use unicode_width::UnicodeWidthChar;
 
 use mermaid_domain::{State, TurnState};
 use mermaid_model::models::{ReasoningCapability, ReasoningLevel, nearest_effort};
@@ -170,23 +169,21 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
     let question_modal_open = question_item.is_some();
 
     // Input height: content-aware, respecting CJK/emoji widths.
-    let terminal_width = frame.area().width.saturating_sub(4) as usize;
-    let input_lines = if state.ui.input_buffer.is_empty() {
-        1
-    } else {
-        let mut lines = 1usize;
-        let mut col = 0usize;
-        for ch in state.ui.input_buffer.chars() {
-            let w = ch.width().unwrap_or(0);
-            if ch == '\n' || col >= terminal_width {
-                lines += 1;
-                col = if ch == '\n' { 0 } else { w };
-            } else {
-                col += w;
-            }
-        }
-        lines.min(5)
-    };
+    //
+    // Must come from the same layout the widget and the caret use. This once
+    // counted cells to the hard edge in a loop of its own, which ignored that
+    // the layout breaks on whitespace and so starts a row sooner — every input
+    // whose last word wrapped got a box one row too short, clipping that line
+    // and stranding the caret on a row the box did not have.
+    //
+    // The input box spans the full frame width, so `frame.area().width` is the
+    // box width here; the layout has not been split yet, since this height is
+    // one of its inputs.
+    let input_lines = widgets::rendered_row_count(
+        &state.ui.input_buffer,
+        frame.area().width.saturating_sub(2) as usize,
+    )
+    .min(5);
     let input_height = if question_modal_open {
         0
     } else {
@@ -1850,5 +1847,78 @@ mod tests {
             GenerationStatus::from_turn(&TurnState::Idle),
             GenerationStatus::Idle
         );
+    }
+
+    /// The caret must land on a text row of the input box, never on its
+    /// border, and the box must show every row of the wrapped input.
+    ///
+    /// This asserts against a real frame rather than against the row count,
+    /// because the shipped bug's symptom lived in the frame: the box drew one
+    /// row short, the last line was clipped, and the caret was placed on the
+    /// bottom border. A row-count unit test alone would not have said that.
+    ///
+    /// Swept across widths and every prefix, since the failure window between
+    /// a word wrapping and a cell count catching up is only a character or two
+    /// wide.
+    #[test]
+    fn the_caret_lands_inside_the_input_box_and_no_row_is_clipped() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let text = "Create a language that. Your goal is up to you.";
+        for width in [24u16, 30, 40, 55] {
+            for n in 0..=text.len() {
+                if !text.is_char_boundary(n) {
+                    continue;
+                }
+                let prefix = &text[..n];
+                let mut state = mock_state();
+                state.ui.input_buffer = prefix.to_string();
+                state.ui.input_cursor = prefix.len();
+
+                let mut terminal = Terminal::new(TestBackend::new(width, 24)).expect("terminal");
+                let mut rstate = test_cache();
+                terminal
+                    .draw(|f| render(&state, &mut rstate, f))
+                    .expect("draw");
+                let cursor = terminal.get_cursor_position().expect("cursor");
+                let buf = terminal.backend().buffer().clone();
+
+                let row_at = |y: u16| {
+                    (0..buf.area.width)
+                        .map(|x| buf[(x, y)].symbol())
+                        .collect::<String>()
+                };
+                let caret_row = row_at(cursor.y);
+
+                // The border is drawn with box-drawing glyphs; a text row
+                // never is. Catches the caret being pushed onto either edge.
+                assert!(
+                    !caret_row.contains('─'),
+                    "caret on the box border at width {width}, prefix {prefix:?}\n\
+                     row {}: |{caret_row}|",
+                    cursor.y
+                );
+
+                // Nothing the widget wrapped may be missing from the frame.
+                let content_width = width.saturating_sub(2) as usize;
+                let rows = widgets::rendered_row_count(prefix, content_width);
+                assert!(
+                    rows <= 5,
+                    "fixture outgrew the 5-row cap at width {width}: {prefix:?}"
+                );
+                if let Some(last) = prefix.split_whitespace().next_back() {
+                    let frame: String = (0..buf.area.height)
+                        .map(row_at)
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    assert!(
+                        frame.contains(last),
+                        "last word {last:?} clipped at width {width}, \
+                         prefix {prefix:?}\n{frame}"
+                    );
+                }
+            }
+        }
     }
 }
