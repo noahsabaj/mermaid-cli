@@ -589,11 +589,17 @@ fn format_approval_body(request: &ActionRequest, classifier_reason: Option<&str>
     });
     let modal_detail = redacted_detail.as_ref().or(request.command.as_ref());
     let mut body = if let Some(cmd) = modal_detail {
-        // A `$ ` prefix reads as "shell command"; only use it for actual shell
-        // categories. Computer-use / MCP details (`type_text "…"`, `mcp s__t(…)`)
-        // render verbatim so the prompt isn't misleading (#30, #31).
+        // A prompt sigil reads as "shell command"; only use it for actual
+        // shell categories. Computer-use / MCP details (`type_text "…"`,
+        // `mcp s__t(…)`) render verbatim so the prompt isn't misleading
+        // (#30, #31). The sigil is the HOST shell's (`$ ` / `PS> `): telling
+        // the reader they are approving a POSIX command when PowerShell will
+        // run it is the same lie the `Bash(...)` transcript label told.
         match request.category {
-            C::Shell | C::Git | C::Process => format!("$ {cmd}"),
+            C::Shell | C::Git | C::Process => format!(
+                "{}{cmd}",
+                mermaid_runtime::HostShell::current().prompt_sigil()
+            ),
             _ => clip_preview(cmd),
         }
     } else if let Some(path) = &request.path {

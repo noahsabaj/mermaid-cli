@@ -362,6 +362,18 @@ impl HostShell {
             Self::PowerShell => "PowerShell",
         }
     }
+
+    /// Prompt sigil an approval modal puts in front of a command so it reads
+    /// as one. Dialect-specific for the same reason the label is: `$ ` in
+    /// front of `Get-ChildItem` tells the reader they are approving a POSIX
+    /// shell command, which is not what will run.
+    #[must_use]
+    pub const fn prompt_sigil(self) -> &'static str {
+        match self {
+            Self::Posix => "$ ",
+            Self::PowerShell => "PS> ",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
