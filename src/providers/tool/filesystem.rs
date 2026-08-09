@@ -536,6 +536,7 @@ impl ToolExecutor for WriteFileTool {
 fn extract_paths(args: &serde_json::Value) -> Result<Vec<String>, String> {
     // Accept both shapes: `{path: "x"}` and `{paths: ["x", "y"]}`.
     if let Some(p) = args.get("path").and_then(|v| v.as_str()) {
+        reject_web_url(p)?;
         return Ok(vec![p.to_string()]);
     }
     if let Some(arr) = args.get("paths").and_then(|v| v.as_array()) {
@@ -551,11 +552,32 @@ fn extract_paths(args: &serde_json::Value) -> Result<Vec<String>, String> {
             let Some(s) = v.as_str() else {
                 return Err("read_file 'paths' must be an array of strings".to_string());
             };
+            reject_web_url(s)?;
             out.push(s.to_string());
         }
         return Ok(out);
     }
     Err("read_file requires 'path' or 'paths'".to_string())
+}
+
+/// `read_file` reads the local filesystem, but models under a web-gated
+/// safety mode were observed pointing it at `https://` URLs and treating the
+/// result as a fetch — and the path-resolution error that came back said
+/// nothing about the actual mistake. Name the mistake and the right tool;
+/// whether `web_fetch` is available is then that tool's own story to tell.
+fn reject_web_url(path: &str) -> Result<(), String> {
+    let head: String = path
+        .trim_start()
+        .chars()
+        .take(8)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if head.starts_with("http://") || head.starts_with("https://") {
+        return Err(format!(
+            "read_file reads local files; '{path}' is a web URL — use web_fetch for URLs"
+        ));
+    }
+    Ok(())
 }
 
 /// Read-only carve-out for memory facts. Global and project-private memory
@@ -871,6 +893,33 @@ mod tests {
             .await;
         assert!(outcome.is_success(), "expected success: {outcome:?}");
         assert_eq!(outcome.output(), "hello");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn read_file_rejects_web_urls_with_a_web_fetch_hint() {
+        // Observed in the field: a model under a web-gated safety mode fed
+        // `read_file` an https:// URL and treated the reply as a fetch. The
+        // rejection must name the right tool — and a plain local read next to
+        // it must keep working (the guard cannot overmatch).
+        let dir = temp_root("read_url");
+        fs::write(dir.join("a.txt"), "hello").expect("write");
+        for args in [
+            serde_json::json!({"path": "https://learn.microsoft.com/clipboard"}),
+            serde_json::json!({"path": "HTTP://example.com/x"}),
+            serde_json::json!({"paths": ["a.txt", "https://example.com/x"]}),
+        ] {
+            let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), dir.clone());
+            let outcome = ReadFileTool.execute(args, ctx).await;
+            assert_eq!(outcome.status, mermaid_domain::ToolStatus::Error);
+            let msg = outcome.error_message().unwrap_or_default();
+            assert!(msg.contains("web_fetch"), "must name the right tool: {msg}");
+        }
+        let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), dir.clone());
+        let outcome = ReadFileTool
+            .execute(serde_json::json!({"path": "a.txt"}), ctx)
+            .await;
+        assert!(outcome.is_success(), "plain local reads must still work");
         let _ = fs::remove_dir_all(&dir);
     }
 

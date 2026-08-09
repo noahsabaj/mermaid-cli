@@ -93,7 +93,11 @@ pub(super) async fn dispatch_execute_tool(
         start_runtime_tool_run(task_id.as_deref(), turn, call_id, tool_key, &args).await;
 
     let Some(tool) = registry.get(tool_key) else {
-        let outcome = mermaid_domain::ToolOutcome::error(format!("unknown tool: {tool_key}"), 0.0);
+        // A deliberately-omitted tool answers with the reason it is absent
+        // (recorded at registry build time); only a name the registry never
+        // considered is a plain "unknown tool". The model sees the name it
+        // actually called, not the internal routing key.
+        let outcome = registry.unknown_tool_outcome(tool_key, &source.function.name);
         finish_runtime_tool_run(tool_run_id.as_deref(), &outcome);
         let _ = msg_tx
             .send(Msg::ToolFinished {
