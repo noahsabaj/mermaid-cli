@@ -1387,5 +1387,16 @@ mod tests {
         assert_eq!(classify("Get-Content x | Out-Null"), RiskClass::ReadOnly);
         assert_ne!(classify("Get-Content x > null.txt"), RiskClass::ReadOnly);
         assert_ne!(classify("Get-Content x > \"$null\""), RiskClass::ReadOnly);
+        // The unix discard spelling is the dangerous one, and it is worse
+        // than "a relative file": pwsh 7.6.4 resolves `2>/dev/null` to
+        // `Out-File` at `C:\dev\null` — DRIVE-ABSOLUTE, so it writes outside
+        // the project. The POSIX classifier rated all three `ReadOnly`.
+        for cmd in [
+            "Get-Content x 2>/dev/null",
+            "Get-Content x >/dev/null",
+            "Get-Content x &>/dev/null",
+        ] {
+            assert_ne!(classify(cmd), RiskClass::ReadOnly, "cmd: {cmd}");
+        }
     }
 }

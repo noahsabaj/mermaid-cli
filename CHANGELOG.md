@@ -56,7 +56,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     PowerShell syntax. Both now name the real interpreter.
   - The **plan-mode build carve-out** (`is_plan_safe_build_command`) parsed
     with the POSIX lexer, so `cargo test | select -First 40` refused while
-    `cargo test 2>/dev/null` — a real file write under PowerShell — passed.
+    `cargo test 2>/dev/null` passed. That redirect is not a discard under
+    PowerShell: it resolves to `Out-File` at `C:\dev\null` — drive-absolute,
+    so it writes *outside the project*, which the POSIX classifier rated
+    `ReadOnly` (verified against pwsh 7.6.4, not assumed).
   - The **plan-file shell-write carve-out** (`is_plan_file_only_write`) did
     too, so the plan denial's own advice ("a shell redirect writing ONLY
     that file also works") was false on Windows for backslash paths.
