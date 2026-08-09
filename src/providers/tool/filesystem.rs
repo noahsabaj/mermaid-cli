@@ -44,6 +44,90 @@ fn defn(name: &str, description: &str, input_schema: serde_json::Value) -> ToolD
 /// combined total; single-file reads are already bounded and unaffected.
 const MAX_READ_AGGREGATE_CHARS: usize = mermaid_model::constants::MAX_RESPONSE_CHARS;
 
+/// Entries kept for same-turn duplicate-read suppression, across all live
+/// scopes. Hashes only — never content — so the bound is about map hygiene,
+/// not memory pressure.
+const READ_DEDUP_CAP: usize = 128;
+
+/// One remembered read: which context read which path, in which turn, and
+/// the content hash that proves the repeat is byte-identical.
+struct ReadDedupEntry {
+    scope: String,
+    path: String,
+    turn: u64,
+    hash: [u8; 32],
+    line_count: usize,
+}
+
+/// Same-turn duplicate reads, process-global (mirrors `web.rs`'s snapshot
+/// store). The `20260806` field logs show the same file read up to 14 times
+/// per session at full length — sometimes twice within one turn, where the
+/// earlier result is by construction still in the model's request. Only
+/// that provably-safe window is deduped: across turns a re-read may be a
+/// legitimate refresh (post-edit, post-compaction). Equality is proven by
+/// content hash — not mtime, which lies on some drives — so a change made
+/// by ANY path (`write_file`, `apply_patch`, `execute_command`, the user's
+/// editor) yields full content again with no invalidation hooks to forget.
+static READ_DEDUP: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::VecDeque<ReadDedupEntry>>,
+> = std::sync::OnceLock::new();
+
+/// The identity a dedup entry belongs to. Session/task ids separate
+/// concurrent contexts (a subagent's context is not the parent's — each
+/// must receive its own full read); the workdir separates anonymous test
+/// harness contexts, which reuse small turn ids.
+fn read_dedup_scope(ctx: &ExecContext) -> String {
+    format!(
+        "{}|{}|{}",
+        ctx.session_id.as_deref().unwrap_or(""),
+        ctx.task_id.as_deref().unwrap_or(""),
+        ctx.workdir.display(),
+    )
+}
+
+/// Returns the short reuse note when `content` is byte-identical to what an
+/// earlier read of `path` already returned THIS turn; otherwise records the
+/// read and returns `None` (full content flows). The note names the line
+/// count and the recovery paths so the model is taught, not stonewalled.
+fn duplicate_read_note(ctx: &ExecContext, path: &str, content: &str) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let hash: [u8; 32] = Sha256::digest(content.as_bytes()).into();
+    let line_count = content.lines().count();
+    let scope = read_dedup_scope(ctx);
+    let mut store = READ_DEDUP
+        .get_or_init(|| std::sync::Mutex::new(std::collections::VecDeque::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(entry) = store
+        .iter_mut()
+        .find(|e| e.scope == scope && e.path == path)
+    {
+        let identical_this_turn = entry.turn == ctx.turn.0 && entry.hash == hash;
+        entry.turn = ctx.turn.0;
+        entry.hash = hash;
+        entry.line_count = line_count;
+        return identical_this_turn.then(|| {
+            format!(
+                "{path}: unchanged since your read earlier this turn — the full \
+                 content ({line_count} lines) is already in this turn's tool \
+                 results; reuse it. A read after the file changes, or in a later \
+                 turn, returns the full content again."
+            )
+        });
+    }
+    store.push_back(ReadDedupEntry {
+        scope,
+        path: path.to_string(),
+        turn: ctx.turn.0,
+        hash,
+        line_count,
+    });
+    if store.len() > READ_DEDUP_CAP {
+        store.pop_front();
+    }
+    None
+}
+
 /// `read_file` — read one or more files and return their contents
 /// joined with section markers.
 pub struct ReadFileTool;
@@ -101,6 +185,16 @@ impl ToolExecutor for ReadFileTool {
                 read = read_one(&roots, raw_path) => {
                     match read {
                         Ok((content, was_truncated)) => {
+                            // A byte-identical repeat of a read this same turn
+                            // collapses to a short reuse note — the earlier
+                            // result is still in the model's request. The note
+                            // is not a truncation: nothing was cut that isn't
+                            // already present in full.
+                            let (content, was_truncated) =
+                                match duplicate_read_note(&ctx, raw_path, &content) {
+                                    Some(note) => (note, false),
+                                    None => (content, was_truncated),
+                                };
                             any_truncated |= was_truncated;
                             if paths.len() > 1 {
                                 let _ = ctx.progress.send(ProgressEvent::Status(
@@ -920,6 +1014,78 @@ mod tests {
             .execute(serde_json::json!({"path": "a.txt"}), ctx)
             .await;
         assert!(outcome.is_success(), "plain local reads must still work");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn duplicate_same_turn_read_collapses_to_a_reuse_note() {
+        let dir = temp_root("read_dedup");
+        fs::write(dir.join("a.txt"), "line one\nline two").expect("write");
+
+        // First read: full content.
+        let (ctx, _rx) = test_exec_context(TurnId(9), ToolCallId(1), dir.clone());
+        let outcome = ReadFileTool
+            .execute(serde_json::json!({"path": "a.txt"}), ctx)
+            .await;
+        assert_eq!(outcome.output(), "line one\nline two");
+
+        // Byte-identical repeat in the SAME turn: a short reuse note, not
+        // the body again — the earlier result rides the same request.
+        let (ctx, _rx) = test_exec_context(TurnId(9), ToolCallId(2), dir.clone());
+        let outcome = ReadFileTool
+            .execute(serde_json::json!({"path": "a.txt"}), ctx)
+            .await;
+        assert!(outcome.is_success());
+        assert!(
+            outcome
+                .output()
+                .contains("unchanged since your read earlier this turn"),
+            "{}",
+            outcome.output()
+        );
+        assert!(outcome.output().contains("2 lines"), "{}", outcome.output());
+        assert!(
+            !outcome.output().contains("line two"),
+            "the body must not repeat: {}",
+            outcome.output()
+        );
+
+        // Matched pair (a): the file CHANGED on disk — by any writer; here a
+        // direct fs write stands in for write_file / apply_patch /
+        // execute_command — so the same-turn re-read returns full content.
+        // Content-hash equality is the invalidation; there is no hook to
+        // forget.
+        fs::write(dir.join("a.txt"), "line one\nline two\nline three").expect("write");
+        let (ctx, _rx) = test_exec_context(TurnId(9), ToolCallId(3), dir.clone());
+        let outcome = ReadFileTool
+            .execute(serde_json::json!({"path": "a.txt"}), ctx)
+            .await;
+        assert_eq!(
+            outcome.output(),
+            "line one\nline two\nline three",
+            "a changed file must read in full"
+        );
+
+        // ...and the byte-identical repeat of THAT read collapses again.
+        let (ctx, _rx) = test_exec_context(TurnId(9), ToolCallId(4), dir.clone());
+        let outcome = ReadFileTool
+            .execute(serde_json::json!({"path": "a.txt"}), ctx)
+            .await;
+        assert!(
+            outcome.output().contains("unchanged since"),
+            "{}",
+            outcome.output()
+        );
+
+        // Matched pair (b): a LATER turn always reads in full — a cross-turn
+        // re-read may be a legitimate refresh (post-compaction, post-edit)
+        // and is never suppressed.
+        let (ctx, _rx) = test_exec_context(TurnId(10), ToolCallId(5), dir.clone());
+        let outcome = ReadFileTool
+            .execute(serde_json::json!({"path": "a.txt"}), ctx)
+            .await;
+        assert_eq!(outcome.output(), "line one\nline two\nline three");
+
         let _ = fs::remove_dir_all(&dir);
     }
 
