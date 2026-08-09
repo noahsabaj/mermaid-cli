@@ -1252,6 +1252,55 @@ mod tests {
         }
     }
 
+    /// The Windows regression that motivated the PowerShell dialect: in plan
+    /// mode a model could not even LIST FILES, because the POSIX lexer read
+    /// every pipeline-shaping cmdlet and `if (...)` statement as an unknown
+    /// mutating head. The exploration shape observed in the field must
+    /// proceed, and its matched mutating pair must keep the plan denial.
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn plan_mode_allows_powershell_exploration_on_windows() {
+        let explore = "Get-ChildItem -Recurse -File | Select-Object -First 100 | \
+                       ForEach-Object { $_.FullName.Replace((Get-Location).Path + '\\','') }; \
+                       Write-Host \"---\"; \
+                       if (Test-Path \"pyproject.toml\") { Get-Content pyproject.toml }";
+        let g = gate(
+            &ctx_plan(),
+            shell_request(explore),
+            &[],
+            serde_json::json!({}),
+            true,
+            false,
+        )
+        .await;
+        assert!(
+            matches!(g, Gate::Proceed { .. }),
+            "plan mode must allow read-only PowerShell exploration"
+        );
+        match gate(
+            &ctx_plan(),
+            shell_request("Get-ChildItem | ForEach-Object { Remove-Item $_ }"),
+            &[],
+            serde_json::json!({}),
+            true,
+            false,
+        )
+        .await
+        {
+            Gate::Block(outcome) => assert!(
+                outcome.model_content.contains(&format!(
+                    "blocked by policy: {}",
+                    mermaid_runtime::PLAN_DENIAL_MARKER
+                )),
+                "got {:?}",
+                outcome.model_content
+            ),
+            Gate::Proceed { .. } => {
+                panic!("a mutating PowerShell pipeline must not run in plan mode")
+            },
+        }
+    }
+
     #[tokio::test]
     async fn plan_mode_allows_memory_and_safe_builds_but_floors_the_rest() {
         // Memory writes: allowed while planning (exploration feeds memory)

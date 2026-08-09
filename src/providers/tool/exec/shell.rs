@@ -62,6 +62,11 @@ pub(crate) fn shell_invocation(
         args.extend(["--".into(), "sh".into(), "-c".into(), command.into()]);
         ShellInvocation { program: exe, args }
     } else if cfg!(target_os = "windows") {
+        // Keep this predicate in lockstep with the policy layer's
+        // `classify_command_for_host_shell`: risk classification reads the
+        // command in the grammar of the interpreter chosen HERE. If Windows
+        // ever grows a non-PowerShell path, the classifier must learn about
+        // it in the same change.
         ShellInvocation {
             program: PathBuf::from(powershell_program()),
             args: vec![

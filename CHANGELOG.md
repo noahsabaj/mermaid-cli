@@ -9,7 +9,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **The input box drew one row too few whenever the last word wrapped,
+- **Plan and read-only mode denied every PowerShell exploration command on
+  Windows — a model in plan mode could not even list files.** Model commands
+  run under PowerShell on Windows (`shell_invocation` picks `pwsh`/
+  `powershell`, never `sh`), but risk classification parsed them with the
+  POSIX lexer. The two grammars disagree exactly where PowerShell lives:
+  `Select-Object`/`ForEach-Object` pipelines, `if (Test-Path x) { ... }`
+  statements, and `(Get-Location).Path` groupings all tokenized into unknown
+  POSIX heads, classified as mutations under the worst-segment rule, and hit
+  the plan/read-only deny. Observed in the field as a plan-mode session whose
+  very first inventory command (`Get-ChildItem | Select-Object -First 100 |
+  ...`) was blocked.
+
+  Shell risk is now classified for the interpreter that will actually run
+  the command: `classify_command_for_host_shell` routes Windows commands
+  through a new PowerShell-dialect scan and everything else through the
+  unchanged POSIX classifier, keyed on the same predicate as
+  `shell_invocation`. The dialect is a conservative structural walk, not a
+  parser: statements split at `;`/newline/`|`/`&&`, every `(...)`, `{...}`,
+  `$(...)` and expanding here-string region classifies recursively with the
+  worst-wins rule, and anything unrecognized fails closed to a mutation —
+  unbalanced delimiters, the call operator `&`, dot-sourcing, an unquoted
+  redirect to a real file, a method or static type outside the audited pure
+  set. That recursion is what makes the pipeline-shaping cmdlets
+  (`Select-Object`, `Where-Object`, `ForEach-Object`, `Sort-Object`,
+  `Format-*`, aliases included) safely read-only here: `ForEach-Object {
+  Remove-Item $_ }` still refuses because the block classifies on its own.
+  They stay off the shared read-only table, so the POSIX classifier — which
+  never looks inside braces — still treats them as mutations.
+
+  Two write-syntax holes closed in passing, both directions of the same
+  dialect mismatch: `*> file` (and glued `cmd>file`) now count as file
+  writes — PowerShell redirects every stream, and POSIX `sh` reads `*>` as
+  glob-then-redirect, so both spellings previously classified read-only and
+  could write files in read-only mode. And the plan-file carve-out's
+  cwd-change refusal now recognizes the PowerShell spellings
+  (`Set-Location`/`sl`, case-insensitively) alongside `cd`/`pushd`/`popd`,
+  since those cmdlets now classify read-only.
+
+  Guards, each checked against the failing direction: the field-observed
+  pipeline classifies `ReadOnly` and proceeds through the plan gate on
+  Windows; its matched mutating pair keeps the plan denial; the dialect
+  canary (`Select-Object`) proves the host switch engaged on Windows and
+  proves POSIX did not loosen elsewhere; and the destructive hard-deny is
+  unchanged in both dialects.
   clipping that line and putting the caret on the border.** Three things have
   to agree on where the text breaks. The rendered text and the caret both went
   through `layout_rows`, which prefers a whitespace break so words stay whole.

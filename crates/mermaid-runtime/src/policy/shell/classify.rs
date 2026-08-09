@@ -276,6 +276,24 @@ pub(crate) fn sort_writes_file(segment: &[String]) -> bool {
     })
 }
 
+/// Classify `command` for the shell it will ACTUALLY run under.
+///
+/// On Windows the exec tool hands every model command to PowerShell
+/// (`shell_invocation` picks `pwsh`/`powershell`, never `sh`), so risk must
+/// be read from PowerShell grammar; elsewhere commands run under `sh` and
+/// keep the POSIX classifier. Keep this predicate in lockstep with
+/// `shell_invocation` — classifying for a different interpreter than the one
+/// that executes is exactly the bug that made plan/read-only mode deny every
+/// read-only PowerShell pipeline on Windows while missing PS-only writes
+/// (`*> file`).
+pub(in crate::policy) fn classify_command_for_host_shell(command: &str) -> RiskClass {
+    if cfg!(target_os = "windows") {
+        super::powershell::classify_powershell_command(command)
+    } else {
+        classify_shell_command(command)
+    }
+}
+
 /// Classify a shell command by splitting it into the command segments
 /// `sh -c` would run (so flag reordering, extra whitespace, absolute paths,
 /// and chaining — including glued operators and newlines — can't downgrade the

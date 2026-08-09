@@ -645,7 +645,7 @@ fn classify(request: &ActionRequest) -> RiskClass {
         ToolCategory::Shell | ToolCategory::Git => request
             .command
             .as_deref()
-            .map(classify_shell_command)
+            .map(classify_command_for_host_shell)
             .unwrap_or(RiskClass::ShellMutation),
         ToolCategory::Web | ToolCategory::Network => RiskClass::Network,
         ToolCategory::ExternalDirectory | ToolCategory::ComputerUse | ToolCategory::Mcp => {
@@ -1789,12 +1789,26 @@ mod tests {
         // redirect as a mutation (no safe-device exemption); the third via
         // the glued-`;` token (`2>/dev/null;`) reading as a sensitive
         // `/dev/` write in the hard-deny scan. Verbatim from the report.
+        //
+        // The engine classifies for the HOST shell, so the spellings are
+        // per-dialect: unix keeps the report's `/dev/null` chains; Windows
+        // asserts the PowerShell `$null` chains, because there `/dev/null`
+        // is not a device at all but an ordinary path (`\dev\null`) — a real
+        // file write, pinned by the matched denial at the end.
         let engine = PolicyEngine::new(SafetyMode::ReadOnly);
-        for cmd in [
+        #[cfg(not(target_os = "windows"))]
+        let chains = [
             r#"find . -maxdepth 4 -not -path '*/\.*' -type f 2>/dev/null | head -50 && echo "---ALL---" && find . -maxdepth 4 -not -path '*/\.*' -type d 2>/dev/null"#,
             r#"ls public/images/ 2>/dev/null && cat public/manifest.webmanifest public/robots.txt public/sitemap.xml 2>/dev/null"#,
             r#"ls -la public/images/ 2>/dev/null; echo "---"; cat public/images/README.md 2>/dev/null"#,
-        ] {
+        ];
+        #[cfg(target_os = "windows")]
+        let chains = [
+            r#"Get-ChildItem -Recurse -File 2>$null | head -50; echo "---ALL---"; Get-ChildItem -Recurse -Directory 2>$null"#,
+            r#"ls public/images/ 2>$null; cat public/manifest.webmanifest 2>$null"#,
+            r#"Get-Content public/images/README.md 2>$null; echo "---""#,
+        ];
+        for cmd in chains {
             assert!(!is_destructive_command(cmd), "not destructive: {cmd}");
             let decision = engine.decide(&shell(cmd));
             assert!(
@@ -1808,6 +1822,16 @@ mod tests {
                 "read_only must allow {cmd}: {decision:?}"
             );
         }
+        // The unix discard spelling is a real write under PowerShell; the
+        // dialect distinction is load-bearing, not cosmetic.
+        #[cfg(target_os = "windows")]
+        assert!(
+            matches!(
+                engine.decide(&shell("ls 2>/dev/null")),
+                PolicyDecision::Deny { .. }
+            ),
+            "PowerShell must treat /dev/null as an ordinary file target"
+        );
     }
 
     #[test]
@@ -2016,6 +2040,56 @@ mod tests {
                 "mutation must never classify as read-only: {cmd}"
             );
         }
+    }
+
+    #[test]
+    fn host_shell_dialect_matches_the_exec_interpreter() {
+        // The exec tool runs model commands under PowerShell on Windows and
+        // `sh` elsewhere (`shell_invocation`); `classify_command_for_host_shell`
+        // must read the same grammar. The canary is a pipeline-shaping cmdlet:
+        // read-only ONLY under the PowerShell dialect (its blocks recurse),
+        // a mutation under POSIX (unknown head, fail-closed). On Windows this
+        // proves the switch engaged; elsewhere it proves POSIX did not loosen.
+        let canary = "Get-ChildItem | Select-Object -First 5";
+        let expected = if cfg!(target_os = "windows") {
+            RiskClass::ReadOnly
+        } else {
+            RiskClass::ShellMutation
+        };
+        assert_eq!(super::classify_command_for_host_shell(canary), expected);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_read_only_mode_allows_powershell_exploration() {
+        // End-to-end through the engine: the exploration pipeline observed
+        // doom-looping in plan mode (read-only floor) must decide Allow,
+        // while its matched mutating pair keeps the read-only deny.
+        let request = |cmd: &str| {
+            let mut r = ActionRequest::new("execute_command", ToolCategory::Shell, cmd);
+            r.command = Some(cmd.to_string());
+            r
+        };
+        let engine = PolicyEngine::new(SafetyMode::ReadOnly);
+        let explore = "Get-ChildItem -Recurse -File | Select-Object -First 100 | \
+                       ForEach-Object { $_.FullName.Replace((Get-Location).Path + '\\','') }; \
+                       if (Test-Path \"pyproject.toml\") { Get-Content pyproject.toml }";
+        assert!(
+            matches!(
+                engine.decide(&request(explore)),
+                PolicyDecision::Allow { .. }
+            ),
+            "read-only PowerShell exploration must be allowed on Windows"
+        );
+        assert!(
+            matches!(
+                engine.decide(&request(
+                    "Get-ChildItem -Recurse -File | ForEach-Object { Remove-Item $_ }"
+                )),
+                PolicyDecision::Deny { .. }
+            ),
+            "the matched mutating pipeline must keep the deny"
+        );
     }
 
     #[test]
