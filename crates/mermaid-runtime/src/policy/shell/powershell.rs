@@ -1378,6 +1378,32 @@ mod tests {
         }
     }
 
+    /// `--%` stops PowerShell's parsing, so a `>` after it is NOT a redirect
+    /// — which is why the token scan stops there. Verified against pwsh
+    /// 7.6.4 rather than assumed: `Write-Output hello --% > out.txt` prints
+    /// `hello`, `--%`, `> out.txt` and creates no file.
+    ///
+    /// The residual case is a native command that redirects on its OWN
+    /// behalf (`cmd /c echo hi --% > f` really does write `f`, via cmd's
+    /// shell). That is safe here for a structural reason worth pinning: every
+    /// such head — `cmd`, `sh`, `bash`, `pwsh` — is either unknown
+    /// (`ShellMutation`) or in `PROCESS_BINARIES`, so none can reach
+    /// `ReadOnly` no matter what follows the stop-parse token.
+    #[test]
+    fn stop_parsing_token_cannot_hide_a_write_behind_a_read_only_head() {
+        assert_eq!(
+            classify("Write-Output hello --% > out.txt"),
+            RiskClass::ReadOnly
+        );
+        for cmd in [
+            "cmd /c echo hi --% > out.txt",
+            "sh -c 'echo hi' --% > out.txt",
+            "pwsh -c echo --% > out.txt",
+        ] {
+            assert_ne!(classify(cmd), RiskClass::ReadOnly, "cmd: {cmd}");
+        }
+    }
+
     /// The safe-target rule is the `$null` device only — and only unquoted.
     #[test]
     fn null_device_matrix() {
