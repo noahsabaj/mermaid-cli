@@ -1050,6 +1050,7 @@ pub struct OllamaConfig {
 
 impl OllamaConfig {
     /// The `host:port` authority every Ollama HTTP client is built from.
+    ///
     /// Scheme-less on purpose: the adapter's `normalize_url` picks http vs
     /// https by host class. One definition, so the CLI verbs, the effect
     /// layer, the provider factory, and the plan-mode preview cannot drift

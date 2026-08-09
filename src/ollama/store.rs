@@ -52,11 +52,14 @@ fn store_candidates() -> Vec<PathBuf> {
 }
 
 /// Every installed model's display name, sorted — or `None` when no candidate
-/// store contains a manifest. `None` deliberately covers both "no store" and
-/// "empty store": an empty walk cannot be distinguished from walking a
-/// location a differently-configured server never used, so callers report the
-/// server as unreachable rather than claiming "no models installed".
-pub(crate) fn installed_models() -> Option<Vec<String>> {
+/// store contains a manifest.
+///
+/// `None` deliberately covers both "no store" and "empty store": an empty
+/// walk cannot be distinguished from walking a location a
+/// differently-configured server never used, so callers report the server as
+/// unreachable rather than claiming "no models installed". Plain `pub` in a
+/// private module — reachable only through `super::observe`.
+pub fn installed_models() -> Option<Vec<String>> {
     installed_models_in(&store_candidates())
 }
 
@@ -135,8 +138,9 @@ fn is_manifest(path: &Path) -> bool {
         == Some(2)
 }
 
-/// `registry.ollama.ai/library/gemma4/e4b-it-qat` → `gemma4:e4b-it-qat`,
-/// matching how Ollama itself shortens names (and therefore how `/api/tags`
+/// `registry.ollama.ai/library/gemma4/e4b-it-qat` → `gemma4:e4b-it-qat`.
+///
+/// Matches how Ollama itself shortens names (and therefore how `/api/tags`
 /// reports them): the default registry disappears, and within it the
 /// `library` namespace does too. Anything else keeps its qualifiers, so two
 /// same-named models from different sources cannot collapse into one row.

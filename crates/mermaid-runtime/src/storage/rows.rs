@@ -76,9 +76,11 @@ pub(crate) fn ensure_column(
     }
 }
 
-/// Environment override for the data directory, checked ahead of the platform
-/// location. The data-dir twin of `app::config::CONFIG_DIR_ENV`, and it exists
-/// for the same reason: `ProjectDirs` resolves a Windows known folder that no
+/// Environment override for the data directory, checked ahead of the
+/// platform location.
+///
+/// The data-dir twin of `app::config::CONFIG_DIR_ENV`, and it exists for the
+/// same reason: `ProjectDirs` resolves a Windows known folder that no
 /// environment variable redirects, so tests spawning the real binary wrote
 /// checkpoints and process rows into the developer's own store.
 pub const DATA_DIR_ENV: &str = "MERMAID_DATA_DIR";

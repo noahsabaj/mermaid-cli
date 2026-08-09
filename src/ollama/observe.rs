@@ -39,10 +39,12 @@ impl LocalModelListing {
     }
 }
 
-/// Answer "what Ollama models exist" without mutating anything: ask the
-/// daemon, and when it is unreachable fall back to the manifest store on
-/// disk. The disk is consulted lazily — a running server never pays for the
-/// walk — and only when [`host_is_loopback`] and the binary is installed.
+/// Answer "what Ollama models exist" without mutating anything.
+///
+/// Asks the daemon first, and when it is unreachable falls back to the
+/// manifest store on disk. The disk is consulted lazily — a running server
+/// never pays for the walk — and only when [`host_is_loopback`] and the
+/// binary is installed.
 pub async fn observe_models(config: &Config) -> LocalModelListing {
     let live = live_models(config).await;
     combine(live, || {
@@ -59,13 +61,13 @@ fn combine(
     live: Option<Vec<String>>,
     disk: impl FnOnce() -> Option<Vec<String>>,
 ) -> LocalModelListing {
-    match live {
-        Some(models) => LocalModelListing::Live(models),
-        None => match disk() {
+    live.map_or_else(
+        || match disk() {
             Some(models) if !models.is_empty() => LocalModelListing::FromDisk(models),
             _ => LocalModelListing::Unreachable,
         },
-    }
+        LocalModelListing::Live,
+    )
 }
 
 /// `/api/tags` with autostart hard-off. `None` when the server could not be
@@ -103,7 +105,7 @@ mod tests {
     use super::*;
 
     fn names(list: &[&str]) -> Vec<String> {
-        list.iter().map(|name| (*name).to_string()).collect()
+        list.iter().copied().map(String::from).collect()
     }
 
     /// The precedence table, exhaustively: live wins even when empty (a
