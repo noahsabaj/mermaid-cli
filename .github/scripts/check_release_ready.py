@@ -248,9 +248,16 @@ def write_fixture(root: Path, version: str, released: str | None) -> None:
     sections = "## [Unreleased]\n\n"
     if released:
         sections += f"## [{released}] - 2026-01-01\n\n### Fixed\n\n- a real entry.\n\n"
+    # A PRIOR release section, always. Not decoration: it is what bounds the
+    # target section. Without it the extraction walks past an empty section
+    # into the link block and reads as non-empty — which made an earlier
+    # version of this fixture unable to model a blank release note at all.
+    # Every real CHANGELOG in Keep a Changelog format has one.
+    sections += "## [0.0.9] - 2025-01-01\n\n### Fixed\n\n- a prior entry.\n\n"
     links = f"[Unreleased]: https://example.invalid/compare/v{version}...HEAD\n"
     if released:
-        links += f"[{released}]: https://example.invalid/compare/v0.0.0...v{released}\n"
+        links += f"[{released}]: https://example.invalid/compare/v0.0.9...v{released}\n"
+    links += "[0.0.9]: https://example.invalid/compare/v0.0.8...v0.0.9\n"
     (root / "CHANGELOG.md").write_text(
         f"# Changelog\n\n{sections}{links}", encoding="utf-8"
     )
@@ -297,7 +304,27 @@ def self_test() -> int:
                     f"got {findings}"
                 )
 
-        # 3. The partial bump that gate 1's second half exists for: manifests
+        # 3. The section that EXISTS but is empty. This is the case gate 2 is
+        # really for, and the dangerous one: a header is present, so anything
+        # that only asked "is there a `## [VERSION]` header?" would pass while
+        # the release shipped blank notes.
+        blank = tmp / "blank"
+        blank.mkdir()
+        write_fixture(blank, version=want, released=want)
+        changelog = blank / "CHANGELOG.md"
+        changelog.write_text(
+            changelog.read_text(encoding="utf-8").replace(
+                "### Fixed\n\n- a real entry.\n", "   \n\t\n"
+            ),
+            encoding="utf-8",
+        )
+        empty = check_changelog(blank, want)
+        if len(empty) != 1:
+            failures.append(
+                f"an empty `## [{want}]` section must be caught, got: {empty}"
+            )
+
+        # 4. The partial bump that gate 1's second half exists for: manifests
         # bumped, one intra-workspace `version =` left behind.
         partial = tmp / "partial"
         partial.mkdir()
