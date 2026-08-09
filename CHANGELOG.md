@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Every run now ends with its summary line — errored, cancelled, and
+  quit-mid-run included.** The one-line "Worked for … · used … tokens"
+  record fired only on the natural completion path; a provider error, an
+  Esc cancel, or quitting mid-run dropped it entirely. A saved log with no
+  summary meant "this run did not end normally" — which is exactly when
+  the duration and spend matter most (field log 20260704_155044 has none
+  at all). All four terminal paths now share one exit point: natural
+  completion keeps its checklist retirement, and the other three append
+  the same summary marked `· interrupted`, so the transcript says both
+  what the run cost and that it did not finish on its own.
+
+  Two conversation-identity edges are guarded: `/clear` and loading
+  another conversation reset the run counters, so a run abandoned by
+  either can no longer stamp its summary into the wrong transcript when
+  the session later exits. The token number itself keeps the existing
+  provenance contract, now pinned from both sides by tests: totals come
+  from provider-reported usage whenever the provider reported it (shown
+  unmarked), and only a usage-less phase falls back to the chars/4
+  estimate that marks the total `~`.
+
 - **A tool that is deliberately absent now tells the model why, instead of
   `unknown tool`.** Web tools vanish from the model's toolset in four
   distinct situations — the selected backend is unviable (managed SearXNG on
