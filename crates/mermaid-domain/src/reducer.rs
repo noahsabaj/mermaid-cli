@@ -8608,9 +8608,12 @@ mod tests {
         let last_save = cmds
             .iter()
             .rev()
-            .find_map(|c| match c {
-                Cmd::SaveConversation(snapshot) => Some(snapshot),
-                _ => None,
+            .find_map(|c| {
+                if let Cmd::SaveConversation(snapshot) = c {
+                    Some(snapshot)
+                } else {
+                    None
+                }
             })
             .expect("exit saves the conversation");
         assert!(
@@ -8631,7 +8634,7 @@ mod tests {
         state.runtime.run_started = Some(std::time::SystemTime::from(state.now));
         state.runtime.run_tokens.add_provider(500);
         state.turn = start_generating(TurnId(5), std::time::SystemTime::now());
-        let history = fresh_state().session.conversation.clone();
+        let history = fresh_state().session.conversation;
         let (mut state, _) = update(state, Msg::ConversationLoaded(history));
         let mut cmds = Vec::new();
         super::request_exit(&mut state, &mut cmds);
