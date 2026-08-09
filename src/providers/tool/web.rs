@@ -63,8 +63,9 @@ impl WebCapabilityStatus {
         );
         let remedy = match self.backend {
             "managed_searxng" => {
-                "The user can set [web] search_backend = \"ollama\" (needs OLLAMA_API_KEY) \
-                 or point [web] searxng_url at a SearXNG instance, then restart mermaid"
+                "The user can set [web] allow_ollama_search_fallback = true (needs \
+                 OLLAMA_API_KEY), set [web] search_backend = \"ollama\", or point \
+                 [web] searxng_url at a SearXNG instance, then restart mermaid"
             },
             "ollama_cloud" => {
                 "The user can set OLLAMA_API_KEY (or switch the [web] backend), \
@@ -94,7 +95,8 @@ impl WebCapabilities {
     #[must_use]
     pub fn resolve(web: &WebConfig) -> Self {
         let needs_ollama_key = web.fetch_backend == FetchBackend::Ollama
-            || web.search_backend == SearchBackend::Ollama;
+            || web.search_backend == SearchBackend::Ollama
+            || (web.search_backend == SearchBackend::Auto && web.allow_ollama_search_fallback);
         let ollama_key = needs_ollama_key
             .then(|| mermaid_model::utils::resolve_provider_key("ollama", "OLLAMA_API_KEY", None))
             .flatten();
@@ -126,9 +128,12 @@ impl WebCapabilities {
 
         let (search, search_backend): (_, Option<Arc<dyn SearchProvider>>) =
             match web.search_backend {
-                // Auto is deliberately sovereign-only. Merely having a cloud
+                // Auto is deliberately sovereign-first. Merely having a cloud
                 // credential must not silently change the egress destination;
-                // users opt into Ollama Cloud with `search_backend = "ollama"`.
+                // users opt into Ollama Cloud with `search_backend = "ollama"`,
+                // or — keeping the sovereign default wherever it is viable —
+                // with `allow_ollama_search_fallback = true` for platforms
+                // that have no managed bundle.
                 SearchBackend::Auto => match crate::searxng::managed_backend_viability() {
                     Ok(_) => (
                         available(
@@ -138,6 +143,17 @@ impl WebCapabilities {
                         ),
                         Some(Arc::new(ManagedSearxngBackend)),
                     ),
+                    Err(viability) if web.allow_ollama_search_fallback => {
+                        // Explicit user opt-in: cloud search over no search.
+                        // The ollama_cloud status discloses the off-machine
+                        // egress in the startup notice; a missing key keeps
+                        // the whole fallback chain in the reason.
+                        let (status, client) = ollama_cloud_backend(ollama_key, "Ollama Cloud");
+                        (
+                            fallback_status(status, &viability),
+                            client.map(|c| c as Arc<dyn SearchProvider>),
+                        )
+                    },
                     Err(reason) => (
                         unavailable(
                             "managed_searxng",
@@ -242,6 +258,21 @@ fn ollama_cloud_backend(
             None,
         ),
     }
+}
+
+/// Shape the Ollama Cloud status produced by the `auto` fallback: an
+/// available fallback passes through untouched (the backend name plus the
+/// off-machine egress already disclose everything), while an unavailable one
+/// keeps the whole chain — why the sovereign default was not viable AND why
+/// the fallback the user opted into is not either.
+fn fallback_status(mut status: WebCapabilityStatus, viability: &str) -> WebCapabilityStatus {
+    if let Some(reason) = status.reason.take() {
+        status.reason = Some(format!(
+            "the managed bundle is unavailable ({viability}) and the configured \
+             Ollama Cloud fallback is too: {reason}"
+        ));
+    }
+    status
 }
 
 fn available(
