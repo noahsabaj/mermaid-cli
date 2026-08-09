@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A byte-identical re-read of a file within one turn no longer ships the
+  whole body again.** The 20260806 field logs show the same file read up to
+  14 times per session at full length — sometimes twice within a single
+  turn, costing thousands of tokens for content the model already had in
+  the very same request. `read_file` now remembers what it returned this
+  turn (content hash, never the content) and answers a byte-identical
+  same-turn repeat with a short reuse note naming the line count and where
+  the full content already is.
+
+  The window is deliberately one turn: across turns a re-read can be a
+  legitimate refresh (after an edit, after compaction) and is never
+  suppressed. Invalidation is content equality itself — a file changed by
+  ANY writer (`write_file`, `apply_patch`, a shell command, the user's
+  editor) hashes differently and reads in full, so there is no
+  invalidation hook to forget, and mtime (which lies on some drives) is
+  never consulted. Per-file caps are unchanged: reads were already bounded
+  at 400 KB with a truncation marker, and tightening that would strand
+  content `read_file` has no range arguments to reach.
+
 - **Every run now ends with its summary line — errored, cancelled, and
   quit-mid-run included.** The one-line "Worked for … · used … tokens"
   record fired only on the natural completion path; a provider error, an
