@@ -134,7 +134,11 @@ fn is_manifest(path: &Path) -> bool {
     };
     serde_json::from_str::<serde_json::Value>(&text)
         .ok()
-        .and_then(|value| value.get("schemaVersion").and_then(|v| v.as_u64()))
+        .and_then(|value| {
+            value
+                .get("schemaVersion")
+                .and_then(serde_json::Value::as_u64)
+        })
         == Some(2)
 }
 

@@ -574,6 +574,7 @@ fn parse_model_id(model_id: &str) -> (String, &str) {
 }
 
 /// Whether `model_id`'s provider could be built on this machine right now.
+///
 /// Ollama ids (bare or `ollama/…`) always pass — the local backend needs no
 /// credential. Remote ids pass iff [`resolve_provider_endpoint`] does, the
 /// same single definition of "buildable" that discovery and `doctor` use.

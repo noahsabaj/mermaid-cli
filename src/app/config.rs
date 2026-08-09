@@ -450,12 +450,13 @@ pub fn get_config_path() -> Result<PathBuf> {
 /// platform location.
 ///
 /// The platform location comes from `ProjectDirs`, which honors
-/// `XDG_CONFIG_HOME` on unix but resolves the Roaming AppData *known folder* on
-/// Windows — a path no environment variable redirects. So a test (or a portable
-/// install, or a CI job) had no way to point Mermaid at a scratch config on
-/// Windows, and every test that spawned the real binary wrote `last_used_model`
-/// into the developer's own `config.toml`. This variable is that missing knob,
-/// and it works identically on all three platforms.
+/// `XDG_CONFIG_HOME` on unix but resolves the Roaming `AppData` *known
+/// folder* on Windows — a path no environment variable redirects. So a test
+/// (or a portable install, or a CI job) had no way to point Mermaid at a
+/// scratch config on Windows, and every test that spawned the real binary
+/// wrote `last_used_model` into the developer's own `config.toml`. This
+/// variable is that missing knob, and it works identically on all three
+/// platforms.
 pub const CONFIG_DIR_ENV: &str = "MERMAID_CONFIG_DIR";
 
 /// Get the configuration directory
