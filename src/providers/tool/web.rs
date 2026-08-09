@@ -57,11 +57,10 @@ impl WebCapabilityStatus {
     /// to fabricate web findings instead of reporting the gap.
     #[must_use]
     pub fn absence_reason(&self, tool: &str) -> String {
-        let reason = self
-            .reason
-            .as_deref()
-            .map(mermaid_model::utils::redact_secrets)
-            .unwrap_or_else(|| "backend initialization failed".to_string());
+        let reason = self.reason.as_deref().map_or_else(
+            || "backend initialization failed".to_string(),
+            mermaid_model::utils::redact_secrets,
+        );
         let remedy = match self.backend {
             "managed_searxng" => {
                 "The user can set [web] search_backend = \"ollama\" (needs OLLAMA_API_KEY) \

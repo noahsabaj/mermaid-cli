@@ -887,11 +887,15 @@ mod tests {
                 summary.to_string(),
                 &serde_json::json!({}),
             )
-            .await
-            .unwrap_or_else(|| panic!("ReadOnly must require approval for {tool}"));
+            .await;
+            assert!(
+                blocked.is_some(),
+                "ReadOnly must require approval for {tool}"
+            );
             // The denial must name read_only's own remedy, not only the
             // blanket trust flag (which trades away far more than web reads).
-            let msg = blocked.error_message().unwrap_or_default();
+            let outcome = blocked.expect("asserted Some above");
+            let msg = outcome.error_message().unwrap_or_default();
             assert!(msg.contains("allow_readonly_web"), "{tool}: {msg}");
         }
         // Matched pair: the same denial outside read_only must NOT advertise

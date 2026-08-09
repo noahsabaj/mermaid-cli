@@ -1545,10 +1545,6 @@ fn note_absent_child_tools(
     safety_mode: SafetyMode,
     web: &WebCapabilities,
 ) {
-    let allowed = |name: &str| tools.is_none_or(|t| t.iter().any(|x| x == name));
-    let toolset = tools
-        .map(|t| t.join(", "))
-        .unwrap_or_else(|| CHILD_TOOL_NAMES.join(", "));
     // Registry key ↔ filter name: the MCP proxy dispatches under "mcp_proxy"
     // while the type filter grants it as "mcp".
     const FILTERABLE: &[(&str, &str)] = &[
@@ -1562,6 +1558,8 @@ fn note_absent_child_tools(
         ("web_fetch", "web_fetch"),
         ("mcp_proxy", "mcp"),
     ];
+    let allowed = |name: &str| tools.is_none_or(|t| t.iter().any(|x| x == name));
+    let toolset = tools.map_or_else(|| CHILD_TOOL_NAMES.join(", "), |t| t.join(", "));
     for &(key, filter_name) in FILTERABLE {
         if r.get(key).is_none() && !allowed(filter_name) {
             r.note_unavailable(

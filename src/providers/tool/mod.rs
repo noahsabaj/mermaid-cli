@@ -142,12 +142,10 @@ impl ToolRegistry {
     /// the model should see the name it actually wrote.
     #[must_use]
     pub fn unknown_tool_outcome(&self, tool_key: &str, called_name: &str) -> ToolOutcome {
-        match self.unavailable.get(tool_key) {
-            Some(reason) => {
-                ToolOutcome::error(format!("{called_name} is not available: {reason}"), 0.0)
-            },
-            None => ToolOutcome::error(format!("unknown tool: {called_name}"), 0.0),
-        }
+        self.unavailable.get(tool_key).map_or_else(
+            || ToolOutcome::error(format!("unknown tool: {called_name}"), 0.0),
+            |reason| ToolOutcome::error(format!("{called_name} is not available: {reason}"), 0.0),
+        )
     }
 
     #[must_use]
@@ -590,7 +588,9 @@ mod tests {
         // "unknown tool". The registry must instead carry the viability
         // reason plus the remediation. On hosts where the managed bundle IS
         // viable, the tool registers and no note exists — both sides pinned.
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let prior = std::env::var("OLLAMA_API_KEY").ok();
         unsafe {
             std::env::remove_var("OLLAMA_API_KEY");
