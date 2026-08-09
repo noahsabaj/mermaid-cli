@@ -517,10 +517,11 @@ mod tests {
         for text in inputs {
             for content_width in 3usize..60 {
                 for n in 0..=text.len() {
-                    if !text.is_char_boundary(n) {
+                    // `get` yields None on a non-boundary, which is also the
+                    // char-boundary check.
+                    let Some(prefix) = text.get(..n) else {
                         continue;
-                    }
-                    let prefix = &text[..n];
+                    };
                     let rendered = wrap_input_with_prompt(prefix, content_width);
                     // `wrap_input_with_prompt` bails to the raw string below
                     // width 3, where there is no wrapping to agree about.
@@ -544,8 +545,8 @@ mod tests {
     /// edge reaches only 2. The old height loop returned 2, so the box clipped
     /// that row and the caret was drawn below the text.
     ///
-    /// The width is load-bearing and was found by sweep, not chosen: at
-    /// content_width 20 both algorithms answer 3 and this test would pass
+    /// The width is load-bearing and was found by sweep, not chosen: at a
+    /// `content_width` of 20 both algorithms answer 3 and this test would pass
     /// against the bug. 22 is the narrowest width above it where they differ.
     #[test]
     fn the_row_a_wrapped_last_word_needs_is_counted() {

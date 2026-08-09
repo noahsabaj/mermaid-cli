@@ -1868,10 +1868,11 @@ mod tests {
         let text = "Create a language that. Your goal is up to you.";
         for width in [24u16, 30, 40, 55] {
             for n in 0..=text.len() {
-                if !text.is_char_boundary(n) {
+                // `get` yields None on a non-boundary, which is also the
+                // char-boundary check.
+                let Some(prefix) = text.get(..n) else {
                     continue;
-                }
-                let prefix = &text[..n];
+                };
                 let mut state = mock_state();
                 state.ui.input_buffer = prefix.to_string();
                 state.ui.input_cursor = prefix.len();
