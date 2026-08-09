@@ -153,13 +153,19 @@ impl Terminal {
         cmd.env("HOME", home.as_os_str());
         cmd.env("USERPROFILE", home.as_os_str());
         cmd.env("XDG_CONFIG_HOME", config.as_os_str());
+        // The Mermaid-specific overrides are the actual isolation: they work
+        // on every platform, where `HOME`/`XDG_CONFIG_HOME` redirect only
+        // unix (Windows resolves known folders no environment variable
+        // moves). Before them, every Windows run of this harness wrote
+        // `last_used_model = "anthropic/pty-visual-test"` into the
+        // developer's real `config.toml`. HOME/XDG stay set for whatever
+        // else a spawned shell or tool resolves against them.
+        cmd.env("MERMAID_CONFIG_DIR", config.join("mermaid").as_os_str());
+        cmd.env(
+            "MERMAID_DATA_DIR",
+            sandbox.join("data").join("mermaid").as_os_str(),
+        );
         cmd.env("RUST_BACKTRACE", "0");
-        // NOTE: `HOME`/`XDG_CONFIG_HOME` redirect the user config layer on
-        // unix, but Windows resolves it through the Roaming AppData known
-        // folder, which no environment variable overrides. So on Windows these
-        // runs read the developer's real `config.toml`. Nothing here asserts on
-        // configurable values for that reason — a frame that depended on one
-        // would pass locally and fail everywhere else.
 
         let child = pair.slave.spawn_command(cmd).expect("spawn mermaid in pty");
         let writer = pair.master.take_writer().expect("take pty writer");

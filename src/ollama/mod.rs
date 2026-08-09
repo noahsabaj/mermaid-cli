@@ -3,7 +3,9 @@ mod cloud_setup;
 mod detector;
 mod guide;
 mod installer;
+mod observe;
 mod server;
+mod store;
 
 pub use cloud_setup::{
     get_cloud_api_key, is_cloud_configured, is_cloud_model, prompt_cloud_setup_if_needed,
@@ -12,4 +14,5 @@ pub use cloud_setup::{
 pub use detector::is_installed;
 pub use guide::detect_and_guide;
 pub use installer::{ensure_model, local_models};
+pub use observe::{LocalModelListing, observe_models};
 pub use server::{AutostartError, OllamaAutostart, ensure_running};

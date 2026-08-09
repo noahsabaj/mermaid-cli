@@ -4,6 +4,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
+use crate::ollama::LocalModelListing;
+
 use super::*;
 
 /// Dispatch an `ExecuteTool` command.
@@ -551,8 +553,10 @@ pub(super) async fn dispatch_probe_vision(
 /// Everything the user could switch to, for the `/model` picker.
 ///
 /// Two sources, both best-effort — a failure anywhere yields fewer rows, never
-/// an error: the local Ollama daemon (queried WITHOUT autostart, so opening a
-/// list can't resurrect a server the user deliberately stopped) and the model
+/// an error: the local Ollama install (queried WITHOUT autostart, so opening a
+/// list can't resurrect a server the user deliberately stopped — a stopped
+/// server answers from its on-disk manifest store instead, labeled so the
+/// user knows selecting one starts the server at first use) and the model
 /// catalog of every remote provider that has a resolvable key. The catalogs
 /// come from `providers::discovery`, which covers the bespoke providers
 /// (Anthropic, Gemini, Meta) as well as the OpenAI-compatible registry — this
@@ -568,12 +572,20 @@ pub(super) async fn discover_available_models(
     let mut out: Vec<ModelChoice> = Vec::new();
 
     // ── Local models ────────────────────────────────────────────────
-    if let Some(names) = list_ollama_models_readonly(config).await {
+    let local = crate::ollama::observe_models(config).await;
+    let local_detail = match &local {
+        LocalModelListing::Live(_) => "runs on this machine",
+        // Selecting one composes with the chat path's autostart: the pick
+        // works, it just wakes the server first.
+        LocalModelListing::FromDisk(_) => "starts Ollama on first use",
+        LocalModelListing::Unreachable => "",
+    };
+    if let Some(names) = local.models() {
         for name in names {
             out.push(ModelChoice {
                 id: format!("ollama/{name}"),
                 group: "Local (Ollama)".to_string(),
-                detail: "runs on this machine".to_string(),
+                detail: local_detail.to_string(),
                 ready: true,
             });
         }
@@ -608,29 +620,6 @@ pub(super) async fn discover_available_models(
     });
     out.dedup_by(|a, b| a.id == b.id);
     out
-}
-
-/// Ask the local Ollama daemon for its models. `None` when it could not be
-/// reached, distinct from `Some(vec![])` (running with nothing pulled).
-///
-/// Autostart is hard-off: enumerating must never mutate. Same contract as the
-/// CLI's `list_ollama_models`.
-pub(super) async fn list_ollama_models_readonly(
-    config: &mermaid_domain::Config,
-) -> Option<Vec<String>> {
-    use mermaid_model::models::adapters::ollama::OllamaAdapter;
-    use mermaid_model::models::{BackendConfig, Model};
-    let backend = BackendConfig {
-        ollama_url: format!("{}:{}", config.ollama.host, config.ollama.port),
-        timeout_secs: 5,
-        max_idle_per_host: 2,
-        // Enumerating must never mutate — see the doc comment.
-        ollama_autostart: false,
-    };
-    match OllamaAdapter::new("__list__", Arc::new(backend)).await {
-        Ok(adapter) => adapter.list_models().await.ok(),
-        Err(_) => None,
-    }
 }
 
 /// Write text to the system clipboard on a blocking thread (the platform

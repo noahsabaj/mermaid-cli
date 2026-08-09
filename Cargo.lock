@@ -2448,6 +2448,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "shell-words",
+ "temp-env",
  "toml",
  "tracing",
  "url",

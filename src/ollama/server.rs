@@ -342,8 +342,9 @@ fn known_install_paths() -> Vec<PathBuf> {
 
 /// `http://localhost:11434` → `localhost:11434` (scheme and any path/query
 /// stripped). The adapter's `normalize_url` guarantees a scheme is present,
-/// but parse defensively.
-fn authority_of(base_url: &str) -> &str {
+/// but parse defensively. `pub(super)` so `observe`'s loopback gate and this
+/// module's autostart gate cannot drift on how a host is read.
+pub(super) fn authority_of(base_url: &str) -> &str {
     let rest = base_url
         .split_once("://")
         .map(|(_, rest)| rest)
@@ -355,7 +356,7 @@ fn authority_of(base_url: &str) -> &str {
 /// `[::1]:11434` → `[::1]` (brackets kept; `classify_host` strips them).
 /// Note: whether `ollama serve` itself accepts a bracketed IPv6 `OLLAMA_HOST`
 /// is unverified — IPv6-loopback autostart is best-effort.
-fn host_of(authority: &str) -> &str {
+pub(super) fn host_of(authority: &str) -> &str {
     if let Some(end) = authority.rfind(']') {
         return &authority[..=end];
     }

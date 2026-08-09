@@ -76,6 +76,14 @@ fn start_tui(sandbox_prefix: &str, model: &str, trailing_shell: &str) -> TuiPty 
     cmd.cwd(project.as_os_str());
     cmd.env("HOME", home.as_os_str());
     cmd.env("XDG_CONFIG_HOME", config.as_os_str());
+    // Platform-independent isolation (HOME/XDG only redirect unix): the
+    // spawned binary must never read or write the developer's real config
+    // or runtime store.
+    cmd.env("MERMAID_CONFIG_DIR", config.join("mermaid").as_os_str());
+    cmd.env(
+        "MERMAID_DATA_DIR",
+        sandbox.join("data").join("mermaid").as_os_str(),
+    );
     cmd.env("NO_COLOR", "1");
     cmd.env("RUST_BACKTRACE", "0");
 

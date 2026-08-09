@@ -1048,6 +1048,19 @@ pub struct OllamaConfig {
     pub auto_start: bool,
 }
 
+impl OllamaConfig {
+    /// The `host:port` authority every Ollama HTTP client is built from.
+    ///
+    /// Scheme-less on purpose: the adapter's `normalize_url` picks http vs
+    /// https by host class. One definition, so the CLI verbs, the effect
+    /// layer, the provider factory, and the plan-mode preview cannot drift
+    /// on where "the local Ollama" is.
+    #[must_use]
+    pub fn base_url(&self) -> String {
+        format!("{}:{}", self.host, self.port)
+    }
+}
+
 impl Default for OllamaConfig {
     fn default() -> Self {
         Self {

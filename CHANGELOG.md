@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A stopped Ollama server no longer hides the installed models.** The
+  enumeration surfaces (`mermaid list`, the `/model` picker, `status`,
+  `doctor`, plan-mode handoff candidates) deliberately never autostart the
+  server — observing must not resurrect what the user shut down — but their
+  only data source was the server's own `/api/tags`, so with it stopped they
+  went blind: `mermaid list` printed "local models can't be listed" and the
+  picker silently dropped the whole "Local (Ollama)" group, leaving no way to
+  even switch to a local model without typing its name from memory.
+
+  The installed-model set was on disk all along: Ollama serves `/api/tags`
+  from a manifest tree (`<models>/manifests/<host>/<namespace>/<model>/<tag>`)
+  that is readable without the server. `ollama::observe_models` is now the one
+  read-only entry point every surface shares — live answer first, and when the
+  server is unreachable it reads that store directly (honoring
+  `OLLAMA_MODELS`; loopback hosts only, since a remote server's store is on
+  the remote machine; only when the binary is installed, so the label is
+  true). Rows and listings from disk say so: "starts automatically on use" —
+  which is exactly what happens, because selecting one composes with the chat
+  path's existing autostart. The startup default probe observes the same way,
+  so a cold boot with nothing pinned no longer wakes the server (a VRAM grab)
+  just to pick a default. The five scattered `host:port` joins collapsed into
+  `OllamaConfig::base_url()`, and the plan-handoff candidates fetch lost its
+  hand-rolled URL + JSON parse for the same shared path.
+
+- **Running the test suite on Windows overwrote the developer's real
+  `config.toml` — after any `cargo test`, mermaid opened on
+  `anthropic/pty-exit-test` instead of the last model actually used.** Two
+  holes compounded. The integration suites spawn the real binary with
+  `--model anthropic/pty-*-test` and "sandbox" it via `HOME`/
+  `XDG_CONFIG_HOME`, which the `directories` crate honors on unix but ignores
+  on Windows (known folders move for no environment variable) — the harness
+  even documented the read side of that gap while missing that the binary
+  *writes*: `--model` persisted `last_used_model` unconditionally, before
+  anything checked the provider was usable. Every test run re-poisoned the
+  config; every launch after a test run started on a model that cannot run.
+
+  Both halves are fixed at the root. `MERMAID_CONFIG_DIR` and
+  `MERMAID_DATA_DIR` now override the config and runtime-store directories on
+  every platform — the isolation primitive the suites lacked — and every
+  binary-spawning test sets them (the pty harness, the NDJSON stream suite,
+  the feedback suite, the daemon suite). And `--model` only persists when the
+  model's provider actually resolves (`model_provider_resolves`, the same
+  single definition of "buildable" that discovery and `doctor` use), so a
+  keyless or typo'd `--model` fails without hijacking every later session's
+  startup default. A matched pair through the real binary pins both: an
+  unbuildable provider leaves `last_used_model` unwritten, a keyless loopback
+  provider writes it — into the sandbox.
+
 ### Added
 
 - **`just preflight VERSION` verifies a release before it is tagged.**

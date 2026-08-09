@@ -573,11 +573,28 @@ fn parse_model_id(model_id: &str) -> (String, &str) {
     }
 }
 
+/// Whether `model_id`'s provider could be built on this machine right now.
+///
+/// Ollama ids (bare or `ollama/…`) always pass — the local backend needs no
+/// credential. Remote ids pass iff [`resolve_provider_endpoint`] does, the
+/// same single definition of "buildable" that discovery and `doctor` use.
+///
+/// This gates persisting `last_used_model`: a `--model` whose provider
+/// provably cannot be built here — a keyless test invocation, a typo'd
+/// provider name — must not become the startup default that every later
+/// session resolves first. (Test binaries writing `anthropic/pty-*-test`
+/// into the developer's real config were exactly this hole.)
+#[must_use]
+pub fn model_provider_resolves(config: &Config, model_id: &str) -> bool {
+    let (provider, _) = parse_model_id(model_id);
+    provider.eq_ignore_ascii_case("ollama") || resolve_provider_endpoint(config, &provider).is_ok()
+}
+
 pub(crate) fn ollama_backend_config(config: &Config) -> BackendConfig {
     BackendConfig {
         // Scheme-less: `normalize_url` in the adapter picks http (loopback/LAN)
         // vs https (public) by host class (#86).
-        ollama_url: format!("{}:{}", config.ollama.host, config.ollama.port),
+        ollama_url: config.ollama.base_url(),
         max_idle_per_host: 10,
         timeout_secs: 10,
         ollama_autostart: config.ollama.auto_start,
