@@ -9,7 +9,85 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **The input box drew one row too few whenever the last word wrapped,
+- **Plan and read-only mode denied every PowerShell exploration command on
+  Windows — a model in plan mode could not even list files.** Model commands
+  run under PowerShell on Windows (`shell_invocation` picks `pwsh`/
+  `powershell`, never `sh`), but risk classification parsed them with the
+  POSIX lexer. The two grammars disagree exactly where PowerShell lives:
+  `Select-Object`/`ForEach-Object` pipelines, `if (Test-Path x) { ... }`
+  statements, and `(Get-Location).Path` groupings all tokenized into unknown
+  POSIX heads, classified as mutations under the worst-segment rule, and hit
+  the plan/read-only deny. Observed in the field as a plan-mode session whose
+  very first inventory command (`Get-ChildItem | Select-Object -First 100 |
+  ...`) was blocked.
+
+  Shell risk is now classified for the interpreter that will actually run
+  the command: `classify_command_for_host_shell` routes Windows commands
+  through a new PowerShell-dialect scan and everything else through the
+  unchanged POSIX classifier, keyed on the same predicate as
+  `shell_invocation`. The dialect is a conservative structural walk, not a
+  parser: statements split at `;`/newline/`|`/`&&`, every `(...)`, `{...}`,
+  `$(...)` and expanding here-string region classifies recursively with the
+  worst-wins rule, and anything unrecognized fails closed to a mutation —
+  unbalanced delimiters, the call operator `&`, dot-sourcing, an unquoted
+  redirect to a real file, a method or static type outside the audited pure
+  set. That recursion is what makes the pipeline-shaping cmdlets
+  (`Select-Object`, `Where-Object`, `ForEach-Object`, `Sort-Object`,
+  `Format-*`, aliases included) safely read-only here: `ForEach-Object {
+  Remove-Item $_ }` still refuses because the block classifies on its own.
+  They stay off the shared read-only table, so the POSIX classifier — which
+  never looks inside braces — still treats them as mutations.
+
+  Two write-syntax holes closed in passing, both directions of the same
+  dialect mismatch: `*> file` (and glued `cmd>file`) now count as file
+  writes — PowerShell redirects every stream, and POSIX `sh` reads `*>` as
+  glob-then-redirect, so both spellings previously classified read-only and
+  could write files in read-only mode. And the plan-file carve-out's
+  cwd-change refusal now recognizes the PowerShell spellings
+  (`Set-Location`/`sl`, case-insensitively) alongside `cd`/`pushd`/`popd`,
+  since those cmdlets now classify read-only.
+
+  Three more sites had the same defect — each independently assuming POSIX
+  while PowerShell was what ran:
+
+  - The **transcript label** rendered every `execute_command` as `Bash(...)`,
+    wrapping PowerShell pipelines in a shell they never touch, and
+    `create_directory` displayed a synthetic `mkdir -p`, which is not
+    PowerShell syntax. Both now name the real interpreter.
+  - The **plan-mode build carve-out** (`is_plan_safe_build_command`) parsed
+    with the POSIX lexer, so `cargo test | select -First 40` refused while
+    `cargo test 2>/dev/null` passed. That redirect is not a discard under
+    PowerShell: it resolves to `Out-File` at `C:\dev\null` — drive-absolute,
+    so it writes *outside the project*, which the POSIX classifier rated
+    `ReadOnly` (verified against pwsh 7.6.4, not assumed).
+  - The **plan-file shell-write carve-out** (`is_plan_file_only_write`) did
+    too, so the plan denial's own advice ("a shell redirect writing ONLY
+    that file also works") was false on Windows for backslash paths.
+
+  Rather than fix each in place, the assumption is now a value: `HostShell`,
+  with `HostShell::current()` the single `cfg!` site. The exec spawn, risk
+  classification, both plan carve-outs, and the transcript label all read
+  that one enum, so a fifth site cannot quietly re-derive the wrong answer —
+  and every dialect-sensitive test now asserts BOTH dialects on every
+  platform instead of only the one CI happens to run on. `PolicyEngine`
+  takes `with_host_shell` and `RenderCache` carries the label dialect (the
+  snapshot rig pins it, so one set of `.snap` files still serves every
+  platform).
+
+  Execution itself was always native PowerShell — `pwsh` when installed,
+  Windows PowerShell 5.1 otherwise, `-NoProfile -NonInteractive`, across
+  foreground, background, and sandbox-less paths alike. Only the layers
+  reasoning ABOUT the command were wrong.
+
+  Guards, each checked against the failing direction: the field-observed
+  pipeline classifies `ReadOnly` and proceeds through the plan gate; its
+  matched mutating pair keeps the plan denial; the dialect canary
+  (`Select-Object`) is read-only under PowerShell and a mutation under
+  POSIX, with `HostShell::current()` pinned to the platform; PowerShell
+  plan-file writes accept the authoring shapes (backslash paths included)
+  and refuse cwd changes, regions, here-strings, argv-target writers, and
+  second effects; the destructive hard-deny is unchanged in both dialects;
+  and the transcript label matches the host shell.
   clipping that line and putting the caret on the border.** Three things have
   to agree on where the text breaks. The rendered text and the caret both went
   through `layout_rows`, which prefers a whitespace break so words stay whole.

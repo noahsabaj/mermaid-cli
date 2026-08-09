@@ -183,7 +183,19 @@ pub fn tool_result_messages(
 /// the chat renderer can show "Read main.rs → 1,234 bytes" etc.
 #[must_use]
 pub fn action_display_for(call: &PendingToolCall, outcome: &ToolOutcome) -> ActionDisplay {
-    let (action_type, target) = display_info_for(call);
+    action_display_for_shell(call, outcome, mermaid_runtime::HostShell::current())
+}
+
+/// [`action_display_for`] with the shell label injected — the render layer's
+/// live rows pass their `RenderCache`-pinned value so snapshot frames stay
+/// byte-stable across platforms.
+#[must_use]
+pub fn action_display_for_shell(
+    call: &PendingToolCall,
+    outcome: &ToolOutcome,
+    host_shell: mermaid_runtime::HostShell,
+) -> ActionDisplay {
+    let (action_type, target) = display_info_for_shell(call, host_shell);
     // `write_file` that overwrote an existing file is an *update*, not a fresh
     // write — relabel it so the transcript reads "Update" (as Claude Code does),
     // reserving "Write" for a genuinely new file. The tool records which case it
@@ -622,15 +634,33 @@ fn count_search_results(output: &str) -> usize {
         .count()
 }
 
+/// [`display_info_for_shell`] with the machine's own
+/// [`HostShell`](mermaid_runtime::HostShell) — what the committed
+/// transcript and activity labels want. The render layer passes its
+/// `RenderCache`-pinned value instead so snapshot frames stay byte-stable
+/// across platforms.
+#[must_use]
+pub fn display_info_for(call: &PendingToolCall) -> (String, String) {
+    display_info_for_shell(call, mermaid_runtime::HostShell::current())
+}
+
 /// Best-effort name + target extraction from a tool call, for chat
-/// display ("Read src/main.rs", "Bash cargo test", etc). Matches on
-/// the wire-format tool name + arguments; unknown tools fall through
-/// to the raw function name.
+/// display ("Read src/main.rs", "Bash cargo test", etc).
+///
+/// Matches on the wire-format tool name + arguments; unknown tools fall
+/// through to the raw function name. `host_shell` names the interpreter
+/// `execute_command` rows run under — the label used to say `Bash`
+/// unconditionally, wrapping PowerShell pipelines in `Bash(...)` on
+/// Windows.
 #[expect(
     clippy::too_many_lines,
     reason = "predates the lint; see .github/baselines/expect_budget.txt"
 )]
-pub fn display_info_for(call: &PendingToolCall) -> (String, String) {
+#[must_use]
+pub fn display_info_for_shell(
+    call: &PendingToolCall,
+    host_shell: mermaid_runtime::HostShell,
+) -> (String, String) {
     let name = call.source.function.name.as_str();
     let args = &call.source.function.arguments;
     let string_arg =
@@ -656,12 +686,18 @@ pub fn display_info_for(call: &PendingToolCall) -> (String, String) {
         // detail (`action_details_for`).
         "apply_patch" => ("Apply patch".to_string(), String::new()),
         "delete_file" => ("Delete".to_string(), string_arg("path").unwrap_or_default()),
+        // PowerShell's `mkdir` creates parents by default and has no `-p`;
+        // showing the POSIX spelling on Windows would teach wrong syntax.
         "create_directory" => (
-            "Bash".to_string(),
-            format!("mkdir -p {}", string_arg("path").unwrap_or_default()),
+            host_shell.display_name().to_string(),
+            if host_shell == mermaid_runtime::HostShell::PowerShell {
+                format!("mkdir {}", string_arg("path").unwrap_or_default())
+            } else {
+                format!("mkdir -p {}", string_arg("path").unwrap_or_default())
+            },
         ),
         "execute_command" => (
-            "Bash".to_string(),
+            host_shell.display_name().to_string(),
             string_arg("command").unwrap_or_default(),
         ),
         "web_search" => {
@@ -772,6 +808,49 @@ mod tests {
                 },
             },
         }
+    }
+
+    #[test]
+    fn execute_command_label_names_the_real_shell() {
+        // The transcript label must name the interpreter that actually runs
+        // the command (`shell_invocation`): on Windows a PowerShell pipeline
+        // used to render as `Bash(Get-ChildItem ...)`. Both dialects assert
+        // on every platform; `display_info_for` itself follows
+        // `HostShell::current()`.
+        use mermaid_runtime::HostShell;
+        let call = sample_call_args(
+            1,
+            "execute_command",
+            serde_json::json!({"command": "Get-ChildItem | Select-Object -First 5"}),
+        );
+        for (shell, label) in [
+            (HostShell::Posix, "Bash"),
+            (HostShell::PowerShell, "PowerShell"),
+        ] {
+            let (got_label, target) = display_info_for_shell(&call, shell);
+            assert_eq!(got_label, label);
+            assert_eq!(target, "Get-ChildItem | Select-Object -First 5");
+        }
+        assert_eq!(
+            display_info_for(&call).0,
+            HostShell::current().display_name(),
+            "the default label follows the machine's own shell"
+        );
+        // `create_directory` shows a shell-flavored synthetic command; the
+        // spelling must match the same shell (`mkdir -p` is not PowerShell).
+        let mkdir = sample_call_args(
+            2,
+            "create_directory",
+            serde_json::json!({"path": "src/new"}),
+        );
+        assert_eq!(
+            display_info_for_shell(&mkdir, HostShell::Posix),
+            ("Bash".to_string(), "mkdir -p src/new".to_string())
+        );
+        assert_eq!(
+            display_info_for_shell(&mkdir, HostShell::PowerShell),
+            ("PowerShell".to_string(), "mkdir src/new".to_string())
+        );
     }
 
     #[test]

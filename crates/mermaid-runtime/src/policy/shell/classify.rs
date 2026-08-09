@@ -276,6 +276,26 @@ pub(crate) fn sort_writes_file(segment: &[String]) -> bool {
     })
 }
 
+/// Classify `command` in the grammar of the shell that will run it.
+///
+/// The engine passes its [`HostShell`](super::super::HostShell) — defaulted
+/// to `HostShell::current()`, the same predicate `shell_invocation` spawns
+/// with — so risk is always read for the interpreter that executes.
+/// Classifying for a different one is exactly the bug that made
+/// plan/read-only mode deny every read-only PowerShell pipeline on Windows
+/// while missing PS-only writes (`*> file`).
+pub(in crate::policy) fn classify_command_for(
+    host_shell: super::super::HostShell,
+    command: &str,
+) -> RiskClass {
+    match host_shell {
+        super::super::HostShell::PowerShell => {
+            super::powershell::classify_powershell_command(command)
+        },
+        super::super::HostShell::Posix => classify_shell_command(command),
+    }
+}
+
 /// Classify a shell command by splitting it into the command segments
 /// `sh -c` would run (so flag reordering, extra whitespace, absolute paths,
 /// and chaining — including glued operators and newlines — can't downgrade the

@@ -589,11 +589,17 @@ fn format_approval_body(request: &ActionRequest, classifier_reason: Option<&str>
     });
     let modal_detail = redacted_detail.as_ref().or(request.command.as_ref());
     let mut body = if let Some(cmd) = modal_detail {
-        // A `$ ` prefix reads as "shell command"; only use it for actual shell
-        // categories. Computer-use / MCP details (`type_text "…"`, `mcp s__t(…)`)
-        // render verbatim so the prompt isn't misleading (#30, #31).
+        // A prompt sigil reads as "shell command"; only use it for actual
+        // shell categories. Computer-use / MCP details (`type_text "…"`,
+        // `mcp s__t(…)`) render verbatim so the prompt isn't misleading
+        // (#30, #31). The sigil is the HOST shell's (`$ ` / `PS> `): telling
+        // the reader they are approving a POSIX command when PowerShell will
+        // run it is the same lie the `Bash(...)` transcript label told.
         match request.category {
-            C::Shell | C::Git | C::Process => format!("$ {cmd}"),
+            C::Shell | C::Git | C::Process => format!(
+                "{}{cmd}",
+                mermaid_runtime::HostShell::current().prompt_sigil()
+            ),
             _ => clip_preview(cmd),
         }
     } else if let Some(path) = &request.path {
@@ -1177,14 +1183,25 @@ mod tests {
     }
 
     /// The shell spelling of plan authoring is allowed; anything with a
-    /// second effect keeps the plan denial.
+    /// second effect keeps the plan denial. Spellings are per-dialect — the
+    /// gate parses for the interpreter that will run the command
+    /// (`HostShell::current()`), so Windows asserts the PowerShell shapes
+    /// (heredocs do not exist there) and unix the POSIX ones.
     #[tokio::test]
     async fn plan_mode_allows_a_shell_write_that_only_touches_the_plan_file() {
-        for cmd in [
+        #[cfg(not(target_os = "windows"))]
+        let allowed = [
             "echo '## Summary' > .mermaid/plans/x.md",
             "printf '%s\\n' more >> /repo/.mermaid/plans/x.md",
             "cat > .mermaid/plans/x.md <<'EOF'\n## Tasks\n1. step\nEOF",
-        ] {
+        ];
+        #[cfg(target_os = "windows")]
+        let allowed = [
+            "echo '## Summary' > .mermaid/plans/x.md",
+            "Write-Output more >> /repo/.mermaid/plans/x.md",
+            "echo x > .mermaid\\plans\\x.md",
+        ];
+        for cmd in allowed {
             let g = gate(
                 &ctx_plan(),
                 shell_request(cmd),
@@ -1249,6 +1266,55 @@ mod tests {
                 );
             },
             Gate::Proceed { .. } => panic!("non-plan shell write must be blocked in plan mode"),
+        }
+    }
+
+    /// The Windows regression that motivated the PowerShell dialect: in plan
+    /// mode a model could not even LIST FILES, because the POSIX lexer read
+    /// every pipeline-shaping cmdlet and `if (...)` statement as an unknown
+    /// mutating head. The exploration shape observed in the field must
+    /// proceed, and its matched mutating pair must keep the plan denial.
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn plan_mode_allows_powershell_exploration_on_windows() {
+        let explore = "Get-ChildItem -Recurse -File | Select-Object -First 100 | \
+                       ForEach-Object { $_.FullName.Replace((Get-Location).Path + '\\','') }; \
+                       Write-Host \"---\"; \
+                       if (Test-Path \"pyproject.toml\") { Get-Content pyproject.toml }";
+        let g = gate(
+            &ctx_plan(),
+            shell_request(explore),
+            &[],
+            serde_json::json!({}),
+            true,
+            false,
+        )
+        .await;
+        assert!(
+            matches!(g, Gate::Proceed { .. }),
+            "plan mode must allow read-only PowerShell exploration"
+        );
+        match gate(
+            &ctx_plan(),
+            shell_request("Get-ChildItem | ForEach-Object { Remove-Item $_ }"),
+            &[],
+            serde_json::json!({}),
+            true,
+            false,
+        )
+        .await
+        {
+            Gate::Block(outcome) => assert!(
+                outcome.model_content.contains(&format!(
+                    "blocked by policy: {}",
+                    mermaid_runtime::PLAN_DENIAL_MARKER
+                )),
+                "got {:?}",
+                outcome.model_content
+            ),
+            Gate::Proceed { .. } => {
+                panic!("a mutating PowerShell pipeline must not run in plan mode")
+            },
         }
     }
 

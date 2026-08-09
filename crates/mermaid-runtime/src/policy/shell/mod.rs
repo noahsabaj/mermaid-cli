@@ -8,6 +8,7 @@
 pub(crate) mod classify;
 pub(crate) mod destructive;
 pub(crate) mod lexer;
+pub(in crate::policy) mod powershell;
 pub(crate) mod tables;
 
 pub(crate) use classify::*;

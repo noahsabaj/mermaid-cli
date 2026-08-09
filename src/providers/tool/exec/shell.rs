@@ -61,7 +61,12 @@ pub(crate) fn shell_invocation(
         }
         args.extend(["--".into(), "sh".into(), "-c".into(), command.into()]);
         ShellInvocation { program: exe, args }
-    } else if cfg!(target_os = "windows") {
+    } else if mermaid_runtime::HostShell::current() == mermaid_runtime::HostShell::PowerShell {
+        // `HostShell::current()` is the shared predicate: risk
+        // classification, the plan-mode carve-outs, and the transcript label
+        // all read the command in the grammar of the interpreter chosen
+        // HERE. A new host shell must be taught to all of them through that
+        // one enum.
         ShellInvocation {
             program: PathBuf::from(powershell_program()),
             args: vec![

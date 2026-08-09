@@ -119,15 +119,18 @@ pub(crate) const READ_ONLY_BINARIES: &[&str] = &[
 /// PowerShell cmdlets (and single-word aliases) that only read state. Matched
 /// case-insensitively — PowerShell command names are. The scriptblock-taking
 /// pipeline cmdlets (ForEach-Object, Where-Object, Select-Object, Sort-Object,
-/// Measure-Object, Format-*) are deliberately absent: a scriptblock or
-/// calculated-property argument can run anything, so they classify as a
-/// mutation and defer to the gate. Model commands run under PowerShell on
+/// Measure-Object, Format-*) are deliberately absent HERE: a scriptblock or
+/// calculated-property argument can run anything, and this table is also
+/// consulted by the POSIX classifier, whose lexer never looks inside braces.
+/// They live in the PowerShell dialect's own `PS_PIPELINE_CMDLETS`, where
+/// every block recursively classifies. Model commands run under PowerShell on
 /// Windows, so these heads are as common there as `cat`/`ls` are on unix.
 pub(crate) const PS_READ_ONLY_CMDLETS: &[&str] = &[
     "get-content",
     "get-childitem",
     "get-item",
     "get-itemproperty",
+    "get-itempropertyvalue",
     "get-location",
     "get-date",
     "get-command",
@@ -141,6 +144,8 @@ pub(crate) const PS_READ_ONLY_CMDLETS: &[&str] = &[
     "get-filehash",
     "get-host",
     "get-error",
+    "get-ciminstance",
+    "get-wmiobject",
     "select-string",
     "test-path",
     "resolve-path",
@@ -148,8 +153,21 @@ pub(crate) const PS_READ_ONLY_CMDLETS: &[&str] = &[
     "join-path",
     "compare-object",
     "out-string",
+    // Discards its input — the cmdlet spelling of `> $null`.
+    "out-null",
     "write-output",
     "write-host",
+    "convertto-json",
+    "convertfrom-json",
+    "convertto-csv",
+    "convertfrom-csv",
+    // Cwd movement, ephemeral in a one-shot spawn — the PowerShell spelling
+    // of the `cd`/`pushd`/`popd` builtins above. Anything doing a LEXICAL
+    // path match against a fixed workdir must refuse when one of these runs;
+    // `CWD_CHANGING_BUILTINS` (plan_gate) lists the same names.
+    "set-location",
+    "push-location",
+    "pop-location",
     "dir",
     // Single-word aliases of the cmdlets above (`cat`/`ls`/`pwd`/`echo`/`ps`
     // style aliases are already in READ_ONLY_BINARIES).
@@ -163,7 +181,9 @@ pub(crate) const PS_READ_ONLY_CMDLETS: &[&str] = &[
     "gsv",
     "gm",
     "gcm",
+    "gwmi",
     "sls",
+    "sl",
 ];
 
 /// `git` subcommands that only read repository state. Deliberately excludes
@@ -239,12 +259,16 @@ pub(crate) const WRAPPERS: &[&str] = &[
 ];
 
 /// If `tok` is an output redirection that writes to a FILE — including the
-/// fd-numbered (`1>`, `2>>`) and `&>` forms a bare `starts_with('>')` misses —
-/// return the file target after the operator (empty ⇒ the target is the next
-/// token). Returns `None` for non-redirects and for fd-dup redirects like
-/// `2>&1` (which write no file), so `ls 2>&1` is not mis-flagged as a mutation.
+/// fd-numbered (`1>`, `2>>`), `&>`, and `*>` forms a bare `starts_with('>')`
+/// misses — return the file target after the operator (empty ⇒ the target is
+/// the next token). Returns `None` for non-redirects and for fd-dup redirects
+/// like `2>&1` (which write no file), so `ls 2>&1` is not mis-flagged as a
+/// mutation. The `*>` arm covers both dialects: PowerShell redirects every
+/// stream to the file, and POSIX `sh` reads the token as glob-then-redirect —
+/// either way `echo hi *> f` writes `f`, which this scan used to miss.
 pub(crate) fn redirect_target_after(tok: &str) -> Option<&str> {
     let rest = tok.trim_start_matches(|c: char| c.is_ascii_digit());
+    let rest = rest.strip_prefix('*').unwrap_or(rest);
     if let Some(r) = rest.strip_prefix("&>") {
         return Some(r.trim_start_matches('>'));
     }

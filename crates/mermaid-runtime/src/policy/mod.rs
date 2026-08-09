@@ -320,12 +320,69 @@ pub enum FloorLevel {
     Deny,
 }
 
+/// Which shell `execute_command` hands model commands to on this host.
+///
+/// THE single answer to "what interpreter runs shell commands?": the exec
+/// tool's spawn (`shell_invocation`), risk classification
+/// (`classify_command_for`), the plan-mode carve-outs
+/// (`is_plan_safe_build_command`, `is_plan_file_only_write`), and the
+/// transcript label (`display_info_for`) all key on this one value, so they
+/// cannot drift apart again — classifying (or labeling) for a different
+/// interpreter than the one that executes is exactly the bug family that
+/// made plan mode deny every read-only PowerShell pipeline on Windows while
+/// the transcript wrapped those pipelines in `Bash(...)`.
+///
+/// Windows executes under PowerShell (`pwsh` when installed, Windows
+/// PowerShell 5.1 otherwise); everywhere else `sh`. [`Self::current`] is the
+/// only `cfg!` site for the decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostShell {
+    Posix,
+    PowerShell,
+}
+
+impl HostShell {
+    /// The shell of the machine this binary runs on.
+    #[must_use]
+    pub const fn current() -> Self {
+        if cfg!(target_os = "windows") {
+            Self::PowerShell
+        } else {
+            Self::Posix
+        }
+    }
+
+    /// Transcript label for an `execute_command` row (`Bash(cargo test)`,
+    /// `PowerShell(Get-ChildItem)`). "Bash" is the colloquial POSIX label —
+    /// the interpreter is `sh` — kept for familiarity.
+    #[must_use]
+    pub const fn display_name(self) -> &'static str {
+        match self {
+            Self::Posix => "Bash",
+            Self::PowerShell => "PowerShell",
+        }
+    }
+
+    /// Prompt sigil an approval modal puts in front of a command so it reads
+    /// as one. Dialect-specific for the same reason the label is: `$ ` in
+    /// front of `Get-ChildItem` tells the reader they are approving a POSIX
+    /// shell command, which is not what will run.
+    #[must_use]
+    pub const fn prompt_sigil(self) -> &'static str {
+        match self {
+            Self::Posix => "$ ",
+            Self::PowerShell => "PS> ",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PolicyEngine {
     mode: SafetyMode,
     overrides: Vec<PolicyOverride>,
     external_writes: FloorLevel,
     system_installs: FloorLevel,
+    host_shell: HostShell,
 }
 
 impl PolicyEngine {
@@ -336,7 +393,18 @@ impl PolicyEngine {
             overrides: Vec::new(),
             external_writes: FloorLevel::default(),
             system_installs: FloorLevel::default(),
+            host_shell: HostShell::current(),
         }
+    }
+
+    /// Override the shell dialect commands are classified for. Tests use
+    /// this to exercise both dialects on every platform; production callers
+    /// keep the [`HostShell::current`] default, which matches what
+    /// `shell_invocation` actually spawns.
+    #[must_use]
+    pub const fn with_host_shell(mut self, host_shell: HostShell) -> Self {
+        self.host_shell = host_shell;
+        self
     }
 
     #[must_use]
@@ -359,7 +427,7 @@ impl PolicyEngine {
 
     #[must_use]
     pub fn decide(&self, request: &ActionRequest) -> PolicyDecision {
-        let risk = classify(request);
+        let risk = classify(request, self.host_shell);
         if risk == RiskClass::Destructive {
             return PolicyDecision::Deny {
                 risk,
@@ -630,7 +698,7 @@ fn override_decision(rule: &PolicyOverride, risk: RiskClass) -> PolicyDecision {
     }
 }
 
-fn classify(request: &ActionRequest) -> RiskClass {
+fn classify(request: &ActionRequest, host_shell: HostShell) -> RiskClass {
     if request
         .command
         .as_deref()
@@ -645,7 +713,7 @@ fn classify(request: &ActionRequest) -> RiskClass {
         ToolCategory::Shell | ToolCategory::Git => request
             .command
             .as_deref()
-            .map(classify_shell_command)
+            .map(|cmd| shell::classify::classify_command_for(host_shell, cmd))
             .unwrap_or(RiskClass::ShellMutation),
         ToolCategory::Web | ToolCategory::Network => RiskClass::Network,
         ToolCategory::ExternalDirectory | ToolCategory::ComputerUse | ToolCategory::Mcp => {
@@ -1632,7 +1700,7 @@ mod tests {
     // ── Plan-file-only shell writes ──────────────────────────────────
 
     fn plan_write(cmd: &str) -> bool {
-        super::is_plan_file_only_write(
+        super::plan_gate::is_plan_file_only_write_posix(
             cmd,
             std::path::Path::new("/repo"),
             std::path::Path::new("/repo/.mermaid/plans/x.md"),
@@ -1789,12 +1857,26 @@ mod tests {
         // redirect as a mutation (no safe-device exemption); the third via
         // the glued-`;` token (`2>/dev/null;`) reading as a sensitive
         // `/dev/` write in the hard-deny scan. Verbatim from the report.
+        //
+        // The engine classifies for the HOST shell, so the spellings are
+        // per-dialect: unix keeps the report's `/dev/null` chains; Windows
+        // asserts the PowerShell `$null` chains, because there `/dev/null`
+        // is not a device at all but an ordinary path (`\dev\null`) — a real
+        // file write, pinned by the matched denial at the end.
         let engine = PolicyEngine::new(SafetyMode::ReadOnly);
-        for cmd in [
+        #[cfg(not(target_os = "windows"))]
+        let chains = [
             r#"find . -maxdepth 4 -not -path '*/\.*' -type f 2>/dev/null | head -50 && echo "---ALL---" && find . -maxdepth 4 -not -path '*/\.*' -type d 2>/dev/null"#,
             r#"ls public/images/ 2>/dev/null && cat public/manifest.webmanifest public/robots.txt public/sitemap.xml 2>/dev/null"#,
             r#"ls -la public/images/ 2>/dev/null; echo "---"; cat public/images/README.md 2>/dev/null"#,
-        ] {
+        ];
+        #[cfg(target_os = "windows")]
+        let chains = [
+            r#"Get-ChildItem -Recurse -File 2>$null | head -50; echo "---ALL---"; Get-ChildItem -Recurse -Directory 2>$null"#,
+            r#"ls public/images/ 2>$null; cat public/manifest.webmanifest 2>$null"#,
+            r#"Get-Content public/images/README.md 2>$null; echo "---""#,
+        ];
+        for cmd in chains {
             assert!(!is_destructive_command(cmd), "not destructive: {cmd}");
             let decision = engine.decide(&shell(cmd));
             assert!(
@@ -1808,6 +1890,16 @@ mod tests {
                 "read_only must allow {cmd}: {decision:?}"
             );
         }
+        // The unix discard spelling is a real write under PowerShell; the
+        // dialect distinction is load-bearing, not cosmetic.
+        #[cfg(target_os = "windows")]
+        assert!(
+            matches!(
+                engine.decide(&shell("ls 2>/dev/null")),
+                PolicyDecision::Deny { .. }
+            ),
+            "PowerShell must treat /dev/null as an ordinary file target"
+        );
     }
 
     #[test]
@@ -2016,6 +2108,63 @@ mod tests {
                 "mutation must never classify as read-only: {cmd}"
             );
         }
+    }
+
+    #[test]
+    fn host_shell_dialect_matches_the_exec_interpreter() {
+        // The dialect canary is a pipeline-shaping cmdlet: read-only ONLY
+        // under the PowerShell dialect (its blocks recurse), a mutation under
+        // POSIX (unknown head, fail-closed). Both dialects assert on every
+        // platform; the `current()` mapping pins the one `cfg!` site to the
+        // interpreter `shell_invocation` actually spawns.
+        let canary = "Get-ChildItem | Select-Object -First 5";
+        assert_eq!(
+            crate::policy::shell::classify::classify_command_for(HostShell::PowerShell, canary),
+            RiskClass::ReadOnly
+        );
+        assert_eq!(
+            crate::policy::shell::classify::classify_command_for(HostShell::Posix, canary),
+            RiskClass::ShellMutation
+        );
+        let expected = if cfg!(target_os = "windows") {
+            HostShell::PowerShell
+        } else {
+            HostShell::Posix
+        };
+        assert_eq!(HostShell::current(), expected);
+    }
+
+    #[test]
+    fn read_only_engine_allows_powershell_exploration_under_ps_dialect() {
+        // End-to-end through the engine, on every platform via the injected
+        // dialect: the exploration pipeline observed doom-looping in plan
+        // mode (read-only floor) must decide Allow, while its matched
+        // mutating pair keeps the read-only deny.
+        let request = |cmd: &str| {
+            let mut r = ActionRequest::new("execute_command", ToolCategory::Shell, cmd);
+            r.command = Some(cmd.to_string());
+            r
+        };
+        let engine = PolicyEngine::new(SafetyMode::ReadOnly).with_host_shell(HostShell::PowerShell);
+        let explore = "Get-ChildItem -Recurse -File | Select-Object -First 100 | \
+                       ForEach-Object { $_.FullName.Replace((Get-Location).Path + '\\','') }; \
+                       if (Test-Path \"pyproject.toml\") { Get-Content pyproject.toml }";
+        assert!(
+            matches!(
+                engine.decide(&request(explore)),
+                PolicyDecision::Allow { .. }
+            ),
+            "read-only PowerShell exploration must be allowed"
+        );
+        assert!(
+            matches!(
+                engine.decide(&request(
+                    "Get-ChildItem -Recurse -File | ForEach-Object { Remove-Item $_ }"
+                )),
+                PolicyDecision::Deny { .. }
+            ),
+            "the matched mutating pipeline must keep the deny"
+        );
     }
 
     #[test]
@@ -2482,7 +2631,7 @@ mod tests {
             "cargo check && cargo test",
             "cargo test 2>/dev/null",
         ] {
-            assert!(is_plan_safe_build_command(cmd), "should allow: {cmd}");
+            assert!(is_plan_safe_build_command_posix(cmd), "should allow: {cmd}");
         }
     }
 
@@ -2514,7 +2663,10 @@ mod tests {
             // File-writing redirect.
             "cargo test > src/lib.rs",
         ] {
-            assert!(!is_plan_safe_build_command(cmd), "should refuse: {cmd}");
+            assert!(
+                !is_plan_safe_build_command_posix(cmd),
+                "should refuse: {cmd}"
+            );
         }
     }
 }
