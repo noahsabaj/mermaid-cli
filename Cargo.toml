@@ -1,6 +1,6 @@
 [package]
 name = "mermaid-cli"
-version = "0.22.0"
+version = "0.23.0"
 edition = "2024"
 default-run = "mermaid"
 # `str::floor_char_boundary` (used in several places for UTF-8-safe slicing)
@@ -107,9 +107,9 @@ mime = "0.3"
 rusqlite = { version = "0.40", features = ["bundled"] }
 getrandom = "0.4"
 sha2 = "0.11"
-mermaid-domain = { path = "crates/mermaid-domain", version = "0.22.0" }
-mermaid-model = { path = "crates/mermaid-model", version = "0.22.0" }
-mermaid-runtime = { path = "crates/mermaid-runtime", version = "0.22.0" }
+mermaid-domain = { path = "crates/mermaid-domain", version = "0.23.0" }
+mermaid-model = { path = "crates/mermaid-model", version = "0.23.0" }
+mermaid-runtime = { path = "crates/mermaid-runtime", version = "0.23.0" }
 
 # Additional utilities
 rustc-hash = "2.0"  # Faster non-cryptographic hash for HashMap
@@ -147,9 +147,9 @@ portable-pty = "0.9"
 # Integration tests link the library plus dev-deps, NOT `[dependencies]`. Both
 # workspace crates are declared here so `tests/` can name them directly instead
 # of reaching them through `mermaid_cli`'s re-export facades.
-mermaid-domain = { path = "crates/mermaid-domain", version = "0.22.0" }
-mermaid-model = { path = "crates/mermaid-model", version = "0.22.0" }
-mermaid-runtime = { path = "crates/mermaid-runtime", version = "0.22.0" }
+mermaid-domain = { path = "crates/mermaid-domain", version = "0.23.0" }
+mermaid-model = { path = "crates/mermaid-model", version = "0.23.0" }
+mermaid-runtime = { path = "crates/mermaid-runtime", version = "0.23.0" }
 # Scoped env-var guards — replaces `unsafe { std::env::set_var / remove_var }`
 # patterns in model + auth tests. Safer under `--test-threads > 1`.
 # `async_closure` feature enables `async_with_vars` for tokio-test paths.
