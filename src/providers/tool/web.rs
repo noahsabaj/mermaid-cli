@@ -49,6 +49,38 @@ pub struct WebCapabilityStatus {
     pub reason: Option<String>,
 }
 
+impl WebCapabilityStatus {
+    /// The model-facing reason recorded when this capability's tool is NOT
+    /// registered: why it is absent plus the concrete way to get it back.
+    /// Registries answer a call to the absent tool with this text — a bare
+    /// "unknown tool" reads as a schema bug and was observed driving models
+    /// to fabricate web findings instead of reporting the gap.
+    #[must_use]
+    pub fn absence_reason(&self, tool: &str) -> String {
+        let reason = self
+            .reason
+            .as_deref()
+            .map(mermaid_model::utils::redact_secrets)
+            .unwrap_or_else(|| "backend initialization failed".to_string());
+        let remedy = match self.backend {
+            "managed_searxng" => {
+                "The user can set [web] search_backend = \"ollama\" (needs OLLAMA_API_KEY) \
+                 or point [web] searxng_url at a SearXNG instance, then restart mermaid"
+            },
+            "ollama_cloud" => {
+                "The user can set OLLAMA_API_KEY (or switch the [web] backend), \
+                 then restart mermaid"
+            },
+            "searxng" => "The user can fix [web] searxng_url, then restart mermaid",
+            _ => "The user can check the [web] config, then restart mermaid",
+        };
+        format!(
+            "{tool} is configured to use the {} backend, which is unavailable: {reason}. {remedy}.",
+            self.backend
+        )
+    }
+}
+
 /// Single source of truth for web backend selection and viability. Registry,
 /// doctor, provider adapters, and child registries consume this result instead
 /// of independently guessing from an Ollama environment variable.

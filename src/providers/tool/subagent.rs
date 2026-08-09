@@ -84,7 +84,9 @@ const EXPLORE_PREAMBLE: &str = "\
 You are an Explore agent: read-only reconnaissance. Locate files, map \
 structure, and extract exactly the facts asked for, using reads and \
 read-only commands. You cannot mutate anything — do not try. Report \
-concrete paths, names, and findings.";
+concrete paths, names, and findings. If the task needs a capability you \
+lack (live web access, writes), say so plainly in your report — never \
+invent findings, sources, or citations.";
 
 /// Tool names an agent type's `tools` filter may reference — the full child
 /// surface (`mcp` covers every `mcp__server__tool` via the proxy). GUI tools
@@ -751,6 +753,7 @@ impl ToolExecutor for SubagentTool {
 
         let child_tools = build_child_registry(
             self.spawner.providers.clone(),
+            &agent_type.name,
             agent_type.tools.as_deref(),
             &config,
             child_safety,
@@ -1472,6 +1475,7 @@ fn apply_live_mcp(
 /// registered tool is gated at the child's effective safety mode.
 fn build_child_registry(
     providers: Arc<ProviderFactory>,
+    agent_type_name: &str,
     tools: Option<&[String]>,
     config: &mermaid_domain::Config,
     safety_mode: SafetyMode,
@@ -1524,7 +1528,107 @@ fn build_child_registry(
     // Silence unused-import if the above imports don't all resolve.
     let _ = computer_use::probe;
     let _ = providers;
+    note_absent_child_tools(&mut r, agent_type_name, tools, config, safety_mode, web);
     Arc::new(r)
+}
+
+/// Record a teaching error for every tool a child model might call that its
+/// registry deliberately lacks. A child runs headless, so a bare
+/// "unknown tool" is exactly the reply that made explore children fabricate
+/// web findings with invented citations instead of reporting the gap
+/// (observed in the 20260806 field logs).
+fn note_absent_child_tools(
+    r: &mut ToolRegistry,
+    type_name: &str,
+    tools: Option<&[String]>,
+    config: &mermaid_domain::Config,
+    safety_mode: SafetyMode,
+    web: &WebCapabilities,
+) {
+    let allowed = |name: &str| tools.is_none_or(|t| t.iter().any(|x| x == name));
+    let toolset = tools
+        .map(|t| t.join(", "))
+        .unwrap_or_else(|| CHILD_TOOL_NAMES.join(", "));
+    // Registry key ↔ filter name: the MCP proxy dispatches under "mcp_proxy"
+    // while the type filter grants it as "mcp".
+    const FILTERABLE: &[(&str, &str)] = &[
+        ("read_file", "read_file"),
+        ("write_file", "write_file"),
+        ("apply_patch", "apply_patch"),
+        ("delete_file", "delete_file"),
+        ("create_directory", "create_directory"),
+        ("execute_command", "execute_command"),
+        ("web_search", "web_search"),
+        ("web_fetch", "web_fetch"),
+        ("mcp_proxy", "mcp"),
+    ];
+    for &(key, filter_name) in FILTERABLE {
+        if r.get(key).is_none() && !allowed(filter_name) {
+            r.note_unavailable(
+                key,
+                format!(
+                    "not in agent type '{type_name}'s toolset ({toolset}). State in \
+                     your report that the task needs it — the parent can re-run \
+                     with a type that carries it (e.g. \"general\")"
+                ),
+            );
+        }
+    }
+    // Web tools the type allows can still be absent: structurally
+    // unexecutable in a headless child (policy would Ask with nobody to
+    // answer), or lacking a viable backend. Say which — and forbid the
+    // failure mode observed in the field: fabricated web findings.
+    for tool in ["web_search", "web_fetch"] {
+        if r.get(tool).is_some() || r.unavailable_reason(tool).is_some() {
+            continue;
+        }
+        let reason = if config.safety.network == mermaid_domain::NetworkPolicy::Deny {
+            "network access is off (safety.network = \"deny\" / --no-network)".to_string()
+        } else if !headless_web_tool_is_executable(config, safety_mode, tool) {
+            let readonly_extra = if safety_mode == SafetyMode::ReadOnly {
+                ", or set [safety] allow_readonly_web = true to permit unattended \
+                 public-web reads in read_only"
+            } else {
+                ""
+            };
+            format!(
+                "safety mode '{}' requires an interactive approval for web egress, \
+                 and a subagent runs headless. Do NOT fabricate web findings — \
+                 report that live web access was unavailable. The user can enable \
+                 it with /safety auto or full_access{readonly_extra}",
+                safety_mode.as_str()
+            )
+        } else {
+            let status = if tool == "web_search" {
+                &web.search
+            } else {
+                &web.fetch
+            };
+            status.absence_reason(tool)
+        };
+        r.note_unavailable(tool, reason);
+    }
+    // Structural exclusions — the same for every agent type.
+    r.note_unavailable(
+        "agent",
+        "subagents cannot spawn subagents; do the work directly or report \
+         what should be delegated back to the parent",
+    );
+    for gui in [
+        "screenshot",
+        "click",
+        "type_text",
+        "press_key",
+        "scroll",
+        "mouse_move",
+        "list_windows",
+    ] {
+        r.note_unavailable(
+            gui,
+            "GUI / computer-use tools are parent-only; a subagent cannot drive \
+             the desktop",
+        );
+    }
 }
 
 /// Whether a headless child can get past policy for this web tool without an
@@ -2126,7 +2230,7 @@ mod tests {
         let config = mermaid_domain::Config::default();
         let providers = Arc::new(ProviderFactory::new(config.clone()));
         let web = WebCapabilities::resolve(&config.web);
-        let r = build_child_registry(providers, None, &config, SafetyMode::Ask, &web);
+        let r = build_child_registry(providers, "general", None, &config, SafetyMode::Ask, &web);
         // GUI tools absent.
         assert!(r.get("screenshot").is_none());
         assert!(r.get("click").is_none());
@@ -2144,6 +2248,68 @@ mod tests {
         // capabilities must not be advertised.
         assert!(r.get("web_fetch").is_none());
         assert!(r.get("web_search").is_none());
+        // ...and calling one anyway is answered with the cause and the
+        // anti-fabrication directive, not a bare "unknown tool".
+        for tool in ["web_fetch", "web_search"] {
+            let reason = r.unavailable_reason(tool).expect("absence reason");
+            assert!(reason.contains("headless"), "{tool}: {reason}");
+            assert!(reason.contains("ask"), "{tool}: {reason}");
+            assert!(reason.contains("fabricate"), "{tool}: {reason}");
+            assert!(
+                !reason.contains("allow_readonly_web"),
+                "the read_only remedy must not show for ask: {reason}"
+            );
+        }
+        // Structural exclusions teach too.
+        let agent = r.unavailable_reason("agent").expect("agent reason");
+        assert!(agent.contains("cannot spawn subagents"), "{agent}");
+        let gui = r.unavailable_reason("screenshot").expect("gui reason");
+        assert!(gui.contains("parent-only"), "{gui}");
+        // A name the registry never considered stays a plain unknown tool.
+        assert!(r.unavailable_reason("not_a_tool").is_none());
+        let outcome = r.unknown_tool_outcome("not_a_tool", "not_a_tool");
+        assert_eq!(
+            outcome.error_message().unwrap_or_default(),
+            "unknown tool: not_a_tool"
+        );
+    }
+
+    #[test]
+    fn readonly_child_web_reason_names_the_readonly_opt_in() {
+        let mut config = mermaid_domain::Config::default();
+        config.safety.mode = SafetyMode::ReadOnly;
+        let providers = Arc::new(ProviderFactory::new(config.clone()));
+        let web = WebCapabilities::resolve(&config.web);
+        let r = build_child_registry(
+            providers,
+            "general",
+            None,
+            &config,
+            SafetyMode::ReadOnly,
+            &web,
+        );
+        assert!(r.get("web_fetch").is_none());
+        let reason = r.unavailable_reason("web_fetch").expect("absence reason");
+        assert!(reason.contains("allow_readonly_web"), "{reason}");
+    }
+
+    #[test]
+    fn network_deny_child_web_reason_names_the_kill_switch() {
+        let mut config = mermaid_domain::Config::default();
+        config.safety.network = mermaid_domain::NetworkPolicy::Deny;
+        let providers = Arc::new(ProviderFactory::new(config.clone()));
+        let web = WebCapabilities::resolve(&config.web);
+        let r = build_child_registry(
+            providers,
+            "general",
+            None,
+            &config,
+            SafetyMode::FullAccess,
+            &web,
+        );
+        assert!(r.get("web_search").is_none());
+        let reason = r.unavailable_reason("web_search").expect("absence reason");
+        assert!(reason.contains("safety.network"), "{reason}");
     }
 
     #[test]
@@ -2160,7 +2326,7 @@ mod tests {
             config.web.searxng_url = "http://127.0.0.1:8080".to_string();
             let providers = Arc::new(ProviderFactory::new(config.clone()));
             let web = WebCapabilities::resolve(&config.web);
-            build_child_registry(providers, None, &config, mode, &web)
+            build_child_registry(providers, "general", None, &config, mode, &web)
         };
 
         for mode in [SafetyMode::Auto, SafetyMode::FullAccess] {
@@ -2302,6 +2468,7 @@ mod tests {
         let web = WebCapabilities::resolve(&config.web);
         let r = build_child_registry(
             providers,
+            &explore.name,
             explore.tools.as_deref(),
             &config,
             SafetyMode::ReadOnly,
@@ -2319,5 +2486,22 @@ mod tests {
         ] {
             assert!(r.get(tool).is_none(), "explore must not carry {tool}");
         }
+        // The 20260806 hallucination shape: an explore child calling
+        // `web_search` must be told the TYPE excludes it (nearest cause —
+        // not the safety mode), and what its report should say.
+        for tool in ["web_search", "web_fetch", "write_file", "mcp_proxy"] {
+            let reason = r.unavailable_reason(tool).expect("absence reason");
+            assert!(reason.contains("'explore'"), "{tool}: {reason}");
+            assert!(reason.contains("general"), "{tool}: {reason}");
+        }
+        // Tools the type DOES carry have no absence note.
+        assert!(r.unavailable_reason("read_file").is_none());
+        // The dispatch shape the model actually sees, via the MCP routing key.
+        let outcome = r.unknown_tool_outcome("mcp_proxy", "mcp__github__search");
+        let msg = outcome.error_message().unwrap_or_default();
+        assert!(
+            msg.starts_with("mcp__github__search is not available:"),
+            "{msg}"
+        );
     }
 }

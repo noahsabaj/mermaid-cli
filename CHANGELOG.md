@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A tool that is deliberately absent now tells the model why, instead of
+  `unknown tool`.** Web tools vanish from the model's toolset in four
+  distinct situations — the selected backend is unviable (managed SearXNG on
+  Windows), `safety.network = "deny"`, an agent type's tool filter
+  (`explore` carries only reads), and web policy that a headless subagent
+  could never satisfy — and all four answered a call with the same bare
+  `unknown tool: web_search`. Field logs show where that leads: an `explore`
+  child given a verification task fabricated a "verification" with
+  plausible-looking Microsoft/StackOverflow/GitHub citations rather than
+  reporting that it had no web access, and a read-only session fed
+  `read_file` an `https://` URL and got a path error that said nothing about
+  the actual mistake.
+
+  Registries now record a model-facing reason for every tool they
+  considered and omitted, and dispatch returns it verbatim: the cause plus
+  the remediation (which config key or safety mode brings the tool back, or
+  what the child's report should say instead — with an explicit "do NOT
+  fabricate web findings" where that failure mode was observed). MCP calls
+  are answered under the name the model actually wrote, not the internal
+  `mcp_proxy` routing key. `read_file` rejects `http(s)://` paths with a
+  pointer to `web_fetch`. The read-only headless web denial now names
+  `[safety] allow_readonly_web = true`, the remedy scoped to it, instead of
+  only the blanket `--allow-untrusted-tools`. And the `explore` preamble
+  tells the child to state missing capabilities in its report rather than
+  invent findings, sources, or citations.
+
 - **A stopped Ollama server no longer hides the installed models.** The
   enumeration surfaces (`mermaid list`, the `/model` picker, `status`,
   `doctor`, plan-mode handoff candidates) deliberately never autostart the

@@ -295,10 +295,22 @@ pub async fn gate(
                     );
                     Gate::Proceed { risk, plan_write }
                 } else {
+                    // Read-only web has its own, narrower remedy — name it,
+                    // or the model's operator is left choosing between a
+                    // blanket trust flag and giving up read-only entirely.
+                    let readonly_web_hint = if request.category
+                        == mermaid_runtime::ToolCategory::Web
+                        && ctx.safety_mode == mermaid_runtime::SafetyMode::ReadOnly
+                    {
+                        " In read_only, [safety] allow_readonly_web = true permits \
+                         unattended public-web reads."
+                    } else {
+                        ""
+                    };
                     Gate::Block(ToolOutcome::error(
                         format!(
                             "{} requires approval, but this is a headless run with no approval UI. \
-                             Re-run with --allow-untrusted-tools, or use a safety mode of auto/full_access.",
+                             Re-run with --allow-untrusted-tools, or use a safety mode of auto/full_access.{readonly_web_hint}",
                             request.summary
                         ),
                         0.0,
@@ -862,24 +874,39 @@ mod tests {
 
     #[tokio::test]
     async fn readonly_web_egress_fails_closed_without_approval_ui() {
+        let ask = ctx(SafetyMode::Ask);
         let ctx = ctx(SafetyMode::ReadOnly);
         for (tool, summary) in [
             ("web_search", "web_search rust release notes"),
             ("web_fetch", "web_fetch https://example.com/docs"),
         ] {
-            assert!(
-                gate_external(
-                    &ctx,
-                    tool,
-                    ToolCategory::Web,
-                    summary.to_string(),
-                    &serde_json::json!({}),
-                )
-                .await
-                .is_some(),
-                "ReadOnly must require approval for {tool}",
-            );
+            let blocked = gate_external(
+                &ctx,
+                tool,
+                ToolCategory::Web,
+                summary.to_string(),
+                &serde_json::json!({}),
+            )
+            .await
+            .unwrap_or_else(|| panic!("ReadOnly must require approval for {tool}"));
+            // The denial must name read_only's own remedy, not only the
+            // blanket trust flag (which trades away far more than web reads).
+            let msg = blocked.error_message().unwrap_or_default();
+            assert!(msg.contains("allow_readonly_web"), "{tool}: {msg}");
         }
+        // Matched pair: the same denial outside read_only must NOT advertise
+        // the read_only-only flag.
+        let blocked = gate_external(
+            &ask,
+            "web_fetch",
+            ToolCategory::Web,
+            "web_fetch https://example.com/docs".to_string(),
+            &serde_json::json!({}),
+        )
+        .await
+        .expect("Ask must block headless web egress");
+        let msg = blocked.error_message().unwrap_or_default();
+        assert!(!msg.contains("allow_readonly_web"), "{msg}");
     }
 
     #[tokio::test]

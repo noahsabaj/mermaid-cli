@@ -77,6 +77,14 @@ pub trait ToolExecutor: Send + Sync {
 /// Built once at startup; read-only after that.
 pub struct ToolRegistry {
     entries: HashMap<&'static str, Arc<dyn ToolExecutor>>,
+    /// Teaching errors for tools that were CONSIDERED at build time and
+    /// deliberately not registered (backend unavailable, network denied,
+    /// filtered out of a child registry). Dispatch returns the reason when
+    /// the model calls one, so the model learns why the tool is absent and
+    /// what to do about it — a bare "unknown tool" reads as a schema bug
+    /// and was observed driving models to fabricate results instead of
+    /// reporting the gap.
+    unavailable: HashMap<&'static str, String>,
     /// Startup-resolved web routing/viability shared by the parent registry,
     /// its provider-facing definitions, UI diagnostics, and every child
     /// registry. Keeping the backend clients here prevents credentials or
@@ -94,6 +102,7 @@ impl ToolRegistry {
     pub fn new() -> Self {
         Self {
             entries: HashMap::new(),
+            unavailable: HashMap::new(),
             web_capabilities: None,
             subagent_spawner: None,
         }
@@ -111,6 +120,34 @@ impl ToolRegistry {
 
     pub fn register(&mut self, tool: Arc<dyn ToolExecutor>) {
         self.entries.insert(tool.name(), tool);
+    }
+
+    /// Record why a tool that could exist in this registry deliberately does
+    /// not. The reason is model-facing: it must name the cause and the
+    /// remediation, because it is returned verbatim when the model calls the
+    /// absent tool.
+    pub fn note_unavailable(&mut self, tool: &'static str, reason: impl Into<String>) {
+        self.unavailable.insert(tool, reason.into());
+    }
+
+    #[must_use]
+    pub fn unavailable_reason(&self, name: &str) -> Option<&str> {
+        self.unavailable.get(name).map(String::as_str)
+    }
+
+    /// The outcome for a call this registry cannot dispatch: the recorded
+    /// teaching error when the tool was deliberately omitted, else the plain
+    /// unknown-tool error. `called_name` is the name the model used — for
+    /// MCP calls it differs from the internal `mcp_proxy` routing key, and
+    /// the model should see the name it actually wrote.
+    #[must_use]
+    pub fn unknown_tool_outcome(&self, tool_key: &str, called_name: &str) -> ToolOutcome {
+        match self.unavailable.get(tool_key) {
+            Some(reason) => {
+                ToolOutcome::error(format!("{called_name} is not available: {reason}"), 0.0)
+            },
+            None => ToolOutcome::error(format!("unknown tool: {called_name}"), 0.0),
+        }
     }
 
     #[must_use]
@@ -244,13 +281,33 @@ impl ToolRegistry {
 
         // `safety.network = "deny"` is a global egress kill-switch, not only
         // a shell sandbox flag. Omit web capabilities entirely so adapters and
-        // subagents cannot advertise or execute them.
+        // subagents cannot advertise or execute them — and record why, so a
+        // model that calls one anyway is taught the cause instead of shown a
+        // bare "unknown tool".
         if config.safety.network == mermaid_domain::NetworkPolicy::Allow {
-            if let Some(tool) = web_capabilities.fetch_tool() {
-                r.register(Arc::new(tool));
+            match web_capabilities.fetch_tool() {
+                Some(tool) => r.register(Arc::new(tool)),
+                None => r.note_unavailable(
+                    "web_fetch",
+                    web_capabilities.fetch.absence_reason("web_fetch"),
+                ),
             }
-            if let Some(tool) = web_capabilities.search_tool() {
-                r.register(Arc::new(tool));
+            match web_capabilities.search_tool() {
+                Some(tool) => r.register(Arc::new(tool)),
+                None => r.note_unavailable(
+                    "web_search",
+                    web_capabilities.search.absence_reason("web_search"),
+                ),
+            }
+        } else {
+            for tool in ["web_fetch", "web_search"] {
+                r.note_unavailable(
+                    tool,
+                    format!(
+                        "{tool} is disabled: network access is off \
+                         (safety.network = \"deny\" / --no-network)"
+                    ),
+                );
             }
         }
 
@@ -509,5 +566,62 @@ mod tests {
         assert!(registry.get("web_fetch").is_none());
         assert!(registry.get("web_search").is_none());
         assert!(registry.get("read_file").is_some());
+        // Calling an omitted web tool is answered with the cause, not a bare
+        // "unknown tool" — that reply was observed driving models to guess.
+        for tool in ["web_fetch", "web_search"] {
+            let outcome = registry.unknown_tool_outcome(tool, tool);
+            let msg = outcome.error_message().unwrap_or_default();
+            assert!(msg.contains("safety.network"), "{tool}: {msg}");
+        }
+        // Matched pair: a registered tool carries no absence note, and a name
+        // never considered stays a plain unknown tool.
+        assert!(registry.unavailable_reason("read_file").is_none());
+        let outcome = registry.unknown_tool_outcome("frobnicate", "frobnicate");
+        assert_eq!(
+            outcome.error_message().unwrap_or_default(),
+            "unknown tool: frobnicate"
+        );
+    }
+
+    #[test]
+    fn unavailable_search_backend_reason_reaches_the_model() {
+        // The Windows field logs: `search_backend = "auto"` with no viable
+        // managed bundle registered nothing, and calling `web_search` got
+        // "unknown tool". The registry must instead carry the viability
+        // reason plus the remediation. On hosts where the managed bundle IS
+        // viable, the tool registers and no note exists — both sides pinned.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prior = std::env::var("OLLAMA_API_KEY").ok();
+        unsafe {
+            std::env::remove_var("OLLAMA_API_KEY");
+        }
+        let cfg = mermaid_domain::Config::default();
+        let providers = Arc::new(crate::providers::ProviderFactory::new(cfg.clone()));
+        let registry = ToolRegistry::build(&cfg, TuiMode::Headless, providers);
+        match crate::searxng::managed_backend_viability() {
+            Ok(_) => {
+                assert!(registry.get("web_search").is_some());
+                assert!(registry.unavailable_reason("web_search").is_none());
+            },
+            Err(viability_reason) => {
+                assert!(registry.get("web_search").is_none());
+                let reason = registry
+                    .unavailable_reason("web_search")
+                    .expect("absence reason recorded");
+                assert!(
+                    reason.contains(&viability_reason),
+                    "must carry the real cause: {reason}"
+                );
+                assert!(
+                    reason.contains("search_backend"),
+                    "must carry the remediation: {reason}"
+                );
+            },
+        }
+        unsafe {
+            if let Some(v) = prior {
+                std::env::set_var("OLLAMA_API_KEY", v);
+            }
+        }
     }
 }
