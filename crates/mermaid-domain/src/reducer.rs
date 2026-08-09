@@ -4602,7 +4602,7 @@ pub(crate) enum RunEnd {
 /// probes). Every terminal path calls this: normal completion, upstream
 /// error, cancellation, and quit-mid-run. A saved log with no summary
 /// previously meant "the run did not end normally" (observed in the field:
-/// 20260704_155044 has none at all) — which is exactly when the duration
+/// `20260704_155044` has none at all) — which is exactly when the duration
 /// and spend matter most. It's a display-only line — `build_chat_request`
 /// keeps it out of the model context.
 pub(crate) fn finish_run(state: &mut State, cmds: &mut Vec<Cmd>, end: RunEnd) {
@@ -8504,7 +8504,7 @@ mod tests {
 
     /// Every way a run ends leaves a summary in the saved log. The natural
     /// path is pinned above; these are the abnormal ends the field logs
-    /// showed skipping it entirely (20260704_155044 has none at all —
+    /// showed skipping it entirely (`20260704_155044` has none at all —
     /// precisely the runs whose duration and spend matter most).
     #[test]
     fn upstream_error_still_emits_an_interrupted_run_summary() {
