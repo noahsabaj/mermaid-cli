@@ -22,7 +22,7 @@ pub use approval::ApprovalModalWidget;
 pub use chat::{ChatState, ChatWidget, ImageClickTarget};
 pub use conversation_list::ConversationListWidget;
 pub use file_picker::FilePickerWidget;
-pub use input::{InputState, InputWidget};
+pub use input::{InputState, InputWidget, rendered_row_count};
 pub use model_picker::{MODEL_PICKER_HEIGHT, ModelPickerWidget};
 pub use plan_config::{PLAN_CONFIG_HEIGHT, PLAN_CONFIG_ROWS, PlanConfigWidget, plan_config_rows};
 pub use question::{QuestionModalWidget, question_modal_height};

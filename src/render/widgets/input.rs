@@ -289,6 +289,32 @@ fn layout_rows(input: &str, line_width: usize) -> Vec<RowSpan> {
     rows
 }
 
+/// How many rendered rows `input` occupies at `content_width` display cells.
+///
+/// `content_width` is the box's inner width — the same value
+/// `calculate_cursor_position` takes — and the 2-cell `"> "` / `"  "` prefix is
+/// subtracted here, so a caller passes one width and cannot get the two out of
+/// step.
+///
+/// Built on `layout_rows` for the same reason the cursor is: the layout picks
+/// whitespace breaks, so it starts a row *earlier* than counting cells to the
+/// hard edge would. A separate row count that hard-broke instead reported one
+/// row too few for any input whose last word wrapped — the box clipped its
+/// final line and the caret was drawn on the row the box did not have.
+#[must_use]
+pub fn rendered_row_count(input: &str, content_width: usize) -> usize {
+    // Mirrors `calculate_cursor_position`'s degenerate-width guards: below
+    // this the prefix does not fit and the widget stops wrapping at all.
+    if content_width < 3 || input.is_empty() {
+        return 1;
+    }
+    let line_width = content_width.saturating_sub(2);
+    if line_width == 0 {
+        return 1;
+    }
+    layout_rows(input, line_width).len().max(1)
+}
+
 /// Wrap input text with "> " prefix on the first line and "  " on
 /// continuation lines (Claude Code style). Always returns at least "> ",
 /// even when input is empty. Embedded newlines render as real rows.
@@ -467,5 +493,74 @@ mod tests {
         assert_eq!(InputState::calculate_cursor_position("a\nb", 1, 20), (0, 1));
         assert_eq!(InputState::calculate_cursor_position("a\nb", 2, 20), (1, 0));
         assert_eq!(InputState::calculate_cursor_position("a\nb", 3, 20), (1, 1));
+    }
+
+    /// The box must be exactly as tall as the text it renders. `render/mod.rs`
+    /// sizes it from `rendered_row_count` and the widget wraps with
+    /// `wrap_input_with_prompt`; if those two ever disagree the last line is
+    /// clipped and the caret is drawn on a row that does not exist.
+    ///
+    /// Swept rather than spot-checked: the bug only showed in the window
+    /// between a word wrapping and the cell count catching up, which is a
+    /// couple of characters wide and easy to step over.
+    #[test]
+    fn row_count_matches_the_rendered_line_count() {
+        let inputs = [
+            "Create a language that. Your goal is up to you.",
+            "the quick brown fox jumps over the lazy dog",
+            "supercalifragilisticexpialidocious antidisestablishmentarianism",
+            "a b c d e f g h i j k l m n o p q r s t u v w x y z",
+            "trailing space wraps here ",
+            "explicit\nnewlines\nhere",
+            "mixed 日本語 and ascii text that wraps somewhere",
+        ];
+        for text in inputs {
+            for content_width in 3usize..60 {
+                for n in 0..=text.len() {
+                    // `get` yields None on a non-boundary, which is also the
+                    // char-boundary check.
+                    let Some(prefix) = text.get(..n) else {
+                        continue;
+                    };
+                    let rendered = wrap_input_with_prompt(prefix, content_width);
+                    // `wrap_input_with_prompt` bails to the raw string below
+                    // width 3, where there is no wrapping to agree about.
+                    if content_width < 3 {
+                        continue;
+                    }
+                    let drawn = rendered.lines().count();
+                    let counted = rendered_row_count(prefix, content_width);
+                    assert_eq!(
+                        counted, drawn,
+                        "height {counted} != {drawn} drawn rows for {prefix:?} \
+                         at content_width {content_width}\nrendered:\n{rendered}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The exact frame from the bug report: at this width `up` is pushed to a
+    /// third row by the whitespace break, while counting cells to the hard
+    /// edge reaches only 2. The old height loop returned 2, so the box clipped
+    /// that row and the caret was drawn below the text.
+    ///
+    /// The width is load-bearing and was found by sweep, not chosen: at a
+    /// `content_width` of 20 both algorithms answer 3 and this test would pass
+    /// against the bug. 22 is the narrowest width above it where they differ.
+    #[test]
+    fn the_row_a_wrapped_last_word_needs_is_counted() {
+        let text = "Create a language that. Your goal is up";
+        let content_width = 22;
+        let rendered = wrap_input_with_prompt(text, content_width);
+        assert_eq!(rendered.lines().count(), 3, "rendered:\n{rendered}");
+        assert_eq!(rendered_row_count(text, content_width), 3);
+    }
+
+    /// Empty input still occupies the one row that holds the bare `"> "`.
+    #[test]
+    fn an_empty_buffer_is_one_row() {
+        assert_eq!(rendered_row_count("", 40), 1);
+        assert_eq!(wrap_input_with_prompt("", 40).lines().count(), 1);
     }
 }

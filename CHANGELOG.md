@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The input box drew one row too few whenever the last word wrapped,
+  clipping that line and putting the caret on the border.** Three things have
+  to agree on where the text breaks. The rendered text and the caret both went
+  through `layout_rows`, which prefers a whitespace break so words stay whole.
+  The box *height* did not: it counted display cells in a loop of its own and
+  broke at the hard column edge, which is later. Every input whose last word
+  wrapped was therefore a row taller than the box reserved.
+
+  At 24 columns, `> Create a language that. Your goal is up` rendered as two
+  rows and a border with the caret drawn *on* the border; the `up` row was
+  simply absent. Typing one more character brought the cell count level with
+  the layout and the row reappeared, which is why it read as a flicker tied to
+  no particular key.
+
+  Height now comes from `rendered_row_count`, built on the same `layout_rows`,
+  so the three cannot drift — the arrangement `find_line_break` already had,
+  and for the same stated reason.
+
+  Two guards, both checked against the old algorithm rather than assumed:
+  `row_count_matches_the_rendered_line_count` sweeps every prefix of seven
+  strings across widths 3 to 60, and
+  `the_caret_lands_inside_the_input_box_and_no_row_is_clipped` renders real
+  frames and fails if the caret sits on a box-drawing glyph. The frame-level
+  one exists because the symptom lived in the frame; a row count alone does
+  not say where the caret landed.
+
+  The width in the narrow regression test is load-bearing and was found by
+  sweep, not chosen. Its first version used a content width of 20, where the
+  old and new algorithms both answer three rows — so it passed against the bug
+  and pinned nothing. 22 is the narrowest width above that where they differ.
+
 ## [0.22.0] - 2026-08-08
 
 ### Changed
