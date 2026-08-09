@@ -340,6 +340,11 @@ jobs:
         run: python3 .github/scripts/check_expect_budget.py
       - name: Crate-root re-exports have consumers
         run: python3 .github/scripts/check_exports.py
+      # Not a release step: this proves the release gate still FIRES, on a
+      # fixture, so `just preflight` cannot rot into a check that passes
+      # everything. It takes no version and touches no network.
+      - name: Release-readiness gate still catches an un-bumped tree
+        run: python3 .github/scripts/check_release_ready.py --self-test
 
   # Heavier integration coverage that CI's default suite skips: the daemon
   # `#[ignore]`d tests (spawn a real mermaidd) and the deterministic, model-free

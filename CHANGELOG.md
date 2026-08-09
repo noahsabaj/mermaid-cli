@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`just preflight VERSION` verifies a release before it is tagged.**
+  `.github/workflows/release.yml` applies its gates *after* the tag is pushed,
+  and the CHANGELOG check runs downstream of five platform builds — so a
+  mismatch surfaces once the GitHub release exists and its binaries have
+  shipped, recoverable only by deleting the tag and re-cutting it.
+
+  `.github/scripts/check_release_ready.py` is those gates, runnable first: the
+  13 version strings across four manifests (package versions *and* every
+  intra-workspace `version =`, because `cargo publish` resolves a stale pin to
+  the previous release on crates.io), the `## [VERSION]` section extracting
+  non-empty, the compare links, and `Cargo.lock` for every workspace crate.
+
+  It carries a `--self-test` that builds a deliberately un-bumped fixture,
+  asserts every gate fires on it with the expected finding count, then bumps
+  the same fixture and asserts they all go quiet. `just guards` and CI run it
+  on every PR, so the gate cannot rot into one that passes everything. The
+  self-test was itself checked by neutering a gate: with the intra-workspace
+  dependency scan removed it fails, naming both the short count and the stale
+  pin it no longer catches. A release gate that has never failed is not
+  evidence.
+
 ## [0.23.0] - 2026-08-09
 
 ### Fixed

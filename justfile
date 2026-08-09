@@ -23,6 +23,15 @@ guards:
     {{python}} .github/scripts/check_layering.py
     {{python}} .github/scripts/check_expect_budget.py
     {{python}} .github/scripts/check_exports.py
+    {{python}} .github/scripts/check_release_ready.py --self-test
+
+# Mirrors every gate `release.yml` applies, so a version mismatch or an empty
+# CHANGELOG section is found BEFORE `git tag` rather than after the GitHub
+# release and its binaries have shipped. Example: `just preflight 0.23.0`.
+#
+# Is this tree ready to tag? (`just preflight 0.23.0`)
+preflight VERSION:
+    {{python}} .github/scripts/check_release_ready.py {{VERSION}}
 
 # Re-record every guard's baseline. Review the diff: the `N keys / M
 # occurrences` header line is the debt counter, and it should be going down.
