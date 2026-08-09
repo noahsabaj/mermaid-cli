@@ -45,6 +45,11 @@ use widgets::{
 /// and rebuilt from `&State` at any time.
 pub struct RenderCache {
     pub chat: ChatState,
+    /// Shell label for `execute_command` rows (`Bash(...)`/`PowerShell(...)`).
+    /// A field, not a `HostShell::current()` read at use sites, for the same
+    /// reason `hostname`/`username` are: the snapshot rig pins it (`Posix`)
+    /// so one set of `.snap` files serves every platform.
+    pub host_shell: mermaid_runtime::HostShell,
     /// Per-message render cache: `(content, theme, width)` hash → fully wrapped,
     /// role-prefixed assistant lines, so committed messages aren't re-parsed or
     /// re-wrapped every frame (#134).
@@ -100,6 +105,7 @@ impl RenderCache {
     pub fn new(hostname: String, username: String) -> Self {
         Self {
             chat: ChatState::new(),
+            host_shell: mermaid_runtime::HostShell::current(),
             wrapped_line_cache: FxHashMap::default(),
             theme: theme::Theme::dark(),
             hostname,
@@ -453,7 +459,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
     } else {
         committed
     };
-    let live_messages = build_live_messages(base, &state.turn, state.now);
+    let live_messages = build_live_messages(base, &state.turn, state.now, rstate.host_shell);
     // 500ms blink phase for in-flight action dots, from the injected clock
     // (never the wall clock) so a frame stays a pure function of State.
     let blink_on = (state.now.timestamp_millis().div_euclid(500)) % 2 == 0;
@@ -919,6 +925,7 @@ fn build_live_messages<'a>(
     committed: &'a [mermaid_model::models::ChatMessage],
     turn: &TurnState,
     now: chrono::DateTime<chrono::Local>,
+    host_shell: mermaid_runtime::HostShell,
 ) -> std::borrow::Cow<'a, [mermaid_model::models::ChatMessage]> {
     if let TurnState::ExecutingTools {
         calls, outcomes, ..
@@ -928,15 +935,16 @@ fn build_live_messages<'a>(
             .iter()
             .zip(outcomes)
             .filter_map(|(call, outcome)| match outcome {
-                Some(outcome) => Some(mermaid_domain::transition::action_display_for(
-                    call, outcome,
+                Some(outcome) => Some(mermaid_domain::transition::action_display_for_shell(
+                    call, outcome, host_shell,
                 )),
                 None => {
                     let name = call.source.function.name.as_str();
                     if name == "agent" || name == "ask_user_question" {
                         return None;
                     }
-                    let (action_type, target) = mermaid_domain::display_info_for(call);
+                    let (action_type, target) =
+                        mermaid_domain::display_info_for_shell(call, host_shell);
                     Some(mermaid_domain::ActionDisplay {
                         action_type,
                         target,
@@ -1251,7 +1259,12 @@ mod tests {
 
         // Agent calls never get a live transcript action row — they get panel
         // rows (and the "Running N agents" override) instead.
-        let live = build_live_messages(&[], &state.turn, chrono::Local::now());
+        let live = build_live_messages(
+            &[],
+            &state.turn,
+            chrono::Local::now(),
+            mermaid_runtime::HostShell::Posix,
+        );
         assert!(
             live.is_empty(),
             "a pending agent call must not synthesize a transcript row"
@@ -1310,7 +1323,12 @@ mod tests {
 
         // The shell command gets a live Running transcript row; the agent gets
         // only its panel row. No override since agents aren't the only work.
-        let live = build_live_messages(&[], &state.turn, chrono::Local::now());
+        let live = build_live_messages(
+            &[],
+            &state.turn,
+            chrono::Local::now(),
+            mermaid_runtime::HostShell::Posix,
+        );
         assert_eq!(live.len(), 1, "one synthetic message carries the rows");
         let actions = &live[0].actions;
         assert_eq!(actions.len(), 1, "the agent call gets no transcript row");
@@ -1336,7 +1354,12 @@ mod tests {
         let now = chrono::Local::now();
 
         // Idle frames borrow the committed log unchanged — no per-frame clone.
-        let idle = build_live_messages(&committed, &TurnState::Idle, now);
+        let idle = build_live_messages(
+            &committed,
+            &TurnState::Idle,
+            now,
+            mermaid_runtime::HostShell::Posix,
+        );
         assert!(matches!(idle, Cow::Borrowed(_)));
         assert_eq!(idle.len(), 1);
 
@@ -1353,7 +1376,7 @@ mod tests {
             pending_tool_calls: Vec::new(),
             continuation: false,
         };
-        let live = build_live_messages(&committed, &turn, now);
+        let live = build_live_messages(&committed, &turn, now, mermaid_runtime::HostShell::Posix);
         assert!(matches!(live, Cow::Owned(_)));
         assert_eq!(live.len(), 2);
         assert_eq!(live[1].timestamp, now);
@@ -1533,7 +1556,12 @@ mod tests {
             pending_tool_calls: Vec::new(),
             continuation: true,
         };
-        let live = build_live_messages(&committed, &turn, chrono::Local::now());
+        let live = build_live_messages(
+            &committed,
+            &turn,
+            chrono::Local::now(),
+            mermaid_runtime::HostShell::Posix,
+        );
         let streamed = live.last().expect("pseudo-message appended");
         assert_eq!(
             streamed.kind,

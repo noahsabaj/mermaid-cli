@@ -276,21 +276,23 @@ pub(crate) fn sort_writes_file(segment: &[String]) -> bool {
     })
 }
 
-/// Classify `command` for the shell it will ACTUALLY run under.
+/// Classify `command` in the grammar of the shell that will run it.
 ///
-/// On Windows the exec tool hands every model command to PowerShell
-/// (`shell_invocation` picks `pwsh`/`powershell`, never `sh`), so risk must
-/// be read from PowerShell grammar; elsewhere commands run under `sh` and
-/// keep the POSIX classifier. Keep this predicate in lockstep with
-/// `shell_invocation` — classifying for a different interpreter than the one
-/// that executes is exactly the bug that made plan/read-only mode deny every
-/// read-only PowerShell pipeline on Windows while missing PS-only writes
-/// (`*> file`).
-pub(in crate::policy) fn classify_command_for_host_shell(command: &str) -> RiskClass {
-    if cfg!(target_os = "windows") {
-        super::powershell::classify_powershell_command(command)
-    } else {
-        classify_shell_command(command)
+/// The engine passes its [`HostShell`](super::super::HostShell) — defaulted
+/// to `HostShell::current()`, the same predicate `shell_invocation` spawns
+/// with — so risk is always read for the interpreter that executes.
+/// Classifying for a different one is exactly the bug that made
+/// plan/read-only mode deny every read-only PowerShell pipeline on Windows
+/// while missing PS-only writes (`*> file`).
+pub(in crate::policy) fn classify_command_for(
+    host_shell: super::super::HostShell,
+    command: &str,
+) -> RiskClass {
+    match host_shell {
+        super::super::HostShell::PowerShell => {
+            super::powershell::classify_powershell_command(command)
+        },
+        super::super::HostShell::Posix => classify_shell_command(command),
     }
 }
 

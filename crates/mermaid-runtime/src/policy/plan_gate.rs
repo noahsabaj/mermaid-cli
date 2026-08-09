@@ -35,8 +35,21 @@ pub const PLAN_DENIAL_MARKER: &str = "plan mode";
 ///
 /// The subcommand tables are curatable the same way `READ_ONLY_BINARIES` is —
 /// additions need the audit tests below.
+///
+/// Dialect-dispatched on [`HostShell::current`](super::HostShell::current):
+/// the command is parsed in the grammar of the interpreter that will run it,
+/// same as risk classification.
 #[must_use]
 pub fn is_plan_safe_build_command(command: &str) -> bool {
+    match super::HostShell::current() {
+        super::HostShell::PowerShell => {
+            super::shell::powershell::is_plan_safe_build_command_ps(command)
+        },
+        super::HostShell::Posix => is_plan_safe_build_command_posix(command),
+    }
+}
+
+pub(in crate::policy) fn is_plan_safe_build_command_posix(command: &str) -> bool {
     let split = split_command(command);
     // Build/test invocations have no legitimate heredoc shape — refusing them
     // outright keeps this carve-out anchored.
@@ -144,8 +157,26 @@ pub(crate) const CWD_CHANGING_BUILTINS: &[&str] = &[
 ///
 /// Residual power is content-level only: arbitrary bytes into the plan file,
 /// which `write_file`'s carve-out already grants.
+///
+/// Dialect-dispatched on [`HostShell::current`](super::HostShell::current) —
+/// on Windows the PowerShell spelling accepts backslash plan paths the POSIX
+/// tokenizer would mangle, keeping the plan denial's "a shell redirect
+/// writing ONLY that file also works" promise true there.
 #[must_use]
 pub fn is_plan_file_only_write(command: &str, workdir: &Path, plan_file: &Path) -> bool {
+    match super::HostShell::current() {
+        super::HostShell::PowerShell => {
+            super::shell::powershell::is_plan_file_only_write_ps(command, workdir, plan_file)
+        },
+        super::HostShell::Posix => is_plan_file_only_write_posix(command, workdir, plan_file),
+    }
+}
+
+pub(in crate::policy) fn is_plan_file_only_write_posix(
+    command: &str,
+    workdir: &Path,
+    plan_file: &Path,
+) -> bool {
     let split = split_command(command);
     if split.segments.is_empty() {
         return false;

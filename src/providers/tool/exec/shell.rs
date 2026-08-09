@@ -61,12 +61,12 @@ pub(crate) fn shell_invocation(
         }
         args.extend(["--".into(), "sh".into(), "-c".into(), command.into()]);
         ShellInvocation { program: exe, args }
-    } else if cfg!(target_os = "windows") {
-        // Keep this predicate in lockstep with the policy layer's
-        // `classify_command_for_host_shell`: risk classification reads the
-        // command in the grammar of the interpreter chosen HERE. If Windows
-        // ever grows a non-PowerShell path, the classifier must learn about
-        // it in the same change.
+    } else if mermaid_runtime::HostShell::current() == mermaid_runtime::HostShell::PowerShell {
+        // `HostShell::current()` is the shared predicate: risk
+        // classification, the plan-mode carve-outs, and the transcript label
+        // all read the command in the grammar of the interpreter chosen
+        // HERE. A new host shell must be taught to all of them through that
+        // one enum.
         ShellInvocation {
             program: PathBuf::from(powershell_program()),
             args: vec![

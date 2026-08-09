@@ -1177,14 +1177,25 @@ mod tests {
     }
 
     /// The shell spelling of plan authoring is allowed; anything with a
-    /// second effect keeps the plan denial.
+    /// second effect keeps the plan denial. Spellings are per-dialect — the
+    /// gate parses for the interpreter that will run the command
+    /// (`HostShell::current()`), so Windows asserts the PowerShell shapes
+    /// (heredocs do not exist there) and unix the POSIX ones.
     #[tokio::test]
     async fn plan_mode_allows_a_shell_write_that_only_touches_the_plan_file() {
-        for cmd in [
+        #[cfg(not(target_os = "windows"))]
+        let allowed = [
             "echo '## Summary' > .mermaid/plans/x.md",
             "printf '%s\\n' more >> /repo/.mermaid/plans/x.md",
             "cat > .mermaid/plans/x.md <<'EOF'\n## Tasks\n1. step\nEOF",
-        ] {
+        ];
+        #[cfg(target_os = "windows")]
+        let allowed = [
+            "echo '## Summary' > .mermaid/plans/x.md",
+            "Write-Output more >> /repo/.mermaid/plans/x.md",
+            "echo x > .mermaid\\plans\\x.md",
+        ];
+        for cmd in allowed {
             let g = gate(
                 &ctx_plan(),
                 shell_request(cmd),

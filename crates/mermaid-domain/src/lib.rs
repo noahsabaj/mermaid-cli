@@ -104,6 +104,7 @@ pub use state::{
     estimate_context_usage_for_request, estimate_tool_schema_tokens,
 };
 pub use transition::{
-    action_display_for, commit_assistant_message, display_info_for, fill_outcome,
-    start_executing_tools, start_generating, tool_result_messages, try_complete_outcomes,
+    action_display_for, commit_assistant_message, display_info_for, display_info_for_shell,
+    fill_outcome, start_executing_tools, start_generating, tool_result_messages,
+    try_complete_outcomes,
 };
