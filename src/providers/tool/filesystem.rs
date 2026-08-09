@@ -191,10 +191,8 @@ impl ToolExecutor for ReadFileTool {
                             // is not a truncation: nothing was cut that isn't
                             // already present in full.
                             let (content, was_truncated) =
-                                match duplicate_read_note(&ctx, raw_path, &content) {
-                                    Some(note) => (note, false),
-                                    None => (content, was_truncated),
-                                };
+                                duplicate_read_note(&ctx, raw_path, &content)
+                                    .map_or((content, was_truncated), |note| (note, false));
                             any_truncated |= was_truncated;
                             if paths.len() > 1 {
                                 let _ = ctx.progress.send(ProgressEvent::Status(
