@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Pasting into the `@` file picker now filters it.** The picker's match
+  list is cached state, re-ranked by the keystroke path — and only the
+  keystroke path: text arriving as a paste (terminal bracketed paste,
+  Ctrl+V, or the Windows key-burst coalescer batching ordinary fast typing)
+  updated the buffer but left the ranking computed for the pre-paste query.
+  The list sat unfiltered, and Enter completed with its stale head — paste
+  `caf`, get `@some-other-file.md`. The shared insert path now runs the
+  same re-rank the keystroke path runs, so all of it holds for pastes too:
+  the query narrows the list, a paste that creates an `@`-token opens the
+  picker and fires the project walk, and a paste into a dismissed token
+  lifts the dismissal exactly like typing does.
+
 - **A byte-identical re-read of a file within one turn no longer ships the
   whole body again.** The 20260806 field logs show the same file read up to
   14 times per session at full length — sometimes twice within a single

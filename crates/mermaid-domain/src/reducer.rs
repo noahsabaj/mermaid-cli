@@ -148,7 +148,7 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             handle_key(&mut state, &mut cmds, key.code, key.modifiers);
         },
         Msg::Paste(paste) => {
-            handle_paste(&mut state, paste);
+            handle_paste(&mut state, &mut cmds, paste);
         },
         Msg::ClipboardRead(read) => {
             handle_clipboard_read(&mut state, &mut cmds, read);
@@ -1593,7 +1593,7 @@ pub(crate) fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, 
         && matches!(state.ui.mode, UiMode::EditingInput)
         && state.confirm.is_none()
     {
-        insert_text_at_cursor(state, "\n");
+        insert_text_at_cursor(state, cmds, "\n");
         return;
     }
 
@@ -2611,23 +2611,32 @@ pub(crate) fn submit_current_input(state: &mut State) {
 /// Insert `text` at the input cursor and advance past it, resetting history-nav
 /// and opening the slash palette if the buffer now starts with `/`. Shared by
 /// terminal bracketed paste (`handle_paste`) and Ctrl+V text
-/// (`handle_clipboard_read`) so the two agree on cursor handling.
-pub(crate) fn insert_text_at_cursor(state: &mut State, text: &str) {
+/// (`handle_clipboard_read`) so the two agree on cursor handling — and on the
+/// @-mention picker, which re-ranks here for the same reason the keystroke
+/// path re-ranks: its match list is cached state, and any text mutation that
+/// skips the refresh leaves it ranked for a query the user is no longer
+/// looking at. Enter then completes with the stale head — paste `caf`, get
+/// `@aaaa.md`.
+pub(crate) fn insert_text_at_cursor(state: &mut State, cmds: &mut Vec<Cmd>, text: &str) {
     // Insert at the cursor (not the end): on the Windows console a paste arrives
     // as a mix of coalesced `Paste` chunks and stray `Char` key events, and
     // appending here while keys insert at the cursor scrambled the result
     // (uppercase letters piled at the front).
     state.ui.input_history_cursor = None;
     state.ui.history_draft.clear();
+    // A paste is typing: Esc's per-token dismissal lifts the same way it
+    // does for a keystroke.
+    state.ui.file_picker_dismissed = false;
     let pos = clamp_cursor(&state.ui.input_buffer, state.ui.input_cursor);
     state.ui.input_buffer.insert_str(pos, text);
     state.ui.input_cursor = clamp_cursor(&state.ui.input_buffer, pos + text.len());
     if state.ui.input_buffer.starts_with('/') {
         state.ui.palette_cursor = Some(0);
     }
+    refresh_file_picker(state, cmds);
 }
 
-pub(crate) fn handle_paste(state: &mut State, paste: Paste) {
+pub(crate) fn handle_paste(state: &mut State, cmds: &mut Vec<Cmd>, paste: Paste) {
     // Terminal bracketed paste (and the Windows key-burst coalescer) is always
     // text; Ctrl+V clipboard reads — which can be images — arrive separately as
     // `Msg::ClipboardRead`.
@@ -2644,7 +2653,7 @@ pub(crate) fn handle_paste(state: &mut State, paste: Paste) {
         *cursor = 0;
         return;
     }
-    insert_text_at_cursor(state, &t);
+    insert_text_at_cursor(state, cmds, &t);
 }
 
 /// A `Cmd::ReadClipboard` (Ctrl+V) has resolved. Release the pending-read
@@ -2667,6 +2676,9 @@ pub(crate) fn handle_clipboard_read(state: &mut State, cmds: &mut Vec<Cmd>, read
             let pos = clamp_cursor(&state.ui.input_buffer, state.ui.input_cursor);
             state.ui.input_buffer.insert_str(pos, &token);
             state.ui.input_cursor = clamp_cursor(&state.ui.input_buffer, pos + token.len());
+            // The token's trailing space closes any open @-token; re-rank so
+            // the picker drops instead of lingering with stale matches.
+            refresh_file_picker(state, cmds);
             state.ui.attachments.push(super::state::Attachment {
                 id,
                 number,
@@ -2692,7 +2704,7 @@ pub(crate) fn handle_clipboard_read(state: &mut State, cmds: &mut Vec<Cmd>, read
             });
         },
         ClipboardRead::Text(t) => {
-            insert_text_at_cursor(state, &t);
+            insert_text_at_cursor(state, cmds, &t);
         },
         ClipboardRead::Empty => {
             push_system(state, cmds, "Clipboard is empty");
@@ -6195,6 +6207,92 @@ mod tests {
         assert!(
             !state.ui.file_picker_open(),
             "the trailing space closes the token"
+        );
+    }
+
+    /// A paste that lands inside an @-token must re-rank the picker exactly
+    /// like the keystroke path. The Windows event source coalesces fast
+    /// keystrokes into `Msg::Paste`, so this is reachable by ordinary typing:
+    /// the pasted query left the match list stale — still ranked for the
+    /// pre-paste query — and Enter completed with the wrong file.
+    #[test]
+    fn a_paste_into_the_at_token_re_ranks_the_picker() {
+        let (state, _) = type_text(fresh_state(), "@");
+        let (state, _) = update(
+            state,
+            Msg::ProjectFilesListed(vec!["docs/notes.md".to_string(), "src/main.rs".to_string()]),
+        );
+        assert_eq!(
+            state.ui.file_picker_matches.len(),
+            2,
+            "empty query ranks everything"
+        );
+        let (state, _) = update(state, Msg::Paste(Paste::Text("main".to_string())));
+        assert_eq!(
+            state.ui.file_picker_matches,
+            vec!["src/main.rs"],
+            "the pasted query narrows the ranking"
+        );
+        let (state, _) = update(state, plain_key(KeyCode::Enter));
+        assert_eq!(
+            state.ui.input_buffer, "@src/main.rs ",
+            "Enter completes with the narrowed selection, not the stale head"
+        );
+    }
+
+    /// A paste that CREATES the token (paste "look at @ma" into an empty
+    /// composer) opens the picker and fires the walk, same as typing it.
+    #[test]
+    fn a_paste_that_creates_the_token_opens_the_picker_and_walks() {
+        let (state, cmds) = update(
+            fresh_state(),
+            Msg::Paste(Paste::Text("look at @ma".to_string())),
+        );
+        assert!(
+            state.ui.file_picker_open(),
+            "pasted @-token opens the picker"
+        );
+        assert_eq!(
+            cmds.iter()
+                .filter(|c| matches!(c, Cmd::ListProjectFiles))
+                .count(),
+            1,
+            "the open fires exactly one walk"
+        );
+    }
+
+    /// Ctrl+V clipboard text into an @-token follows the same rule as a
+    /// terminal paste — the two share the insert path and must also agree
+    /// on re-ranking.
+    #[test]
+    fn clipboard_text_into_the_at_token_re_ranks_the_picker() {
+        let (state, _) = type_text(fresh_state(), "@");
+        let (state, _) = update(
+            state,
+            Msg::ProjectFilesListed(vec!["docs/notes.md".to_string(), "src/main.rs".to_string()]),
+        );
+        let (state, _) = update(
+            state,
+            Msg::ClipboardRead(ClipboardRead::Text("main".to_string())),
+        );
+        assert_eq!(
+            state.ui.file_picker_matches,
+            vec!["src/main.rs"],
+            "clipboard text narrows the ranking"
+        );
+    }
+
+    /// Esc dismisses the picker per-token; pasting into the token reopens it,
+    /// exactly like a keystroke does.
+    #[test]
+    fn a_paste_reopens_a_dismissed_picker() {
+        let (state, _) = type_text(fresh_state(), "@ma");
+        let (state, _) = update(state, plain_key(KeyCode::Escape));
+        assert!(!state.ui.file_picker_open(), "Esc dismisses");
+        let (state, _) = update(state, Msg::Paste(Paste::Text("in".to_string())));
+        assert!(
+            state.ui.file_picker_open(),
+            "a paste is typing: the dismissal lifts"
         );
     }
 
