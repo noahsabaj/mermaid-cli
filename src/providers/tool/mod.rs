@@ -542,20 +542,17 @@ mod tests {
         let mut cfg = mermaid_domain::Config::default();
         cfg.web.allow_ollama_search_fallback = true;
         let capabilities = web::WebCapabilities::resolve(&cfg.web);
-        match crate::searxng::managed_backend_viability() {
-            Ok(_) => {
-                assert_eq!(capabilities.search.backend, "managed_searxng");
-                assert!(capabilities.search.available);
-            },
-            Err(_) => {
-                assert_eq!(capabilities.search.backend, "ollama_cloud");
-                assert!(capabilities.search.available);
-                assert_eq!(capabilities.search.egress, web::Egress::OffMachine);
-                assert!(
-                    capabilities.search_tool().is_some(),
-                    "the fallback must produce a registrable tool"
-                );
-            },
+        if crate::searxng::managed_backend_viability().is_ok() {
+            assert_eq!(capabilities.search.backend, "managed_searxng");
+            assert!(capabilities.search.available);
+        } else {
+            assert_eq!(capabilities.search.backend, "ollama_cloud");
+            assert!(capabilities.search.available);
+            assert_eq!(capabilities.search.egress, web::Egress::OffMachine);
+            assert!(
+                capabilities.search_tool().is_some(),
+                "the fallback must produce a registrable tool"
+            );
         }
         unsafe {
             match prior {
