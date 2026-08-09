@@ -71,11 +71,15 @@ pub struct Terminal {
     /// How many `ESC[6n` queries have already been answered.
     answered: usize,
     /// Both ends stay owned for the lifetime of the harness — see the module
-    /// docs.
-    _master: Box<dyn portable_pty::MasterPty + Send>,
+    /// docs. The master additionally serves [`Terminal::resize`].
+    master: Box<dyn portable_pty::MasterPty + Send>,
     _slave: Box<dyn portable_pty::SlavePty + Send>,
     /// The sandbox root, kept so `normalize` can redact it out of frames.
     sandbox: PathBuf,
+    /// Current grid geometry. Starts at [`ROWS`]x[`COLS`]; changes only via
+    /// [`Terminal::resize`]. `frame` parses at this size.
+    rows: u16,
+    cols: u16,
 }
 
 impl Drop for Terminal {
@@ -175,9 +179,11 @@ impl Terminal {
             writer,
             child,
             answered: 0,
-            _master: pair.master,
+            master: pair.master,
             _slave: pair.slave,
             sandbox,
+            rows: ROWS,
+            cols: COLS,
         };
         assert!(
             term.wait(
@@ -194,6 +200,39 @@ impl Terminal {
     pub fn press(&mut self, bytes: &[u8]) {
         self.writer.write_all(bytes).expect("write key");
         self.writer.flush().expect("flush key");
+    }
+
+    /// Change the terminal geometry mid-session, the way a user drags a
+    /// window edge. The app receives a real resize event through the pty.
+    ///
+    /// The accumulated byte stream was painted for the OLD geometry; parsing
+    /// it at the new size would misplace every absolute cursor move. So the
+    /// buffer restarts empty, and the next read reflects only what the app
+    /// drew for the new grid.
+    pub fn resize(&mut self, rows: u16, cols: u16) {
+        {
+            let mut out = self.output.lock().expect("output lock");
+            out.clear();
+            // The count restarts with the buffer: `answer_cursor_queries`
+            // counts matches in the (now empty) stream.
+            self.answered = 0;
+        }
+        self.master
+            .resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("resize pty");
+        self.rows = rows;
+        self.cols = cols;
+    }
+
+    /// Is the app still running? A pty child that died mid-resize reads
+    /// exactly like a hang, so tests assert this explicitly.
+    pub fn is_alive(&mut self) -> bool {
+        self.child.try_wait().expect("poll child").is_none()
     }
 
     /// Type `text` one byte at a time, the way a person does — a single write
@@ -217,12 +256,12 @@ impl Terminal {
     /// at test sizes and avoids sharing a parser with the reader thread.
     pub fn frame(&self) -> Vec<String> {
         let bytes = self.output.lock().expect("output lock").clone();
-        let mut parser = vt100::Parser::new(ROWS, COLS, 0);
+        let mut parser = vt100::Parser::new(self.rows, self.cols, 0);
         parser.process(&bytes);
         let screen = parser.screen();
-        (0..ROWS)
+        (0..self.rows)
             .map(|row| {
-                let line = screen.contents_between(row, 0, row, COLS);
+                let line = screen.contents_between(row, 0, row, self.cols);
                 line.trim_end().to_string()
             })
             .collect()

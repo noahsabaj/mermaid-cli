@@ -15,7 +15,7 @@
 
 mod harness;
 
-use harness::{ENTER, ESC, SHIFT_TAB, Terminal};
+use harness::{CTRL_L, ENTER, ESC, SHIFT_TAB, Terminal};
 use std::time::Duration;
 
 /// The safety cycle is flat and total: five modes, `plan` included, wrapping
@@ -98,6 +98,39 @@ if ([System.Windows.Forms.Clipboard]::ContainsImage()) {{ throw 'expected a PNG-
         landed,
         "Ctrl+V did not attach the image. Screen:\n{}",
         term.frame_text()
+    );
+}
+
+/// Shrinking the terminal keeps the composer and the mode band on screen.
+///
+/// The chat zone's 10-row floor (`Constraint::Min`) outranks the fixed
+/// `Length` zones below it in the layout solver, so at 10 rows the
+/// transcript consumed the whole frame — no input box, no footer. The two
+/// surfaces the user actually drives were exactly the ones that vanished,
+/// silently: typing still worked, invisibly. A short terminal must keep
+/// the composer and footer; the transcript absorbs the shortage.
+#[test]
+fn a_short_terminal_still_shows_the_composer_and_footer() {
+    let mut term = Terminal::launch("pty-short");
+    term.press(b"draft text");
+    assert!(
+        term.wait_for_text("draft text", Duration::from_secs(10)),
+        "typed text must reach the composer before the resize. Screen:\n{}",
+        term.frame_text(),
+    );
+
+    term.resize(10, 60);
+    term.press(CTRL_L);
+    assert!(term.is_alive(), "the app must survive the resize");
+    assert!(
+        term.wait_for_text("safety:", Duration::from_secs(10)),
+        "the footer mode band must stay on a 10-row screen. Screen:\n{}",
+        term.frame_text(),
+    );
+    assert!(
+        term.wait_for_text("draft text", Duration::from_secs(10)),
+        "the composer draft must stay on a 10-row screen. Screen:\n{}",
+        term.frame_text(),
     );
 }
 

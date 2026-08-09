@@ -288,9 +288,8 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
     };
 
     // Reserve the status zone's height to match its row count, but never so much
-    // that the input box or bottom bar get evicted on a short terminal: keep room
-    // for the chat floor (Min 10), the input box, and the bottom bar (≥2). (The
-    // trailing Length zones would otherwise starve before the Min(10) chat zone.)
+    // that it crowds the rest: keep room for a 10-row chat, the input box, and
+    // the bottom bar (≥2) before granting the status zone anything.
     let status_reserve = 10 + input_height + 2;
     let status_line_height = (status_lines.len() as u16)
         .min(14)
@@ -402,11 +401,21 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
     // 4-zone vertical layout: chat / status line / input / bottom. Pasted images
     // are inline `[Image #N]` tokens in the input now, so there's no separate
     // attachment zone.
+    //
+    // Chat is `Fill`, not `Min(10)`: `Min` outranks `Length` in the solver,
+    // so on a terminal shorter than 10-plus-the-fixed-zones the transcript
+    // consumed every row and evicted the composer and the mode band — the
+    // two surfaces the user drives, gone silently while typing kept working
+    // invisibly. `Fill` yields: the fixed zones win the shortage and the
+    // transcript absorbs it. On any terminal tall enough for everything,
+    // the two are identical (chat takes all remaining rows either way; the
+    // status/tasks zones still self-clamp against `status_reserve` so chat
+    // keeps ≥10 rows whenever the terminal has them to give).
     use ratatui::layout::{Constraint, Direction, Layout};
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(10),
+            Constraint::Fill(1),
             Constraint::Length(status_line_height),
             Constraint::Length(tasks_zone_height),
             Constraint::Length(input_height),
