@@ -118,7 +118,8 @@ fn viability_for(os: &str, arch: &str) -> std::result::Result<&'static str, Stri
 fn unsupported_platform_message(os: &str, arch: &str) -> String {
     format!(
         "no sovereign SearXNG bundle is available for this platform ({os}/{arch}). \
-         Configure `[web] search_backend = \"ollama\"` and OLLAMA_API_KEY, or \
+         Set `[web] allow_ollama_search_fallback = true` (with OLLAMA_API_KEY) to \
+         fall back to Ollama Cloud, configure `search_backend = \"ollama\"`, or \
          set `search_backend = \"searxng\"` and point `searxng_url` at your own instance."
     )
 }

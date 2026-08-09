@@ -2787,6 +2787,7 @@ mod tests {
                 fetch_backend: mermaid_domain::FetchBackend::Native,
                 search_backend: mermaid_domain::SearchBackend::Searxng,
                 searxng_url: "http://127.0.0.1:8080".to_string(),
+                ..mermaid_domain::WebConfig::default()
             },
             ..Config::default()
         };

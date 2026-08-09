@@ -85,6 +85,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`[web] allow_ollama_search_fallback` — opt-in Ollama Cloud search where
+  `auto` has no managed bundle.** The sovereign `auto` default runs a local
+  SearXNG bundle, but no bundle exists for Windows, so `web_search` simply
+  did not exist there unless the user reconfigured the backend outright.
+  The new flag keeps `auto`'s meaning — a viable managed bundle always
+  wins, and merely holding an `OLLAMA_API_KEY` still never changes the
+  route — while letting the user pre-authorize the one case where the
+  choice was previously "no search at all": platforms without a bundle now
+  fall back to Ollama Cloud search (key required). The startup notice
+  discloses the off-machine egress when the fallback engages, a missing
+  key reports the whole chain (bundle unviable AND fallback keyless), and
+  the unsupported-platform teaching error now names the flag. Project
+  config cannot set it — the entire `[web]` table remains user/session-only.
+
 - **`just preflight VERSION` verifies a release before it is tagged.**
   `.github/workflows/release.yml` applies its gates *after* the tag is pushed,
   and the CHANGELOG check runs downstream of five platform builds — so a

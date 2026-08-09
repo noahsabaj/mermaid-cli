@@ -1110,6 +1110,7 @@ pub enum SearchBackend {
 /// [web]
 /// fetch_backend = "native"   # or "ollama"
 /// search_backend = "auto"    # or "ollama" / "searxng"
+/// allow_ollama_search_fallback = false
 /// searxng_url = "http://localhost:8080"
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1122,6 +1123,13 @@ pub struct WebConfig {
     /// process where a bundle is supported. `ollama` explicitly selects Ollama
     /// Cloud; `searxng` selects a self-hosted instance at `searxng_url`.
     pub search_backend: SearchBackend,
+    /// Fall back to Ollama Cloud search when `search_backend = "auto"` has no
+    /// viable managed bundle on this platform (Windows today). Explicit
+    /// opt-in because it changes where search queries egress — off by
+    /// default, disclosed in the startup notice when it engages, and it
+    /// still needs `OLLAMA_API_KEY`. A viable managed bundle always wins;
+    /// explicit backends ignore this.
+    pub allow_ollama_search_fallback: bool,
     /// SearXNG base URL, used when `search_backend = "searxng"` (your own
     /// instance). The instance must have the JSON output format enabled
     /// (`search.formats` includes `json`). The `auto` managed instance ignores
@@ -1134,6 +1142,7 @@ impl Default for WebConfig {
         Self {
             fetch_backend: FetchBackend::Native,
             search_backend: SearchBackend::Auto,
+            allow_ollama_search_fallback: false,
             searxng_url: String::from("http://localhost:8080"),
         }
     }

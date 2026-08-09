@@ -527,6 +527,71 @@ mod tests {
     }
 
     #[test]
+    fn auto_search_fallback_engages_only_when_opted_in_with_a_key() {
+        // The opt-in flips exactly one case: auto + no viable bundle + key.
+        // A viable sovereign default always wins over the fallback, and the
+        // not-opted-in side is pinned by
+        // `auto_search_never_selects_cloud_just_because_a_key_exists`.
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let prior = std::env::var("OLLAMA_API_KEY").ok();
+        unsafe {
+            std::env::set_var("OLLAMA_API_KEY", "test-key-fallback");
+        }
+        let mut cfg = mermaid_domain::Config::default();
+        cfg.web.allow_ollama_search_fallback = true;
+        let capabilities = web::WebCapabilities::resolve(&cfg.web);
+        match crate::searxng::managed_backend_viability() {
+            Ok(_) => {
+                assert_eq!(capabilities.search.backend, "managed_searxng");
+                assert!(capabilities.search.available);
+            },
+            Err(_) => {
+                assert_eq!(capabilities.search.backend, "ollama_cloud");
+                assert!(capabilities.search.available);
+                assert_eq!(capabilities.search.egress, web::Egress::OffMachine);
+                assert!(
+                    capabilities.search_tool().is_some(),
+                    "the fallback must produce a registrable tool"
+                );
+            },
+        }
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("OLLAMA_API_KEY", v),
+                None => std::env::remove_var("OLLAMA_API_KEY"),
+            }
+        }
+    }
+
+    #[test]
+    fn auto_search_fallback_without_a_key_reports_the_whole_chain() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let prior = std::env::var("OLLAMA_API_KEY").ok();
+        unsafe {
+            std::env::remove_var("OLLAMA_API_KEY");
+        }
+        let mut cfg = mermaid_domain::Config::default();
+        cfg.web.allow_ollama_search_fallback = true;
+        let capabilities = web::WebCapabilities::resolve(&cfg.web);
+        if crate::searxng::managed_backend_viability().is_err() {
+            assert!(!capabilities.search.available);
+            assert_eq!(capabilities.search.backend, "ollama_cloud");
+            let reason = capabilities.search.reason.as_deref().unwrap_or_default();
+            assert!(reason.contains("managed bundle"), "{reason}");
+            assert!(reason.contains("OLLAMA_API_KEY"), "{reason}");
+        }
+        unsafe {
+            if let Some(v) = prior {
+                std::env::set_var("OLLAMA_API_KEY", v);
+            }
+        }
+    }
+
+    #[test]
     fn build_registers_searxng_web_search_without_key() {
         // The SearXNG search backend registers regardless of OLLAMA_API_KEY —
         // reachability is a call-time concern, not a registration one.
