@@ -625,6 +625,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `every_msg_kind_has_a_round_trip_sample` caught the missing sample at
   once — a `Msg` variant without one is a variant `--replay` would drop.
 
+- **The root crate did not compile in `--release`, and no CI job would ever
+  have noticed.** `[lints.rust] warnings = "deny"` applies to both profiles,
+  but every job that builds `mermaid-cli` builds it debug —
+  `clippy --all-targets`, `nextest`, and the standalone crate builds. So
+  `#[cfg(debug_assertions)]` items are present everywhere CI looks, and
+  anything whose only consumer is one of them reads as live code.
+
+  `HashWrite` in `render/widgets/chat.rs` is constructed in exactly one place:
+  `frame_fingerprint`, which is `#[cfg(debug_assertions)]`. A release build
+  strips the consumer, the struct becomes `dead_code`, and `deny` makes that a
+  build failure. It is gated to match its only constructor now.
+
+  The gap is what mattered more than the struct. Every check was green on the
+  PR and on `main`, and all five platform builds then failed on the tag, with
+  the version bump already merged. Nothing published — the publish job depends
+  on the builds — but the tag had to be moved. A `Release Build (Linux)` job
+  now compiles `--workspace --release` on every PR, which is the one
+  configuration `release.yml` uses and CI did not.
+
 - **`cargo doc` accepted broken intra-doc links.** The CI step ran without
   `-D warnings`, so rustdoc printed unresolved links and exited 0. Twenty had
   accumulated, including `TaskBroker::note_tokens` — a method renamed to
