@@ -84,8 +84,14 @@ def check_versions(root: Path, want: str) -> list[str]:
         elif match.group(1) != want:
             findings.append(f"{rel}: package v{match.group(1)}, expected {want}")
 
-        for dep_match in WORKSPACE_DEP_RE.finditer(text):
-            line = text[dep_match.start() : text.find("\n", dep_match.start())]
+        # Line-at-a-time, like the `grep | sed` pipeline this mirrors. Slicing
+        # the whole text to the next "\n" would drop the final character of a
+        # manifest whose last line is a dependency and has no trailing newline
+        # (`str.find` returns -1 there, and `text[start:-1]` is silently short).
+        for line in text.splitlines():
+            dep_match = WORKSPACE_DEP_RE.match(line)
+            if dep_match is None:
+                continue
             versions = DEP_VERSION_RE.findall(line)
             got = versions[-1]
             if got != want:
