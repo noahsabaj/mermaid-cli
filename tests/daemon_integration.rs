@@ -54,6 +54,7 @@ fn spawn_daemon(base: &Path, stderr_log: &Path) -> Child {
     Command::new(env!("CARGO_BIN_EXE_mermaidd"))
         .env("XDG_DATA_HOME", base)
         .env("HOME", base) // belt-and-suspenders: isolate any HOME-based fallback
+        .env("MERMAID_DATA_DIR", base.join("mermaid")) // platform-independent data-dir pin
         .env_remove("MERMAID_DAEMON_ENABLE_TCP") // never bind the shared TCP port
         .stdout(Stdio::null())
         .stderr(Stdio::from(

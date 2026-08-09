@@ -148,7 +148,13 @@ async fn dispatch_interactive(cli: Cli, mut config: mermaid_domain::Config) -> R
         ensure_ollama_model(&model_id, &config).await?;
     }
 
-    if cli_model_provided && let Err(err) = persist_last_model(&model_id) {
+    // Remember the model only when its provider actually resolves: a
+    // `--model` whose provider cannot be built here (no key, unknown name)
+    // would otherwise hijack every later session's startup default.
+    if cli_model_provided
+        && mermaid_cli::providers::model_provider_resolves(&config, &model_id)
+        && let Err(err) = persist_last_model(&model_id)
+    {
         tracing::warn!(error = %err, "failed to persist last-used model");
     }
 
@@ -294,7 +300,12 @@ async fn dispatch_non_interactive(
         ensure_ollama_model(&model_id, &config).await?;
     }
 
-    if cli_model_provided && let Err(err) = persist_last_model(&model_id) {
+    // Same gate as the interactive path: never remember a model whose
+    // provider cannot be built on this machine.
+    if cli_model_provided
+        && mermaid_cli::providers::model_provider_resolves(&config, &model_id)
+        && let Err(err) = persist_last_model(&model_id)
+    {
         tracing::warn!(error = %err, "failed to persist last-used model");
     }
 

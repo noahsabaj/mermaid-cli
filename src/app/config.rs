@@ -446,7 +446,22 @@ pub fn get_config_path() -> Result<PathBuf> {
     Ok(get_config_dir()?.join("config.toml"))
 }
 
+/// Environment override for the config directory, checked ahead of the
+/// platform location.
+///
+/// The platform location comes from `ProjectDirs`, which honors
+/// `XDG_CONFIG_HOME` on unix but resolves the Roaming AppData *known folder* on
+/// Windows — a path no environment variable redirects. So a test (or a portable
+/// install, or a CI job) had no way to point Mermaid at a scratch config on
+/// Windows, and every test that spawned the real binary wrote `last_used_model`
+/// into the developer's own `config.toml`. This variable is that missing knob,
+/// and it works identically on all three platforms.
+pub const CONFIG_DIR_ENV: &str = "MERMAID_CONFIG_DIR";
+
 /// Get the configuration directory
+///
+/// [`CONFIG_DIR_ENV`] wins when set; otherwise the platform location, then a
+/// `~/.config/mermaid` fallback.
 ///
 /// # Errors
 ///
@@ -454,6 +469,11 @@ pub fn get_config_path() -> Result<PathBuf> {
 /// reports no config location — neither `HOME` nor `USERPROFILE` being set.
 /// The directory is created here, so an `Ok` path exists.
 pub fn get_config_dir() -> Result<PathBuf> {
+    if let Some(dir) = std::env::var_os(CONFIG_DIR_ENV).filter(|dir| !dir.is_empty()) {
+        let config_dir = PathBuf::from(dir);
+        std::fs::create_dir_all(&config_dir)?;
+        return Ok(config_dir);
+    }
     if let Some(proj_dirs) = ProjectDirs::from("", "", "mermaid") {
         let config_dir = proj_dirs.config_dir();
         std::fs::create_dir_all(config_dir)?;
@@ -688,8 +708,9 @@ pub fn persist_ollama_allow_ram_offload(enabled: bool) -> Result<()> {
 /// An alias that cannot be resolved, and the terminal case where nothing is
 /// pinned, no local Ollama model is installed, and no configured provider
 /// carries a `default_model` — that message offers both routes rather than
-/// demanding an Ollama install. A stopped or absent Ollama is not an error on
-/// its own: the local probe simply contributes nothing.
+/// demanding an Ollama install. An absent Ollama is not an error on its own:
+/// the local probe simply contributes nothing. A stopped one still answers,
+/// from its on-disk store, without being woken.
 pub async fn resolve_model_id(cli_model: Option<&str>, config: &Config) -> anyhow::Result<String> {
     if let Some(model) = cli_model {
         if let Some(resolved) = resolve_model_alias(model, config)? {
@@ -858,6 +879,35 @@ mod tests {
     use super::*;
     use mermaid_runtime::SafetyMode;
     use std::collections::HashMap;
+
+    /// The matched pair for the override: set, it redirects the config dir on
+    /// every platform (the isolation the pty/e2e suites rely on so a test run
+    /// can never write the developer's real `config.toml` — Windows resolves
+    /// the platform location through a known folder no HOME/XDG var moves);
+    /// empty, it is "unset", so a stray `MERMAID_CONFIG_DIR=` in a shell
+    /// profile cannot silently point the config at the current directory.
+    #[test]
+    fn config_dir_env_override_wins_and_empty_is_unset() {
+        let sandbox = std::env::temp_dir().join(format!(
+            "mermaid-config-dir-override-{}",
+            std::process::id()
+        ));
+        temp_env::with_var(
+            CONFIG_DIR_ENV,
+            Some(sandbox.to_str().expect("utf8 temp path")),
+            || {
+                let resolved = get_config_dir().expect("override resolves");
+                assert_eq!(resolved, sandbox);
+                assert!(sandbox.is_dir(), "the override dir is created on use");
+            },
+        );
+        temp_env::with_var(CONFIG_DIR_ENV, Some(""), || {
+            let resolved = get_config_dir().expect("platform dir resolves");
+            assert_ne!(resolved, PathBuf::from(""), "empty must not become cwd");
+            assert!(resolved.is_absolute(), "got {}", resolved.display());
+        });
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
 
     #[test]
     fn legacy_default_max_tokens_migrates_to_auto() {
@@ -1980,17 +2030,30 @@ port = 11434
     fn resolve_model_id_falls_back_to_a_configured_provider() {
         let mut config = config_with_provider_default("anthropic", "claude-x");
         // Point at a dead port with autostart off, so "no local model" holds
-        // whether or not this machine has Ollama installed.
+        // whether or not this machine has Ollama installed — and point
+        // OLLAMA_MODELS at an empty store, so the on-disk fallback (which
+        // answers for a dead server precisely so listings survive it) cannot
+        // report this machine's real models into the test.
         config.ollama.host = "http://127.0.0.1".to_string();
         config.ollama.port = 1;
         config.ollama.auto_start = false;
-        temp_env::with_vars([("ANTHROPIC_API_KEY", Some("sk-test"))], || {
-            let runtime = tokio::runtime::Runtime::new().expect("runtime");
-            let resolved = runtime
-                .block_on(resolve_model_id(None, &config))
-                .expect("a configured provider is enough to resolve a model");
-            assert_eq!(resolved, "anthropic/claude-x");
-        });
+        let empty_store =
+            std::env::temp_dir().join(format!("mermaid-empty-ollama-store-{}", std::process::id()));
+        std::fs::create_dir_all(&empty_store).expect("create empty store");
+        temp_env::with_vars(
+            [
+                ("ANTHROPIC_API_KEY", Some("sk-test")),
+                ("OLLAMA_MODELS", empty_store.to_str()),
+            ],
+            || {
+                let runtime = tokio::runtime::Runtime::new().expect("runtime");
+                let resolved = runtime
+                    .block_on(resolve_model_id(None, &config))
+                    .expect("a configured provider is enough to resolve a model");
+                assert_eq!(resolved, "anthropic/claude-x");
+            },
+        );
+        let _ = std::fs::remove_dir_all(&empty_store);
     }
 
     /// An installed-but-empty Ollama needs a pull, not another install.

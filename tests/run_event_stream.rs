@@ -25,11 +25,19 @@ fn sandbox_dir() -> PathBuf {
 /// Run the real binary keylessly (the anthropic provider errors fast on the
 /// missing key — no network), fully sandboxed: config/data under `home`, and
 /// the working directory under `home/work` so the run's `.mermaid/` session
-/// store never touches the repo checkout.
+/// store never touches the repo checkout. The `MERMAID_*` overrides are what
+/// isolate on Windows, where the HOME/XDG vars don't move the known-folder
+/// platform dirs — before them, every Windows `cargo test` wrote
+/// `last_used_model = "anthropic/pty-exit-test"` into the developer's real
+/// `config.toml`.
 fn run_sandboxed(home: &Path, extra_args: &[&str]) -> std::process::Output {
+    run_sandboxed_with_model(home, "anthropic/pty-exit-test", extra_args)
+}
+
+fn run_sandboxed_with_model(home: &Path, model: &str, extra_args: &[&str]) -> std::process::Output {
     let work = home.join("work");
     std::fs::create_dir_all(&work).expect("create workdir");
-    let mut args = vec!["--model", "anthropic/pty-exit-test"];
+    let mut args = vec!["--model", model];
     args.extend_from_slice(extra_args);
     Command::new(env!("CARGO_BIN_EXE_mermaid"))
         .args(&args)
@@ -37,9 +45,17 @@ fn run_sandboxed(home: &Path, extra_args: &[&str]) -> std::process::Output {
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join("config"))
         .env("XDG_DATA_HOME", home.join("data"))
+        .env("MERMAID_CONFIG_DIR", sandbox_config_dir(home))
+        .env("MERMAID_DATA_DIR", home.join("data").join("mermaid"))
         .env_remove("ANTHROPIC_API_KEY")
         .output()
         .expect("spawn mermaid")
+}
+
+/// Where the sandboxed run's user config lives — the dir `MERMAID_CONFIG_DIR`
+/// pins, so tests can assert on exactly what the binary wrote.
+fn sandbox_config_dir(home: &Path) -> PathBuf {
+    home.join("config").join("mermaid")
 }
 
 /// Parse the non-empty NDJSON lines of a run's stdout.
@@ -185,6 +201,49 @@ fn headless_resume_error_paths_are_clear() {
     assert!(
         stderr.contains("no saved session"),
         "error must explain: {stderr}"
+    );
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// The matched pair for the `last_used_model` persist gate, through the real
+/// binary. Negative: a `--model` whose provider cannot be built must leave the
+/// user config without a `last_used_model` — this is the write that poisoned
+/// developer configs with `anthropic/pty-exit-test` before the gate. Positive:
+/// a keyless loopback provider IS buildable, so the same code path must write
+/// the key — proving the gate discriminates rather than never persisting, and
+/// that `MERMAID_CONFIG_DIR` really is where the binary's config writes land.
+/// No network beyond one refused loopback connect: the provider endpoint
+/// resolves without contacting anything, and the chat then fails fast.
+#[test]
+fn cli_model_is_remembered_only_when_its_provider_is_buildable() {
+    let home = sandbox_dir();
+    let config_path = sandbox_config_dir(&home).join("config.toml");
+
+    // Negative: unknown provider — the endpoint cannot resolve, so nothing
+    // may be remembered (the run itself fails; its exit status is the
+    // provider error's concern, not this test's).
+    let _ = run_sandboxed_with_model(&home, "nosuch/never-persist", &["run", "x"]);
+    let written = std::fs::read_to_string(&config_path).unwrap_or_default();
+    assert!(
+        !written.contains("last_used_model"),
+        "an unbuildable provider must not be remembered: {written}"
+    );
+
+    // Positive: a keyless loopback endpoint is a real, buildable provider
+    // (same rule as discovery), so the persist fires even though the chat
+    // then dies on the dead port.
+    std::fs::create_dir_all(sandbox_config_dir(&home)).expect("create config dir");
+    std::fs::write(
+        &config_path,
+        "[providers.stub]\nbase_url = \"http://127.0.0.1:9/v1\"\n",
+    )
+    .expect("write sandbox config");
+    let _ = run_sandboxed_with_model(&home, "stub/test-model", &["run", "x"]);
+    let written = std::fs::read_to_string(&config_path).expect("config must exist");
+    assert!(
+        written.contains("last_used_model = \"stub/test-model\""),
+        "a buildable provider must be remembered in the sandbox: {written}"
     );
 
     let _ = std::fs::remove_dir_all(&home);

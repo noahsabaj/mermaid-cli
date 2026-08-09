@@ -80,3 +80,8 @@ windows-sys = { version = "0.61", features = [
 landlock = "0.4"
 libc = "0.2"
 seccompiler = "0.5"
+
+[dev-dependencies]
+# Serialized env-var scoping for the MERMAID_DATA_DIR override tests — same
+# crate the sibling crates' tests use.
+temp-env = "0.3"

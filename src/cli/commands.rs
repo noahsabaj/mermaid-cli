@@ -1,12 +1,9 @@
 use anyhow::{Context, Result, anyhow, bail};
 use std::path::Path;
-use std::sync::Arc;
 
 use mermaid_runtime::{NewProviderProbe, RuntimeStore, TaskRecord};
 
-use mermaid_model::models::{
-    BackendConfig, ChatMessage, Model, PROVIDER_REGISTRY, lookup_provider,
-};
+use mermaid_model::models::{ChatMessage, PROVIDER_REGISTRY, lookup_provider};
 
 use mermaid_domain::Config;
 
@@ -17,7 +14,7 @@ use mermaid_domain::{
 
 use crate::{
     app::{get_config_dir, init_config, load_config_or_warn},
-    ollama::is_installed as is_ollama_installed,
+    ollama::{LocalModelListing, is_installed as is_ollama_installed, observe_models},
     providers::discovery::{configured_remote_provider_names, configured_remote_providers},
     runtime_client::{RuntimeClient, record_static_provider_probes},
     session::ConversationManager,
@@ -373,14 +370,14 @@ pub(crate) async fn build_doctor_report(
         Err(err) => (None, Some(err.to_string()), None),
     };
 
-    // Diagnostics observe, they don't heal: autostart=false so `doctor` can
-    // actually report a dead server instead of reviving it mid-check. `None`
-    // (unreachable) vs `Some(vec![])` (running, nothing pulled) get distinct
-    // messages; the "next steps" nudge below only needs "no usable models".
+    // Diagnostics observe, they don't heal: the shared observe path keeps
+    // autostart hard-off so `doctor` can actually report a dead server
+    // instead of reviving it mid-check — while the on-disk manifest store
+    // still answers what is installed (`FromDisk`).
     let ollama_models = if is_ollama_installed() {
-        list_ollama_models(config).await
+        observe_models(config).await
     } else {
-        None
+        LocalModelListing::Unreachable
     };
     let ollama = if !is_ollama_installed() {
         DoctorCheck {
@@ -390,19 +387,30 @@ pub(crate) async fn build_doctor_report(
         }
     } else {
         match &ollama_models {
-            None => DoctorCheck {
+            LocalModelListing::Unreachable => DoctorCheck {
                 status: "warning",
                 message: "Ollama is installed but not running; mermaid starts it \
                           automatically when an Ollama model is used."
                     .to_string(),
             },
-            Some(models) if models.is_empty() => DoctorCheck {
+            LocalModelListing::Live(models) if models.is_empty() => DoctorCheck {
                 status: "warning",
                 message: "Ollama is running but no local/cloud models were listed.".to_string(),
             },
-            Some(models) => DoctorCheck {
+            LocalModelListing::Live(models) => DoctorCheck {
                 status: "ok",
                 message: format!("Ollama reachable with {} models.", models.len()),
+            },
+            // Not running is not a fault: the models are installed and the
+            // server starts on first use, so this machine has a working
+            // local backend.
+            LocalModelListing::FromDisk(models) => DoctorCheck {
+                status: "ok",
+                message: format!(
+                    "Ollama installed, not running — {} model(s) on disk; starts \
+                     automatically when used.",
+                    models.len()
+                ),
             },
         }
     };
@@ -486,7 +494,7 @@ pub(crate) async fn build_doctor_report(
                 .to_string(),
         );
     }
-    if remote_providers.is_empty() && ollama_models.as_deref().unwrap_or_default().is_empty() {
+    if remote_providers.is_empty() && ollama_models.models().unwrap_or_default().is_empty() {
         next_steps.push(
             "Install or start Ollama, pull a model, or set a remote provider API key.".to_string(),
         );
@@ -2086,25 +2094,37 @@ fn show_ports() -> Result<()> {
 /// List available models across all backends (honors user config).
 /// Read-only: a dead local server is reported, never resurrected — a
 /// cloud-model user who stopped Ollama on purpose must be able to
-/// enumerate without a surprise VRAM grab.
+/// enumerate without a surprise VRAM grab. A stopped server does not hide
+/// the installed set: the on-disk manifest store answers for it
+/// (`FromDisk`), labeled so the user knows the server will start on use.
 ///
 /// # Errors
 ///
 /// Only writing to stdout. Every "nothing to list" case — Ollama not
-/// installed, installed but stopped, installed with no models, no configured
-/// remote providers — is `Ok` and prints what it found, because a listing verb
-/// that exits nonzero because the answer is empty is answering a different
-/// question.
+/// installed, installed but stopped with an unreadable store, installed with
+/// no models, no configured remote providers — is `Ok` and prints what it
+/// found, because a listing verb that exits nonzero because the answer is
+/// empty is answering a different question.
 pub async fn list_models(config: &Config) -> Result<()> {
-    match list_ollama_models(config).await {
-        None if is_ollama_installed() => {
-            println!("Ollama is installed but not running — local models can't be listed.");
+    match observe_models(config).await {
+        LocalModelListing::Unreachable if is_ollama_installed() => {
+            println!("Ollama is installed but not running, and its model store could not be read.");
             println!("(It starts automatically when you use an Ollama model.)");
         },
-        None => println!("Ollama is not installed; no local models."),
-        Some(models) if models.is_empty() => println!("No Ollama models installed locally."),
-        Some(models) => {
+        LocalModelListing::Unreachable => println!("Ollama is not installed; no local models."),
+        LocalModelListing::Live(models) if models.is_empty() => {
+            println!("No Ollama models installed locally.");
+        },
+        LocalModelListing::Live(models) => {
             println!("Ollama models (local/cloud):");
+            for name in &models {
+                println!("  - ollama/{name}");
+            }
+        },
+        LocalModelListing::FromDisk(models) => {
+            println!(
+                "Ollama models (installed; server not running — starts automatically on use):"
+            );
             for name in &models {
                 println!("  - ollama/{name}");
             }
@@ -2151,29 +2171,6 @@ pub async fn list_models(config: &Config) -> Result<()> {
 
     println!("\nSwitch models in-session with /model <name>.");
     Ok(())
-}
-
-/// Ask the local Ollama daemon for its list of models — strictly read-only.
-/// `None` when the server couldn't be reached (distinct from `Some(vec![])`:
-/// running with nothing pulled) so callers can report a dead server
-/// truthfully. Every caller is an enumeration/diagnostic verb (`list` /
-/// `models` / `status` / `doctor`), and observing state must never mutate
-/// it — a cloud-only user who deliberately stopped Ollama to free VRAM must
-/// not get it resurrected by a listing — so autostart is hard-off here. The
-/// intent paths (chat's `send_chat`, the startup preflight in
-/// `ollama::installer`) keep autostart; that's where a dead server heals.
-async fn list_ollama_models(config: &Config) -> Option<Vec<String>> {
-    use mermaid_model::models::adapters::ollama::OllamaAdapter;
-    let backend = BackendConfig {
-        ollama_url: format!("{}:{}", config.ollama.host, config.ollama.port),
-        timeout_secs: 5,
-        max_idle_per_host: 2,
-        ollama_autostart: false,
-    };
-    match OllamaAdapter::new("__list__", Arc::new(backend)).await {
-        Ok(adapter) => adapter.list_models().await.ok(),
-        Err(_) => None,
-    }
 }
 
 /// Show version information
@@ -2459,26 +2456,38 @@ async fn show_status(config: &Config) -> Result<()> {
     }
 
     // Check Ollama (via HTTP, so remote deployments are honored).
-    // Diagnostics observe, they don't heal: autostart=false, otherwise a
-    // status check would start the server and then report "Running" —
-    // never able to observe the dead state it exists to surface.
+    // Diagnostics observe, they don't heal: the shared observe path keeps
+    // autostart off, otherwise a status check would start the server and then
+    // report "Running" — never able to observe the dead state it exists to
+    // surface. A dead server with a readable store still lists (`FromDisk`).
     if is_ollama_installed() {
-        match list_ollama_models(config).await {
-            None => println!(
+        let preview = |models: &[String]| {
+            for model in models.iter().take(3) {
+                println!("      - {model}");
+            }
+            if models.len() > 3 {
+                println!("      ... and {} more", models.len() - 3);
+            }
+        };
+        match observe_models(config).await {
+            LocalModelListing::Unreachable => println!(
                 "  [WARNING] Ollama: Installed but not running (started automatically \
                  when an Ollama model is used)"
             ),
-            Some(models) if models.is_empty() => {
+            LocalModelListing::Live(models) if models.is_empty() => {
                 println!("  [WARNING] Ollama: Running (no models installed)");
             },
-            Some(models) => {
+            LocalModelListing::Live(models) => {
                 println!("  [OK] Ollama: Running ({} models installed)", models.len());
-                for model in models.iter().take(3) {
-                    println!("      - {model}");
-                }
-                if models.len() > 3 {
-                    println!("      ... and {} more", models.len() - 3);
-                }
+                preview(&models);
+            },
+            LocalModelListing::FromDisk(models) => {
+                println!(
+                    "  [OK] Ollama: Not running ({} models installed on disk; starts \
+                     automatically when used)",
+                    models.len()
+                );
+                preview(&models);
             },
         }
     } else if available.is_empty() {

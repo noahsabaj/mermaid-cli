@@ -21,6 +21,8 @@ fn sandbox_dir() -> PathBuf {
 
 /// Run the real binary fully sandboxed: config/data under `home`, working
 /// directory under `home/work` so the bundle file never lands in the checkout.
+/// The `MERMAID_*` overrides are what isolate on Windows, where the HOME/XDG
+/// vars don't move the known-folder platform dirs.
 fn run_sandboxed(home: &Path, extra_args: &[&str]) -> std::process::Output {
     let work = home.join("work");
     std::fs::create_dir_all(&work).expect("create workdir");
@@ -30,6 +32,8 @@ fn run_sandboxed(home: &Path, extra_args: &[&str]) -> std::process::Output {
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join("config"))
         .env("XDG_DATA_HOME", home.join("data"))
+        .env("MERMAID_CONFIG_DIR", home.join("config").join("mermaid"))
+        .env("MERMAID_DATA_DIR", home.join("data").join("mermaid"))
         // A planted credential-shaped env var: it must never surface in the
         // bundle (the summary reports key PRESENCE only).
         .env("OPENAI_API_KEY", "sk-plantedsecret1234567890abcd")

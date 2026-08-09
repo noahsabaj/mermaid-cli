@@ -30,7 +30,7 @@ pub use discovery::{
     ConfiguredProvider, ProviderCatalog, ProviderProblem, configured_remote_providers,
     provider_catalogs, provider_problems,
 };
-pub use factory::ProviderFactory;
+pub use factory::{ProviderFactory, model_provider_resolves};
 pub use model::{
     AnthropicProvider, GeminiProvider, MetaProvider, ModelProvider, OllamaProvider,
     OpenAICompatProvider,

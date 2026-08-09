@@ -3,6 +3,14 @@
 Config file: `~/.config/mermaid/config.toml` (Linux) or the platform equivalent
 via the `directories` crate. Run `mermaid init` to create one.
 
+Two environment variables relocate Mermaid's own directories wholesale, on
+every platform: `MERMAID_CONFIG_DIR` (the directory holding `config.toml`) and
+`MERMAID_DATA_DIR` (the runtime store: checkpoints, process records, the
+daemon socket). They exist for sandboxed test runs, CI, and portable installs
+— on Windows the platform locations are known folders that `HOME`/
+`XDG_CONFIG_HOME` cannot move, so these are the only reliable override. An
+empty value means unset.
+
 ## Layers
 
 Configuration is assembled from layers, later layers winning key-by-key through
@@ -60,7 +68,9 @@ port = 11434
 # (loopback hosts only; the revived server binds to exactly this host:port).
 # Only paths that USE Ollama start it (chat, the startup model check); the
 # read-only verbs (`mermaid list` / `models` / `status` / `doctor`) observe
-# and never start anything. Disable here — or with
+# and never start anything — a stopped server still lists its installed
+# models, read from Ollama's on-disk store (honoring OLLAMA_MODELS), and
+# labeled "starts automatically on use". Disable autostart here — or with
 # MERMAID_OLLAMA_AUTOSTART=0 in the environment — if you manage Ollama
 # yourself (custom bind address, containers, CI).
 auto_start = true

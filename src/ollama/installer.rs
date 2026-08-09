@@ -10,7 +10,7 @@ use std::sync::Arc;
 /// config. Falls back to an empty list on any HTTP error.
 async fn list_installed_models(config: &Config) -> Vec<String> {
     let backend = BackendConfig {
-        ollama_url: format!("{}:{}", config.ollama.host, config.ollama.port),
+        ollama_url: config.ollama.base_url(),
         timeout_secs: 5,
         max_idle_per_host: 2,
         ollama_autostart: config.ollama.auto_start,
@@ -111,20 +111,33 @@ pub async fn ensure_model(model_name: &str, config: &Config) -> Result<()> {
     Ok(())
 }
 
-/// The local Ollama daemon's models, for callers deciding whether a local
+/// The local Ollama install's models, for callers deciding whether a local
 /// model is available at all.
 ///
 /// `None` means Ollama is not installed on this machine; `Some(vec![])` means
-/// it is installed but has nothing usable (unreachable, or running with
-/// nothing pulled). Neither is an error: Ollama is Mermaid's default backend,
-/// not a prerequisite — a machine with only a remote provider key configured
-/// must still be able to start. Callers that genuinely need an Ollama model
-/// (`ensure_model`) still fail loudly, with [`guide::detect_and_guide`].
+/// it is installed but has nothing usable (unreachable with an unreadable
+/// store, or running with nothing pulled). Neither is an error: Ollama is
+/// Mermaid's default backend, not a prerequisite — a machine with only a
+/// remote provider key configured must still be able to start. Callers that
+/// genuinely need an Ollama model (`ensure_model`) still fail loudly, with
+/// [`guide::detect_and_guide`].
+///
+/// Observes first: picking a startup default is enumeration, not intent, so
+/// a stopped server whose manifest store already answers must not be woken
+/// (its VRAM grab included) just to be asked the same question — the first
+/// chat autostarts it anyway. The healing HTTP list survives only as the
+/// fallback for an unreadable store, e.g. a fresh install before its first
+/// pull.
 pub async fn local_models(config: &Config) -> Option<Vec<String>> {
     if !detector::is_installed() {
         return None;
     }
-    Some(list_installed_models(config).await)
+    match super::observe_models(config).await {
+        super::LocalModelListing::Live(models) | super::LocalModelListing::FromDisk(models) => {
+            Some(models)
+        },
+        super::LocalModelListing::Unreachable => Some(list_installed_models(config).await),
+    }
 }
 
 #[cfg(test)]

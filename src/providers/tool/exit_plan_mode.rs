@@ -193,8 +193,10 @@ impl ExitPlanModeTool {
 
 /// Candidate execution models for the handoff picker: models this install
 /// has used before (the per-model reasoning table doubles as a recency
-/// record) plus whatever the local Ollama daemon has pulled (best-effort,
-/// short timeout). The current model is excluded — "Same model" covers it.
+/// record) plus whatever Ollama has installed — read-only, and answered from
+/// the on-disk store when the server is stopped, so a sleeping server still
+/// contributes candidates. The current model is excluded — "Same model"
+/// covers it.
 async fn handoff_model_candidates(ctx: &ExecContext) -> Vec<String> {
     let mut seen = std::collections::BTreeSet::new();
     let mut out = Vec::new();
@@ -203,32 +205,11 @@ async fn handoff_model_candidates(ctx: &ExecContext) -> Vec<String> {
             out.push(m.clone());
         }
     }
-    let url = format!(
-        "http://{}:{}/api/tags",
-        ctx.config.ollama.host, ctx.config.ollama.port
-    );
-    let fetched = async {
-        let resp = reqwest::Client::new()
-            .get(&url)
-            .timeout(std::time::Duration::from_secs(2))
-            .send()
-            .await
-            .ok()?;
-        resp.json::<serde_json::Value>().await.ok()
-    }
-    .await;
-    if let Some(v) = fetched {
-        for m in v
-            .get("models")
-            .and_then(|m| m.as_array())
-            .into_iter()
-            .flatten()
-        {
-            if let Some(name) = m.get("name").and_then(|n| n.as_str()) {
-                let id = format!("ollama/{name}");
-                if id != ctx.model_id && seen.insert(id.clone()) {
-                    out.push(id);
-                }
+    if let Some(models) = crate::ollama::observe_models(&ctx.config).await.models() {
+        for name in models {
+            let id = format!("ollama/{name}");
+            if id != ctx.model_id && seen.insert(id.clone()) {
+                out.push(id);
             }
         }
     }
