@@ -239,19 +239,15 @@ impl OllamaAdapter {
         // routes `ReasoningLevel::XHigh` / `Max` through `nearest_effort`
         // → `High`, which `think_for_ollama` then renders as `"high"`.
         let capabilities = if uses_effort_string_think(model_name) {
-            ModelCapabilities {
-                supports_tools: true,
-                supports_vision: false,
-                supports_reasoning: crate::models::ReasoningCapability::Levels(vec![
+            ModelCapabilities::advertised(
+                false,
+                crate::models::ReasoningCapability::Levels(vec![
                     ReasoningLevel::None,
                     ReasoningLevel::Low,
                     ReasoningLevel::Medium,
                     ReasoningLevel::High,
                 ]),
-                max_context_tokens: None,
-                max_output_tokens: None,
-                emits_provider_continuation: false,
-            }
+            )
         } else {
             ModelCapabilities::ollama_default()
         };

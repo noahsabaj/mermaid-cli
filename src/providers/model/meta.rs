@@ -68,15 +68,19 @@ impl MetaProvider {
         // Prefix, not exact-id: a future muse-spark-1.2 should inherit the
         // documented family limits instead of regressing to "unknown".
         let muse_spark = model_name.to_ascii_lowercase().starts_with("muse-spark");
+        // The one sanctioned static-window exception (see capabilities.rs's
+        // module doc): Meta documents the muse-spark family limits and
+        // exposes no endpoint to discover them live.
         let capabilities = ModelCapabilities {
-            supports_tools: true,
-            supports_vision: true,
-            supports_reasoning: ReasoningCapability::Levels(meta_reasoning_levels()),
             max_context_tokens: muse_spark
                 .then_some(mermaid_model::constants::META_MUSE_SPARK_CONTEXT_WINDOW),
             max_output_tokens: muse_spark
                 .then_some(mermaid_model::constants::META_MUSE_SPARK_MAX_OUTPUT_TOKENS),
-            emits_provider_continuation: true,
+            ..ModelCapabilities::advertised(
+                true,
+                ReasoningCapability::Levels(meta_reasoning_levels()),
+            )
+            .with_provider_continuation()
         };
         Ok(Self {
             client,
