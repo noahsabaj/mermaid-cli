@@ -913,28 +913,14 @@ mod tests {
         let outside = project.parent().unwrap().to_path_buf();
 
         let mk_ctx = || {
-            let (tx, rx) = tokio::sync::mpsc::channel(64);
             let mut config = mermaid_domain::Config::default();
             config.safety.mode = mermaid_runtime::SafetyMode::ReadOnly;
-            let ctx = crate::providers::ctx::ExecContext::new(
-                tokio_util::sync::CancellationToken::new(),
-                tx,
-                ToolCallId(1),
+            crate::providers::ctx::test_exec_context_with_config(
                 TurnId(1),
+                ToolCallId(1),
                 project.clone(),
-                std::sync::Arc::new(config),
-                String::new(),
-                None,
-                None,
-                None,
-                mermaid_runtime::SafetyMode::ReadOnly,
-                None,
-                None,
-                None,
-                None,
-                None,
-            );
-            (ctx, rx)
+                config,
+            )
         };
 
         let (ctx, _rx) = mk_ctx();
@@ -981,27 +967,14 @@ mod tests {
         let plan_file = project.join(".mermaid/plans/x.md");
 
         let mk_ctx = || {
-            let (tx, rx) = tokio::sync::mpsc::channel(64);
             let mut config = mermaid_domain::Config::default();
             config.safety.mode = mermaid_runtime::SafetyMode::ReadOnly;
             config.safety.checkpoint_on_mutation = false;
-            let mut ctx = crate::providers::ctx::ExecContext::new(
-                tokio_util::sync::CancellationToken::new(),
-                tx,
-                ToolCallId(1),
+            let (mut ctx, rx) = crate::providers::ctx::test_exec_context_with_config(
                 TurnId(1),
+                ToolCallId(1),
                 project.clone(),
-                std::sync::Arc::new(config),
-                String::new(),
-                None,
-                None,
-                None,
-                mermaid_runtime::SafetyMode::ReadOnly,
-                None,
-                None,
-                None,
-                None,
-                None,
+                config,
             );
             ctx.plan_file = Some(plan_file.clone());
             (ctx, rx)
@@ -1730,26 +1703,13 @@ mod tests {
 
         // ReadOnly gate: an ExternalDirectory escalation would classify as
         // ExternalAccess and be denied; a Shell read-only command is allowed.
-        let (tx, _rx) = tokio::sync::mpsc::channel(64);
         let mut config = mermaid_domain::Config::default();
         config.safety.mode = mermaid_runtime::SafetyMode::ReadOnly;
-        let mut ctx = crate::providers::ctx::ExecContext::new(
-            tokio_util::sync::CancellationToken::new(),
-            tx,
-            ToolCallId(1),
+        let (mut ctx, _rx) = crate::providers::ctx::test_exec_context_with_config(
             TurnId(1),
+            ToolCallId(1),
             project.clone(),
-            std::sync::Arc::new(config),
-            String::new(),
-            None,
-            None,
-            None,
-            mermaid_runtime::SafetyMode::ReadOnly,
-            None,
-            None,
-            None,
-            None,
-            None,
+            config,
         );
         ctx.scratchpad = Some(scratch.clone());
         let outcome = ExecuteCommandTool

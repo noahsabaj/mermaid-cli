@@ -56,7 +56,7 @@ pub use checklist::{
     ChecklistEdit, ChecklistItem, ChecklistOrigin, ChecklistSpec, ChecklistStatus, ChecklistStore,
     EvidenceEntry, Stamp, UserChecklistEdit, advisory_notes,
 };
-pub use cmd::{ChatRequest, Cmd, ToolDefinition};
+pub use cmd::{ChatRequest, Cmd, ToolDefinition, ToolDispatch};
 pub use compaction::{
     CompactionArchive, CompactionBoundary, CompactionEvent, CompactionPolicy, CompactionRequest,
     CompactionResult, CompactionReviewStatus, CompactionTrigger, PreparedCompaction,

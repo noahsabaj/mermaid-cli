@@ -195,24 +195,11 @@ async fn all_scratch_patch_is_ungated() {
 
     let mut config = mermaid_domain::Config::default();
     config.safety.mode = mermaid_runtime::SafetyMode::Ask;
-    let (tx, _rx) = tokio::sync::mpsc::channel(8);
-    let mut ctx = crate::providers::ctx::ExecContext::new(
-        tokio_util::sync::CancellationToken::new(),
-        tx,
-        ToolCallId(1),
+    let (mut ctx, _rx) = crate::providers::ctx::test_exec_context_with_config(
         TurnId(1),
+        ToolCallId(1),
         project.clone(),
-        std::sync::Arc::new(config),
-        String::new(),
-        None,
-        None,
-        None,
-        mermaid_runtime::SafetyMode::Ask,
-        None,
-        None,
-        None,
-        None,
-        None,
+        config,
     );
     ctx.scratchpad = Some(scratch.clone());
 

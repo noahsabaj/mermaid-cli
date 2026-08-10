@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The tool-dispatch seam wears its three hats as three types.** One tool
+  call used to cross the reducer/effect boundary as eleven loose fields on
+  `Cmd::ExecuteTool`, a 24-argument `dispatch_execute_tool`, and a 16-argument
+  `ExecContext::new` followed by eight post-construction field-sets -- turn
+  plumbing, session identity, and policy inputs fused into one bag, with the
+  "field-set after construction on the live path" convention documented in
+  comments because the types could not say it. The seam now names them:
+  `ToolDispatch` (domain -- everything the reducer stamps from live session
+  state), `TurnSignals` (the owning scope's cancellation, background signal,
+  and shared web budget), and `ToolServices` (the runner-bound config, task
+  ownership, and interaction back-channels). `ExecContext::assemble` builds
+  the flat context every tool already reads in one total step -- no
+  post-construction mutation -- and the six tool tests that each hand-rolled
+  the 16-argument constructor now share the one test helper. Checklist
+  evidence recording degrades to a graceful no-op without a broker instead of
+  requiring one, matching every other optional service.
+
 - **The pure MVU core no longer depends on `mermaid-runtime` -- the crate
   stack points one way.** `mermaid-domain`'s manifest-omission enforcement
   ("a reducer that wants to await cannot, because the runtime is not a

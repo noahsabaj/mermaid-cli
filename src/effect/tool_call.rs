@@ -1,6 +1,5 @@
 //! Tool dispatch, plus the runtime tool-run bookkeeping that brackets it.
 use mermaid_model::utils::{join_logged, spawn_guarded};
-use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -8,7 +7,9 @@ use crate::ollama::LocalModelListing;
 
 use super::*;
 
-/// Dispatch an `ExecuteTool` command.
+/// Dispatch an `ExecuteTool` command. The three-hat seam: `signals` from
+/// the owning turn scope, `dispatch` stamped by the reducer, `services`
+/// bound by the runner — assembled into a flat `ExecContext` in one shot.
 #[expect(clippy::too_many_arguments)]
 #[expect(
     clippy::too_many_lines,
@@ -17,28 +18,12 @@ use super::*;
 pub(super) async fn dispatch_execute_tool(
     msg_tx: MsgSender,
     tools: Option<Arc<ToolRegistry>>,
-    workdir: PathBuf,
     turn: TurnId,
     call_id: mermaid_domain::ToolCallId,
     source: mermaid_model::models::tool_call::ToolCall,
-    token: tokio_util::sync::CancellationToken,
-    background: tokio_util::sync::CancellationToken,
-    web_bytes: Arc<std::sync::atomic::AtomicUsize>,
-    config: Arc<mermaid_domain::Config>,
-    model_id: String,
-    task_id: Option<String>,
-    session_id: String,
-    message_index: usize,
-    scratchpad: Option<PathBuf>,
-    safety_mode: mermaid_runtime::SafetyMode,
-    plan_file: Option<PathBuf>,
-    plan_permissions: mermaid_domain::PlanPermissions,
-    context_percent: Option<u8>,
-    intent: Option<String>,
-    classifier: Option<Arc<dyn crate::providers::AutoClassifier>>,
-    approval: Option<crate::providers::ApprovalBroker>,
-    questions: Option<crate::providers::QuestionBroker>,
-    tasks: crate::providers::TaskBroker,
+    signals: crate::providers::ctx::TurnSignals,
+    dispatch: mermaid_domain::ToolDispatch,
+    services: crate::providers::ctx::ToolServices,
 ) {
     let _ = msg_tx.send(Msg::ToolStarted { turn, call_id }).await;
 
@@ -90,7 +75,7 @@ pub(super) async fn dispatch_execute_tool(
         )
     };
     let tool_run_id =
-        start_runtime_tool_run(task_id.as_deref(), turn, call_id, tool_key, &args).await;
+        start_runtime_tool_run(services.task_id.as_deref(), turn, call_id, tool_key, &args).await;
 
     let Some(tool) = registry.get(tool_key) else {
         // A deliberately-omitted tool answers with the reason it is absent
@@ -116,7 +101,7 @@ pub(super) async fn dispatch_execute_tool(
     // relay loop cleanly.
     let (progress_tx, mut progress_rx) = mpsc::channel(16);
     let relay_tx = msg_tx.clone();
-    let relay_token = token.clone();
+    let relay_token = signals.token.clone();
     let progress_relay = spawn_guarded(async move {
         loop {
             let event = tokio::select! {
@@ -141,34 +126,8 @@ pub(super) async fn dispatch_execute_tool(
         }
     });
 
-    let mut ctx = ExecContext::new(
-        token,
-        progress_tx,
-        call_id,
-        turn,
-        workdir,
-        config,
-        model_id,
-        task_id,
-        Some(session_id),
-        Some(message_index as i64),
-        safety_mode,
-        intent,
-        classifier,
-        approval,
-        questions,
-        Some(tasks.clone()),
-    );
-    ctx.background = background;
-    ctx.web_bytes = web_bytes;
-    ctx.plan_file = plan_file;
-    ctx.plan_permissions = plan_permissions;
-    ctx.context_percent = context_percent;
-    // Detached work (backgrounded subagents) reports back through the main
-    // msg channel after this turn's progress relay is gone.
-    ctx.notify = Some(msg_tx.clone());
-    // Per-session scratch dir, when the session has one materialized.
-    ctx.scratchpad = scratchpad;
+    let task_broker = services.tasks.clone();
+    let ctx = ExecContext::assemble(turn, call_id, progress_tx, signals, dispatch, services);
     // `before_tool_use` is the one DECISION event: an enabled plugin hook may
     // deny the call, rewrite its arguments, or inject context for the next
     // model request. Every other event stays fire-and-forget.
@@ -225,13 +184,15 @@ pub(super) async fn dispatch_execute_tool(
             call_id,
             source: source.clone(),
         });
-        tasks
-            .record_evidence(mermaid_domain::EvidenceEntry {
-                tool: action,
-                target,
-                status: tool_status_label(outcome.status).to_string(),
-            })
-            .await;
+        if let Some(broker) = &task_broker {
+            broker
+                .record_evidence(mermaid_domain::EvidenceEntry {
+                    tool: action,
+                    target,
+                    status: tool_status_label(outcome.status).to_string(),
+                })
+                .await;
+        }
     }
     let after_payload = serde_json::json!({
         "turn_id": turn.0,

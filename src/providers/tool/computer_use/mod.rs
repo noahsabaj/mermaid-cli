@@ -267,24 +267,12 @@ mod tests {
         use mermaid_domain::{ToolCallId, TurnId};
         let mut cfg = mermaid_domain::Config::default();
         cfg.computer_use.auto_screenshot = false;
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<ProgressEvent>(8);
-        let ctx = ExecContext::new(
-            tokio_util::sync::CancellationToken::new(),
-            tx,
-            ToolCallId(1),
+        cfg.safety.mode = mermaid_runtime::SafetyMode::FullAccess;
+        let (ctx, mut rx) = crate::providers::ctx::test_exec_context_with_config(
             TurnId(1),
+            ToolCallId(1),
             std::path::PathBuf::from("/tmp"),
-            std::sync::Arc::new(cfg),
-            String::new(),
-            None,
-            None,
-            None,
-            mermaid_runtime::SafetyMode::FullAccess,
-            None,
-            None,
-            None,
-            None,
-            None,
+            cfg,
         );
         // Backend is irrelevant — the flag short-circuits before any capture.
         let driver = ComputerUseDriver::new(Backend::Unsupported);

@@ -149,6 +149,46 @@ pub struct FinalResponse {
     pub stop_reason: Option<FinishReason>,
 }
 
+/// What the turn's scope supplies to every tool call it owns: cancellation,
+/// the Ctrl+B background signal, and the shared web-byte budget sibling
+/// calls charge together. One of the three hats the old 24-argument
+/// dispatch wore; the other two are [`mermaid_domain::ToolDispatch`]
+/// (reducer-stamped session/policy context) and [`ToolServices`]
+/// (runner-bound services).
+#[derive(Debug, Clone)]
+pub struct TurnSignals {
+    pub token: CancellationToken,
+    pub background: CancellationToken,
+    pub web_bytes: Arc<AtomicUsize>,
+}
+
+impl Default for TurnSignals {
+    /// Fresh, never-fired tokens and a zero budget — the test default;
+    /// the live path always builds from the owning `TurnScope`.
+    fn default() -> Self {
+        Self {
+            token: CancellationToken::new(),
+            background: CancellationToken::new(),
+            web_bytes: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+}
+
+/// What the runner binds for the session, independent of any one call:
+/// the project root, the startup `Config`, daemon task ownership, and the
+/// interaction back-channels (approval, questions, checklist, the
+/// turn-independent notify channel, the Auto-mode classifier).
+pub struct ToolServices {
+    pub workdir: PathBuf,
+    pub config: Arc<mermaid_domain::Config>,
+    pub task_id: Option<String>,
+    pub notify: Option<mpsc::Sender<Msg>>,
+    pub classifier: Option<Arc<dyn AutoClassifier>>,
+    pub approval: Option<ApprovalBroker>,
+    pub questions: Option<QuestionBroker>,
+    pub tasks: Option<crate::providers::tasks::TaskBroker>,
+}
+
 /// What a `ToolExecutor::execute()` receives.
 pub struct ExecContext {
     pub token: CancellationToken,
@@ -265,55 +305,47 @@ impl std::fmt::Debug for ExecContext {
 }
 
 impl ExecContext {
-    #[expect(clippy::too_many_arguments)]
+    /// Total construction from the three hats — no post-construction
+    /// field-sets. The struct itself stays flat (every tool reads
+    /// `ctx.token`, `ctx.workdir`, … unchanged); only assembly is grouped.
+    ///
+    /// `dispatch.session_id` is the conversation id (always present on the
+    /// live path); an empty id — bare test contexts — maps to `None` so
+    /// checkpoint anchoring stays "unanchored" rather than keyed to `""`.
     #[must_use]
-    pub fn new(
-        token: CancellationToken,
-        progress: mpsc::Sender<ProgressEvent>,
-        call_id: ToolCallId,
+    pub fn assemble(
         turn: TurnId,
-        workdir: PathBuf,
-        config: Arc<mermaid_domain::Config>,
-        model_id: String,
-        task_id: Option<String>,
-        session_id: Option<String>,
-        message_index: Option<i64>,
-        safety_mode: SafetyMode,
-        intent: Option<String>,
-        classifier: Option<Arc<dyn AutoClassifier>>,
-        approval: Option<ApprovalBroker>,
-        questions: Option<QuestionBroker>,
-        tasks: Option<crate::providers::tasks::TaskBroker>,
+        call_id: ToolCallId,
+        progress: mpsc::Sender<ProgressEvent>,
+        signals: TurnSignals,
+        dispatch: mermaid_domain::ToolDispatch,
+        services: ToolServices,
     ) -> Self {
+        let session_id = (!dispatch.session_id.is_empty()).then(|| dispatch.session_id.clone());
         Self {
-            token,
-            // Defaults to a fresh, never-fired token ("no background
-            // requested"); the live execute path overwrites it with the turn
-            // scope's background token (and sets `notify`).
-            background: CancellationToken::new(),
-            notify: None,
-            plan_file: None,
-            plan_permissions: mermaid_domain::PlanPermissions::default(),
-            context_percent: None,
-            // Field-set by the live execute path alongside `background`/
-            // `notify`; tests and bare contexts leave it unset.
-            scratchpad: None,
+            token: signals.token,
+            background: signals.background,
+            web_bytes: signals.web_bytes,
+            notify: services.notify,
             progress,
             call_id,
             turn,
-            workdir,
-            config,
-            model_id,
-            task_id,
+            workdir: services.workdir,
+            config: services.config,
+            model_id: dispatch.model_id,
+            task_id: services.task_id,
+            message_index: session_id.as_ref().map(|_| dispatch.message_index as i64),
             session_id,
-            message_index,
-            safety_mode,
-            intent,
-            classifier,
-            approval,
-            questions,
-            tasks,
-            web_bytes: Arc::new(AtomicUsize::new(0)),
+            scratchpad: dispatch.scratchpad,
+            safety_mode: dispatch.safety_mode,
+            plan_file: dispatch.plan_file,
+            plan_permissions: dispatch.plan_permissions,
+            context_percent: dispatch.context_percent,
+            intent: dispatch.intent,
+            classifier: services.classifier,
+            approval: services.approval,
+            questions: services.questions,
+            tasks: services.tasks,
         }
     }
 
@@ -372,7 +404,7 @@ pub fn test_stream_context(turn: TurnId) -> (StreamContext, mpsc::Receiver<Strea
 /// `SafetyMode::FullAccess` (the production default is now `Ask`) so tool
 /// unit tests exercise the tool's own behavior rather than the approval
 /// gate. Tests that specifically exercise policy gating should construct
-/// `ExecContext::new` directly with their chosen safety mode.
+/// `ExecContext::assemble` directly with their chosen safety mode.
 #[must_use]
 pub fn test_exec_context(
     turn: TurnId,
@@ -387,7 +419,7 @@ pub fn test_exec_context(
 /// [`test_exec_context`] with an explicit `Config` (e.g. `exec.pty = false`
 /// to pin the pipe spawn path, or a `safety.mode` other than `FullAccess`).
 /// The context's safety mode follows `config.safety.mode`, so gate tests can
-/// pick a mode without hand-rolling `ExecContext::new`.
+/// pick a mode without hand-rolling `ExecContext::assemble`.
 #[must_use]
 pub fn test_exec_context_with_config(
     turn: TurnId,
@@ -395,28 +427,36 @@ pub fn test_exec_context_with_config(
     workdir: PathBuf,
     config: mermaid_domain::Config,
 ) -> (ExecContext, mpsc::Receiver<ProgressEvent>) {
-    let token = CancellationToken::new();
     let (tx, rx) = mpsc::channel(64);
     let safety_mode = config.safety.mode;
     let config = Arc::new(config);
     (
-        ExecContext::new(
-            token,
-            tx,
-            call_id,
+        ExecContext::assemble(
             turn,
-            workdir,
-            config,
-            String::new(),
-            None,
-            None,
-            None,
-            safety_mode,
-            None,
-            None,
-            None,
-            None,
-            None,
+            call_id,
+            tx,
+            TurnSignals::default(),
+            mermaid_domain::ToolDispatch {
+                model_id: String::new(),
+                safety_mode,
+                plan_file: None,
+                plan_permissions: mermaid_domain::PlanPermissions::default(),
+                context_percent: None,
+                intent: None,
+                session_id: String::new(),
+                message_index: 0,
+                scratchpad: None,
+            },
+            ToolServices {
+                workdir,
+                config,
+                task_id: None,
+                notify: None,
+                classifier: None,
+                approval: None,
+                questions: None,
+                tasks: None,
+            },
         ),
         rx,
     )
