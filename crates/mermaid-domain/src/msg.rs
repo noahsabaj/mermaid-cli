@@ -606,17 +606,17 @@ pub enum SlashCmd {
     Compact(Option<String>),
     /// List saved durable memories.
     Memory,
-    /// Save free-text as a private memory.
-    Remember(Option<String>),
-    /// Delete a memory by name/id.
-    Forget(Option<String>),
+    /// Save free-text as a private memory. Required arg, parse-guarded.
+    Remember(String),
+    /// Delete a memory by name/id. Required arg, parse-guarded.
+    Forget(String),
     /// Prune duplicate/obsolete memories via a one-shot model pass.
     ConsolidateMemory,
     Doctor,
     Tasks,
-    Task(Option<String>),
-    Pause(Option<String>),
-    Resume(Option<String>),
+    Task(String),
+    Pause(String),
+    Resume(String),
     Cancel(Option<String>),
     Handoff(Option<String>),
     Report(Option<String>),
@@ -624,18 +624,18 @@ pub enum SlashCmd {
     /// No arg → list background agents; `Some("kill <id>"|"kill all")` →
     /// cancel them. Tail parsed in the reducer arm.
     Agents(Option<String>),
-    Logs(Option<String>),
-    Stop(Option<String>),
-    Restart(Option<String>),
-    Open(Option<String>),
+    Logs(String),
+    Stop(String),
+    Restart(String),
+    Open(String),
     Ports,
     Approvals,
-    Approve(Option<String>),
-    Deny(Option<String>),
-    Checkpoint(Option<String>),
+    Approve(String),
+    Deny(String),
+    Checkpoint(String),
     Checkpoints,
-    Restore(Option<String>),
-    ModelInfo(Option<String>),
+    Restore(String),
+    ModelInfo(String),
     Plugins,
     CloudSetup,
     /// No arg → show current theme; `Some("dark"|"light")` → switch and
@@ -645,6 +645,12 @@ pub enum SlashCmd {
     Editor,
     Help,
     Quit,
+    /// A registry command whose argument is required (`<...>` hint) was
+    /// invoked without one. Carries the rendered usage line (built by
+    /// [`crate::slash_commands::SlashCommand::usage_line`] at parse time) so
+    /// the reducer's arm is a plain print and a recording replays exactly
+    /// what the user saw. Arity itself lives in the registry, not here.
+    MissingArg(String),
     /// User typed something that isn't in the registry; carries the
     /// raw name for the error message.
     Unknown(String),

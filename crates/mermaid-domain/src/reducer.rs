@@ -3087,21 +3087,11 @@ pub(crate) fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd
         SlashCmd::Memory => {
             cmds.push(Cmd::ListMemory);
         },
-        SlashCmd::Remember(Some(text)) => {
+        SlashCmd::Remember(text) => {
             cmds.push(Cmd::RememberMemory { text });
         },
-        SlashCmd::Remember(None) => {
-            push_system(state, cmds, "Usage: /remember <fact to remember>");
-        },
-        SlashCmd::Forget(Some(id)) => {
+        SlashCmd::Forget(id) => {
             cmds.push(Cmd::ForgetMemory { id });
-        },
-        SlashCmd::Forget(None) => {
-            push_system(
-                state,
-                cmds,
-                "Usage: /forget <memory name> (see /memory for names)",
-            );
         },
         SlashCmd::ConsolidateMemory => {
             cmds.push(Cmd::ConsolidateMemory {
@@ -3117,31 +3107,22 @@ pub(crate) fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd
         SlashCmd::Tasks => {
             cmds.push(Cmd::ListRuntimeTasks { limit: 10 });
         },
-        SlashCmd::Task(Some(id)) => {
+        SlashCmd::Task(id) => {
             cmds.push(Cmd::LoadRuntimeTask { id });
         },
-        SlashCmd::Task(None) => {
-            push_system(state, cmds, "Usage: /task <id>");
-        },
-        SlashCmd::Pause(Some(id)) => {
+        SlashCmd::Pause(id) => {
             cmds.push(Cmd::UpdateRuntimeTaskStatus {
                 id,
                 status: TaskStatus::Blocked,
                 final_report: Some("Paused from TUI".to_string()),
             });
         },
-        SlashCmd::Pause(None) => {
-            push_system(state, cmds, "Usage: /pause <task-id>");
-        },
-        SlashCmd::Resume(Some(id)) => {
+        SlashCmd::Resume(id) => {
             cmds.push(Cmd::UpdateRuntimeTaskStatus {
                 id,
                 status: TaskStatus::Running,
                 final_report: None,
             });
-        },
-        SlashCmd::Resume(None) => {
-            push_system(state, cmds, "Usage: /resume <task-id>");
         },
         SlashCmd::Cancel(Some(id)) => {
             cmds.push(Cmd::UpdateRuntimeTaskStatus {
@@ -3184,29 +3165,17 @@ pub(crate) fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd
         SlashCmd::Agents(arg) => {
             handle_slash_agents(state, cmds, arg.as_deref());
         },
-        SlashCmd::Logs(Some(id)) => {
+        SlashCmd::Logs(id) => {
             cmds.push(Cmd::ShowRuntimeProcessLogs { id });
         },
-        SlashCmd::Logs(None) => {
-            push_system(state, cmds, "Usage: /logs <process-id>");
-        },
-        SlashCmd::Stop(Some(id)) => {
+        SlashCmd::Stop(id) => {
             cmds.push(Cmd::StopRuntimeProcess { id });
         },
-        SlashCmd::Stop(None) => {
-            push_system(state, cmds, "Usage: /stop <process-id>");
-        },
-        SlashCmd::Restart(Some(id)) => {
+        SlashCmd::Restart(id) => {
             cmds.push(Cmd::RestartRuntimeProcess { id });
         },
-        SlashCmd::Restart(None) => {
-            push_system(state, cmds, "Usage: /restart <process-id>");
-        },
-        SlashCmd::Open(Some(target)) => {
+        SlashCmd::Open(target) => {
             cmds.push(Cmd::OpenRuntimeTarget { target });
-        },
-        SlashCmd::Open(None) => {
-            push_system(state, cmds, "Usage: /open <url|path|process-id>");
         },
         SlashCmd::Ports => {
             cmds.push(Cmd::ShowRuntimePorts);
@@ -3214,51 +3183,36 @@ pub(crate) fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd
         SlashCmd::Approvals => {
             cmds.push(Cmd::ListRuntimeApprovals);
         },
-        SlashCmd::Approve(Some(id)) => {
+        SlashCmd::Approve(id) => {
             cmds.push(Cmd::DecideRuntimeApproval {
                 id,
                 decision: "approved".to_string(),
             });
         },
-        SlashCmd::Approve(None) => {
-            push_system(state, cmds, "Usage: /approve <approval-id>");
-        },
-        SlashCmd::Deny(Some(id)) => {
+        SlashCmd::Deny(id) => {
             cmds.push(Cmd::DecideRuntimeApproval {
                 id,
                 decision: "denied".to_string(),
             });
         },
-        SlashCmd::Deny(None) => {
-            push_system(state, cmds, "Usage: /deny <approval-id>");
-        },
-        SlashCmd::Checkpoint(Some(paths)) => {
+        SlashCmd::Checkpoint(paths) => {
             let paths = paths
                 .split_whitespace()
                 .map(std::path::PathBuf::from)
                 .collect::<Vec<_>>();
             cmds.push(Cmd::CreateRuntimeCheckpoint { paths });
         },
-        SlashCmd::Checkpoint(None) => {
-            push_system(state, cmds, "Usage: /checkpoint <path...>");
-        },
         SlashCmd::Checkpoints => {
             cmds.push(Cmd::ListRuntimeCheckpoints { limit: 10 });
         },
-        SlashCmd::Restore(Some(id)) => {
+        SlashCmd::Restore(id) => {
             cmds.push(Cmd::RestoreRuntimeCheckpoint { id });
-        },
-        SlashCmd::Restore(None) => {
-            push_system(state, cmds, "Usage: /restore <checkpoint-id>");
         },
         SlashCmd::Plugins => {
             cmds.push(Cmd::ListRuntimePlugins);
         },
-        SlashCmd::ModelInfo(Some(model)) => {
+        SlashCmd::ModelInfo(model) => {
             cmds.push(Cmd::ShowRuntimeModelInfo { model });
-        },
-        SlashCmd::ModelInfo(None) => {
-            push_system(state, cmds, "Usage: /model-info <model>");
         },
         SlashCmd::CloudSetup => {
             // Cloud setup needs interactive stdin (rpassword) which
@@ -3333,6 +3287,9 @@ pub(crate) fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd
         },
         SlashCmd::Quit => {
             request_exit(state, cmds);
+        },
+        SlashCmd::MissingArg(usage) => {
+            push_system(state, cmds, usage);
         },
         SlashCmd::Unknown(name) => {
             push_system(state, cmds, format!("Unknown command: /{name}"));
@@ -10685,7 +10642,7 @@ mod tests {
 
         let (_s, cmds) = update(
             fresh_state(),
-            Msg::Slash(SlashCmd::Remember(Some("prefer ripgrep".to_string()))),
+            Msg::Slash(SlashCmd::Remember("prefer ripgrep".to_string())),
         );
         assert!(
             cmds.iter()
@@ -10694,15 +10651,19 @@ mod tests {
 
         let (_s, cmds) = update(
             fresh_state(),
-            Msg::Slash(SlashCmd::Forget(Some("prefer-rg".to_string()))),
+            Msg::Slash(SlashCmd::Forget("prefer-rg".to_string())),
         );
         assert!(
             cmds.iter()
                 .any(|c| matches!(c, Cmd::ForgetMemory { id } if id == "prefer-rg"))
         );
 
-        // No-arg /remember explains usage instead of dispatching.
-        let (state, cmds) = update(fresh_state(), Msg::Slash(SlashCmd::Remember(None)));
+        // A no-arg /remember never reaches the Remember arm: the parser
+        // answers with the registry's usage line, and the reducer prints it.
+        let (state, cmds) = update(
+            fresh_state(),
+            Msg::Slash(crate::parse_slash_command("remember")),
+        );
         assert!(!cmds.iter().any(|c| matches!(c, Cmd::RememberMemory { .. })));
         assert!(
             state

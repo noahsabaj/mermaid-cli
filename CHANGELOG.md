@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Slash-command arity and usage text live in the command registry, not in
+  the reducer.** Fourteen commands require an argument (`/task`, `/pause`,
+  `/resume`, `/logs`, `/stop`, `/restart`, `/open`, `/approve`, `/deny`,
+  `/checkpoint`, `/restore`, `/model-info`, `/remember`, `/forget`), and each
+  one carried a hand-typed `"Usage: /…"` string in its own reducer arm — 18
+  literals that could drift from the palette's argument hints, because the
+  registry that owns those hints carried no notion of arity. The hint's
+  bracket is now load-bearing (`<...>` required, `[...]` optional): the parser
+  consults it, answers a bare or blank invocation with a usage line derived
+  from the registry entry, and the fourteen `SlashCmd` variants carry a plain
+  `String` — the missing-argument state is unrepresentable past the parser,
+  and the fourteen usage arms are one.
+
+  Three user-visible edges moved with it. A required-arg command with a
+  *blank* argument (`/task ` — trailing space) now shows usage instead of
+  dispatching an empty id downstream. `/remember`'s usage line reads
+  `Usage: /remember <fact>` (derived from its palette hint). And `/restore`'s
+  palette hint gained precision (`<checkpoint-id>`) so the hint and the usage
+  line agree. Recordings from before this change replay unchanged except for
+  bare-invocation slash lines (`{"Task":null}`), which replay as skipped
+  entries — the shape a newer-build recording already takes.
+
 - **A new turn-scoped message or command can no longer silently skip the
   staleness gates.** `Msg::turn_id()` feeds the reducer's stale-turn filter
   and `Cmd::scope_turn()` feeds the effect runner's cancelled-turn tombstone
