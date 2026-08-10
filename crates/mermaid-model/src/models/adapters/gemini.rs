@@ -405,10 +405,9 @@ impl GeminiAdapter {
         // is forward-compatible. Gemini has no xhigh tier — `XHigh`
         // collapses to the model's top (Gemini 3: "high"; Gemini 2.5:
         // adaptive sentinel -1).
-        let capabilities = ModelCapabilities {
-            supports_tools: true,
-            supports_vision: true,
-            supports_reasoning: ReasoningCapability::Levels(vec![
+        let capabilities = ModelCapabilities::advertised(
+            true,
+            ReasoningCapability::Levels(vec![
                 ReasoningLevel::None,
                 ReasoningLevel::Minimal,
                 ReasoningLevel::Low,
@@ -417,10 +416,7 @@ impl GeminiAdapter {
                 ReasoningLevel::Max,
                 ReasoningLevel::XHigh,
             ]),
-            max_context_tokens: None,
-            max_output_tokens: None,
-            emits_provider_continuation: false,
-        };
+        );
 
         Ok(Self {
             client,

@@ -583,10 +583,9 @@ impl AnthropicAdapter {
         // advertised on-paper; `adaptive_effort_for` snaps it to `max` or
         // `high` based on the specific model (Opus 4.7 is the only model
         // that accepts `xhigh` verbatim).
-        let capabilities = ModelCapabilities {
-            supports_tools: true,
-            supports_vision: true,
-            supports_reasoning: ReasoningCapability::Levels(vec![
+        let capabilities = ModelCapabilities::advertised(
+            true,
+            ReasoningCapability::Levels(vec![
                 ReasoningLevel::None,
                 ReasoningLevel::Low,
                 ReasoningLevel::Medium,
@@ -594,13 +593,7 @@ impl AnthropicAdapter {
                 ReasoningLevel::Max,
                 ReasoningLevel::XHigh,
             ]),
-            // Unknown until live discovery: the provider wrapper's
-            // `resolve_context_window` fetches real per-model limits from
-            // the Models API (cache-first). No static pins — they rot.
-            max_context_tokens: None,
-            max_output_tokens: None,
-            emits_provider_continuation: false,
-        };
+        );
 
         Ok(Self {
             client,

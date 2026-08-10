@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The three capability sources have their precedence written down, and
+  the static baseline is one constructor.** Model capabilities come from
+  three places -- live probes (provider `/models`, Ollama `/api/show`,
+  cached in `provider_probes`), the static catalog, and the adapter's own
+  advertised baseline -- but the precedence lived in scattered comments,
+  and `capabilities.rs` still introduced itself with "for Step 1 the
+  values are hardcoded; a future step can add per-model lookup or runtime
+  probing" -- a future that shipped long ago. The module doc now states
+  the chain (probe > catalog > adapter static) and where each source
+  lives. The five adapters that each hand-built the same struct -- five
+  copies of "tools on, windows None, no continuation" varying only in
+  vision and reasoning enum -- now route through one
+  `ModelCapabilities::advertised(vision, reasoning)` constructor, so
+  "static windows stay unknown until live discovery" is a property of the
+  constructor rather than a comment repeated per provider. Meta keeps its
+  documented muse-spark family limits by explicit struct-update over the
+  baseline -- the one sanctioned exception, now labeled as such.
+
 - **`policy/mod.rs` splits along its seams.** The last un-decomposed file
   in the policy module carried three concerns: the vocabulary (`SafetyMode`,
   `RiskClass`, `ActionRequest`, `PolicyDecision`, the floors), the engine

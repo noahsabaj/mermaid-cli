@@ -873,21 +873,15 @@ fn derive_capabilities(profile: &ProviderProfile, model_name: &str) -> ModelCapa
             ReasoningLevel::Max,
         ]),
     };
-    ModelCapabilities {
-        supports_tools: true,
-        // Vision is a property of the MODEL, not the provider — the catalog's
-        // substring markers match known image-capable families under any id
-        // (`gpt-4o`, `openai/gpt-4o`, `anthropic/claude-3.5-sonnet`).
-        // Conservative: an unknown id is treated as text-only. This only
-        // governs the capability we ADVERTISE — it never gates the send.
-        supports_vision: crate::models::catalog::lookup(model_name).vision,
+    // Vision is a property of the MODEL, not the provider — the catalog's
+    // substring markers match known image-capable families under any id
+    // (`gpt-4o`, `openai/gpt-4o`, `anthropic/claude-3.5-sonnet`).
+    // Conservative: an unknown id is treated as text-only. This only
+    // governs the capability we ADVERTISE — it never gates the send.
+    ModelCapabilities::advertised(
+        crate::models::catalog::lookup(model_name).vision,
         supports_reasoning,
-        // Unknown statically; discovered live from `/models` metadata by the
-        // provider wrapper's `resolve_context_window` override.
-        max_context_tokens: None,
-        max_output_tokens: None,
-        emits_provider_continuation: false,
-    }
+    )
 }
 
 impl OpenAICompatAdapter {
