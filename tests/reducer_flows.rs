@@ -1198,20 +1198,17 @@ fn absorb_save_cmds(
     last: &mut Option<mermaid_domain::ConversationHistory>,
 ) {
     for cmd in cmds {
-        match cmd {
-            Cmd::SaveConversation { snapshot, events } => {
-                log.extend(events.iter().cloned());
-                *last = Some(snapshot.clone());
-            },
-            Cmd::SaveCompactionArchive {
-                conversation,
-                events,
-                ..
-            } => {
-                log.extend(events.iter().cloned());
-                *last = Some(conversation.clone());
-            },
-            _ => {},
+        if let Cmd::SaveConversation { snapshot, events } = cmd {
+            log.extend(events.iter().cloned());
+            *last = Some(snapshot.clone());
+        } else if let Cmd::SaveCompactionArchive {
+            conversation,
+            events,
+            ..
+        } = cmd
+        {
+            log.extend(events.iter().cloned());
+            *last = Some(conversation.clone());
         }
     }
 }
@@ -1235,13 +1232,13 @@ fn assert_fold_matches(
     events.extend(log.iter().cloned());
     let folded = mermaid_domain::fold_session(events).expect("a started event leads");
     assert_eq!(
-        serde_json::to_value(&folded).unwrap(),
-        serde_json::to_value(expected).unwrap(),
+        serde_json::to_value(&folded).expect("folded serializes"),
+        serde_json::to_value(expected).expect("snapshot serializes"),
         "fold(events) must reproduce the persisted snapshot ({stage})"
     );
 }
 
-fn stream_done_msg(turn: TurnId) -> Msg {
+const fn stream_done_msg(turn: TurnId) -> Msg {
     Msg::StreamDone {
         turn,
         usage: None,
@@ -1327,10 +1324,15 @@ fn emitted_session_events_fold_to_the_persisted_snapshot() {
     absorb_save_cmds(&cmds, &mut log, &mut last_saved);
     let (state, cmds) = update(state, stream_done_msg(id));
     absorb_save_cmds(&cmds, &mut log, &mut last_saved);
-    let call_id = match &state.turn {
-        TurnState::ExecutingTools { calls, .. } => calls[0].call_id,
-        other => panic!("expected ExecutingTools, got {other:?}"),
+    assert!(
+        matches!(state.turn, TurnState::ExecutingTools { .. }),
+        "stream done with buffered calls must execute tools, got {:?}",
+        state.turn
+    );
+    let TurnState::ExecutingTools { calls, .. } = &state.turn else {
+        unreachable!("asserted above")
     };
+    let call_id = calls[0].call_id;
     let (state, cmds) = update(
         state,
         Msg::ToolFinished {

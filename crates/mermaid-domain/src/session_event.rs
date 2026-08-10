@@ -31,16 +31,18 @@ use mermaid_model::action::ActionDisplay;
 use mermaid_model::models::{ChatMessage, MessageRole};
 use mermaid_model::safety::SafetyMode;
 
-/// Bumped only on an incompatible change to the envelope or an existing
-/// variant's shape. Additive variants and additive `ChatMessage` fields keep
-/// version 1 (readers deserialize unknown-to-them message fields via serde
-/// defaults). Readers refuse newer versions, mirroring the recorder and the
-/// runtime DB.
+/// Bumped only on an incompatible change to the wire shape.
+///
+/// Additive variants and additive `ChatMessage` fields keep version 1
+/// (readers deserialize unknown-to-them message fields via serde defaults).
+/// Readers refuse newer versions, mirroring the recorder and the runtime DB.
 pub const SESSION_EVENT_FORMAT_VERSION: u32 = 1;
 
-/// One line of a session's `.jsonl` log: transport envelope around a typed
-/// event. `seq` and `ts` are appender-owned metadata (truncation detection
-/// and a late-attach cursor), never inputs to [`fold_session`].
+/// One line of a session's `.jsonl` log: a transport envelope around one
+/// typed event.
+///
+/// `seq` and `ts` are appender-owned metadata (truncation detection and a
+/// late-attach cursor), never inputs to [`fold_session`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionEventLine {
     /// [`SESSION_EVENT_FORMAT_VERSION`] at write time.
@@ -172,19 +174,21 @@ impl SessionScalars {
     }
 
     fn assign_to(&self, conversation: &mut ConversationHistory) {
-        conversation.title = self.title.clone();
-        conversation.model_name = self.model_name.clone();
+        conversation.title.clone_from(&self.title);
+        conversation.model_name.clone_from(&self.model_name);
         conversation.safety_mode = self.safety_mode;
-        conversation.plan = self.plan.clone();
-        conversation.advertised_context = self.advertised_context.clone();
+        conversation.plan.clone_from(&self.plan);
+        conversation
+            .advertised_context
+            .clone_from(&self.advertised_context);
         conversation.last_token_usage = self.last_token_usage;
         conversation.cumulative_token_usage = self.cumulative_token_usage;
-        conversation.context_usage = self.context_usage.clone();
-        conversation.git_branch = self.git_branch.clone();
-        conversation.git_sha = self.git_sha.clone();
-        conversation.cli_version = self.cli_version.clone();
-        conversation.forked_from = self.forked_from.clone();
-        conversation.parent_session = self.parent_session.clone();
+        conversation.context_usage.clone_from(&self.context_usage);
+        conversation.git_branch.clone_from(&self.git_branch);
+        conversation.git_sha.clone_from(&self.git_sha);
+        conversation.cli_version.clone_from(&self.cli_version);
+        conversation.forked_from.clone_from(&self.forked_from);
+        conversation.parent_session.clone_from(&self.parent_session);
     }
 }
 
