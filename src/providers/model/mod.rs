@@ -11,7 +11,6 @@ pub mod gemini;
 pub(crate) mod meta;
 pub mod ollama;
 pub mod openai_compat;
-pub(crate) mod stream_bridge;
 
 use std::sync::Arc;
 

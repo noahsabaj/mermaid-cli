@@ -68,7 +68,7 @@ use crate::models::error::{BackendError, ModelError, Result};
 use crate::models::reasoning::{
     ReasoningCapability, ReasoningChunk, ReasoningLevel, nearest_effort,
 };
-use crate::models::stream::{StreamCallback, StreamEvent};
+use crate::models::stream::{StreamEvent, StreamSink, emit_all};
 use crate::models::tool_call::{FunctionCall, ToolCall};
 use crate::models::traits::Model;
 use crate::models::types::{
@@ -728,7 +728,7 @@ impl GeminiAdapter {
     async fn handle_stream(
         &self,
         response: reqwest::Response,
-        callback: StreamCallback,
+        sink: Option<&StreamSink>,
         hide_reasoning_trace: bool,
     ) -> Result<ModelResponse> {
         if !response.status().is_success() {
@@ -755,7 +755,9 @@ impl GeminiAdapter {
             buf.extend_from_slice(&chunk);
 
             for payload in drain_sse_events(&mut buf) {
-                process_chunk_payload(&payload, &mut state, &callback, hide_reasoning_trace)?;
+                let mut events: Vec<StreamEvent> = Vec::new();
+                process_chunk_payload(&payload, &mut state, &mut events, hide_reasoning_trace)?;
+                emit_all(sink, events).await?;
             }
         }
 
@@ -832,7 +834,7 @@ impl StreamState {
 }
 
 /// Process one SSE event payload (already JSON-decoded). Mutates `state`
-/// and emits `StreamEvents` through `callback`. Returns Err on mid-stream
+/// and pushes `StreamEvent`s onto `out`. Returns Err on mid-stream
 /// error payloads or JSON parse failure.
 #[expect(
     clippy::too_many_lines,
@@ -841,7 +843,7 @@ impl StreamState {
 fn process_chunk_payload(
     payload: &str,
     state: &mut StreamState,
-    callback: &StreamCallback,
+    out: &mut Vec<StreamEvent>,
     hide_reasoning_trace: bool,
 ) -> Result<()> {
     let parsed: Value = serde_json::from_str(payload).map_err(|e| ModelError::ParseError {
@@ -960,7 +962,7 @@ fn process_chunk_payload(
                     arguments: args,
                 },
             };
-            callback(StreamEvent::ToolCall(tc.clone()));
+            out.push(StreamEvent::ToolCall(tc.clone()));
             state.tool_calls_done.push(tc);
             continue;
         }
@@ -978,7 +980,7 @@ fn process_chunk_payload(
             .unwrap_or(false);
         if is_thought {
             if !hide_reasoning_trace {
-                callback(StreamEvent::Reasoning(ReasoningChunk {
+                out.push(StreamEvent::Reasoning(ReasoningChunk {
                     text: text.to_string(),
                     signature: None,
                 }));
@@ -990,7 +992,7 @@ fn process_chunk_payload(
                 MAX_RESPONSE_CHARS,
             );
         } else {
-            callback(StreamEvent::Text(text.to_string()));
+            out.push(StreamEvent::Text(text.to_string()));
             push_capped(
                 &mut state.text_acc,
                 text,
@@ -1026,13 +1028,12 @@ impl Model for GeminiAdapter {
         &self,
         messages: &[ChatMessage],
         config: &ModelConfig,
-        callback: Option<StreamCallback>,
+        sink: Option<StreamSink>,
     ) -> Result<ModelResponse> {
         let body = self.build_request_body(messages, config);
-        let stream = callback.is_some();
-        let response = self.send_chat(&body, stream).await?;
-        if let Some(cb) = callback {
-            self.handle_stream(response, cb, config.hide_reasoning_trace)
+        let response = self.send_chat(&body, sink.is_some()).await?;
+        if let Some(sink) = sink {
+            self.handle_stream(response, Some(&sink), config.hide_reasoning_trace)
                 .await
         } else {
             self.decode_non_streaming(response).await
@@ -1258,9 +1259,9 @@ mod tests {
         // candidates must surface a typed ProviderError, not be swallowed by the
         // no-parts branch as a silent empty success.
         let mut state = StreamState::default();
-        let cb: StreamCallback = std::sync::Arc::new(|_ev| {});
+        let mut events: Vec<StreamEvent> = Vec::new();
         let payload = r#"{"promptFeedback":{"blockReason":"PROHIBITED_CONTENT"}}"#;
-        let err = process_chunk_payload(payload, &mut state, &cb, false)
+        let err = process_chunk_payload(payload, &mut state, &mut events, false)
             .expect_err("prompt block must error");
         match err {
             ModelError::Backend(BackendError::ProviderError {
@@ -1283,9 +1284,10 @@ mod tests {
         // `blockReason`) must NOT be treated as a block — it co-occurs with real
         // content on normal responses.
         let mut state = StreamState::default();
-        let cb: StreamCallback = std::sync::Arc::new(|_ev| {});
+        let mut events: Vec<StreamEvent> = Vec::new();
         let payload = r#"{"promptFeedback":{"safetyRatings":[]},"candidates":[{"content":{"parts":[{"text":"hello"}]}}]}"#;
-        process_chunk_payload(payload, &mut state, &cb, false).expect("benign feedback is ok");
+        process_chunk_payload(payload, &mut state, &mut events, false)
+            .expect("benign feedback is ok");
         assert_eq!(state.text_acc, "hello");
     }
 
@@ -1998,20 +2000,6 @@ mod tests {
 
     // --- streaming state machine ---
 
-    use std::sync::Arc;
-    use std::sync::Mutex;
-
-    /// Build a callback that records every emitted `StreamEvent` into a
-    /// shared Vec for test assertions.
-    fn record_callback() -> (StreamCallback, Arc<Mutex<Vec<StreamEvent>>>) {
-        let events: Arc<Mutex<Vec<StreamEvent>>> = Arc::new(Mutex::new(Vec::new()));
-        let clone = Arc::clone(&events);
-        let cb: StreamCallback = Arc::new(move |evt| {
-            clone.lock().unwrap().push(evt);
-        });
-        (cb, events)
-    }
-
     fn count_text(events: &[StreamEvent]) -> usize {
         events
             .iter()
@@ -2035,7 +2023,7 @@ mod tests {
 
     #[test]
     fn stream_text_only_multi_chunk() {
-        let (cb, events) = record_callback();
+        let mut events: Vec<StreamEvent> = Vec::new();
         let mut state = StreamState::default();
 
         // Chunk 1: "Hello, "
@@ -2045,7 +2033,7 @@ mod tests {
             }]
         })
         .to_string();
-        process_chunk_payload(&chunk1, &mut state, &cb, false).unwrap();
+        process_chunk_payload(&chunk1, &mut state, &mut events, false).unwrap();
 
         // Chunk 2: "world!" + usage.
         let chunk2 = json!({
@@ -2059,28 +2047,27 @@ mod tests {
             }
         })
         .to_string();
-        process_chunk_payload(&chunk2, &mut state, &cb, false).unwrap();
+        process_chunk_payload(&chunk2, &mut state, &mut events, false).unwrap();
 
         assert_eq!(state.text_acc, "Hello, world!");
         assert_eq!(state.prompt_tokens, 5);
         assert_eq!(state.completion_tokens, 3);
         assert_eq!(state.usage().expect("usage present").total_tokens(), 8);
 
-        let evts = events.lock().unwrap();
-        assert_eq!(count_text(&evts), 2);
-        assert_eq!(count_reasoning(&evts), 0);
-        assert_eq!(count_tool_calls(&evts), 0);
+        assert_eq!(count_text(&events), 2);
+        assert_eq!(count_reasoning(&events), 0);
+        assert_eq!(count_tool_calls(&events), 0);
     }
 
     #[test]
     fn stream_usage_is_none_without_usage_metadata() {
         // #125: a stream that never carried a `usageMetadata` block yields None,
         // so the reducer keeps its char/4 estimate instead of resetting to zero.
-        let (cb, _events) = record_callback();
+        let mut events: Vec<StreamEvent> = Vec::new();
         let mut state = StreamState::default();
         let chunk =
             json!({ "candidates": [{ "content": {"parts": [{"text": "hi"}]} }] }).to_string();
-        process_chunk_payload(&chunk, &mut state, &cb, false).unwrap();
+        process_chunk_payload(&chunk, &mut state, &mut events, false).unwrap();
         assert!(!state.saw_usage);
         assert!(state.usage().is_none());
     }
@@ -2089,7 +2076,7 @@ mod tests {
     fn stream_usage_does_not_double_count_cached_input() {
         // #137: Gemini folds cached tokens into promptTokenCount; the input
         // breakdown must not add them a second time.
-        let (cb, _events) = record_callback();
+        let mut events: Vec<StreamEvent> = Vec::new();
         let mut state = StreamState::default();
         let chunk = json!({
             "candidates": [{ "content": {"parts": [{"text": "hi"}]} }],
@@ -2101,7 +2088,7 @@ mod tests {
             }
         })
         .to_string();
-        process_chunk_payload(&chunk, &mut state, &cb, false).unwrap();
+        process_chunk_payload(&chunk, &mut state, &mut events, false).unwrap();
         assert!(state.saw_usage);
         let usage = state.usage().expect("usage present");
         assert_eq!(
@@ -2113,7 +2100,7 @@ mod tests {
 
     #[test]
     fn stream_thought_then_text() {
-        let (cb, events) = record_callback();
+        let mut events: Vec<StreamEvent> = Vec::new();
         let mut state = StreamState::default();
 
         let chunk1 = json!({
@@ -2122,7 +2109,7 @@ mod tests {
             }]
         })
         .to_string();
-        process_chunk_payload(&chunk1, &mut state, &cb, false).unwrap();
+        process_chunk_payload(&chunk1, &mut state, &mut events, false).unwrap();
 
         let chunk2 = json!({
             "candidates": [{
@@ -2130,19 +2117,18 @@ mod tests {
             }]
         })
         .to_string();
-        process_chunk_payload(&chunk2, &mut state, &cb, false).unwrap();
+        process_chunk_payload(&chunk2, &mut state, &mut events, false).unwrap();
 
         assert_eq!(state.thinking_acc, "let me think...");
         assert_eq!(state.text_acc, "the answer is 42");
 
-        let evts = events.lock().unwrap();
-        assert_eq!(count_reasoning(&evts), 1);
-        assert_eq!(count_text(&evts), 1);
+        assert_eq!(count_reasoning(&events), 1);
+        assert_eq!(count_text(&events), 1);
     }
 
     #[test]
     fn stream_function_call_emits_tool_call_event() {
-        let (cb, events) = record_callback();
+        let mut events: Vec<StreamEvent> = Vec::new();
         let mut state = StreamState::default();
 
         let chunk = json!({
@@ -2155,7 +2141,7 @@ mod tests {
             }]
         })
         .to_string();
-        process_chunk_payload(&chunk, &mut state, &cb, false).unwrap();
+        process_chunk_payload(&chunk, &mut state, &mut events, false).unwrap();
 
         assert_eq!(state.tool_calls_done.len(), 1);
         let tc = &state.tool_calls_done[0];
@@ -2163,13 +2149,12 @@ mod tests {
         assert_eq!(tc.function.arguments["path"], "Cargo.toml");
         assert_eq!(tc.id.as_deref(), Some("call_0"));
 
-        let evts = events.lock().unwrap();
-        assert_eq!(count_tool_calls(&evts), 1);
+        assert_eq!(count_tool_calls(&events), 1);
     }
 
     #[test]
     fn stream_thought_text_and_tool_call_in_one_chunk() {
-        let (cb, events) = record_callback();
+        let mut events: Vec<StreamEvent> = Vec::new();
         let mut state = StreamState::default();
 
         let chunk = json!({
@@ -2184,21 +2169,20 @@ mod tests {
             }]
         })
         .to_string();
-        process_chunk_payload(&chunk, &mut state, &cb, false).unwrap();
+        process_chunk_payload(&chunk, &mut state, &mut events, false).unwrap();
 
         assert_eq!(state.thinking_acc, "thinking...");
         assert_eq!(state.text_acc, "calling tool now");
         assert_eq!(state.tool_calls_done.len(), 1);
 
-        let evts = events.lock().unwrap();
-        assert_eq!(count_reasoning(&evts), 1);
-        assert_eq!(count_text(&evts), 1);
-        assert_eq!(count_tool_calls(&evts), 1);
+        assert_eq!(count_reasoning(&events), 1);
+        assert_eq!(count_text(&events), 1);
+        assert_eq!(count_tool_calls(&events), 1);
     }
 
     #[test]
     fn stream_hide_reasoning_trace_suppresses_event_but_accumulates() {
-        let (cb, events) = record_callback();
+        let mut events: Vec<StreamEvent> = Vec::new();
         let mut state = StreamState::default();
 
         let chunk = json!({
@@ -2208,18 +2192,17 @@ mod tests {
         })
         .to_string();
         // hide_reasoning_trace = true.
-        process_chunk_payload(&chunk, &mut state, &cb, true).unwrap();
+        process_chunk_payload(&chunk, &mut state, &mut events, true).unwrap();
 
         // Accumulator gets the text (so the final ModelResponse.thinking
         // is populated), but no Reasoning event is emitted.
         assert_eq!(state.thinking_acc, "hidden thoughts");
-        let evts = events.lock().unwrap();
-        assert_eq!(count_reasoning(&evts), 0);
+        assert_eq!(count_reasoning(&events), 0);
     }
 
     #[test]
     fn stream_mid_stream_error_returns_error() {
-        let (cb, _events) = record_callback();
+        let mut events: Vec<StreamEvent> = Vec::new();
         let mut state = StreamState::default();
 
         let chunk = json!({
@@ -2230,7 +2213,7 @@ mod tests {
             }
         })
         .to_string();
-        let result = process_chunk_payload(&chunk, &mut state, &cb, false);
+        let result = process_chunk_payload(&chunk, &mut state, &mut events, false);
         assert!(result.is_err());
         match result {
             Err(ModelError::Backend(BackendError::ProviderError { code, message, .. })) => {
@@ -2243,7 +2226,7 @@ mod tests {
 
     #[test]
     fn stream_tool_call_ids_are_synthesized_in_sequence() {
-        let (cb, _events) = record_callback();
+        let mut events: Vec<StreamEvent> = Vec::new();
         let mut state = StreamState::default();
 
         let chunk = json!({
@@ -2257,7 +2240,7 @@ mod tests {
             }]
         })
         .to_string();
-        process_chunk_payload(&chunk, &mut state, &cb, false).unwrap();
+        process_chunk_payload(&chunk, &mut state, &mut events, false).unwrap();
 
         assert_eq!(state.tool_calls_done.len(), 2);
         assert_eq!(state.tool_calls_done[0].id.as_deref(), Some("call_0"));
@@ -2266,16 +2249,16 @@ mod tests {
 
     #[test]
     fn stream_safety_block_with_no_parts_errors() {
-        let (cb, _events) = record_callback();
+        let mut events: Vec<StreamEvent> = Vec::new();
         let mut state = StreamState::default();
         // A content-free SAFETY block must error, not silently succeed (#1).
         let chunk = json!({ "candidates": [{ "finishReason": "SAFETY" }] }).to_string();
-        assert!(process_chunk_payload(&chunk, &mut state, &cb, false).is_err());
+        assert!(process_chunk_payload(&chunk, &mut state, &mut events, false).is_err());
     }
 
     #[test]
     fn stream_max_tokens_keeps_partial_and_sets_length() {
-        let (cb, _events) = record_callback();
+        let mut events: Vec<StreamEvent> = Vec::new();
         let mut state = StreamState::default();
         let chunk = json!({
             "candidates": [{
@@ -2284,7 +2267,7 @@ mod tests {
             }]
         })
         .to_string();
-        process_chunk_payload(&chunk, &mut state, &cb, false).unwrap();
+        process_chunk_payload(&chunk, &mut state, &mut events, false).unwrap();
         assert_eq!(state.finish_reason, Some(FinishReason::Length));
         assert_eq!(state.text_acc, "partial");
     }
@@ -2294,12 +2277,12 @@ mod tests {
         // F56: content chunks with no finishReason leave the stream incomplete
         // until a terminal finishReason lands. A drop here must surface as an
         // error, not a clean Ok indistinguishable from a real completion.
-        let (cb, _events) = record_callback();
+        let mut events: Vec<StreamEvent> = Vec::new();
         let mut state = StreamState::default();
         let chunk =
             json!({ "candidates": [{ "content": {"parts": [{"text": "partial answer"}]} }] })
                 .to_string();
-        process_chunk_payload(&chunk, &mut state, &cb, false).unwrap();
+        process_chunk_payload(&chunk, &mut state, &mut events, false).unwrap();
         assert!(
             stream_closed_abnormally(state.finish_reason.as_ref()),
             "no finishReason observed yet → abnormal if the stream ends here"
@@ -2310,7 +2293,7 @@ mod tests {
             "candidates": [{ "content": {"parts": [{"text": "."}]}, "finishReason": "STOP" }]
         })
         .to_string();
-        process_chunk_payload(&final_chunk, &mut state, &cb, false).unwrap();
+        process_chunk_payload(&final_chunk, &mut state, &mut events, false).unwrap();
         assert!(!stream_closed_abnormally(state.finish_reason.as_ref()));
     }
 
@@ -2329,7 +2312,7 @@ mod tests {
         // tool in one turn are associated by POSITION. We synthesize ids in
         // arrival order and must emit results in the same order — that ordering
         // is the only correctness lever, so pin it against accidental reordering.
-        let (cb, _events) = record_callback();
+        let mut events: Vec<StreamEvent> = Vec::new();
         let mut state = StreamState::default();
         let chunk = json!({
             "candidates": [{
@@ -2340,7 +2323,7 @@ mod tests {
             }]
         })
         .to_string();
-        process_chunk_payload(&chunk, &mut state, &cb, false).unwrap();
+        process_chunk_payload(&chunk, &mut state, &mut events, false).unwrap();
         assert_eq!(state.tool_calls_done.len(), 2);
         assert_eq!(state.tool_calls_done[0].id.as_deref(), Some("call_0"));
         assert_eq!(state.tool_calls_done[1].id.as_deref(), Some("call_1"));

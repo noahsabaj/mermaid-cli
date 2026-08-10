@@ -17,7 +17,7 @@ use crate::models::adapters::ollama_sizing::ModelDims;
 use crate::models::config::{BackendConfig, ModelConfig};
 use crate::models::error::{BackendError, ModelError, Result};
 use crate::models::reasoning::{ReasoningChunk, ReasoningLevel};
-use crate::models::stream::{StreamCallback, StreamEvent};
+use crate::models::stream::{StatusNotify, StreamEvent, StreamSink, emit_all};
 use crate::models::traits::Model;
 use crate::models::types::{ChatMessage, FinishReason, MessageRole, ModelResponse, TokenUsage};
 use crate::utils::drain_complete_lines;
@@ -34,7 +34,7 @@ struct StreamAccumulator {
     content: String,
     thinking: String,
     tool_calls: Vec<crate::models::ToolCall>,
-    /// Suppress `StreamEvent::Reasoning` emission to the typed callback.
+    /// Suppress `StreamEvent::Reasoning` emission to the turn's sink.
     /// The accumulator still records `thinking` so `ModelResponse.thinking`
     /// stays populated for backward-compat callers — only the user-visible
     /// stream is gated. Mirrors Ollama's `--hidethinking` semantics.
@@ -148,13 +148,12 @@ pub struct OllamaAdapter {
     /// longer decides that for itself.
     recovery: Option<Arc<dyn LocalServerRecovery>>,
     /// Fallback surface for the autostart notice on paths that carry no
-    /// stream callback (`list_models` — the startup preflight and the CLI
-    /// list verbs). Console constructors attach an stderr printer via
-    /// [`OllamaAdapter::with_status_notify`]; the chat path's stream
-    /// callback takes precedence. `None` (the default) keeps recovery
-    /// silent, which is the safe choice anywhere a TUI might own the
-    /// screen.
-    status_notify: Option<StreamCallback>,
+    /// stream sink (`list_models` — the startup preflight and the CLI list
+    /// verbs). Console constructors attach an stderr printer via
+    /// [`OllamaAdapter::with_status_notify`]; the chat path's sink takes
+    /// precedence. `None` (the default) keeps recovery silent, which is the
+    /// safe choice anywhere a TUI might own the screen.
+    status_notify: Option<StatusNotify>,
 }
 
 /// True if this model takes the gpt-oss `think: "low"|"medium"|"high"` string
@@ -272,11 +271,11 @@ impl OllamaAdapter {
         self
     }
 
-    /// Attach a surface for the autostart notice on callback-less paths
+    /// Attach a surface for the autostart notice on sink-less paths
     /// (`list_models`). For console-owned contexts only — the startup
     /// preflight and the CLI list verbs print it to stderr; never attach
     /// anything that writes to a terminal a TUI might own.
-    pub fn with_status_notify(mut self, notify: StreamCallback) -> Self {
+    pub fn with_status_notify(mut self, notify: StatusNotify) -> Self {
         self.status_notify = Some(notify);
         self
     }
@@ -427,14 +426,12 @@ impl OllamaAdapter {
             .and_then(|m| Some((m.size_vram?, m.size?)))
     }
 
-    /// Handle a streaming response, emitting typed `StreamEvent`s through
-    /// the optional callback. The legacy text-callback shape is provided
-    /// by the `chat()` shim below, which translates these typed events
-    /// back into the marker-encoded text stream the older callers expect.
+    /// Handle a streaming response, emitting typed `StreamEvent`s onto the
+    /// turn's sink.
     async fn handle_stream(
         &self,
         response: reqwest::Response,
-        callback: Option<StreamCallback>,
+        sink: Option<&StreamSink>,
         hide_reasoning_trace: bool,
     ) -> Result<ModelResponse> {
         if !response.status().is_success() {
@@ -496,7 +493,9 @@ impl OllamaAdapter {
 
                 let json_chunk = parse_ollama_stream_frame(&line)?;
 
-                Self::process_stream_chunk(&json_chunk, callback.as_ref(), &mut acc);
+                let mut events: Vec<StreamEvent> = Vec::new();
+                Self::process_stream_chunk(&json_chunk, &mut events, &mut acc);
+                emit_all(sink, events).await?;
             }
         }
 
@@ -507,7 +506,9 @@ impl OllamaAdapter {
             if !trailing.trim().is_empty() {
                 let json_chunk = parse_ollama_stream_frame(trailing.trim())?;
 
-                Self::process_stream_chunk(&json_chunk, callback.as_ref(), &mut acc);
+                let mut events: Vec<StreamEvent> = Vec::new();
+                Self::process_stream_chunk(&json_chunk, &mut events, &mut acc);
+                emit_all(sink, events).await?;
             }
         }
 
@@ -541,11 +542,10 @@ impl OllamaAdapter {
             Some(acc.tool_calls)
         };
 
-        // F3: the adapter no longer emits a terminal `Done` through the
-        // callback. The v0.7 provider wrapper (`providers::model::*`)
-        // emits the authoritative `StreamEvent::Done { usage,
-        // provider_continuation }` from the returned `ModelResponse`.
-        // Emitting here would race the wrapper's Done (ordering aside)
+        // F3: the adapter never emits a terminal `Done`. The provider
+        // wrapper (`providers::model::*`) emits the authoritative
+        // `StreamEvent::Done { usage, provider_continuation, stop_reason }`
+        // from the returned `ModelResponse`; emitting one here would race it
         // and drop the provider_continuation for Anthropic.
 
         Ok(ModelResponse {
@@ -563,8 +563,10 @@ impl OllamaAdapter {
     /// emitting typed events.
     ///
     /// Event ordering within a chunk: reasoning (if any) → tool calls (if
-    /// any) → text (if any). The `Done` event is emitted by the caller
-    /// (`handle_stream`) once the stream closes, never here.
+    /// any) → text (if any). Events are pushed onto `out` rather than sent,
+    /// so this stays synchronous and the caller owns every `await` — which
+    /// is what makes the emission order the production order. The `Done`
+    /// event comes from the provider wrapper, never from here.
     ///
     /// Once the per-stream `MAX_RESPONSE_CHARS` cap trips (`acc.truncated`),
     /// further content / thinking chunks are silently dropped — both from
@@ -572,20 +574,18 @@ impl OllamaAdapter {
     /// usage are still recorded because those are bounded.
     fn process_stream_chunk(
         json_chunk: &OllamaStreamChunk,
-        callback: Option<&StreamCallback>,
+        out: &mut Vec<StreamEvent>,
         acc: &mut StreamAccumulator,
     ) {
         // Reasoning / thinking content. Always recorded into `acc.thinking`
-        // (so `ModelResponse.thinking` stays populated for backward-compat
-        // callers); only emitted via typed callback when not hidden.
+        // (so `ModelResponse.thinking` stays populated for callers that read
+        // the final response); only emitted when not hidden.
         if let Some(ref thinking_chunk) = json_chunk.message.thinking
             && !acc.truncated
             && !thinking_chunk.is_empty()
         {
-            if let Some(cb) = callback
-                && !acc.hide_reasoning_trace
-            {
-                cb(StreamEvent::Reasoning(ReasoningChunk {
+            if !acc.hide_reasoning_trace {
+                out.push(StreamEvent::Reasoning(ReasoningChunk {
                     text: thinking_chunk.clone(),
                     signature: None,
                 }));
@@ -602,18 +602,14 @@ impl OllamaAdapter {
         // immediately so streaming consumers can react before completion.
         if let Some(ref tool_calls) = json_chunk.message.tool_calls {
             acc.tool_calls.extend(tool_calls.clone());
-            if let Some(cb) = callback {
-                for tc in tool_calls {
-                    cb(StreamEvent::ToolCall(tc.clone()));
-                }
+            for tc in tool_calls {
+                out.push(StreamEvent::ToolCall(tc.clone()));
             }
         }
 
         // Regular text content.
         if !json_chunk.message.content.is_empty() && !acc.truncated {
-            if let Some(cb) = callback {
-                cb(StreamEvent::Text(json_chunk.message.content.clone()));
-            }
+            out.push(StreamEvent::Text(json_chunk.message.content.clone()));
             push_capped(
                 &mut acc.content,
                 &json_chunk.message.content,
@@ -779,10 +775,10 @@ impl OllamaAdapter {
     async fn send_chat(
         &self,
         body: &serde_json::Value,
-        notify: Option<&StreamCallback>,
+        sink: Option<&StreamSink>,
     ) -> Result<reqwest::Response> {
         let url = format!("{}/api/chat", self.base_url);
-        self.with_local_recovery(notify, || async {
+        self.with_local_recovery(sink, || async {
             self.client.post(&url).json(body).send().await.map_err(|e| {
                 ModelError::Backend(BackendError::ConnectionFailed {
                     backend: "ollama".to_string(),
@@ -802,7 +798,7 @@ impl OllamaAdapter {
     /// the connection error so the surfaced message says what to do next;
     /// non-local URLs pass their error through untouched.
     ///
-    /// `notify` carries the moment-of-spawn notice ("Starting the local
+    /// `sink` carries the moment-of-spawn notice ("Starting the local
     /// Ollama server…") out as a `StreamEvent::Status` — the revival can
     /// block ~15s behind an otherwise generic spinner, and the spawned
     /// server outlives mermaid, so this one line covers latency feedback,
@@ -821,7 +817,7 @@ impl OllamaAdapter {
     /// retry, here and in the post-recovery round.
     async fn with_local_recovery<F, Fut>(
         &self,
-        notify: Option<&StreamCallback>,
+        sink: Option<&StreamSink>,
         mut op: F,
     ) -> Result<reqwest::Response>
     where
@@ -838,16 +834,31 @@ impl OllamaAdapter {
         ) {
             return first;
         }
-        // Stream callback first (chat), constructor sink second (console
-        // list paths) — whichever exists carries the one notice.
-        let ensured = match notify.or(self.status_notify.as_ref()) {
-            Some(cb) => {
-                let forward = |text: &str| cb(StreamEvent::Status(text.to_string()));
+        // The turn's sink first (chat), the constructor's console printer
+        // second (list paths) — whichever exists carries the one notice.
+        //
+        // `try_send` and not an awaited send because `ensure_running` takes a
+        // synchronous `&str` notifier: the notice has to reach the user
+        // *during* a spawn that can block ~15s, not after it. Dropping it is
+        // acceptable and unreachable in practice — this fires before the
+        // stream produces anything, so the bounded channel is empty, and a
+        // status line is best-effort plumbing rather than response content.
+        let ensured = match (sink, self.status_notify.as_ref()) {
+            (Some(sink), _) => {
+                let forward = |text: &str| {
+                    let _ = sink.try_send(StreamEvent::Status(text.to_string()));
+                };
                 recovery
                     .ensure_running(&self.base_url, Some(&forward))
                     .await
             },
-            None => recovery.ensure_running(&self.base_url, None).await,
+            (None, Some(notify)) => {
+                let forward = |text: &str| notify(text);
+                recovery
+                    .ensure_running(&self.base_url, Some(&forward))
+                    .await
+            },
+            (None, None) => recovery.ensure_running(&self.base_url, None).await,
         };
         match ensured {
             Ok(()) => crate::models::retry::retry_transient_http(&mut op).await,
@@ -949,18 +960,18 @@ impl Model for OllamaAdapter {
         &self,
         messages: &[ChatMessage],
         config: &ModelConfig,
-        callback: Option<StreamCallback>,
+        sink: Option<StreamSink>,
     ) -> Result<ModelResponse> {
-        let stream = callback.is_some();
+        let stream = sink.is_some();
         let supports_thinking = self.thinking_supported().await;
         let request_body = self.build_request_body(messages, config, stream, supports_thinking);
-        // `callback` doubles as the autostart notice channel: if the local
+        // The sink doubles as the autostart notice channel: if the local
         // server has to be started, the user sees a status line instead of
         // ~15s of bare spinner.
-        let response = self.send_chat(&request_body, callback.as_ref()).await?;
+        let response = self.send_chat(&request_body, sink.as_ref()).await?;
 
-        if stream {
-            self.handle_stream(response, callback, config.hide_reasoning_trace)
+        if let Some(sink) = sink {
+            self.handle_stream(response, Some(&sink), config.hide_reasoning_trace)
                 .await
         } else {
             self.decode_non_streaming(response).await
@@ -1747,7 +1758,7 @@ mod tests {
             eval_count: Some(10),
             done_reason: Some("length".to_string()),
         };
-        OllamaAdapter::process_stream_chunk(&chunk, None, &mut acc);
+        OllamaAdapter::process_stream_chunk(&chunk, &mut Vec::new(), &mut acc);
         assert_eq!(acc.done_reason.as_deref(), Some("length"));
         assert_eq!(acc.prompt_tokens, usize::MAX);
         assert_eq!(acc.completion_tokens, 10);
@@ -1796,7 +1807,7 @@ mod tests {
             eval_count: None,
             done_reason: None,
         };
-        OllamaAdapter::process_stream_chunk(&content_chunk, None, &mut acc);
+        OllamaAdapter::process_stream_chunk(&content_chunk, &mut Vec::new(), &mut acc);
         assert!(
             acc.usage().is_none(),
             "a cut stream must not reset the gauge to a zero usage"
@@ -1814,7 +1825,7 @@ mod tests {
             eval_count: Some(8),
             done_reason: Some("stop".to_string()),
         };
-        OllamaAdapter::process_stream_chunk(&done_chunk, None, &mut acc);
+        OllamaAdapter::process_stream_chunk(&done_chunk, &mut Vec::new(), &mut acc);
         let usage = acc
             .usage()
             .expect("usage present after a done chunk with counts");
@@ -1844,7 +1855,7 @@ mod tests {
             eval_count: None,
             done_reason: None,
         };
-        OllamaAdapter::process_stream_chunk(&content_chunk, None, &mut acc);
+        OllamaAdapter::process_stream_chunk(&content_chunk, &mut Vec::new(), &mut acc);
         assert!(
             acc.closed_abnormally(),
             "a stream cut before `done` must be flagged abnormal"
@@ -1863,7 +1874,7 @@ mod tests {
             eval_count: Some(2),
             done_reason: Some("stop".to_string()),
         };
-        OllamaAdapter::process_stream_chunk(&done_chunk, None, &mut acc);
+        OllamaAdapter::process_stream_chunk(&done_chunk, &mut Vec::new(), &mut acc);
         assert!(
             !acc.closed_abnormally(),
             "a `done` chunk completes the stream"
@@ -1890,7 +1901,7 @@ mod tests {
             eval_count: Some(512),
             done_reason: Some("length".to_string()),
         };
-        OllamaAdapter::process_stream_chunk(&length_done, None, &mut acc);
+        OllamaAdapter::process_stream_chunk(&length_done, &mut Vec::new(), &mut acc);
         assert!(
             !acc.closed_abnormally(),
             "context-full Length truncation has a real `done` frame — not abnormal"

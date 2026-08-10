@@ -71,11 +71,9 @@ impl ModelProvider for GeminiProvider {
 
     async fn chat(&self, request: ChatRequest, ctx: StreamContext) -> Result<FinalResponse> {
         let config = build_model_config(&request);
-        let (relay_tx, relay_handle) = super::stream_bridge::ordered_relay(ctx.sink.clone());
-        let callback = super::stream_bridge::forward_callback(relay_tx.clone());
         let chat_fut = self
             .adapter
-            .chat(&request.messages, &config, Some(callback));
+            .chat(&request.messages, &config, Some(ctx.sink.clone()));
 
         let response = tokio::select! {
             biased;
@@ -87,14 +85,16 @@ impl ModelProvider for GeminiProvider {
 
         let usage = response.usage.clone();
         let stop_reason = response.stop_reason.clone();
-        // Terminal Done through the ordered relay, then drain (see openai_compat).
-        let _ = relay_tx.send(StreamEvent::Done {
-            usage: usage.clone(),
-            provider_continuation: None,
-            stop_reason: stop_reason.clone(),
-        });
-        drop(relay_tx);
-        mermaid_model::utils::join_logged(relay_handle.take(), "stream_relay").await;
+        // The terminal Done goes on the same sink the adapter just finished
+        // writing to, so it cannot overtake a still-queued ToolCall.
+        let _ = ctx
+            .sink
+            .send(StreamEvent::Done {
+                usage: usage.clone(),
+                provider_continuation: None,
+                stop_reason: stop_reason.clone(),
+            })
+            .await;
 
         Ok(FinalResponse {
             usage,

@@ -234,24 +234,13 @@ impl ModelProvider for OllamaProvider {
         let sizing = self.resolve_context_window(&request).await;
         let config =
             build_model_config(&request, &self.config, sizing.effective, sizing.max_output);
-        // Ordered relay (F2): the adapter's sync callback pushes into an
-        // `UnboundedSender` (synchronous, FIFO). A single relay task drains
-        // into the bounded sink in order, avoiding the per-event `tokio::
-        // spawn` race that could deliver `Done` before prior tool calls.
-        let (relay_tx, relay_handle) = super::stream_bridge::ordered_relay(ctx.sink.clone());
-        let callback = super::stream_bridge::forward_callback(relay_tx.clone());
-
-        // Race adapter.chat against the cancellation token. When
-        // cancelled, the adapter's stream loop observes the sink
-        // closing (we drop `callback`) and exits at its next await.
-        // This is the crucial structural win vs. the old
-        // `check_interrupt` polling: the adapter doesn't need to
-        // know anything about turn IDs — the sink either drains or
-        // doesn't, and the tokens handle everything else.
+        // Race adapter.chat against the cancellation token. When cancelled,
+        // this future is dropped and the adapter's stream loop goes with it —
+        // the adapter never has to know anything about turn IDs.
         let chat_fut = async {
             match self
                 .adapter
-                .chat(&request.messages, &config, Some(callback.clone()))
+                .chat(&request.messages, &config, Some(ctx.sink.clone()))
                 .await
             {
                 Ok(response) => Ok(response),
@@ -260,7 +249,7 @@ impl ModelProvider for OllamaProvider {
                     // the model's real output cap and names the cap in the
                     // body. Learn it (persisted — later turns size below it up
                     // front), clamp, retry ONCE. A request that 400s streamed
-                    // no events, so the relay is untouched and reusable.
+                    // no events, so the retry starts from a clean stream.
                     let Some(cap) = output_cap_from_error(&err) else {
                         return Err(err);
                     };
@@ -273,13 +262,13 @@ impl ModelProvider for OllamaProvider {
                     }
                     let model = Model::name(&self.adapter).to_string();
                     learn_output_cap("ollama".to_string(), model.clone(), cap).await;
-                    let _ = relay_tx.send(StreamEvent::Status(format!(
+                    let _ = ctx.sink.send(StreamEvent::Status(format!(
                         "{model} rejected the output budget; learned its {cap}-token cap and retrying"
-                    )));
+                    ))).await;
                     let retry_config =
                         build_model_config(&request, &self.config, sizing.effective, Some(cap));
                     self.adapter
-                        .chat(&request.messages, &retry_config, Some(callback.clone()))
+                        .chat(&request.messages, &retry_config, Some(ctx.sink.clone()))
                         .await
                 },
             }
@@ -298,21 +287,22 @@ impl ModelProvider for OllamaProvider {
             r = chat_fut => r?,
         };
 
-        // F3: the wrapper's `Done` is now the sole terminal event —
-        // the adapter no longer emits one from the callback. Carrying
-        // `provider_continuation` out of `ModelResponse` here is what
-        // lets multi-turn extended thinking round-trip.
+        // F3: the wrapper's `Done` is the sole terminal event — the adapter
+        // never emits one. Carrying `provider_continuation` out of
+        // `ModelResponse` here is what lets multi-turn extended thinking
+        // round-trip. It goes on the same sink the adapter just finished
+        // writing to, so it cannot overtake a still-queued ToolCall.
         let usage = response.usage.clone();
         let provider_continuation = response.provider_continuation.clone();
         let stop_reason = response.stop_reason.clone();
-        // Terminal Done through the ordered relay, then drain (see stream_bridge).
-        let _ = relay_tx.send(StreamEvent::Done {
-            usage: usage.clone(),
-            provider_continuation: provider_continuation.clone(),
-            stop_reason: stop_reason.clone(),
-        });
-        drop(relay_tx);
-        mermaid_model::utils::join_logged(relay_handle.take(), "stream_relay").await;
+        let _ = ctx
+            .sink
+            .send(StreamEvent::Done {
+                usage: usage.clone(),
+                provider_continuation: provider_continuation.clone(),
+                stop_reason: stop_reason.clone(),
+            })
+            .await;
 
         Ok(FinalResponse {
             usage,
