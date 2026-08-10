@@ -159,6 +159,9 @@ portable-pty = "0.9"
 # Snapshot suite for `render()` — pins full TUI frames for curated scenes
 # (src/render/snapshots.rs); review drift with `just snapshots`.
 insta = "1"
+# Paused-clock timers for the paste chunk-bridge tests: virtual time makes a
+# 25ms window deterministic instead of racing the runner.
+tokio = { version = "1.44", features = ["test-util"] }
 # Managed-SearXNG archive-limit tests compile on unsupported hosts too, even
 # though extraction is only shipped on Unix targets.
 ruzstd = "0.8.3"

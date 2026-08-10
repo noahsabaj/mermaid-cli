@@ -25,7 +25,7 @@ use futures::{FutureExt, StreamExt};
 use ratatui::layout::Rect;
 use tokio::time::{Duration, interval};
 
-use crate::app::event_source::coalesce_key_burst;
+use crate::app::event_source::{bridge_paste_chunks, coalesce_key_burst_seamed};
 use crate::app::lifecycle::RuntimeLifecycle;
 use crate::app::recorder::{RECORDING_FORMAT_VERSION, Recorder, SessionHeader};
 use crate::app::terminal::TerminalGuard;
@@ -34,7 +34,7 @@ use crate::providers::ToolRegistry;
 use crate::render::{RenderCache, render};
 use mermaid_domain::Config;
 use mermaid_domain::ConversationHistory;
-use mermaid_domain::{Cmd, Msg, RuntimeSignal, State, update};
+use mermaid_domain::{Cmd, Msg, Paste, RuntimeSignal, State, update};
 
 /// Options for `run_interactive_with`. Added so new flags land without
 /// reshuffling positional args.
@@ -365,15 +365,25 @@ pub async fn run_interactive_with(
                             // paste arrives as a flood of Char/Enter key events).
                             // The drain pulls every immediately-available event
                             // so the whole block lands as one atomic Msg::Paste.
-                            let (primary, trailing) = coalesce_key_burst(evt, || {
-                                events
-                                    .as_mut()
-                                    .expect("event stream is alive while the loop runs")
-                                    .next()
-                                    .now_or_never()
-                                    .flatten()
-                                    .and_then(|r| r.ok())
-                            });
+                            let stream = events
+                                .as_mut()
+                                .expect("event stream is alive while the loop runs");
+                            let (mut primary, mut trailing, ends_with_cr) =
+                                coalesce_key_burst_seamed(evt, || {
+                                    stream.next().now_or_never().flatten().and_then(|r| r.ok())
+                                });
+                            // A paste-shaped burst that stopped on plain quiet
+                            // (no deliberate trailing event) may just be the
+                            // first chunk ConPTY delivered — bridge the gap so
+                            // a chunk boundary right after an Enter never
+                            // submits half a paste (#351). The fold state
+                            // crosses the seam with it, so a CRLF pair split
+                            // at the gap stays one newline.
+                            if trailing.is_empty()
+                                && let Some(Msg::Paste(Paste::Text(text))) = &mut primary
+                            {
+                                trailing = bridge_paste_chunks(text, ends_with_cr, stream).await;
+                            }
                             for queued in trailing {
                                 pending_msgs.push_back(queued);
                             }

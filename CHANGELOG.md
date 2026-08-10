@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A multiline paste on the Windows console lands as one insert — no more
+  per-line submits.** ConPTY re-encodes a pasted `\r` as plain Enter and a
+  pasted `\n` as **Ctrl+Enter**, and the key-burst coalescer treated
+  Enter-with-Control as deliberate input: it broke the burst, and the
+  reducer's Enter arm then submitted whatever half of the paste had landed —
+  pasting a three-line prompt fired two half-prompts at the model. Inside a
+  burst, Ctrl+Enter now folds as the newline it is, a CRLF pair folds to ONE
+  newline (bare-LF endings and blank lines keep their count), and a lone
+  Ctrl+Enter with no burst around it still submits. A bounded bridge also
+  absorbs real chunk gaps: after a paste-shaped burst goes quiet, input
+  arriving within 25ms — a newline included — is still paste content, with
+  the CRLF fold state carried across the seam. A deliberate keystroke never
+  waits: the window opens only after a burst that was already a paste.
+
 - **A short terminal keeps the composer and the mode band on screen.** The
   chat zone's 10-row floor (`Constraint::Min`) outranks the fixed-height
   zones below it in the layout solver, so on a terminal shorter than the
