@@ -806,6 +806,41 @@ impl RuntimeClient {
     }
 }
 
+/// A session's transcript, shaped as the `MessageRecord` rows this wire has
+/// always carried.
+///
+/// Sourced from the conversation FILES, not the `messages` table: that table
+/// has never had a production writer, so every reader of it — this one, the
+/// daemon's `session_messages`, the task detail view — served a permanently
+/// empty list. Going through `ConversationManager` also picks up event-log
+/// recovery for a session whose snapshot is missing or corrupt.
+///
+/// Best-effort: a session row whose project or file has since gone away
+/// yields no rows rather than an error, matching the previous behavior of
+/// the (always-empty) query it replaces.
+fn transcript_rows(session: &SessionRecord) -> Vec<MessageRecord> {
+    let Ok(manager) = crate::session::ConversationManager::new(&session.project_path) else {
+        return Vec::new();
+    };
+    let Ok(conversation) = manager.load_conversation(&session.id) else {
+        return Vec::new();
+    };
+    conversation
+        .messages()
+        .iter()
+        .enumerate()
+        .map(|(index, message)| MessageRecord {
+            // Positional, since these rows have no database identity. A
+            // transcript long enough to overflow i64 cannot exist.
+            id: i64::try_from(index).unwrap_or(i64::MAX),
+            session_id: session.id.clone(),
+            role: format!("{:?}", message.role).to_lowercase(),
+            content_json: serde_json::to_string(message).unwrap_or_default(),
+            created_at: message.timestamp.to_rfc3339(),
+        })
+        .collect()
+}
+
 impl RuntimeService {
     /// # Errors
     ///
@@ -818,6 +853,22 @@ impl RuntimeService {
 
     pub fn from_store(store: RuntimeStore) -> Self {
         Self { store }
+    }
+
+    /// One session's index row plus its transcript, for the daemon's
+    /// `session_messages` command.
+    ///
+    /// # Errors
+    ///
+    /// A store query failure. An unknown session id is `(None, empty)`, not
+    /// an error — same as before, when the row simply was not there.
+    pub fn session_messages(
+        &self,
+        id: &str,
+    ) -> Result<(Option<SessionRecord>, Vec<MessageRecord>)> {
+        let session = self.store.sessions().get(id)?;
+        let messages = session.as_ref().map_or_else(Vec::new, transcript_rows);
+        Ok((session, messages))
     }
 
     /// # Errors
@@ -1004,10 +1055,7 @@ impl RuntimeService {
             Some(session_id) => self.store.sessions().get(session_id)?,
             None => None,
         };
-        let messages = match task.conversation_id.as_deref() {
-            Some(session_id) => self.store.messages().list_for_session(session_id)?,
-            None => Vec::new(),
-        };
+        let messages = session.as_ref().map_or_else(Vec::new, transcript_rows);
         let approvals = self
             .store
             .approvals()
@@ -1697,6 +1745,71 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create temp dir");
         dir.join("runtime.sqlite3")
+    }
+
+    #[test]
+    fn session_messages_come_from_the_conversation_file() {
+        // The `messages` table has never had a writer. This asserts the
+        // transcript now arrives from the conversation file the session row
+        // points at — the table stays empty throughout, which is the whole
+        // point.
+        let path = temp_db("session_from_disk");
+        let project = path.parent().expect("temp dir").join("project");
+        std::fs::create_dir_all(&project).expect("project dir");
+
+        let manager = crate::session::ConversationManager::new(&project).expect("manager");
+        let mut conversation = mermaid_domain::ConversationHistory::new(
+            project.display().to_string(),
+            "ollama/test".to_string(),
+            chrono::Local::now(),
+        );
+        // `Vec`, not an array literal: `ChatMessage` is large enough that a
+        // two-element array trips `large_stack_arrays`.
+        let seeded = vec![
+            mermaid_model::models::ChatMessage::user("what shipped?"),
+            mermaid_model::models::ChatMessage::assistant("the event log"),
+        ];
+        conversation.add_messages(&seeded, chrono::Local::now());
+        manager.save_conversation(&conversation).expect("save");
+
+        let service = RuntimeService::from_store(RuntimeStore::open(&path).expect("open store"));
+        service
+            .store
+            .sessions()
+            .upsert(mermaid_runtime::NewSession {
+                id: Some(conversation.id.clone()),
+                project_path: project.display().to_string(),
+                model_id: "ollama/test".to_string(),
+                title: Some(conversation.title.clone()),
+                conversation_path: None,
+                total_tokens: Some(42),
+            })
+            .expect("index row");
+
+        let (session, messages) = service
+            .session_messages(&conversation.id)
+            .expect("session_messages");
+        assert!(session.is_some());
+        assert_eq!(messages.len(), 2, "transcript must come off disk");
+        assert_eq!(messages[0].role, "user");
+        assert!(messages[0].content_json.contains("what shipped?"));
+        assert_eq!(messages[1].role, "assistant");
+        assert!(
+            service
+                .store
+                .messages()
+                .list_for_session(&conversation.id)
+                .expect("table query")
+                .is_empty(),
+            "the messages table must still be empty -- nothing writes it"
+        );
+
+        // An unknown session is empty, not an error.
+        let (missing, none) = service
+            .session_messages("20990101_000000_999")
+            .expect("unknown id is Ok");
+        assert!(missing.is_none() && none.is_empty());
+        let _ = std::fs::remove_dir_all(path.parent().expect("temp dir"));
     }
 
     #[test]

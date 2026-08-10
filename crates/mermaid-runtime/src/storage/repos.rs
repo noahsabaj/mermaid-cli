@@ -281,6 +281,26 @@ impl TasksRepo<'_> {
         Ok(())
     }
 
+    /// Link a task to the conversation its run produced.
+    ///
+    /// The column is set at task CREATION today, where the conversation does
+    /// not exist yet — so it was `NULL` for every daemon task, and every
+    /// join through it came back empty. The run knows the id only when it
+    /// returns, which is where this is called from.
+    ///
+    /// # Errors
+    ///
+    /// The write statement. A task id that no longer exists updates zero
+    /// rows and is `Ok`: the link is bookkeeping, and a task pruned mid-run
+    /// must not fail the terminal-status path that carries it.
+    pub fn set_conversation(&self, id: &str, conversation_id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE tasks SET conversation_id = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, conversation_id, now_rfc3339()],
+        )?;
+        Ok(())
+    }
+
     /// Atomically claim the next runnable queued task for the daemon scheduler:
     /// flip it to `Running` and return it, or `None` when the queue is empty.
     ///

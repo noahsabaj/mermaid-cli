@@ -273,6 +273,24 @@ async fn execute_claimed_task(
     )
     .await;
 
+    // The run's conversation id, captured before the result is consumed. It
+    // is the one thing a follow-up `mermaid run --resume` needs, and until
+    // now the daemon dropped it on the floor: `tasks.conversation_id` is set
+    // at CREATION, before any conversation exists, so it was NULL for every
+    // daemon task and every join through it came back empty.
+    let session_id = result
+        .as_ref()
+        .ok()
+        .map(|run| run.session_id.clone())
+        .filter(|id| !id.is_empty());
+    if let Some(session_id) = &session_id {
+        let task_id = task.id.clone();
+        let session_id = session_id.clone();
+        let _ = mermaid_runtime::with_shared_store(move |store| {
+            store.tasks().set_conversation(&task_id, &session_id)
+        });
+    }
+
     // The run has ended; `_running_guard` removes the token from the running map
     // when this function returns. Map the outcome to a terminal status + report
     // — an explicit cancel wins over whatever the interrupted run returned.
@@ -754,6 +772,39 @@ fn request_requires_auth_wire(_line: &str) -> bool {
     true
 }
 
+/// The terminal `RunEvent` a LATE subscriber gets: the task already ended,
+/// so there is no live stream to join and the record has to answer for it.
+///
+/// A late attach used to be handed a blank `session_id` and zero tokens —
+/// the one field a follow-up `mermaid run --resume` needs was the one left
+/// empty. Both now come off the task's conversation backlink and the
+/// session index row it points at.
+#[cfg(any(unix, windows))]
+fn terminal_result_event(
+    store: &mermaid_runtime::RuntimeStore,
+    task: &mermaid_runtime::TaskRecord,
+) -> mermaid_domain::RunEvent {
+    let errors = match task.status {
+        mermaid_runtime::TaskStatus::Completed => Vec::new(),
+        status => vec![format!("task ended {status}")],
+    };
+    let session_id = task.conversation_id.clone().unwrap_or_default();
+    let total_tokens = (!session_id.is_empty())
+        .then(|| store.sessions().get(&session_id).ok().flatten())
+        .flatten()
+        .and_then(|session| session.total_tokens)
+        .and_then(|total| u64::try_from(total).ok())
+        .unwrap_or(0);
+    mermaid_domain::RunEvent::Result {
+        response: task.final_report.clone().unwrap_or_default(),
+        reasoning: None,
+        total_tokens,
+        errors,
+        session_id,
+        structured_output: None,
+    }
+}
+
 /// Serve one `subscribe_task` connection: ack line, then NDJSON `RunEvent`s
 /// until the terminal `result`. An already-terminal task gets the ack plus
 /// ONE synthesized result from the persisted record. Slow clients are
@@ -827,20 +878,7 @@ where
             | mermaid_runtime::TaskStatus::Cancelled
     );
     if terminal_status {
-        // Best-effort synthesis from the persisted record: tokens are not
-        // stored per-task, and a failed/cancelled status rides in `errors`.
-        let errors = match task.status {
-            mermaid_runtime::TaskStatus::Completed => Vec::new(),
-            status => vec![format!("task ended {status}")],
-        };
-        let event = mermaid_domain::RunEvent::Result {
-            response: task.final_report.clone().unwrap_or_default(),
-            reasoning: None,
-            total_tokens: 0,
-            errors,
-            session_id: String::new(),
-            structured_output: None,
-        };
+        let event = terminal_result_event(&store, &task);
         write_line(&mut stream, &serde_json::to_string(&event)?).await?;
         stream.shutdown().await?;
         return Ok(());
@@ -1130,11 +1168,14 @@ fn handle_runtime_read(
     let service = mermaid_cli::runtime_client::RuntimeService::open_default()?;
     match request {
         DaemonRequest::SessionMessages { id } => {
-            let store = mermaid_runtime::RuntimeStore::open_default()?;
+            // Served from the conversation files (see `transcript_rows`);
+            // the `messages` table this used to read has never had a
+            // writer, so it always answered with an empty list.
+            let (session, messages) = service.session_messages(&id)?;
             Ok(serde_json::json!({
                 "ok": true,
-                "session": store.sessions().get(&id)?,
-                "messages": store.messages().list_for_session(&id)?,
+                "session": session,
+                "messages": messages,
             }))
         },
         DaemonRequest::Snapshot => Ok(serde_json::to_value(service.snapshot()?)?),
