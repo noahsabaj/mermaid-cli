@@ -2,6 +2,7 @@ pub mod app;
 pub mod cli;
 pub mod clipboard;
 pub mod effect;
+pub mod engine;
 pub mod mcp;
 pub mod ollama;
 pub mod providers;

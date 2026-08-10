@@ -23,7 +23,8 @@ use anyhow::Result;
 use chrono::{DateTime, Local};
 
 use crate::app::recorder::{RecordLine, Replay, SessionHeader, session_fingerprint};
-use mermaid_domain::{Msg, State, update};
+use crate::engine::{DropEffects, Engine};
+use mermaid_domain::{Msg, State};
 use mermaid_model::models::MessageRole;
 
 /// Everything `--replay` learned from one recording.
@@ -139,10 +140,14 @@ pub fn replay_recording(path: &Path) -> Result<ReplayReport> {
     })
 }
 
-/// The fold itself: initial `State` from the header, then one `update` per
-/// entry under the entry's recorded clock. Emitted `Cmd`s are dropped — the
-/// log already contains every effect result as a later `Msg`. Stops where
-/// the live loop would have: on `should_exit`.
+/// The fold itself: initial `State` from the header, then one `Engine::reduce`
+/// per entry under the entry's recorded clock. The sink is [`DropEffects`] —
+/// the log already contains every effect result as a later `Msg`, so re-running
+/// the effect would both duplicate it and make the fold impure. Stops where the
+/// live loop would have: on `should_exit`.
+///
+/// The engine's kernel is synchronous precisely so this stays a plain `for`
+/// loop with no tokio runtime anywhere near it.
 fn fold(header: &SessionHeader, msgs: &[(usize, DateTime<Local>, Msg)]) -> (State, Option<usize>) {
     let mut state = State::new(
         header.config.clone(),
@@ -154,17 +159,15 @@ fn fold(header: &SessionHeader, msgs: &[(usize, DateTime<Local>, Msg)]) -> (Stat
     if let Some(seed) = header.seed_conversation.clone() {
         state.seed_conversation(seed);
     }
+    let mut engine = Engine::new(state, DropEffects);
     let mut stopped_at = None;
     for (line, ts, msg) in msgs {
-        state.now = *ts;
-        let (next, _cmds) = update(state, msg.clone());
-        state = next;
-        if state.should_exit {
+        if engine.reduce(*ts, msg.clone()).should_exit {
             stopped_at = Some(*line);
             break;
         }
     }
-    (state, stopped_at)
+    (engine.into_parts().0, stopped_at)
 }
 
 /// CLI entry point for `--replay`: fold, print the report + reconstructed
@@ -300,6 +303,7 @@ mod tests {
     use crate::app::recorder::{RECORDING_FORMAT_VERSION, Recorder};
     use mermaid_domain::Config;
     use mermaid_domain::TurnId;
+    use mermaid_domain::update;
     use mermaid_model::models::{FinishReason, TokenUsage};
     use std::path::PathBuf;
 

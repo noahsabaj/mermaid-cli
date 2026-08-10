@@ -49,11 +49,12 @@ use tokio::sync::{Semaphore, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::effect::{EffectRunner, MSG_CHANNEL_CAPACITY};
+use crate::engine::{DriveExit, DrivePolicy, Engine, Inbox, Observation, OnCancel, StepObserver};
 use crate::providers::ProviderFactory;
 use crate::providers::ctx::ExecContext;
 use mermaid_domain::{
     Msg, State, TokenUsageTotals, ToolDefinition, ToolMetadata, ToolOutcome, ToolRunMetadata,
-    TurnState, update,
+    TurnState,
 };
 use mermaid_model::models::MessageRole;
 use mermaid_runtime::SafetyMode;
@@ -1167,8 +1168,8 @@ enum DriveError {
 /// usage (real spend regardless of how the child ended) and cache the context
 /// for continuations.
 async fn drive_child(
-    mut state: State,
-    mut runner: EffectRunner,
+    state: State,
+    runner: EffectRunner,
     mut msg_rx: mpsc::Receiver<Msg>,
     parent_progress: mpsc::Sender<ProgressEvent>,
     prompt: String,
@@ -1185,78 +1186,51 @@ async fn drive_child(
     // `drive_child` is called (see `execute`), so the child's first model call
     // sees them — no RefreshInstructions/RefreshMemory dispatch here, which would
     // race that first call.
+    let mut engine = Engine::new(state, runner).with_observer(ChildRelay {
+        progress: ChildProgress::new(tokio::time::Instant::now()),
+        parent: parent_progress,
+    });
 
-    // Seed the child turn.
-    let seed = Msg::SubmitPrompt {
-        text: prompt,
-        attachment_ids: vec![],
-    };
-    let (new_state, cmds) = update(state, seed);
-    state = new_state;
-    for cmd in cmds {
-        runner.dispatch(cmd);
-    }
+    // Seed the child turn. Through `reduce`, not `step`: the seed is the
+    // parent's own prompt, and relaying it back as child activity would report
+    // the child working before it has started.
+    engine.reduce(
+        chrono::Local::now(),
+        Msg::SubmitPrompt {
+            text: prompt,
+            attachment_ids: vec![],
+        },
+    );
 
-    // Drive the child reducer to Idle, bounded by a wall-clock deadline.
-    // The deadline is a `select!` arm (not a `timeout()` wrapper) so the
-    // single `runner.shutdown()` below always runs — on normal exit,
-    // cancel, OR timeout — instead of the runner being dropped mid-flight
-    // and leaking its MCP children (#76).
-    let deadline = tokio::time::sleep(timeout);
-    tokio::pin!(deadline);
+    // Drive the child reducer to settled, bounded by a wall-clock deadline.
+    // The deadline is a policy arm (not a `timeout()` wrapper) so the single
+    // `runner.shutdown()` below always runs — on normal exit, cancel, OR
+    // timeout — instead of the runner being dropped mid-flight and leaking its
+    // MCP children (#76).
+    //
+    // `OnCancel::Abort` rather than the headless run's graceful unwind: a
+    // cancelled child is being torn down by a parent turn that is itself
+    // unwinding, so there is nobody left to report to.
+    let policy = DrivePolicy::until_settled()
+        .cancel_with(Some(token), OnCancel::Abort)
+        .deadline(Some(timeout));
+    let exit = engine.drive(&mut Inbox::new(&mut msg_rx), &policy).await;
 
-    let mut outcome: Result<(), DriveError> = Ok(());
-    let mut child_progress = ChildProgress::new(tokio::time::Instant::now());
-    loop {
-        if token.is_cancelled() {
-            outcome = Err(DriveError::Cancelled);
-            break;
-        }
-        if matches!(state.turn, TurnState::Idle) && state.ui.queued_messages.is_empty() {
-            break;
-        }
+    let (state, runner, _) = engine.into_parts();
 
-        let msg = tokio::select! {
-            biased;
-            _ = token.cancelled() => {
-                outcome = Err(DriveError::Cancelled);
-                break;
-            },
-            _ = &mut deadline => {
-                outcome = Err(DriveError::TimedOut);
-                break;
-            },
-            recv = msg_rx.recv() => match recv {
-                Some(m) => m,
-                None => break, // channel closed — child runner shut down
-            },
-        };
-
-        // Forward child activity to parent progress BEFORE the
-        // reducer mutates state (we want `call_id` + `tool_name`
-        // semantic info, which reducer events strip).
-        for event in child_progress.observe(&msg, &state, tokio::time::Instant::now()) {
-            let _ = parent_progress.send(event).await;
-        }
-
-        let (new_state, cmds) = update(state, msg);
-        state = new_state;
-        for cmd in cmds {
-            runner.dispatch(cmd);
-        }
-        if state.should_exit {
-            break;
-        }
-    }
-
-    // Always reap the child runner regardless of how the loop exited. This
+    // Always reap the child runner regardless of how the drive exited. This
     // cancels the child's scopes and drains its tasks; it does NOT touch the
     // process-global MCP manager (`new_child` opts out of that reap — the
     // servers are shared with the parent).
     runner.shutdown().await;
 
-    if let Err(e) = outcome {
-        return (Err(e), state);
+    match exit {
+        DriveExit::Cancelled => return (Err(DriveError::Cancelled), state),
+        DriveExit::TimedOut => return (Err(DriveError::TimedOut), state),
+        // Settled is the ordinary end. `Exited` (the child asked to quit) and
+        // `Closed` (its runner went away) both still have whatever the child
+        // said before that, and an empty one falls through to the error below.
+        DriveExit::Settled | DriveExit::Exited | DriveExit::Closed => {},
     }
 
     // Extract last assistant message as the result.
@@ -1277,6 +1251,28 @@ async fn drive_child(
         );
     }
     (Ok(summary), state)
+}
+
+/// Carries [`ChildProgress`]'s verdicts to the parent's status line.
+///
+/// The state machine stays a pure, unit-testable function of the child's
+/// messages; this is only the wire. It observes each message BEFORE the reducer
+/// mutates state, because the `call_id` + `tool_name` pairing it reports is
+/// exactly what the reducer strips.
+struct ChildRelay {
+    progress: ChildProgress,
+    parent: mpsc::Sender<ProgressEvent>,
+}
+
+impl StepObserver for ChildRelay {
+    async fn observe(&mut self, obs: Observation<'_>) {
+        for event in self
+            .progress
+            .observe(obs.msg, obs.state, tokio::time::Instant::now())
+        {
+            let _ = self.parent.send(event).await;
+        }
+    }
 }
 
 /// Minimum spacing between `SubagentTokens` progress events. Anything faster

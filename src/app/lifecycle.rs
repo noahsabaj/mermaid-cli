@@ -25,6 +25,14 @@ impl RuntimeLifecycle {
     pub async fn next_msg(&mut self) -> Option<Msg> {
         self.rx.recv().await.map(Msg::RuntimeSignal)
     }
+
+    /// A lifecycle whose signals a test delivers by hand. `new()` installs
+    /// real OS handlers, which a test can neither fire nor close.
+    #[cfg(test)]
+    pub(crate) fn for_test() -> (mpsc::UnboundedSender<RuntimeSignal>, Self) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        (tx, Self { rx })
+    }
 }
 
 impl Default for RuntimeLifecycle {
@@ -88,8 +96,7 @@ mod tests {
 
     #[tokio::test]
     async fn lifecycle_wraps_signal_as_reducer_msg() {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let mut lifecycle = RuntimeLifecycle { rx };
+        let (tx, mut lifecycle) = RuntimeLifecycle::for_test();
         tx.send(RuntimeSignal::Terminate).expect("send signal");
 
         let msg = lifecycle.next_msg().await.expect("signal msg");
