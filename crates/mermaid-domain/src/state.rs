@@ -1228,6 +1228,56 @@ pub struct ModelChoice {
     pub ready: bool,
 }
 
+/// Which surface owns the next non-chord keystroke — the modal-precedence
+/// order that used to live as a chain of early-return guards in
+/// `handle_key`, named as data in one place. The render layer picks its
+/// bottom pane from the same resolver, so what draws and what receives
+/// keys cannot disagree.
+///
+/// Only the EXCLUSIVE surfaces appear here. The slash palette and the
+/// @-file picker deliberately do not: they ride the composer (typing keeps
+/// editing the buffer while they filter), so they are composer flow, not
+/// focus targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Focus {
+    /// A tool awaits inline approval — exclusive, above everything.
+    ApprovalModal,
+    /// An `ask_user_question` set awaits answers.
+    QuestionModal,
+    /// A yes/no confirmation (`/clear`).
+    ConfirmModal,
+    /// One of the `UiMode` pickers (model / conversations / rewind /
+    /// plan config).
+    Picker,
+    /// The plain composer.
+    Composer,
+}
+
+impl State {
+    /// Resolve the focus in priority order. The one authority — key routing
+    /// and the render layer's bottom pane both consult this.
+    #[must_use]
+    pub fn focus(&self) -> Focus {
+        if !self.pending_approval.is_empty() {
+            Focus::ApprovalModal
+        } else if !self.pending_question.is_empty() {
+            Focus::QuestionModal
+        } else if self.confirm.is_some() {
+            Focus::ConfirmModal
+        } else if matches!(
+            self.ui.mode,
+            UiMode::ModelPicker { .. }
+                | UiMode::ConversationList { .. }
+                | UiMode::RewindPicker { .. }
+                | UiMode::PlanConfig { .. }
+        ) {
+            Focus::Picker
+        } else {
+            Focus::Composer
+        }
+    }
+}
+
 /// Top-level UI mode. Like `TurnState` this is a sum type instead of a
 /// zoo of independent bools. `EditingInput` is the default.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -1696,5 +1746,35 @@ mod tests {
         s.session.append(ChatMessage::user("hi"), s.now);
         assert_eq!(s.session.messages().len(), 1);
         assert_eq!(s.session.messages()[0].content, "hi");
+    }
+}
+
+#[cfg(test)]
+mod focus_tests {
+    use super::*;
+
+    #[test]
+    fn focus_resolves_in_modal_precedence_order() {
+        let mut state = State::new(
+            Config::default(),
+            std::path::PathBuf::from("/p"),
+            "m".to_string(),
+            chrono::Local::now(),
+            std::path::PathBuf::from("/tmp"),
+        );
+        assert_eq!(state.focus(), Focus::Composer);
+
+        state.ui.mode = UiMode::PlanConfig { cursor: 0 };
+        assert_eq!(state.focus(), Focus::Picker, "a picker beats the composer");
+
+        state.confirm = Some(Confirmation {
+            prompt: "?".to_string(),
+            accept_msg_token: ConfirmationTarget::ClearConversation,
+        });
+        assert_eq!(
+            state.focus(),
+            Focus::ConfirmModal,
+            "a confirmation beats a picker"
+        );
     }
 }

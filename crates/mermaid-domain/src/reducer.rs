@@ -39,7 +39,9 @@ use super::compaction::{
     CompactionArchive, CompactionRequest, CompactionResult, CompactionTrigger, format_compact_count,
 };
 use super::msg::{ClipboardRead, KeyCode, KeyMods, Msg, Paste, SlashCmd};
+use super::picker::{PickerStep, picker_step};
 use super::query::{Query, QueryResult};
+use super::state::Focus;
 use super::state::{
     GenPhase, McpServerEntry, McpServerStatus, State, StatusKind, TokenUsageTotals, ToolOutcome,
     TurnState, UiMode,
@@ -1335,94 +1337,23 @@ pub(crate) fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, 
     // (keeping the turn alive) rather than cancelling the whole turn. Any other
     // key is swallowed. Resolving emits `Cmd::ResolveApproval`, which unblocks
     // the parked tool task via the broker.
-    if !state.pending_approval.is_empty() {
-        use crate::ApprovalChoice;
-        // Content-bearing external tools are non-allowlistable: the gate signals
-        // this with an empty allowlist scope, and the modal then omits the
-        // middle "approve always" option (#6, #31). Layout:
-        //   allowlistable:     0 = Yes, 1 = Yes-always, 2 = No
-        //   non-allowlistable: 0 = Yes,                 1 = No
-        let allowlistable = state
-            .pending_approval
-            .front()
-            .map(|i| !i.allowlist_scope.is_empty())
-            .unwrap_or(false);
-        let option_count = if allowlistable { 3 } else { 2 };
-        let choice_for = |idx: usize| match (allowlistable, idx) {
-            (true, 0) | (false, 0) => ApprovalChoice::Approve,
-            (true, 1) => ApprovalChoice::ApproveAlways,
-            _ => ApprovalChoice::Deny,
-        };
-        // Copy the current highlight out so the ↑/↓ arms can take a fresh
-        // mutable borrow without conflicting.
-        let selected = state
-            .pending_approval
-            .front()
-            .map(|i| i.selected_option)
-            .unwrap_or(0);
-        let choice = match code {
-            KeyCode::Char('1') | KeyCode::Char('y') | KeyCode::Char('Y') => {
-                Some(ApprovalChoice::Approve)
-            },
-            // 'a'/'A' and '2' select approve-always only when allowlistable;
-            // when not, '2' is the (second, final) "No" option.
-            KeyCode::Char('a') | KeyCode::Char('A') if allowlistable => {
-                Some(ApprovalChoice::ApproveAlways)
-            },
-            KeyCode::Char('2') => Some(if allowlistable {
-                ApprovalChoice::ApproveAlways
-            } else {
-                ApprovalChoice::Deny
-            }),
-            KeyCode::Char('3') | KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Escape => {
-                Some(ApprovalChoice::Deny)
-            },
-            KeyCode::Enter => Some(choice_for(selected)),
-            KeyCode::Up => {
-                if let Some(front) = state.pending_approval.front_mut() {
-                    front.selected_option = selected.saturating_sub(1);
-                }
-                None
-            },
-            KeyCode::Down => {
-                if let Some(front) = state.pending_approval.front_mut() {
-                    front.selected_option = (selected + 1).min(option_count - 1);
-                }
-                None
-            },
-            _ => None,
-        };
-        if let Some(decision) = choice
-            && let Some(call_id) = state.pending_approval.front().map(|i| i.call_id)
-        {
-            state.pending_approval.pop_front();
-            cmds.push(Cmd::ResolveApproval { call_id, decision });
-        }
-        return;
-    }
-
-    // Inline question modal (ask_user_question): exclusive while a question set
-    // awaits answers. Sits ABOVE the Esc-cancel guard so Esc dismisses just the
-    // question and keeps the turn alive, mirroring the approval modal.
-    if !state.pending_question.is_empty() {
-        handle_question_key(state, cmds, code, mods);
-        return;
-    }
-
-    // Pending confirmation modal (e.g. `/clear`): y/Enter accepts, n/Esc
-    // declines. (This handler — and the render side — were missing, so the
-    // confirmation was previously inert.)
-    if state.confirm.is_some() {
-        match code {
-            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-                handle_confirm_accepted(state, cmds);
-            },
-            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Escape => {
-                state.confirm = None;
-            },
-            _ => {},
-        }
-        return;
+    match state.focus() {
+        Focus::ApprovalModal => {
+            handle_approval_key(state, cmds, code);
+            return;
+        },
+        Focus::QuestionModal => {
+            handle_question_key(state, cmds, code, mods);
+            return;
+        },
+        Focus::ConfirmModal => {
+            handle_confirm_key(state, cmds, code);
+            return;
+        },
+        // Pickers dispatch BELOW the busy-Esc guard and the composer
+        // chords (Ctrl+D still quits, Alt+T still cycles, with a picker
+        // open) — same order the guard chain always had.
+        Focus::Picker | Focus::Composer => {},
     }
 
     // Esc interrupts active work by cancelling the current turn. It must NEVER
@@ -1500,32 +1431,11 @@ pub(crate) fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, 
         return;
     }
 
-    // Model picker (`/model`): ↑/↓ navigate, Enter switches, Esc dismisses,
-    // typing filters. Placed before the conversation picker for no reason
-    // other than declaration order — the modes are mutually exclusive.
-    if matches!(state.ui.mode, UiMode::ModelPicker { .. }) {
-        handle_model_picker_key(state, cmds, code);
-        return;
-    }
-
-    // Conversation-list picker (UiMode::ConversationList): ↑/↓
-    // navigate, Enter loads the highlighted session, Esc dismisses.
-    if matches!(state.ui.mode, UiMode::ConversationList { .. }) {
-        handle_conversation_list_key(state, cmds, code);
-        return;
-    }
-
-    // Rewind picker (double-Esc): ↑/↓ navigate the user messages, Enter
-    // forks the session at the highlighted one, Esc dismisses untouched.
-    if matches!(state.ui.mode, UiMode::RewindPicker { .. }) {
-        handle_rewind_picker_key(state, cmds, code);
-        return;
-    }
-
-    // Plan-mode settings picker (/plan config): ↑/↓ navigate, Enter/←/→
-    // cycle the highlighted value, Esc closes.
-    if matches!(state.ui.mode, UiMode::PlanConfig { .. }) {
-        handle_plan_config_key(state, cmds, code);
+    // A picker owns the keystroke from here down (the shared navigation
+    // core lives in `picker::picker_step`; each handler keeps only its
+    // confirm semantics and extra keys).
+    if state.focus() == Focus::Picker {
+        handle_picker_key(state, cmds, code);
         return;
     }
 
@@ -1834,6 +1744,104 @@ pub(crate) fn rewind_candidates(messages: &[ChatMessage]) -> Vec<crate::RewindCa
 /// Handle keyboard input while the rewind picker is open. Up/Down walk the
 /// candidate list; Enter forks the session at the highlighted user message;
 /// Esc dismisses without touching the conversation.
+/// Route a keystroke to whichever `UiMode` picker is open. Reached only
+/// when [`Focus::Picker`] resolved, so the per-handler mode destructures
+/// are re-checks, not policy.
+pub(crate) fn handle_picker_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode) {
+    match state.ui.mode {
+        UiMode::ModelPicker { .. } => handle_model_picker_key(state, cmds, code),
+        UiMode::ConversationList { .. } => handle_conversation_list_key(state, cmds, code),
+        UiMode::RewindPicker { .. } => handle_rewind_picker_key(state, cmds, code),
+        UiMode::PlanConfig { .. } => handle_plan_config_key(state, cmds, code),
+        UiMode::EditingInput | UiMode::ModelList => {},
+    }
+}
+
+/// The yes/no confirmation modal (`/clear`): y/Enter accepts, n/Esc
+/// declines. Extracted verbatim from the old guard chain.
+pub(crate) fn handle_confirm_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode) {
+    match code {
+        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+            handle_confirm_accepted(state, cmds);
+        },
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Escape => {
+            state.confirm = None;
+        },
+        _ => {},
+    }
+}
+
+/// The inline tool-approval modal. Exclusive while a tool awaits approval:
+/// 1/y approve, 2/a approve-always (when allowlistable), 3/n/Esc deny, or
+/// highlight with the arrows and Enter. Body extracted verbatim from the
+/// old guard chain; `Focus::ApprovalModal` is the routing authority now.
+pub(crate) fn handle_approval_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode) {
+    {
+        use crate::ApprovalChoice;
+        // Content-bearing external tools are non-allowlistable: the gate signals
+        // this with an empty allowlist scope, and the modal then omits the
+        // middle "approve always" option (#6, #31). Layout:
+        //   allowlistable:     0 = Yes, 1 = Yes-always, 2 = No
+        //   non-allowlistable: 0 = Yes,                 1 = No
+        let allowlistable = state
+            .pending_approval
+            .front()
+            .map(|i| !i.allowlist_scope.is_empty())
+            .unwrap_or(false);
+        let option_count = if allowlistable { 3 } else { 2 };
+        let choice_for = |idx: usize| match (allowlistable, idx) {
+            (true, 0) | (false, 0) => ApprovalChoice::Approve,
+            (true, 1) => ApprovalChoice::ApproveAlways,
+            _ => ApprovalChoice::Deny,
+        };
+        // Copy the current highlight out so the ↑/↓ arms can take a fresh
+        // mutable borrow without conflicting.
+        let selected = state
+            .pending_approval
+            .front()
+            .map(|i| i.selected_option)
+            .unwrap_or(0);
+        let choice = match code {
+            KeyCode::Char('1') | KeyCode::Char('y') | KeyCode::Char('Y') => {
+                Some(ApprovalChoice::Approve)
+            },
+            // 'a'/'A' and '2' select approve-always only when allowlistable;
+            // when not, '2' is the (second, final) "No" option.
+            KeyCode::Char('a') | KeyCode::Char('A') if allowlistable => {
+                Some(ApprovalChoice::ApproveAlways)
+            },
+            KeyCode::Char('2') => Some(if allowlistable {
+                ApprovalChoice::ApproveAlways
+            } else {
+                ApprovalChoice::Deny
+            }),
+            KeyCode::Char('3') | KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Escape => {
+                Some(ApprovalChoice::Deny)
+            },
+            KeyCode::Enter => Some(choice_for(selected)),
+            KeyCode::Up => {
+                if let Some(front) = state.pending_approval.front_mut() {
+                    front.selected_option = selected.saturating_sub(1);
+                }
+                None
+            },
+            KeyCode::Down => {
+                if let Some(front) = state.pending_approval.front_mut() {
+                    front.selected_option = (selected + 1).min(option_count - 1);
+                }
+                None
+            },
+            _ => None,
+        };
+        if let Some(decision) = choice
+            && let Some(call_id) = state.pending_approval.front().map(|i| i.call_id)
+        {
+            state.pending_approval.pop_front();
+            cmds.push(Cmd::ResolveApproval { call_id, decision });
+        }
+    }
+}
+
 pub(crate) fn handle_rewind_picker_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode) {
     let UiMode::RewindPicker {
         ref candidates,
@@ -1842,26 +1850,17 @@ pub(crate) fn handle_rewind_picker_key(state: &mut State, cmds: &mut Vec<Cmd>, c
     else {
         return;
     };
-    match code {
-        KeyCode::Up => {
-            *cursor = cursor.saturating_sub(1);
-        },
-        KeyCode::Down => {
-            let max = candidates.len().saturating_sub(1);
-            if *cursor < max {
-                *cursor += 1;
-            }
-        },
-        KeyCode::Enter => {
-            if let Some(candidate) = candidates.get(*cursor) {
+    match picker_step(code, cursor, candidates.len()) {
+        PickerStep::Confirm(row) => {
+            if let Some(candidate) = candidates.get(row) {
                 let message_index = candidate.message_index;
                 fork_conversation_at(state, cmds, message_index);
             }
         },
-        KeyCode::Escape => {
+        PickerStep::Dismiss => {
             state.ui.mode = UiMode::EditingInput;
         },
-        _ => {},
+        PickerStep::Moved | PickerStep::Other => {},
     }
 }
 
@@ -2210,36 +2209,32 @@ pub(crate) fn handle_model_picker_key(state: &mut State, cmds: &mut Vec<Cmd>, co
     else {
         return;
     };
-    match code {
-        KeyCode::Up => *cursor = cursor.saturating_sub(1),
-        KeyCode::Down => {
-            let max = filter_model_choices(candidates, query)
-                .len()
-                .saturating_sub(1);
-            if *cursor < max {
-                *cursor += 1;
-            }
-        },
-        KeyCode::Enter => {
+    // The cursor walks the FILTERED list, so the query decides the length.
+    let filtered_len = filter_model_choices(candidates, query).len();
+    match picker_step(code, cursor, filtered_len) {
+        PickerStep::Confirm(row) => {
             let chosen = filter_model_choices(candidates, query)
-                .get(*cursor)
+                .get(row)
                 .map(|c| c.id.clone());
             state.ui.mode = UiMode::EditingInput;
             if let Some(id) = chosen {
                 switch_model(state, cmds, id);
             }
         },
-        KeyCode::Escape => state.ui.mode = UiMode::EditingInput,
-        KeyCode::Backspace => {
-            query.pop();
-            *cursor = 0;
+        PickerStep::Dismiss => state.ui.mode = UiMode::EditingInput,
+        PickerStep::Moved => {},
+        PickerStep::Other => match code {
+            KeyCode::Backspace => {
+                query.pop();
+                *cursor = 0;
+            },
+            KeyCode::Char(c) => {
+                query.push(c);
+                // Narrowing invalidates the old row position; start from the top.
+                *cursor = 0;
+            },
+            _ => {},
         },
-        KeyCode::Char(c) => {
-            query.push(c);
-            // Narrowing invalidates the old row position; start from the top.
-            *cursor = 0;
-        },
-        _ => {},
     }
 }
 
@@ -2254,18 +2249,9 @@ pub(crate) fn handle_conversation_list_key(state: &mut State, cmds: &mut Vec<Cmd
     else {
         return;
     };
-    match code {
-        KeyCode::Up => {
-            *cursor = cursor.saturating_sub(1);
-        },
-        KeyCode::Down => {
-            let max = candidates.len().saturating_sub(1);
-            if *cursor < max {
-                *cursor += 1;
-            }
-        },
-        KeyCode::Enter => {
-            if let Some(summary) = candidates.get(*cursor) {
+    match picker_step(code, cursor, candidates.len()) {
+        PickerStep::Confirm(row) => {
+            if let Some(summary) = candidates.get(row) {
                 cmds.push(Cmd::Query(Query::LoadConversation {
                     id: summary.id.clone(),
                 }));
@@ -2274,10 +2260,10 @@ pub(crate) fn handle_conversation_list_key(state: &mut State, cmds: &mut Vec<Cmd
             // until then so the user sees the list until the load
             // completes.
         },
-        KeyCode::Escape => {
+        PickerStep::Dismiss => {
             state.ui.mode = UiMode::EditingInput;
         },
-        _ => {},
+        PickerStep::Moved | PickerStep::Other => {},
     }
 }
 
@@ -5450,27 +5436,30 @@ pub(crate) fn handle_plan_config_key(state: &mut State, cmds: &mut Vec<Cmd>, cod
     let UiMode::PlanConfig { ref mut cursor } = state.ui.mode else {
         return;
     };
-    match code {
-        KeyCode::Up => {
-            *cursor = cursor.saturating_sub(1);
-        },
-        KeyCode::Down => {
-            *cursor = (*cursor + 1).min(PLAN_CONFIG_ROW_COUNT - 1);
-        },
-        KeyCode::Enter | KeyCode::Right => {
-            let row = *cursor;
+    match picker_step(code, cursor, PLAN_CONFIG_ROW_COUNT) {
+        // Enter and Right both cycle the highlighted value forward.
+        PickerStep::Confirm(row) => {
             cycle_plan_config_row(state, row, true);
             cmds.push(Cmd::PersistPlanConfig(state.settings.plan.clone()));
         },
-        KeyCode::Left => {
-            let row = *cursor;
-            cycle_plan_config_row(state, row, false);
-            cmds.push(Cmd::PersistPlanConfig(state.settings.plan.clone()));
-        },
-        KeyCode::Escape => {
+        PickerStep::Dismiss => {
             state.ui.mode = UiMode::EditingInput;
         },
-        _ => {},
+        PickerStep::Moved => {},
+        PickerStep::Other => {
+            let row = *cursor;
+            match code {
+                KeyCode::Right => {
+                    cycle_plan_config_row(state, row, true);
+                    cmds.push(Cmd::PersistPlanConfig(state.settings.plan.clone()));
+                },
+                KeyCode::Left => {
+                    cycle_plan_config_row(state, row, false);
+                    cmds.push(Cmd::PersistPlanConfig(state.settings.plan.clone()));
+                },
+                _ => {},
+            }
+        },
     }
 }
 

@@ -319,83 +319,40 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         0
     };
 
-    // Bottom region: one of three widgets based on UI mode.
-    //   - ConversationList picker: 12-line pane.
-    //   - Slash palette (input starts with `/`): 3–10 lines based on
-    //     filter match count.
-    //   - Otherwise: 2-line status bar.
-    // Precedence: approval modal > confirm modal > ConversationList picker >
-    // slash palette > status bar. Approvals/confirms are interrupts that
-    // overlay regardless of input mode. (`approval_item`/`question_item`
-    // were decided up front, before the status/input zones were sized.)
-    let confirm_open =
-        approval_item.is_none() && question_item.is_none() && state.confirm.is_some();
-    let conv_list_open = approval_item.is_none()
-        && question_item.is_none()
-        && !confirm_open
-        && matches!(
-            state.ui.mode,
-            mermaid_domain::UiMode::ConversationList { .. }
-        );
-    let rewind_open = approval_item.is_none()
-        && question_item.is_none()
-        && !confirm_open
-        && matches!(state.ui.mode, mermaid_domain::UiMode::RewindPicker { .. });
-    let plan_config_open = approval_item.is_none()
-        && question_item.is_none()
-        && !confirm_open
-        && matches!(state.ui.mode, mermaid_domain::UiMode::PlanConfig { .. });
-    let model_picker_open = approval_item.is_none()
-        && question_item.is_none()
-        && !confirm_open
-        && matches!(state.ui.mode, mermaid_domain::UiMode::ModelPicker { .. });
-    let file_picker_open = approval_item.is_none()
-        && question_item.is_none()
-        && !confirm_open
-        && !conv_list_open
-        && !rewind_open
-        && !plan_config_open
-        && state.ui.file_picker_open();
-    let palette_open = approval_item.is_none()
-        && question_item.is_none()
-        && !confirm_open
-        && !conv_list_open
-        && !file_picker_open
-        && state.ui.input_buffer.starts_with('/');
-    let bottom_height = if let Some(item) = approval_item {
-        // border(2) + body lines + blank(1) + 3 option lines
-        let body_lines = item.prompt.lines().count().clamp(1, 6) as u16;
-        2 + body_lines + 1 + 3
-    } else if let Some(qset) = question_item {
-        // The modal spans the full frame width; wrapping must be measured at
-        // the same width it is drawn at or the reserved zone clips it.
-        widgets::question_modal_height(qset, &rstate.theme, frame.area().width)
-    } else if confirm_open {
-        6
-    } else if conv_list_open || rewind_open {
-        12
-    } else if plan_config_open {
-        widgets::PLAN_CONFIG_HEIGHT
-    } else if model_picker_open {
-        widgets::MODEL_PICKER_HEIGHT
-    } else if file_picker_open {
-        let rows = state.ui.file_picker_matches.len().clamp(1, 8);
-        (rows as u16) + 2
-    } else if palette_open {
-        let typed = state
-            .ui
-            .input_buffer
-            .trim_start_matches('/')
-            .split_whitespace()
-            .next()
-            .unwrap_or("");
-        let row_count =
-            mermaid_domain::slash_commands::filter_entries(typed, &state.plugin_commands)
-                .len()
-                .clamp(1, 8);
-        (row_count as u16) + 2
-    } else {
-        2
+    // Bottom region: ONE decision picks the pane, and height and draw both
+    // match on it — the two hand-maintained ladders this replaces (a guard
+    // ladder sizing the zone, an if-else ladder drawing it) had to be edited
+    // in lockstep and could disagree. Precedence for the exclusive tiers is
+    // the reducer's own `State::focus()`, so what draws and what receives
+    // keys cannot drift apart; the composer-attached surfaces (file picker,
+    // palette) rank below every exclusive surface, palette last.
+    let pane = bottom_pane(state);
+    let bottom_height = match &pane {
+        BottomPane::Approval => {
+            // border(2) + body lines + blank(1) + 3 option lines
+            let body_lines = state
+                .pending_approval
+                .front()
+                .map(|item| item.prompt.lines().count())
+                .unwrap_or(1)
+                .clamp(1, 6) as u16;
+            2 + body_lines + 1 + 3
+        },
+        BottomPane::Question => state
+            .pending_question
+            .front()
+            .map(|qset| widgets::question_modal_height(qset, &rstate.theme, frame.area().width))
+            .unwrap_or(2),
+        BottomPane::Confirm => 6,
+        BottomPane::ConversationList | BottomPane::Rewind => 12,
+        BottomPane::PlanConfig => widgets::PLAN_CONFIG_HEIGHT,
+        BottomPane::ModelPicker => widgets::MODEL_PICKER_HEIGHT,
+        BottomPane::FilePicker => {
+            let rows = state.ui.file_picker_matches.len().clamp(1, 8);
+            (rows as u16) + 2
+        },
+        BottomPane::Palette(entries) => (entries.len().clamp(1, 8) as u16) + 2,
+        BottomPane::Status => 2,
     };
 
     // 4-zone vertical layout: chat / status line / input / bottom. Pasted images
@@ -566,138 +523,212 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         Some(requested)
     };
 
-    // Bottom: conversation-list picker, slash-palette overlay, or
-    // persistent status bar — whichever the UI mode dictates.
-    if let Some(item) = state.pending_approval.front() {
-        use widgets::ApprovalModalWidget;
-        // Content-bearing external tools (type_text, MCP, …) are
-        // non-allowlistable: the gate leaves their scope empty, and we omit the
-        // "don't ask again" option so the user can't blanket-approve them (#6, #31).
-        let options = if item.allowlist_scope.is_empty() {
-            vec!["1. Yes".to_string(), "2. No  (Esc)".to_string()]
-        } else {
-            vec![
-                "1. Yes".to_string(),
-                format!("2. Yes, and don't ask again for `{}`", item.allowlist_scope),
-                "3. No  (Esc)".to_string(),
-            ]
-        };
-        let widget = ApprovalModalWidget {
-            theme: &rstate.theme,
-            title: format!("Approval required — {}  [{}]", item.tool, item.risk),
-            body: item.prompt.as_str(),
-            options,
-            selected_index: Some(item.selected_option),
-            accent: rstate.theme.colors.warning.to_color(),
-        };
-        frame.render_widget(widget, chunks[4]);
-    } else if let Some(qset) = state.pending_question.front() {
-        use widgets::QuestionModalWidget;
-        let widget = QuestionModalWidget {
-            theme: &rstate.theme,
-            set: qset,
-            width: chunks[4].width,
-        };
-        frame.render_widget(widget, chunks[4]);
-    } else if let Some(confirm) = &state.confirm {
-        use widgets::ApprovalModalWidget;
-        let widget = ApprovalModalWidget {
-            theme: &rstate.theme,
-            title: "Confirm".to_string(),
-            body: confirm.prompt.as_str(),
-            options: vec!["y. Yes".to_string(), "n. No  (Esc)".to_string()],
-            selected_index: None,
-            accent: rstate.theme.colors.warning.to_color(),
-        };
-        frame.render_widget(widget, chunks[4]);
-    } else if let mermaid_domain::UiMode::ModelPicker {
-        candidates,
-        query,
-        cursor,
-        loading,
-    } = &state.ui.mode
-    {
-        use widgets::ModelPickerWidget;
-        let matches = mermaid_domain::reducer::filter_model_choices(candidates, query);
-        let widget = ModelPickerWidget {
-            theme: &rstate.theme,
-            matches: &matches,
-            query,
-            cursor: *cursor,
-            loading: *loading,
-            current: &state.session.model_id,
-        };
-        frame.render_widget(widget, chunks[4]);
-    } else if let mermaid_domain::UiMode::ConversationList { candidates, cursor } = &state.ui.mode {
-        use widgets::ConversationListWidget;
-        let widget = ConversationListWidget {
-            theme: &rstate.theme,
-            candidates,
-            cursor: *cursor,
-        };
-        frame.render_widget(widget, chunks[4]);
-    } else if let mermaid_domain::UiMode::RewindPicker { candidates, cursor } = &state.ui.mode {
-        use widgets::RewindPickerWidget;
-        let widget = RewindPickerWidget {
-            theme: &rstate.theme,
-            candidates,
-            cursor: *cursor,
-        };
-        frame.render_widget(widget, chunks[4]);
-    } else if let mermaid_domain::UiMode::PlanConfig { cursor } = &state.ui.mode {
-        use widgets::PlanConfigWidget;
-        let widget = PlanConfigWidget {
-            theme: &rstate.theme,
-            plan: &state.settings.plan,
-            session_model: &state.session.model_id,
-            cursor: *cursor,
-        };
-        frame.render_widget(widget, chunks[4]);
-    } else if file_picker_open {
-        use widgets::FilePickerWidget;
-        let widget = FilePickerWidget {
-            theme: &rstate.theme,
-            matches: &state.ui.file_picker_matches,
-            selected_index: state.ui.file_picker_cursor.unwrap_or(0),
-            loading: state.ui.project_files_loading && state.ui.project_files.is_none(),
-        };
-        frame.render_widget(widget, chunks[4]);
-    } else if palette_open {
-        let typed = state
-            .ui
-            .input_buffer
-            .trim_start_matches('/')
-            .split_whitespace()
-            .next()
-            .unwrap_or("");
-        let entries = mermaid_domain::slash_commands::filter_entries(typed, &state.plugin_commands);
-        let palette_widget = SlashPaletteWidget {
-            theme: &rstate.theme,
-            entries,
-            selected_index: state.ui.palette_cursor.unwrap_or(0),
-        };
-        frame.render_widget(palette_widget, chunks[4]);
-    } else {
-        let cwd = state.cwd.display().to_string();
-        let status_widget = StatusWidget {
-            theme: &rstate.theme,
-            working_dir: &cwd,
-            hostname: &rstate.hostname,
-            username: &rstate.username,
-            version: &rstate.version,
-            context_usage: state.session.context_usage.as_ref(),
-            model_name: &state.session.model_id,
-            reasoning_level: effective,
-            requested_level,
-            // Planning IS the mode — `plan` renders through the same
-            // `safety: <mode>` segment as every other level.
-            safety_mode: state.session.safety_mode,
-        };
-        frame.render_widget(status_widget, chunks[4]);
+    // Bottom: draw whichever pane the one decision above picked.
+    match pane {
+        BottomPane::Approval => {
+            if let Some(item) = state.pending_approval.front() {
+                use widgets::ApprovalModalWidget;
+                // Content-bearing external tools (type_text, MCP, …) are
+                // non-allowlistable: the gate leaves their scope empty, and we
+                // omit the "don't ask again" option so the user can't
+                // blanket-approve them (#6, #31).
+                let options = if item.allowlist_scope.is_empty() {
+                    vec!["1. Yes".to_string(), "2. No  (Esc)".to_string()]
+                } else {
+                    vec![
+                        "1. Yes".to_string(),
+                        format!("2. Yes, and don't ask again for `{}`", item.allowlist_scope),
+                        "3. No  (Esc)".to_string(),
+                    ]
+                };
+                let widget = ApprovalModalWidget {
+                    theme: &rstate.theme,
+                    title: format!("Approval required — {}  [{}]", item.tool, item.risk),
+                    body: item.prompt.as_str(),
+                    options,
+                    selected_index: Some(item.selected_option),
+                    accent: rstate.theme.colors.warning.to_color(),
+                };
+                frame.render_widget(widget, chunks[4]);
+            }
+        },
+        BottomPane::Question => {
+            if let Some(qset) = state.pending_question.front() {
+                use widgets::QuestionModalWidget;
+                let widget = QuestionModalWidget {
+                    theme: &rstate.theme,
+                    set: qset,
+                    width: chunks[4].width,
+                };
+                frame.render_widget(widget, chunks[4]);
+            }
+        },
+        BottomPane::Confirm => {
+            if let Some(confirm) = &state.confirm {
+                use widgets::ApprovalModalWidget;
+                let widget = ApprovalModalWidget {
+                    theme: &rstate.theme,
+                    title: "Confirm".to_string(),
+                    body: confirm.prompt.as_str(),
+                    options: vec!["y. Yes".to_string(), "n. No  (Esc)".to_string()],
+                    selected_index: None,
+                    accent: rstate.theme.colors.warning.to_color(),
+                };
+                frame.render_widget(widget, chunks[4]);
+            }
+        },
+        BottomPane::ModelPicker => {
+            if let mermaid_domain::UiMode::ModelPicker {
+                candidates,
+                query,
+                cursor,
+                loading,
+            } = &state.ui.mode
+            {
+                use widgets::ModelPickerWidget;
+                let matches = mermaid_domain::reducer::filter_model_choices(candidates, query);
+                let widget = ModelPickerWidget {
+                    theme: &rstate.theme,
+                    matches: &matches,
+                    query,
+                    cursor: *cursor,
+                    loading: *loading,
+                    current: &state.session.model_id,
+                };
+                frame.render_widget(widget, chunks[4]);
+            }
+        },
+        BottomPane::ConversationList => {
+            if let mermaid_domain::UiMode::ConversationList { candidates, cursor } = &state.ui.mode
+            {
+                use widgets::ConversationListWidget;
+                let widget = ConversationListWidget {
+                    theme: &rstate.theme,
+                    candidates,
+                    cursor: *cursor,
+                };
+                frame.render_widget(widget, chunks[4]);
+            }
+        },
+        BottomPane::Rewind => {
+            if let mermaid_domain::UiMode::RewindPicker { candidates, cursor } = &state.ui.mode {
+                use widgets::RewindPickerWidget;
+                let widget = RewindPickerWidget {
+                    theme: &rstate.theme,
+                    candidates,
+                    cursor: *cursor,
+                };
+                frame.render_widget(widget, chunks[4]);
+            }
+        },
+        BottomPane::PlanConfig => {
+            if let mermaid_domain::UiMode::PlanConfig { cursor } = &state.ui.mode {
+                use widgets::PlanConfigWidget;
+                let widget = PlanConfigWidget {
+                    theme: &rstate.theme,
+                    plan: &state.settings.plan,
+                    session_model: &state.session.model_id,
+                    cursor: *cursor,
+                };
+                frame.render_widget(widget, chunks[4]);
+            }
+        },
+        BottomPane::FilePicker => {
+            use widgets::FilePickerWidget;
+            let widget = FilePickerWidget {
+                theme: &rstate.theme,
+                matches: &state.ui.file_picker_matches,
+                selected_index: state.ui.file_picker_cursor.unwrap_or(0),
+                loading: state.ui.project_files_loading && state.ui.project_files.is_none(),
+            };
+            frame.render_widget(widget, chunks[4]);
+        },
+        BottomPane::Palette(entries) => {
+            let palette_widget = SlashPaletteWidget {
+                theme: &rstate.theme,
+                entries,
+                selected_index: state.ui.palette_cursor.unwrap_or(0),
+            };
+            frame.render_widget(palette_widget, chunks[4]);
+        },
+        BottomPane::Status => {
+            let cwd = state.cwd.display().to_string();
+            let status_widget = StatusWidget {
+                theme: &rstate.theme,
+                working_dir: &cwd,
+                hostname: &rstate.hostname,
+                username: &rstate.username,
+                version: &rstate.version,
+                context_usage: state.session.context_usage.as_ref(),
+                model_name: &state.session.model_id,
+                reasoning_level: effective,
+                requested_level,
+                // Planning IS the mode — `plan` renders through the same
+                // `safety: <mode>` segment as every other level.
+                safety_mode: state.session.safety_mode,
+            };
+            frame.render_widget(status_widget, chunks[4]);
+        },
     }
 }
 
-/// Can a `Continuation` message be folded into this predecessor? Guards the
+/// The bottom zone's pane for this frame. The exclusive tiers come straight
+/// from the reducer's [`mermaid_domain::Focus`] resolver — the same
+/// authority that routes keys — so the pane the user sees and the surface
+/// their keys reach are one decision. Composer-attached surfaces rank below
+/// every exclusive tier: the @-file picker, then the slash palette (whose
+/// filtered entries are computed here ONCE — the old ladders each ran the
+/// filter, one for height and one for rows).
+enum BottomPane<'a> {
+    Approval,
+    Question,
+    Confirm,
+    ModelPicker,
+    ConversationList,
+    Rewind,
+    PlanConfig,
+    FilePicker,
+    Palette(Vec<mermaid_domain::slash_commands::PaletteEntry<'a>>),
+    Status,
+}
+
+fn bottom_pane(state: &mermaid_domain::State) -> BottomPane<'_> {
+    use mermaid_domain::{Focus, UiMode};
+    match state.focus() {
+        Focus::ApprovalModal => BottomPane::Approval,
+        Focus::QuestionModal => BottomPane::Question,
+        Focus::ConfirmModal => BottomPane::Confirm,
+        Focus::Picker => match state.ui.mode {
+            UiMode::ModelPicker { .. } => BottomPane::ModelPicker,
+            UiMode::ConversationList { .. } => BottomPane::ConversationList,
+            UiMode::RewindPicker { .. } => BottomPane::Rewind,
+            UiMode::PlanConfig { .. } => BottomPane::PlanConfig,
+            // `Focus::Picker` only resolves for the four picker modes.
+            UiMode::EditingInput | UiMode::ModelList => BottomPane::Status,
+        },
+        Focus::Composer => {
+            if state.ui.file_picker_open() {
+                BottomPane::FilePicker
+            } else if state.ui.input_buffer.starts_with('/') {
+                let typed = state
+                    .ui
+                    .input_buffer
+                    .trim_start_matches('/')
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("");
+                BottomPane::Palette(mermaid_domain::slash_commands::filter_entries(
+                    typed,
+                    &state.plugin_commands,
+                ))
+            } else {
+                BottomPane::Status
+            }
+        },
+    }
+}
+
+/// Can a `Continuation` message be folded into this predecessor?/// Can a `Continuation` message be folded into this predecessor? Guards the
 /// stitch against non-bubble assistants: a compaction checkpoint's assistant
 /// half (`ContextCheckpoint`, rendered as an event block), the empty
 /// error-carrier message, or an assistant that ended in tool calls.
