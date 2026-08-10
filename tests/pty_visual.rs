@@ -101,6 +101,40 @@ if ([System.Windows.Forms.Clipboard]::ContainsImage()) {{ throw 'expected a PNG-
     );
 }
 
+/// A multiline paste lands in the composer as ONE insert — no per-line
+/// submits, no model calls.
+///
+/// ConPTY delivers a terminal paste as several key-event chunks (crossterm
+/// emits no `Event::Paste` on the Windows console), and a chunk gap landing
+/// right after an Enter made that Enter a lone key — a submit. Pasting a
+/// three-line prompt fired two half-prompts at the model (issue #351). On
+/// unix the same bytes parse as a real bracketed paste, so this claim holds
+/// trivially there and guards the chunk bridge on Windows.
+#[test]
+fn a_multiline_paste_never_submits() {
+    let mut term = Terminal::launch("pty-paste-chunks");
+    term.press(b"\x1b[200~line one\r\nline two\nline three\x1b[201~");
+    assert!(
+        term.wait_for_text("line three", Duration::from_secs(10)),
+        "the paste never reached the composer. Screen:\n{}",
+        term.frame_text(),
+    );
+    // A wrongly-submitted line fires a model call whose failure renders in
+    // the transcript; give one time to surface before reading the frame.
+    std::thread::sleep(Duration::from_millis(1200));
+    term.press(CTRL_L);
+    std::thread::sleep(Duration::from_millis(300));
+    let screen = term.frame_text();
+    assert!(
+        !screen.contains("Auth error") && !screen.contains("Worked for"),
+        "a pasted line was submitted as a message. Screen:\n{screen}",
+    );
+    assert!(
+        screen.contains("line one") && screen.contains("line two"),
+        "the whole paste must sit in the composer. Screen:\n{screen}",
+    );
+}
+
 /// Shrinking the terminal keeps the composer and the mode band on screen.
 ///
 /// The chat zone's 10-row floor (`Constraint::Min`) outranks the fixed

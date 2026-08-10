@@ -86,19 +86,56 @@ pub fn event_to_msg(event: CtEvent) -> Option<Msg> {
 /// submits and Ctrl+J still inserts a literal newline.
 pub fn coalesce_key_burst(
     first: CtEvent,
-    mut drain: impl FnMut() -> Option<CtEvent>,
+    drain: impl FnMut() -> Option<CtEvent>,
 ) -> (Option<Msg>, Vec<Msg>) {
-    // Only an unmodified character/Enter press can start a paste burst.
-    // Anything else (arrows, Ctrl/Alt combos, mouse, resize) passes straight
-    // through with no draining.
-    let Some(first_char) = coalescible_char(&first) else {
-        return (event_to_msg(first), Vec::new());
-    };
+    let (primary, trailing, _) = coalesce_key_burst_seamed(first, drain);
+    (primary, trailing)
+}
+
+/// [`coalesce_key_burst`] plus the CRLF fold state at burst end, for the one
+/// caller that bridges chunk gaps: a pair split at the seam — a CR closing
+/// this burst, its LF opening the next chunk — must still fold to one
+/// newline, and only this state can tell the bridge so.
+pub(crate) fn coalesce_key_burst_seamed(
+    first: CtEvent,
+    drain: impl FnMut() -> Option<CtEvent>,
+) -> (Option<Msg>, Vec<Msg>, bool) {
+    // Only a coalescible press can start a paste burst. Anything else
+    // (arrows, Ctrl/Alt chords, mouse, resize) passes straight through with
+    // no draining.
+    if coalescible_char(&first).is_none() {
+        return (event_to_msg(first), Vec::new(), false);
+    }
 
     let mut buf = String::new();
-    buf.push(first_char);
-    let mut trailing = Vec::new();
+    let mut last_was_cr = false;
+    let breaker = drain_burst_into(&mut buf, &mut last_was_cr, first.clone(), drain);
+    let trailing: Vec<Msg> = breaker.and_then(event_to_msg).into_iter().collect();
 
+    if buf.chars().count() <= 1 {
+        // Single keystroke, not a paste: keep normal key semantics.
+        (event_to_msg(first), trailing, last_was_cr)
+    } else {
+        (Some(Msg::Paste(Paste::Text(buf))), trailing, last_was_cr)
+    }
+}
+
+/// Accumulate a burst into `buf`, starting from `first` (returned unfolded
+/// if it is not coalescible). Returns the event that broke the burst, if
+/// any — untranslated, for the caller to queue after the paste.
+///
+/// `last_was_cr` carries CRLF fold state in and out, so a caller stitching
+/// bursts across chunk gaps deduplicates a pair split at the seam.
+fn drain_burst_into(
+    buf: &mut String,
+    last_was_cr: &mut bool,
+    first: CtEvent,
+    mut drain: impl FnMut() -> Option<CtEvent>,
+) -> Option<CtEvent> {
+    match coalescible_char(&first) {
+        Some(c) => push_burst_char(buf, last_was_cr, c),
+        None => return Some(first),
+    }
     while let Some(evt) = drain() {
         // Skip key release/repeat without ending the burst.
         if let CtEvent::Key(k) = &evt
@@ -107,45 +144,156 @@ pub fn coalesce_key_burst(
             continue;
         }
         match coalescible_char(&evt) {
-            Some(c) => buf.push(c),
-            None => {
-                // Not part of the paste — process it on its own next tick.
-                if let Some(m) = event_to_msg(evt) {
-                    trailing.push(m);
-                }
-                break;
-            },
+            Some(c) => push_burst_char(buf, last_was_cr, c),
+            None => return Some(evt),
         }
     }
+    None
+}
 
-    if buf.chars().count() <= 1 {
-        // Single keystroke, not a paste: keep normal key semantics.
-        (event_to_msg(first), trailing)
-    } else {
-        (Some(Msg::Paste(Paste::Text(buf))), trailing)
+/// How long a paste-shaped burst survives a momentary quiet before it is
+/// considered finished.
+///
+/// ConPTY hands a single terminal paste to the reader in several chunks with
+/// sub-millisecond to few-millisecond gaps; 25ms absorbs those (and
+/// loaded-runner jitter) while staying far below human reaction time, so a
+/// deliberate keystroke after a paste does not land inside the window in
+/// practice. The wait is paid only while a burst is already paste-shaped — a
+/// lone keystroke, Enter included, never waits.
+const PASTE_CHUNK_BRIDGE: std::time::Duration = std::time::Duration::from_millis(25);
+
+/// Extend a just-coalesced paste across chunk gaps: wait up to
+/// [`PASTE_CHUNK_BRIDGE`] for more input, folding further coalescible chunks
+/// into `text`, until the quiet outlasts the window or deliberate input
+/// arrives (returned, to be processed after the merged paste).
+///
+/// This is the second half of [`coalesce_key_burst`]: its drain sees only
+/// *immediately available* events, so a chunk gap ends the burst — and a
+/// pasted newline arriving just past the gap lands as a lone Enter, which is
+/// a submit. Pasting a three-line prompt fired two half-prompts at the model
+/// (#351). Inside the bridge window an Enter — Ctrl+Enter included — is
+/// paste content, never a submit; a deliberate submit after a paste arrives
+/// on a human timescale, not within milliseconds of the last chunk.
+///
+/// `last_was_cr` seeds the CRLF fold state from the burst this paste came
+/// from, so a pair split exactly at the chunk gap (CR closing one chunk, LF
+/// opening the next — precisely where ConPTY splits) still folds to one
+/// newline.
+#[must_use]
+pub async fn bridge_paste_chunks<S>(
+    text: &mut String,
+    mut last_was_cr: bool,
+    events: &mut S,
+) -> Vec<Msg>
+where
+    S: futures::Stream<Item = std::io::Result<CtEvent>> + Unpin,
+{
+    use futures::{FutureExt, StreamExt};
+    loop {
+        let Ok(arrival) = tokio::time::timeout(PASTE_CHUNK_BRIDGE, events.next()).await else {
+            // The quiet outlasted the window: the paste is over.
+            return Vec::new();
+        };
+        let Some(Ok(evt)) = arrival else {
+            // Stream end or error; the main loop observes it on its next poll.
+            return Vec::new();
+        };
+        // Skip key release/repeat without ending the bridge — the same rule
+        // the coalescer's drain applies mid-burst.
+        if let CtEvent::Key(k) = &evt
+            && k.kind != KeyEventKind::Press
+        {
+            continue;
+        }
+        if coalescible_char(&evt).is_none() {
+            // Deliberate input: the paste is over; hand the event back.
+            return event_to_msg(evt).into_iter().collect();
+        }
+        // A continuation chunk: fold it — and everything immediately behind
+        // it — straight into the paste. Even a single-key chunk is paste
+        // content here; the single-keystroke rule belongs to burst STARTS,
+        // not to continuations inside the window.
+        let breaker = drain_burst_into(text, &mut last_was_cr, evt, || {
+            events.next().now_or_never().flatten().and_then(|r| r.ok())
+        });
+        if let Some(b) = breaker {
+            // The continuation stopped on deliberate input: the paste is over.
+            return event_to_msg(b).into_iter().collect();
+        }
     }
 }
 
-/// The character a key press contributes to a coalesced paste, or `None` when
-/// the event isn't part of a paste burst. Only unmodified (no Ctrl/Alt)
-/// `Char` and `Enter` presses qualify; Enter maps to a newline.
-fn coalescible_char(event: &CtEvent) -> Option<char> {
+/// What one key press contributes to a coalesced paste.
+///
+/// Newlines carry their source byte because ConPTY re-encodes a pasted `\r`
+/// as plain Enter and a pasted `\n` as **Ctrl+Enter** — so a CRLF pair
+/// arrives as two Enter presses that must fold to ONE newline, while a
+/// bare-LF line ending (Ctrl+Enter with no preceding plain Enter) is a real
+/// newline of its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BurstChar {
+    /// A printable char or a pasted tab.
+    Plain(char),
+    /// Enter without Control: a pasted `\r` (or the user's Enter key).
+    CrNewline,
+    /// Enter with Control: a pasted `\n`. Recorded distinctly so the fold
+    /// can collapse the LF half of a CRLF pair.
+    LfNewline,
+}
+
+/// Fold one burst character into `buf`. `last_was_cr` carries across calls
+/// within a single accumulation, so `\r\n` folds to one newline while bare
+/// `\n`s and blank lines (`\r\n\r\n`) keep their count.
+fn push_burst_char(buf: &mut String, last_was_cr: &mut bool, ch: BurstChar) {
+    match ch {
+        BurstChar::Plain(c) => {
+            buf.push(c);
+            *last_was_cr = false;
+        },
+        BurstChar::CrNewline => {
+            buf.push('\n');
+            *last_was_cr = true;
+        },
+        BurstChar::LfNewline => {
+            if !*last_was_cr {
+                buf.push('\n');
+            }
+            *last_was_cr = false;
+        },
+    }
+}
+
+/// The contribution a key press makes to a coalesced paste, or `None` when
+/// the event isn't part of a paste burst.
+///
+/// Unmodified `Char`, `Enter`, and `Tab` presses qualify — and so does
+/// **Enter with Control**, because that is how ConPTY delivers a pasted LF
+/// byte (issue #351: treating it as deliberate input broke the burst, and
+/// the reducer's Enter arm then submitted half the paste). A LONE
+/// Ctrl+Enter still submits: the caller's single-keystroke rule returns it
+/// as a normal key when no burst formed around it. Every other modifier
+/// combination stays non-coalescible, so Ctrl+C still interrupts and
+/// chords keep their meaning mid-paste.
+fn coalescible_char(event: &CtEvent) -> Option<BurstChar> {
     let CtEvent::Key(key) = event else {
         return None;
     };
     if key.kind != KeyEventKind::Press {
         return None;
     }
-    if key.modifiers.intersects(CtMods::CONTROL | CtMods::ALT) {
+    if key.modifiers.intersects(CtMods::ALT) {
         return None;
     }
+    if key.modifiers.intersects(CtMods::CONTROL) {
+        return (key.code == CtKeyCode::Enter).then_some(BurstChar::LfNewline);
+    }
     match key.code {
-        CtKeyCode::Char(c) => Some(c),
-        CtKeyCode::Enter => Some('\n'),
+        CtKeyCode::Char(c) => Some(BurstChar::Plain(c)),
+        CtKeyCode::Enter => Some(BurstChar::CrNewline),
         // Pasted tabs arrive as Tab key events on the Windows console; fold
         // them into the burst so indented code survives a paste. A lone Tab
         // (no burst) still falls through to the normal key path below.
-        CtKeyCode::Tab => Some('\t'),
+        CtKeyCode::Tab => Some(BurstChar::Plain('\t')),
         _ => None,
     }
 }
@@ -413,6 +561,170 @@ mod tests {
         // A single Tab (palette completion etc.) must not become a paste.
         let (primary, _) = coalesce_key_burst(key(CtKeyCode::Tab), || None);
         assert!(matches!(primary, Some(Msg::Key(k)) if k.code == KeyCode::Tab));
+    }
+
+    /// ConPTY delivers a pasted LF byte as Enter+CONTROL. Inside a burst it
+    /// is a newline, not deliberate input — treating it as deliberate broke
+    /// the burst and the reducer's Enter arm submitted half the paste (#351).
+    #[test]
+    fn ctrl_enter_in_a_burst_folds_as_a_newline() {
+        let mut rest = vec![
+            key_with(CtKeyCode::Enter, CtMods::CONTROL, KeyEventKind::Press),
+            key(CtKeyCode::Char('b')),
+        ]
+        .into_iter();
+        let (primary, trailing) = coalesce_key_burst(key(CtKeyCode::Char('a')), || rest.next());
+        assert!(
+            matches!(primary, Some(Msg::Paste(Paste::Text(ref s))) if s == "a\nb"),
+            "got {primary:?}"
+        );
+        assert!(trailing.is_empty());
+    }
+
+    /// A CRLF pair arrives as Enter (the CR) then Ctrl+Enter (the LF) —
+    /// one line ending, one newline.
+    #[test]
+    fn a_crlf_pair_in_a_burst_folds_to_one_newline() {
+        let mut rest = vec![
+            key(CtKeyCode::Enter),
+            key_with(CtKeyCode::Enter, CtMods::CONTROL, KeyEventKind::Press),
+            key(CtKeyCode::Char('b')),
+        ]
+        .into_iter();
+        let (primary, _) = coalesce_key_burst(key(CtKeyCode::Char('a')), || rest.next());
+        assert!(
+            matches!(primary, Some(Msg::Paste(Paste::Text(ref s))) if s == "a\nb"),
+            "CRLF must fold to one newline, got {primary:?}"
+        );
+    }
+
+    /// Two CRLF pairs are a blank line; two bare LFs are one too. The dedup
+    /// must collapse pairs, never runs.
+    #[test]
+    fn blank_lines_survive_the_crlf_fold() {
+        // a\r\n\r\nb — a blank line between a and b.
+        let mut rest = vec![
+            key(CtKeyCode::Enter),
+            key_with(CtKeyCode::Enter, CtMods::CONTROL, KeyEventKind::Press),
+            key(CtKeyCode::Enter),
+            key_with(CtKeyCode::Enter, CtMods::CONTROL, KeyEventKind::Press),
+            key(CtKeyCode::Char('b')),
+        ]
+        .into_iter();
+        let (primary, _) = coalesce_key_burst(key(CtKeyCode::Char('a')), || rest.next());
+        assert!(
+            matches!(primary, Some(Msg::Paste(Paste::Text(ref s))) if s == "a\n\nb"),
+            "got {primary:?}"
+        );
+
+        // a\n\nb with bare-LF endings: two Ctrl+Enters, two newlines.
+        let mut rest = vec![
+            key_with(CtKeyCode::Enter, CtMods::CONTROL, KeyEventKind::Press),
+            key_with(CtKeyCode::Enter, CtMods::CONTROL, KeyEventKind::Press),
+            key(CtKeyCode::Char('b')),
+        ]
+        .into_iter();
+        let (primary, _) = coalesce_key_burst(key(CtKeyCode::Char('a')), || rest.next());
+        assert!(
+            matches!(primary, Some(Msg::Paste(Paste::Text(ref s))) if s == "a\n\nb"),
+            "bare LFs each count, got {primary:?}"
+        );
+    }
+
+    /// A deliberate Ctrl+Enter (no burst around it) keeps its key meaning —
+    /// the single-keystroke rule, not the fold, decides it.
+    #[test]
+    fn coalesce_lone_ctrl_enter_stays_a_key() {
+        let (primary, _) = coalesce_key_burst(
+            key_with(CtKeyCode::Enter, CtMods::CONTROL, KeyEventKind::Press),
+            || None,
+        );
+        assert!(
+            matches!(primary, Some(Msg::Key(k)) if k.code == KeyCode::Enter && k.modifiers.ctrl),
+            "got {primary:?}"
+        );
+    }
+
+    /// Scripted event stream for bridge tests: each entry arrives after its
+    /// virtual delay. Under a paused clock the delays are exact. Fused,
+    /// because the bridge keeps polling until the window closes — the real
+    /// `EventStream` is channel-backed and re-poll-safe the same way.
+    fn scripted(
+        events: Vec<(u64, CtEvent)>,
+    ) -> std::pin::Pin<Box<dyn futures::Stream<Item = std::io::Result<CtEvent>> + Send>> {
+        use futures::StreamExt;
+        Box::pin(
+            futures::stream::unfold(events.into_iter(), |mut it| async move {
+                let (delay_ms, evt) = it.next()?;
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                Some((Ok(evt), it))
+            })
+            .fuse(),
+        )
+    }
+
+    /// The #351 shape: a chunk gap, then the rest of the paste. The newline
+    /// and following text must fold into the paste, not submit it.
+    #[tokio::test(start_paused = true)]
+    async fn bridge_folds_a_chunk_gap_newline_into_the_paste() {
+        let mut text = String::from("line one");
+        let mut stream = scripted(vec![
+            (
+                2,
+                key_with(CtKeyCode::Enter, CtMods::CONTROL, KeyEventKind::Press),
+            ),
+            (1, key(CtKeyCode::Char('x'))),
+        ]);
+        let trailing = bridge_paste_chunks(&mut text, false, &mut stream).await;
+        assert_eq!(text, "line one\nx");
+        assert!(trailing.is_empty());
+    }
+
+    /// The seam ConPTY actually splits at: the CR closed the coalesced burst
+    /// (fold state seeded true), its LF opens the bridge. One newline, not
+    /// two.
+    #[tokio::test(start_paused = true)]
+    async fn bridge_dedups_a_crlf_pair_split_at_the_seam() {
+        let mut text = String::from("line one\n");
+        let mut stream = scripted(vec![
+            (
+                2,
+                key_with(CtKeyCode::Enter, CtMods::CONTROL, KeyEventKind::Press),
+            ),
+            (1, key(CtKeyCode::Char('x'))),
+        ]);
+        let trailing = bridge_paste_chunks(&mut text, true, &mut stream).await;
+        assert_eq!(text, "line one\nx", "the split CRLF must stay one newline");
+        assert!(trailing.is_empty());
+    }
+
+    /// Quiet longer than the window ends the paste; the late keystroke stays
+    /// in the stream for the main loop and is NOT folded into the paste.
+    #[tokio::test(start_paused = true)]
+    async fn bridge_gives_up_when_the_quiet_outlasts_the_window() {
+        use futures::StreamExt;
+        let mut text = String::from("chunk");
+        let mut stream = scripted(vec![(50, key(CtKeyCode::Char('x')))]);
+        let trailing = bridge_paste_chunks(&mut text, false, &mut stream).await;
+        assert_eq!(text, "chunk", "a 50ms-late keystroke is typing, not paste");
+        assert!(trailing.is_empty());
+        let late = stream.next().await;
+        assert!(
+            matches!(late, Some(Ok(CtEvent::Key(k))) if k.code == CtKeyCode::Char('x')),
+            "the late keystroke must still be deliverable, got {late:?}"
+        );
+    }
+
+    /// Deliberate input inside the window ends the paste and is handed back
+    /// to be processed after it.
+    #[tokio::test(start_paused = true)]
+    async fn bridge_hands_back_deliberate_input_inside_the_window() {
+        let mut text = String::from("pasted");
+        let mut stream = scripted(vec![(2, key(CtKeyCode::Esc))]);
+        let trailing = bridge_paste_chunks(&mut text, false, &mut stream).await;
+        assert_eq!(text, "pasted");
+        assert_eq!(trailing.len(), 1);
+        assert!(matches!(trailing[0], Msg::Key(k) if k.code == KeyCode::Escape));
     }
 
     #[test]
