@@ -24,6 +24,7 @@ use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, PoisonError};
 
 use anyhow::{Context, Result};
@@ -37,6 +38,10 @@ use mermaid_model::models::{ChatMessage, MessageRole};
 /// snapshot's 64 MiB cap with headroom for the event envelopes.
 const MAX_LOG_BYTES: u64 = 128 * 1024 * 1024;
 
+/// Process-unique suffix for a diverged session log, so two conflicts on
+/// one id within a process cannot collide.
+static CONFLICT_COUNTER: AtomicU64 = AtomicU64::new(0);
+
 /// Marker appended to a message's text when its screenshot bytes are
 /// dropped at the append chokepoint — the same marker the snapshot writer
 /// uses, so a fold and a stored snapshot describe the strip identically.
@@ -49,10 +54,28 @@ const SCREENSHOT_ELIDED_MARKER: &str = "\n[screenshot not persisted]";
 /// line-atomic enough for the prefix-fold reader.
 pub struct EventLog {
     dir: PathBuf,
-    /// Next `seq` per session id, as THIS process last knew it. Populated
-    /// by scanning the file on first touch; evicted on any append error so
-    /// a transient failure cannot wedge the cursor.
-    next_seq: Mutex<HashMap<String, u64>>,
+    /// Per session, what THIS process last wrote: the next `seq` to use and
+    /// the file length it left behind. The length is the concurrent-writer
+    /// baseline (F73, moved here from the snapshot in
+    /// `docs/design/fold-first-resume.md`) — a `stat` is O(1), where
+    /// counting lines would reintroduce the per-append cost the whole
+    /// arrangement exists to remove.
+    ///
+    /// Both are evicted on any append error, so a transient failure cannot
+    /// wedge the cursor or leave a stale baseline.
+    next_seq: Mutex<HashMap<String, Cursor>>,
+    /// Sessions this process has moved off the shared log after detecting
+    /// another writer, and the sibling it writes to instead.
+    diverted: Mutex<HashMap<String, PathBuf>>,
+}
+
+/// What one process knows about a log it has written.
+#[derive(Debug, Clone, Copy)]
+struct Cursor {
+    next_seq: u64,
+    /// File length after our last write. A different length before the next
+    /// append means somebody else appended in between.
+    len: u64,
 }
 
 impl EventLog {
@@ -60,6 +83,7 @@ impl EventLog {
         Self {
             dir,
             next_seq: Mutex::new(HashMap::new()),
+            diverted: Mutex::new(HashMap::new()),
         }
     }
 
@@ -89,7 +113,7 @@ impl EventLog {
         if snapshot.messages().is_empty() {
             return Ok(());
         }
-        let path = self.path_for(&snapshot.id);
+        let path = self.active_path(&snapshot.id);
         let result = self.append_inner(&path, snapshot, events);
         if result.is_err() {
             // Self-heal: drop the cached cursor so the next save re-derives
@@ -108,6 +132,14 @@ impl EventLog {
         snapshot: &ConversationHistory,
         events: &[SessionEvent],
     ) -> Result<()> {
+        // A diverging session moves to a fresh file, so re-resolve the path
+        // and let the backfill below make the sibling a complete log.
+        let diverted = !path.exists() || self.diverted_on_conflict(&snapshot.id, path);
+        let path = &if diverted {
+            self.active_path(&snapshot.id)
+        } else {
+            path.to_path_buf()
+        };
         let creating = !path.exists();
         let batch: Vec<SessionEvent> = if creating {
             let mut seeded = backfill_events(snapshot);
@@ -148,11 +180,92 @@ impl EventLog {
             seq += 1;
         }
         file.flush().context("flush session event log")?;
+        let len = std::fs::metadata(path).map_or(0, |meta| meta.len());
         self.next_seq
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(snapshot.id.clone(), seq);
+            .insert(snapshot.id.clone(), Cursor { next_seq: seq, len });
         Ok(())
+    }
+
+    /// Refuse to append to a log another process has written since we last
+    /// did (F73, moved from the snapshot in
+    /// `docs/design/fold-first-resume.md`).
+    ///
+    /// A daemon run and an interactive session can hold the same session
+    /// id. While the snapshot was authoritative, a last-writer-wins
+    /// overwrite was the hazard and an `(mtime, len)` baseline caught it.
+    /// Append-only storage has the opposite failure: both writers succeed,
+    /// and the fold later replays one session's turns spliced into
+    /// another's. So the baseline moves here — the file length we left
+    /// behind, checked with an O(1) `stat`.
+    ///
+    /// Only this process's OWN writes set a baseline, so repeated appends
+    /// never false-positive and a first touch is never blocked.
+    ///
+    /// Detection DIVERTS rather than fails: this process's session moves to
+    /// a `.conflict.jsonl` sibling, which its own backfill then makes a
+    /// complete, foldable log of its side. Failing instead would strand
+    /// every later event of a session the user is still using, and there is
+    /// no safe way to keep interleaving into the shared file.
+    fn diverted_on_conflict(&self, id: &str, path: &Path) -> bool {
+        let Some(cursor) = self
+            .next_seq
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(id)
+            .copied()
+        else {
+            return false;
+        };
+        let actual = std::fs::metadata(path).map_or(0, |meta| meta.len());
+        if actual == cursor.len {
+            return false;
+        }
+        let sibling = self.conflict_path(id);
+        tracing::warn!(
+            id,
+            log = %path.display(),
+            conflict = %sibling.display(),
+            expected_len = cursor.len,
+            actual_len = actual,
+            "another mermaid appended to this session's log; this process continues in a .conflict sibling"
+        );
+        self.diverted
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(id.to_string(), sibling);
+        // The sibling starts empty, so the cursor must not carry the shared
+        // log's position into it.
+        self.next_seq
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(id);
+        true
+    }
+
+    /// Where this process appends for `id`: the session's log, or the
+    /// `.conflict` sibling it moved to after detecting another writer.
+    fn active_path(&self, id: &str) -> PathBuf {
+        self.diverted
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(id)
+            .cloned()
+            .unwrap_or_else(|| self.path_for(id))
+    }
+
+    /// A process-unique sibling for a diverged session. Deliberately ends
+    /// in `.conflict.jsonl` so the canonical-log discovery (`*.jsonl` with a
+    /// valid session-id stem) never mistakes it for a session of its own.
+    fn conflict_path(&self, id: &str) -> PathBuf {
+        let n = CONFLICT_COUNTER.fetch_add(1, Ordering::Relaxed);
+        self.dir.join(format!(
+            "{}.{}.{}.conflict.jsonl",
+            id,
+            std::process::id(),
+            n
+        ))
     }
 
     /// The next `seq` for `id`: the cached cursor, or a one-time scan of
@@ -171,7 +284,7 @@ impl EventLog {
             .unwrap_or_else(PoisonError::into_inner)
             .get(id)
         {
-            return Ok(*seq);
+            return Ok(seq.next_seq);
         }
         let Ok(meta) = std::fs::metadata(path) else {
             return Ok(0);
@@ -218,7 +331,7 @@ impl EventLog {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get(id)
-            .and_then(|next| next.checked_sub(1))
+            .and_then(|cursor| cursor.next_seq.checked_sub(1))
     }
 
     /// Read the log's events, optionally skipping everything at or below
@@ -917,6 +1030,78 @@ mod tests {
                 .id,
             snapshot.id
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_second_writer_diverts_this_process_to_a_conflict_sibling() {
+        // A daemon run and an interactive session can hold one session id.
+        // Interleaved appends would fold into one transcript with two
+        // sessions' turns spliced together, so this process moves aside.
+        let root = temp_root("log_conflict");
+        let manager = ConversationManager::new(&root).expect("manager");
+        let mut state = driven_state(&root);
+        let snapshot = state.session.snapshot_conversation();
+        let events = state.session.drain_events(&snapshot);
+        manager
+            .append_session_events(&snapshot, &events)
+            .expect("our first append");
+        let shared = manager
+            .conversations_dir()
+            .join(format!("{}.jsonl", snapshot.id));
+        let before = std::fs::read_to_string(&shared).expect("read shared");
+
+        // Another process appends to the same log.
+        let other = ConversationManager::new(&root).expect("other process");
+        let mut other_state = driven_state(&root);
+        other_state.session.conversation.id = snapshot.id.clone();
+        let other_snapshot = other_state.session.snapshot_conversation();
+        let other_events = other_state.session.drain_events(&other_snapshot);
+        other
+            .append_session_events(&other_snapshot, &other_events)
+            .expect("the other writer lands");
+        assert_ne!(
+            std::fs::read_to_string(&shared).unwrap().len(),
+            before.len(),
+            "the other writer must actually have grown the log"
+        );
+
+        // Our next append notices and moves aside.
+        state
+            .session
+            .append(ChatMessage::user("ours after the clash"), fixed_ts());
+        let latest = state.session.snapshot_conversation();
+        let ours = state.session.drain_events(&latest);
+        manager
+            .append_session_events(&latest, &ours)
+            .expect("diverting is not an error");
+
+        let siblings: Vec<PathBuf> = std::fs::read_dir(manager.conversations_dir())
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.to_string_lossy().contains(".conflict.jsonl"))
+            .collect();
+        assert_eq!(siblings.len(), 1, "exactly one sibling: {siblings:?}");
+        let diverted = std::fs::read_to_string(&siblings[0]).unwrap();
+        assert!(
+            diverted.contains("ours after the clash"),
+            "our continuation must be preserved: {diverted}"
+        );
+        assert!(
+            !std::fs::read_to_string(&shared)
+                .unwrap()
+                .contains("ours after the clash"),
+            "and must NOT have interleaved into the shared log"
+        );
+        // The sibling is a complete log of our side, not a fragment.
+        assert!(
+            diverted.contains("\"type\":\"started\""),
+            "the sibling must be foldable on its own: {diverted}"
+        );
+        // ...and it must not masquerade as a session of its own.
+        let listed = manager.list_conversation_metas().expect("list");
+        assert_eq!(listed.len(), 1, "one session, not two: {listed:?}");
         let _ = std::fs::remove_dir_all(&root);
     }
 

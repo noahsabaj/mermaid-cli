@@ -6,8 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::SystemTime;
 
 /// Reject a conversation id that doesn't match the generated shape
@@ -158,17 +157,6 @@ impl ConversationMeta {
     }
 }
 
-/// Cheap fingerprint of a file on disk used for optimistic-concurrency
-/// detection (F73): an `(mtime, len)` pair. A concurrent writer that rewrites a
-/// conversation almost always changes the length (different message count) and
-/// the mtime, so a mismatch against the value captured at load/last-save flags
-/// the clobber without parsing the file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct FileStamp {
-    mtime: SystemTime,
-    len: u64,
-}
-
 /// Read a checkpoint file: the conversation plus the log watermark it was
 /// materialized at, when it carries one.
 ///
@@ -187,20 +175,6 @@ fn read_checkpoint(path: &Path) -> Result<(ConversationHistory, Option<u64>)> {
     Ok((conversation, seq))
 }
 
-/// Stat `path` into a [`FileStamp`]. `None` when the file is absent/unreadable.
-fn file_stamp(path: &Path) -> Option<FileStamp> {
-    let meta = fs::metadata(path).ok()?;
-    let mtime = meta.modified().ok()?;
-    Some(FileStamp {
-        mtime,
-        len: meta.len(),
-    })
-}
-
-/// Process-unique counter for `.conflict` sibling filenames so two conflicts on
-/// the same id within one process don't collide.
-static CONFLICT_COUNTER: AtomicU64 = AtomicU64::new(0);
-
 /// Manages conversation persistence for a project
 #[derive(Clone)]
 pub struct ConversationManager {
@@ -208,13 +182,6 @@ pub struct ConversationManager {
     /// scratchpad cascade in [`ConversationManager::delete_conversation`].
     project_dir: PathBuf,
     conversations_dir: PathBuf,
-    /// Per-id `(mtime, len)` of the conversation file as THIS process last
-    /// observed it — recorded at load and after each of our own saves. Used to
-    /// detect a concurrent writer before `save_conversation` overwrites (F73).
-    /// Shared across clones of the manager (same process) via the `Arc`, so a
-    /// cloned manager sees the same baselines; separate processes have separate
-    /// maps, which is exactly the cross-process clobber we want to catch.
-    seen: Arc<Mutex<HashMap<String, FileStamp>>>,
     /// The per-session `.jsonl` appender/reader (see `event_log`). Shared
     /// across clones like `seen`, so one process keeps one seq cursor.
     events: Arc<crate::session::event_log::EventLog>,
@@ -239,7 +206,6 @@ impl ConversationManager {
                 conversations_dir.clone(),
             )),
             conversations_dir,
-            seen: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -313,29 +279,6 @@ impl ConversationManager {
         Ok(Some(folded))
     }
 
-    /// Record the on-disk `(mtime, len)` of `path` as the baseline for `id`, so a
-    /// later `save_conversation` can tell whether a concurrent writer touched the
-    /// file since we read or wrote it (F73). Called on load and after our own
-    /// saves. Best-effort: an unreadable file simply leaves no baseline.
-    fn record_stamp(&self, id: &str, path: &Path) {
-        if let Some(stamp) = file_stamp(path) {
-            self.seen
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(id.to_string(), stamp);
-        }
-    }
-
-    /// Path of a `.conflict` sibling for `id`. Deliberately ends in `.conflict`
-    /// (not `.json`) so it never shows up in `list_conversations` /
-    /// `load_last_conversation`, which only consider `*.json`. `id` is validated
-    /// by the caller before this runs, so the filename can't traverse.
-    fn conflict_sibling_path(&self, id: &str) -> PathBuf {
-        let n = CONFLICT_COUNTER.fetch_add(1, Ordering::Relaxed);
-        self.conversations_dir
-            .join(format!("{}.{}.{}.conflict", id, std::process::id(), n))
-    }
-
     /// Save a conversation to disk
     ///
     /// # Errors
@@ -391,41 +334,21 @@ impl ConversationManager {
         }
         let json = serde_json::to_string_pretty(&value)?;
 
-        // Optimistic-concurrency guard (F73). Without this, two processes (e.g. a
-        // daemon `run` and an interactive session) saving the same id do blind
-        // last-writer-wins and silently clobber each other. If the file on disk
-        // changed since we last read or wrote it — a concurrent writer — don't
-        // overwrite: preserve our copy in a `.conflict` sibling and warn. The
-        // baseline is per-process (`seen`), recorded at load and after our own
-        // saves, so our OWN repeated saves don't false-positive.
-        let baseline = self
-            .seen
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&conversation.id)
-            .copied();
-        if let (Some(current), Some(base)) = (file_stamp(&path), baseline)
-            && current != base
-        {
-            let sibling = self.conflict_sibling_path(&conversation.id);
-            // Keep the existing atomic-write for the preserved copy too (owner-only).
-            mermaid_runtime::write_atomic_with_mode(&sibling, json.as_bytes(), 0o600)?;
-            tracing::warn!(
-                id = %conversation.id,
-                main = %path.display(),
-                conflict = %sibling.display(),
-                "conversation changed on disk since load (concurrent writer); wrote our copy to a .conflict sibling instead of overwriting"
-            );
-            return Ok(());
-        }
+        // F73's concurrent-writer guard is NOT here any more; it moved to the
+        // append (see `event_log::diverted_on_conflict`). Two reasons, both
+        // consequences of the log becoming the truth: this file is now a
+        // derived cache, so a clobbered checkpoint costs a longer replay
+        // rather than lost history — and by the time a save reaches here the
+        // append has already decided whether this process is still writing
+        // the shared session at all. Guarding the cache after the truth was
+        // written would only produce `.conflict` copies of a rebuildable file.
 
-        // Atomic write: a crash mid-save must not empty/corrupt the session
-        // file (this is the hot path, rewritten after nearly every message).
+        // Atomic write: a crash mid-save must not leave a half-written
+        // checkpoint that resume would then have to distrust.
         // Owner-only (0o600): the transcript can carry secrets in cleartext.
         mermaid_runtime::write_atomic_with_mode(&path, json.as_bytes(), 0o600)?;
         // Refresh our baseline to the file we just wrote so the NEXT save by this
         // process compares against our own write, not the pre-save state.
-        self.record_stamp(&conversation.id, &path);
 
         // Keep the picker's sidecar current for a checkpoint written without
         // a preceding append (the QA paths do this). The append writes it
@@ -454,7 +377,6 @@ impl ConversationManager {
         if !self.events.exists(id) {
             let (conversation, _) = checkpoint?;
             validate_conversation_id(&conversation.id)?;
-            self.record_stamp(&conversation.id, &path);
             return Ok(conversation);
         }
 
@@ -468,14 +390,12 @@ impl ConversationManager {
             && validate_conversation_id(&checkpoint.id).is_ok()
             && let Some(resumed) = self.events.replay_onto(id, checkpoint, seq)?
         {
-            self.record_stamp(id, &path);
             return Ok(resumed);
         }
 
         let folded = self
             .fold_conversation_from_log(id)?
             .with_context(|| format!("session {id} has a log that could not be folded"))?;
-        self.record_stamp(id, &path);
         Ok(folded)
     }
 
@@ -886,7 +806,6 @@ mod tests {
             project_dir: dir.clone(),
             events: Arc::new(crate::session::event_log::EventLog::new(dir.clone())),
             conversations_dir: dir.clone(),
-            seen: Arc::new(Mutex::new(HashMap::new())),
         };
         store.save_conversation(&conv).expect("save");
         let raw = fs::read_to_string(dir.join(format!("{}.json", conv.id))).expect("read");
@@ -918,7 +837,6 @@ mod tests {
             project_dir: dir.clone(),
             events: Arc::new(crate::session::event_log::EventLog::new(dir.clone())),
             conversations_dir: dir.clone(),
-            seen: Arc::new(Mutex::new(HashMap::new())),
         };
         store.save_conversation(&conv).expect("save");
         let path = dir.join(format!("{}.json", conv.id));
@@ -1353,100 +1271,9 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn save_conversation_detects_concurrent_writer_and_writes_conflict_sibling() {
-        // F73: a daemon `run` and an interactive session can both hold the same
-        // conversation id. Blind last-writer-wins silently drops one side's
-        // edits. The optimistic-concurrency guard must detect the concurrent
-        // write and preserve our copy in a `.conflict` sibling instead of
-        // clobbering the other writer's file.
-        let dir =
-            std::env::temp_dir().join(format!("mermaid_conv_conflict_{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        let manager = ConversationManager::new(&dir).unwrap();
-
-        let mut conv = ConversationHistory::new("/tmp".into(), "m".into(), Local::now());
-        conv.add_messages(&[ChatMessage::user("ours")], Local::now());
-        manager.save_conversation(&conv).unwrap();
-        let main = manager
-            .conversations_dir()
-            .join(format!("{}.json", conv.id));
-
-        // A SEPARATE process (its own baseline map) loads the same conversation,
-        // appends, and saves — growing the file. This is the concurrent writer.
-        let other = ConversationManager::new(&dir).unwrap();
-        let mut their_conv = other.load_conversation(&conv.id).unwrap();
-        their_conv.add_messages(
-            &[ChatMessage::user("theirs - extra content here")],
-            Local::now(),
-        );
-        other.save_conversation(&their_conv).unwrap();
-
-        // Our next save still holds the pre-concurrent baseline, so it must NOT
-        // overwrite the other writer's file.
-        manager.save_conversation(&conv).unwrap();
-        let on_disk: ConversationHistory =
-            serde_json::from_str(&fs::read_to_string(&main).unwrap()).unwrap();
-        assert_eq!(
-            on_disk.messages().len(),
-            2,
-            "the concurrent writer's file must be left intact"
-        );
-
-        // Our copy is preserved in exactly one `.conflict` sibling.
-        let mut conflicts = fs::read_dir(manager.conversations_dir())
-            .unwrap()
-            .flatten()
-            .filter(|e| e.file_name().to_string_lossy().ends_with(".conflict"))
-            .map(|e| e.path())
-            .collect::<Vec<_>>();
-        assert_eq!(conflicts.len(), 1, "exactly one .conflict sibling expected");
-        let sibling = fs::read_to_string(conflicts.pop().unwrap()).unwrap();
-        assert!(
-            sibling.contains("ours") && !sibling.contains("theirs"),
-            "the .conflict sibling holds OUR copy, not the concurrent writer's"
-        );
-
-        // The `.conflict` sibling must not pollute the conversation listing
-        // (it isn't a `*.json` file).
-        let listed = manager.list_conversations().unwrap();
-        assert_eq!(
-            listed.len(),
-            1,
-            ".conflict sibling must not appear as a conversation"
-        );
-        assert_eq!(listed[0].id, conv.id);
-
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn save_conversation_repeated_self_saves_do_not_conflict() {
-        // The guard must not false-positive on a single process's OWN repeated
-        // saves (the hot path rewrites the file after nearly every message).
-        let dir =
-            std::env::temp_dir().join(format!("mermaid_conv_self_save_{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        let manager = ConversationManager::new(&dir).unwrap();
-
-        let mut conv = ConversationHistory::new("/tmp".into(), "m".into(), Local::now());
-        conv.add_messages(&[ChatMessage::user("first")], Local::now());
-        manager.save_conversation(&conv).unwrap();
-        conv.add_messages(&[ChatMessage::user("second")], Local::now());
-        manager.save_conversation(&conv).unwrap();
-
-        let conflicts = fs::read_dir(manager.conversations_dir())
-            .unwrap()
-            .flatten()
-            .filter(|e| e.file_name().to_string_lossy().ends_with(".conflict"))
-            .count();
-        assert_eq!(
-            conflicts, 0,
-            "our own repeated saves must not be flagged as conflicts"
-        );
-        let loaded = manager.load_conversation(&conv.id).unwrap();
-        assert_eq!(loaded.messages().len(), 2, "latest save must win for us");
-
-        let _ = fs::remove_dir_all(&dir);
-    }
+    // The two tests that lived here pinned the snapshot-side F73 guard.
+    // That guard moved to the append, so its coverage moved with it:
+    // event_log::tests::a_second_writer_diverts_this_process_to_a_conflict_sibling.
+    // Keeping them here would assert that a derived cache defends itself
+    // against a writer that no longer races for it.
 }
