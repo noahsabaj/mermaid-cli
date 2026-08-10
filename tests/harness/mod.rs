@@ -210,13 +210,11 @@ impl Terminal {
     /// buffer restarts empty, and the next read reflects only what the app
     /// drew for the new grid.
     pub fn resize(&mut self, rows: u16, cols: u16) {
-        {
-            let mut out = self.output.lock().expect("output lock");
-            out.clear();
-            // The count restarts with the buffer: `answer_cursor_queries`
-            // counts matches in the (now empty) stream.
-            self.answered = 0;
-        }
+        self.output.lock().expect("output lock").clear();
+        // The count restarts with the buffer: `answer_cursor_queries` counts
+        // matches in the (now empty) stream. Only this thread touches
+        // `answered`, so it needs no place under the lock.
+        self.answered = 0;
         self.master
             .resize(PtySize {
                 rows,
