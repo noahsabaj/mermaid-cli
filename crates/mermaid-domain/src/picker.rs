@@ -2,9 +2,11 @@
 //!
 //! Four pickers (model, conversations, rewind, plan config) each hand-rolled
 //! the same Up/Down/Enter/Escape state machine over a `cursor` and a row
-//! count — the paste-into-the-file-picker bug (#350) came from exactly this
-//! family of per-surface duplication. [`picker_step`] is that machine said
-//! once: callers keep only their confirm semantics and any extra keys.
+//! count.
+//!
+//! The paste-into-the-file-picker bug (#350) came from exactly this family
+//! of per-surface duplication. [`picker_step`] is that machine said once:
+//! callers keep only their confirm semantics and any extra keys.
 
 use crate::msg::KeyCode;
 
@@ -22,11 +24,12 @@ pub enum PickerStep {
     Other,
 }
 
-/// Advance `cursor` over a `len`-row list for one key. Up saturates at the
-/// top, Down clamps to the last row (an empty list pins the cursor at 0),
-/// Enter confirms the current row, Escape dismisses; anything else is
-/// [`PickerStep::Other`].
-pub fn picker_step(code: KeyCode, cursor: &mut usize, len: usize) -> PickerStep {
+/// Advance `cursor` over a `len`-row list for one key.
+///
+/// Up saturates at the top, Down clamps to the last row (an empty list pins
+/// the cursor at 0), Enter confirms the current row, Escape dismisses;
+/// anything else is [`PickerStep::Other`].
+pub const fn picker_step(code: KeyCode, cursor: &mut usize, len: usize) -> PickerStep {
     match code {
         KeyCode::Up => {
             *cursor = cursor.saturating_sub(1);

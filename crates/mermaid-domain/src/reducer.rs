@@ -1744,9 +1744,10 @@ pub(crate) fn rewind_candidates(messages: &[ChatMessage]) -> Vec<crate::RewindCa
 /// Handle keyboard input while the rewind picker is open. Up/Down walk the
 /// candidate list; Enter forks the session at the highlighted user message;
 /// Esc dismisses without touching the conversation.
-/// Route a keystroke to whichever `UiMode` picker is open. Reached only
-/// when [`Focus::Picker`] resolved, so the per-handler mode destructures
-/// are re-checks, not policy.
+/// Route a keystroke to whichever `UiMode` picker is open.
+///
+/// Reached only when [`Focus::Picker`] resolved, so the per-handler mode
+/// destructures are re-checks, not policy.
 pub(crate) fn handle_picker_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode) {
     match state.ui.mode {
         UiMode::ModelPicker { .. } => handle_model_picker_key(state, cmds, code),
@@ -1757,8 +1758,10 @@ pub(crate) fn handle_picker_key(state: &mut State, cmds: &mut Vec<Cmd>, code: Ke
     }
 }
 
-/// The yes/no confirmation modal (`/clear`): y/Enter accepts, n/Esc
-/// declines. Extracted verbatim from the old guard chain.
+/// The yes/no confirmation modal (`/clear`).
+///
+/// y/Enter accepts, n/Esc declines. Extracted verbatim from the old guard
+/// chain.
 pub(crate) fn handle_confirm_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode) {
     match code {
         KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
@@ -1771,10 +1774,12 @@ pub(crate) fn handle_confirm_key(state: &mut State, cmds: &mut Vec<Cmd>, code: K
     }
 }
 
-/// The inline tool-approval modal. Exclusive while a tool awaits approval:
-/// 1/y approve, 2/a approve-always (when allowlistable), 3/n/Esc deny, or
-/// highlight with the arrows and Enter. Body extracted verbatim from the
-/// old guard chain; `Focus::ApprovalModal` is the routing authority now.
+/// The inline tool-approval modal.
+///
+/// Exclusive while a tool awaits approval: 1/y approve, 2/a approve-always
+/// (when allowlistable), 3/n/Esc deny, or highlight with the arrows and
+/// Enter. Body extracted verbatim from the old guard chain;
+/// `Focus::ApprovalModal` is the routing authority now.
 pub(crate) fn handle_approval_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode) {
     {
         use crate::ApprovalChoice;

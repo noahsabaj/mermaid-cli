@@ -1228,11 +1228,12 @@ pub struct ModelChoice {
     pub ready: bool,
 }
 
-/// Which surface owns the next non-chord keystroke — the modal-precedence
-/// order that used to live as a chain of early-return guards in
-/// `handle_key`, named as data in one place. The render layer picks its
-/// bottom pane from the same resolver, so what draws and what receives
-/// keys cannot disagree.
+/// Which surface owns the next non-chord keystroke.
+///
+/// The modal-precedence order that used to live as a chain of early-return
+/// guards in `handle_key`, named as data in one place. The render layer
+/// picks its bottom pane from the same resolver, so what draws and what
+/// receives keys cannot disagree.
 ///
 /// Only the EXCLUSIVE surfaces appear here. The slash palette and the
 /// @-file picker deliberately do not: they ride the composer (typing keeps
@@ -1254,8 +1255,10 @@ pub enum Focus {
 }
 
 impl State {
-    /// Resolve the focus in priority order. The one authority — key routing
-    /// and the render layer's bottom pane both consult this.
+    /// Resolve the focus in priority order.
+    ///
+    /// The one authority — key routing and the render layer's bottom pane
+    /// both consult this.
     #[must_use]
     pub fn focus(&self) -> Focus {
         if !self.pending_approval.is_empty() {
