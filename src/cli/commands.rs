@@ -1058,7 +1058,10 @@ fn run_qa_compact_smoke(
     let mut archive_path = None;
     for cmd in save_cmds {
         match cmd {
-            Cmd::SaveConversation(conversation) => {
+            Cmd::SaveConversation {
+                snapshot: conversation,
+                ..
+            } => {
                 manager.save_conversation(&conversation)?;
                 conversation_path = Some(
                     manager

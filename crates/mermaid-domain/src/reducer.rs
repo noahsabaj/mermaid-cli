@@ -2006,7 +2006,7 @@ const TASK_STALENESS_CALLS: u32 = 5;
 pub(crate) fn fork_conversation_at(state: &mut State, cmds: &mut Vec<Cmd>, message_index: usize) {
     // 1. Persist the original FIRST — different id, different file, so this
     //    can never clobber the fork's save below.
-    cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
+    cmds.push(state.session.save_conversation_cmd());
 
     // File checkpoints anchored past the cut belong to the timeline being
     // discarded; ask the runtime store which exist (async — the reply arm
@@ -2063,7 +2063,7 @@ pub(crate) fn fork_conversation_at(state: &mut State, cmds: &mut Vec<Cmd>, messa
     // The fork starts with an empty checklist (a rewound plan describes
     // dropped work); the broker must forget it too or the next task tool
     // call would republish the stale list.
-    state.session.conversation = fork;
+    state.session.replace_conversation(fork);
     state.session.last_token_usage = None;
     // The context gauge is RE-ESTIMATED, not cleared. Dropping it to `None`
     // rendered "context: n/a" — which reads as "unknown", when in fact the
@@ -2103,7 +2103,7 @@ pub(crate) fn fork_conversation_at(state: &mut State, cmds: &mut Vec<Cmd>, messa
     //    empty conversations, so the fork file materializes on first resend.
     state.ui.mode = UiMode::EditingInput;
     state.ui.esc_armed_at = None;
-    cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
+    cmds.push(state.session.save_conversation_cmd());
     emit_title_if_changed(state, cmds);
 }
 
@@ -2642,7 +2642,7 @@ pub(crate) fn commit_user_message(state: &mut State, text: String, attachment_id
             .with_image_numbers(image_numbers);
     }
     state.session.append(user_msg, state.now);
-    state.session.conversation.add_to_input_history(text);
+    state.session.record_input(text);
 }
 
 pub(crate) fn handle_submit_prompt(
@@ -2736,7 +2736,7 @@ pub(crate) fn handle_query_result(state: &mut State, cmds: &mut Vec<Cmd>, result
             // auto-submit into the one being loaded — drop them (mirrors the
             // clears above).
             state.ui.queued_messages.clear();
-            state.session.conversation = *history;
+            state.session.replace_conversation(*history);
             state.turn = TurnState::Idle;
             // The abandoned run's summary counters die with it: a leaked
             // `run_started` would otherwise let a later `finish_run` (quit)
@@ -2829,7 +2829,7 @@ pub(crate) fn handle_query_result(state: &mut State, cmds: &mut Vec<Cmd>, result
 /// answer and of `Msg::RuntimeText`.
 fn append_runtime_note(state: &mut State, cmds: &mut Vec<Cmd>, text: String) {
     state.session.append(ChatMessage::system(text), state.now);
-    cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
+    cmds.push(state.session.save_conversation_cmd());
 }
 
 #[expect(
@@ -2933,7 +2933,7 @@ pub(crate) fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd
             });
         },
         SlashCmd::Save(_name) => {
-            cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
+            cmds.push(state.session.save_conversation_cmd());
         },
         SlashCmd::Load(Some(id)) => {
             cmds.push(Cmd::Query(Query::LoadConversation { id }));
@@ -2952,7 +2952,7 @@ pub(crate) fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd
             state
                 .session
                 .append(ChatMessage::system(usage_text(state)), state.now);
-            cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
+            cmds.push(state.session.save_conversation_cmd());
         },
         SlashCmd::Todos(arg) => {
             handle_todos_command(state, cmds, arg.as_deref());
@@ -2983,7 +2983,7 @@ pub(crate) fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd
                     state
                         .session
                         .append(ChatMessage::system(context_text(state)), state.now);
-                    cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
+                    cmds.push(state.session.save_conversation_cmd());
                 },
                 // The sizing knobs only affect Ollama's num_ctx.
                 _ if !is_ollama => {
@@ -3099,7 +3099,7 @@ pub(crate) fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd
             state
                 .session
                 .append(ChatMessage::system(doctor_text(state)), state.now);
-            cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
+            cmds.push(state.session.save_conversation_cmd());
         },
         SlashCmd::Tasks => {
             cmds.push(Cmd::Query(Query::ListRuntimeTasks { limit: 10 }));
@@ -3145,7 +3145,7 @@ pub(crate) fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd
                 usage_text(state)
             );
             state.session.append(ChatMessage::system(text), state.now);
-            cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
+            cmds.push(state.session.save_conversation_cmd());
         },
         SlashCmd::Report(None) => {
             let text = format!(
@@ -3154,7 +3154,7 @@ pub(crate) fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd
                 usage_text(state)
             );
             state.session.append(ChatMessage::system(text), state.now);
-            cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
+            cmds.push(state.session.save_conversation_cmd());
         },
         SlashCmd::Processes => {
             cmds.push(Cmd::Query(Query::ListRuntimeProcesses { limit: 10 }));
@@ -3280,7 +3280,7 @@ pub(crate) fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd
                 ChatMessage::system(help_text(&state.plugin_commands)),
                 state.now,
             );
-            cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
+            cmds.push(state.session.save_conversation_cmd());
         },
         SlashCmd::Quit => {
             request_exit(state, cmds);
@@ -3437,8 +3437,7 @@ pub(crate) fn push_system_kind(
     let mut msg = ChatMessage::system(text.into());
     msg.kind = kind;
     if would_split {
-        let pos = messages.len() - 1;
-        state.session.conversation.messages_mut().insert(pos, msg);
+        state.session.insert_before_last(msg);
     } else {
         state.session.append(msg, state.now);
     }
@@ -3448,7 +3447,7 @@ pub(crate) fn push_system_kind(
     // per dispatch for a byte-identical message that is guaranteed to be gone
     // before the save could ever be read back. Durable kinds still save.
     if kind != mermaid_model::models::ChatMessageKind::RecoveryNudge {
-        cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
+        cmds.push(state.session.save_conversation_cmd());
     }
 }
 
@@ -3635,7 +3634,7 @@ pub(crate) fn request_exit(state: &mut State, cmds: &mut Vec<Cmd>) {
     // worked and what it spent, after the interrupted partial above so the
     // summary reads in order.
     finish_run(state, cmds, RunEnd::Interrupted);
-    cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
+    cmds.push(state.session.save_conversation_cmd());
     cmds.push(Cmd::Exit);
 }
 
@@ -3872,6 +3871,9 @@ pub(crate) fn handle_compaction_finished(
         .session
         .conversation
         .add_compaction(record.clone(), state.now);
+    // The event carries the FINAL post-splice transcript, so the fold
+    // reproduces the replace + splice + record in one step.
+    state.session.note_compaction(state.now, record.clone());
     state.session.context_usage = Some(
         result
             .after_snapshot
@@ -3922,10 +3924,13 @@ pub(crate) fn handle_compaction_finished(
     // The compaction's replacement message already carries the receipt text, so
     // the old transient banner that repeated it is simply gone.
     // SaveCompactionArchive persists the stripped conversation.
+    let conversation = state.session.conversation.clone();
+    let events = state.session.drain_events(&conversation);
     cmds.push(Cmd::SaveCompactionArchive {
         archive,
         record,
-        conversation: state.session.conversation.clone(),
+        conversation,
+        events,
     });
 }
 
@@ -4357,7 +4362,7 @@ pub(crate) fn handle_stream_done(
     // the footer's "Last API request" should reflect the last request that
     // actually reported usage, not flip to "n/a".
 
-    cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
+    cmds.push(state.session.save_conversation_cmd());
 
     // If the model asked for any tools, transition to ExecutingTools
     // and dispatch one ExecuteTool per call. The Vec<Option<ToolOutcome>>
@@ -4621,7 +4626,7 @@ pub(crate) fn finish_run(state: &mut State, cmds: &mut Vec<Cmd>, end: RunEnd) {
     state
         .session
         .append(ChatMessage::run_summary(summary), state.now);
-    cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
+    cmds.push(state.session.save_conversation_cmd());
 }
 
 /// Handle `Msg::OpenImageAt`. Resolves the base64 payload from the committed
@@ -4697,7 +4702,7 @@ pub(crate) fn handle_turn_cancelled(state: &mut State, cmds: &mut Vec<Cmd>, turn
             // steering — retire it so the hidden instruction can't leak into
             // the user's next, unrelated request.
             if sweep_spent_nudges(state) {
-                cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
+                cmds.push(state.session.save_conversation_cmd());
             }
             drain_next_queued_message(state);
         },
@@ -4760,7 +4765,7 @@ pub(crate) fn handle_upstream_error(
     // The errored turn abandoned whatever recovery its nudge was steering —
     // retire it so the hidden instruction can't leak into a later request.
     if sweep_spent_nudges(state) {
-        cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
+        cmds.push(state.session.save_conversation_cmd());
     }
     let msg = ChatMessage {
         role: MessageRole::Assistant,
@@ -4795,7 +4800,7 @@ pub(crate) fn handle_upstream_error(
     // A provider error ends the turn just like a normal completion — persist
     // the session too, so an errored headless run's emitted session id points
     // at a real file (`mermaid run --resume <id>` after a failed run).
-    cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
+    cmds.push(state.session.save_conversation_cmd());
 
     // Drain the queued-message FIFO so a message the user typed mid-turn isn't
     // stranded until their next manual submit (it would otherwise run out of
@@ -4829,12 +4834,8 @@ pub(crate) fn handle_tool_progress(
                     TurnState::ExecutingTools { .. } | TurnState::Generating { .. }
                 ) =>
         {
-            if let Some(last) = state.session.conversation.messages_mut().last_mut()
-                && last.role == MessageRole::Assistant
-            {
-                let encoded = general_purpose::STANDARD.encode(&data);
-                last.images.get_or_insert_with(Vec::new).push(encoded);
-            }
+            let encoded = general_purpose::STANDARD.encode(&data);
+            state.session.attach_image(encoded);
         },
         // Live subagent activity → the per-call status the agent panel and
         // status line show next to the tool label. Only while the owning turn
@@ -4938,11 +4939,7 @@ pub(crate) fn handle_tool_finished(
                     cmds.push(Cmd::SaveProcess(process.clone()));
                     state.runtime.register_process(process);
                 }
-                if let Some(last) = state.session.conversation.messages_mut().last_mut()
-                    && last.role == MessageRole::Assistant
-                {
-                    last.actions.push(action);
-                }
+                state.session.attach_action(action);
             }
             try_complete_outcomes(outcomes)
         },
@@ -4998,7 +4995,7 @@ pub(crate) fn handle_tool_finished(
             // Steered text is user-authored; persist it now rather than
             // relying on the next StreamDone's save (a crash between this
             // CallModel and its StreamDone would otherwise lose it).
-            cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
+            cmds.push(state.session.save_conversation_cmd());
         }
         let next_turn = state.ids.fresh_turn();
         state.turn = start_generating(next_turn, std::time::SystemTime::from(state.now));
@@ -5587,7 +5584,7 @@ pub(crate) fn apply_safety_mode(
     note_safety_mode_change(state, cmds, previous, next);
     // Persist now so `--resume`/`--continue` restore this mode even if the user
     // changes it and quits without sending another message.
-    cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
+    cmds.push(state.session.save_conversation_cmd());
 }
 
 /// Where a session lands when it leaves plan mode without naming a
@@ -5663,7 +5660,7 @@ pub(crate) fn enter_plan_mode_state(
     // A fresh plan starts with a disarmed doom-loop breaker.
     state.runtime.plan_thrash_armed = false;
     state.runtime.plan_calls_since_denial = 0;
-    cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
+    cmds.push(state.session.save_conversation_cmd());
     Some(plan_path)
 }
 
@@ -5721,7 +5718,7 @@ pub(crate) fn exit_plan_mode(state: &mut State, cmds: &mut Vec<Cmd>) {
     // No transcript row: the status band reverting to the plain safety mode
     // is the human announcement; the model's comes from the context-delta
     // marker at the next dispatch.
-    cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
+    cmds.push(state.session.save_conversation_cmd());
 }
 
 /// Retract a standing plan tail reminder and disarm the doom-loop breaker —
@@ -5844,7 +5841,7 @@ pub(crate) fn handoff_plan_mode(
     restore_plan_overrides(state, &plan);
     // The exploration conversation is history now — save it under its own id
     // BEFORE swapping (the fork_conversation_at ordering).
-    cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
+    cmds.push(state.session.save_conversation_cmd());
     let original = &state.session.conversation;
     let mut next = crate::ConversationHistory::new(
         original.project_path.clone(),
@@ -5875,7 +5872,7 @@ pub(crate) fn handoff_plan_mode(
         // context that never saw plan mode has nothing to reconcile.
         next.advertised_context = original.advertised_context.clone();
     }
-    state.session.conversation = next;
+    state.session.replace_conversation(next);
     // A standing plan reminder rode in with the forked messages (it is only
     // swept at turn-end); plan mode is over, retract it.
     retract_plan_reminder(state);
@@ -5906,7 +5903,7 @@ pub(crate) fn handoff_plan_mode(
             attachment_ids: vec![],
         });
     drain_next_queued_message(state);
-    cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
+    cmds.push(state.session.save_conversation_cmd());
 }
 
 /// Plan-tool post-processing at the tool boundary (`handle_tool_finished`):
@@ -5977,7 +5974,7 @@ pub(crate) fn finish_plan_mode(state: &mut State, cmds: &mut Vec<Cmd>, body: &st
     // next dispatch tells the model plan mode is off.
     retract_plan_reminder(state);
     seed_plan_tasks(state, cmds, body);
-    cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
+    cmds.push(state.session.save_conversation_cmd());
     if start {
         // Auto-submit implementation through the queued-message path (the
         // background-report precedent): the tool-boundary drain in
@@ -6486,7 +6483,9 @@ mod tests {
         assert_eq!(state.session.conversation.id, original_id);
         assert_eq!(state.session.messages().len(), 4, "history untouched");
         assert!(
-            !cmds.iter().any(|c| matches!(c, Cmd::SaveConversation(_))),
+            !cmds
+                .iter()
+                .any(|c| matches!(c, Cmd::SaveConversation { .. })),
             "dismiss saves nothing"
         );
     }
@@ -6518,12 +6517,16 @@ mod tests {
         assert!(matches!(state.ui.mode, UiMode::EditingInput));
         let saves = cmds
             .iter()
-            .filter(|c| matches!(c, Cmd::SaveConversation(_)))
+            .filter(|c| matches!(c, Cmd::SaveConversation { .. }))
             .count();
         assert_eq!(saves, 2, "original saved first, then the fork");
         // The FIRST save carries the ORIGINAL (full history, its own id).
-        let Some(Cmd::SaveConversation(first_saved)) =
-            cmds.iter().find(|c| matches!(c, Cmd::SaveConversation(_)))
+        let Some(Cmd::SaveConversation {
+            snapshot: first_saved,
+            ..
+        }) = cmds
+            .iter()
+            .find(|c| matches!(c, Cmd::SaveConversation { .. }))
         else {
             unreachable!()
         };
@@ -6706,7 +6709,7 @@ mod tests {
         let (state, cmds) = update(state, Msg::Quit);
         assert!(state.should_exit);
         assert_eq!(cmds.len(), 2);
-        assert!(matches!(cmds[0], Cmd::SaveConversation(_)));
+        assert!(matches!(cmds[0], Cmd::SaveConversation { .. }));
         assert!(matches!(cmds[1], Cmd::Exit));
     }
 
@@ -7074,7 +7077,8 @@ mod tests {
             .expect("a transcript message was appended");
         assert!(last.content.contains("Clipboard is empty"));
         assert!(
-            cmds.iter().any(|c| matches!(c, Cmd::SaveConversation(_))),
+            cmds.iter()
+                .any(|c| matches!(c, Cmd::SaveConversation { .. })),
             "the transcript message is persisted"
         );
     }
@@ -7102,7 +7106,9 @@ mod tests {
             state.session.messages()
         );
         assert!(
-            !cmds.iter().any(|c| matches!(c, Cmd::SaveConversation(_))),
+            !cmds
+                .iter()
+                .any(|c| matches!(c, Cmd::SaveConversation { .. })),
             "a toast is not worth persisting"
         );
         // Expiry is lazy against `state.now` — nothing has to clear it.
@@ -7145,7 +7151,10 @@ mod tests {
             1,
             "one warning on first probe"
         );
-        assert!(cmds.iter().any(|c| matches!(c, Cmd::SaveConversation(_))));
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Cmd::SaveConversation { .. }))
+        );
         // A second probe for the same model must not nag again.
         let (state, _) = update(state, vision_resolved("ollama/test", Some(false), true));
         assert_eq!(
@@ -7843,7 +7852,10 @@ mod tests {
         assert!(state.should_exit);
         let last = state.session.messages().last().expect("a message");
         assert_eq!(last.role, MessageRole::Tool);
-        assert!(cmds.iter().any(|c| matches!(c, Cmd::SaveConversation(_))));
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Cmd::SaveConversation { .. }))
+        );
     }
 
     #[test]
@@ -8448,7 +8460,10 @@ mod tests {
         assert!(matches!(state.turn, TurnState::Idle));
         assert_eq!(state.session.messages().len(), 1);
         assert_eq!(state.session.messages()[0].content, "final answer");
-        assert!(cmds.iter().any(|c| matches!(c, Cmd::SaveConversation(_))));
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Cmd::SaveConversation { .. }))
+        );
     }
 
     #[test]
@@ -8650,7 +8665,10 @@ mod tests {
             state.runtime.run_started.is_none(),
             "the summary fires exactly once per run"
         );
-        assert!(cmds.iter().any(|c| matches!(c, Cmd::SaveConversation(_))));
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Cmd::SaveConversation { .. }))
+        );
         // Transcript order: the error line first, then the run's summary.
         assert_eq!(state.session.messages().len(), 2);
         assert_eq!(
@@ -8703,7 +8721,7 @@ mod tests {
             .iter()
             .rev()
             .find_map(|c| {
-                if let Cmd::SaveConversation(snapshot) = c {
+                if let Cmd::SaveConversation { snapshot, .. } = c {
                     Some(snapshot)
                 } else {
                     None
@@ -9617,7 +9635,10 @@ mod tests {
         let (state, cmds) = update(state, Msg::Quit);
 
         assert!(state.should_exit);
-        assert!(cmds.iter().any(|c| matches!(c, Cmd::SaveConversation(_))));
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Cmd::SaveConversation { .. }))
+        );
         let messages = state.session.messages();
         assert!(
             !messages
@@ -9673,7 +9694,8 @@ mod tests {
                 "nudge swept (is_error={is_error})"
             );
             assert!(
-                cmds.iter().any(|c| matches!(c, Cmd::SaveConversation(_))),
+                cmds.iter()
+                    .any(|c| matches!(c, Cmd::SaveConversation { .. })),
                 "sweep persisted (is_error={is_error})"
             );
         }
@@ -10529,7 +10551,8 @@ mod tests {
         // The errored turn persists the session — a headless run's emitted
         // session id must point at a real file even when the provider failed.
         assert!(
-            cmds.iter().any(|c| matches!(c, Cmd::SaveConversation(_))),
+            cmds.iter()
+                .any(|c| matches!(c, Cmd::SaveConversation { .. })),
             "upstream error must save the conversation"
         );
         assert_eq!(state.session.messages().len(), 1);
@@ -10661,7 +10684,10 @@ mod tests {
         assert!(msg.content.contains("Advanced runtime:"));
         assert!(msg.content.contains("/model"));
         assert!(msg.content.contains("/help"));
-        assert!(cmds.iter().any(|c| matches!(c, Cmd::SaveConversation(_))));
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Cmd::SaveConversation { .. }))
+        );
     }
 
     #[test]
@@ -10673,7 +10699,10 @@ mod tests {
         assert!(msg.content.contains("Mermaid Doctor"));
         assert!(msg.content.contains("Active model:"));
         assert!(msg.content.contains("Safety:"));
-        assert!(cmds.iter().any(|c| matches!(c, Cmd::SaveConversation(_))));
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Cmd::SaveConversation { .. }))
+        );
     }
 
     #[test]
@@ -12444,7 +12473,10 @@ mod tests {
             .expect("follow-up CallModel");
         assert!(request.messages.iter().any(|m| m.content == "steer two"));
         // User-authored text persists at the boundary, not only at StreamDone.
-        assert!(cmds.iter().any(|c| matches!(c, Cmd::SaveConversation(_))));
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Cmd::SaveConversation { .. }))
+        );
     }
 
     #[test]
@@ -14641,7 +14673,10 @@ mod tests {
         assert_eq!(last.role, MessageRole::Assistant);
         assert!(last.content.contains("half written"));
         assert!(last.content.contains("[interrupted]"));
-        assert!(cmds.iter().any(|c| matches!(c, Cmd::SaveConversation(_))));
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Cmd::SaveConversation { .. }))
+        );
     }
 
     #[test]
