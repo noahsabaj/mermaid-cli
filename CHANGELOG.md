@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`policy/mod.rs` splits along its seams.** The last un-decomposed file
+  in the policy module carried three concerns: the vocabulary (`SafetyMode`,
+  `RiskClass`, `ActionRequest`, `PolicyDecision`, the floors), the engine
+  that folds them into a verdict, and ~1,900 lines of end-to-end policy
+  tests. The vocabulary now lives in `policy/types.rs`, the engine and its
+  helpers in `policy/engine.rs` (tests ride with the engine, since a
+  verdict is only meaningful end to end), and `mod.rs` is the gateway that
+  keeps every existing `crate::policy::*` / `mermaid_runtime::*` path
+  working. The now-unconsumed `pub(crate) use shell::*` glob is gone --
+  engine and tests import what they use by name. No behavior change.
+
 - **`wrap.rs`'s tests moved home.** The wrap extraction left its ~15 tests
   behind in `chat.rs`'s test module — `wrap.rs` itself showed zero tests while
   the suite that pins its CJK widths, phantom-space, hard-break, and
