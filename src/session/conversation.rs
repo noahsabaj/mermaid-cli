@@ -259,6 +259,32 @@ impl ConversationManager {
         self.events.path_for(id)
     }
 
+    /// Read a session's log as EVENTS rather than folding it into a
+    /// conversation — for readers that want the history in the order it
+    /// happened instead of the state it produced.
+    ///
+    /// The daemon's `subscribe_task` catch-up is that reader: a mid-run
+    /// attach replays these onto the `RunEvent` wire so a subscriber joining
+    /// at minute nine learns what the first nine produced. `Ok(None)` when
+    /// there is no readable log; a torn tail yields the prefix, exactly as a
+    /// fold does.
+    ///
+    /// # Errors
+    ///
+    /// An `id` that would escape the conversations dir, and read I/O on the
+    /// log file. A log that is absent, over the cap, or newer-format is
+    /// `Ok(None)`, not an error.
+    pub fn read_session_events(
+        &self,
+        id: &str,
+    ) -> Result<Option<Vec<mermaid_domain::SessionEvent>>> {
+        validate_conversation_id(id)?;
+        Ok(self
+            .events
+            .read_events(id, None)?
+            .map(|(events, _highest)| events))
+    }
+
     /// Rebuild a conversation from its event log — the recovery source when
     /// the snapshot is missing or will not parse. `Ok(None)` when there is
     /// no (foldable) log.

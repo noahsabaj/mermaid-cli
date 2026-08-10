@@ -258,6 +258,13 @@ async fn execute_claimed_task(
     // Live event stream for `subscribe_task` attachments (pre-run
     // subscribers already hold receivers on this same sender).
     let event_tx = sched.stream_for(&task.id);
+    // Stamp the backlink when the run ANNOUNCES its session, not only when
+    // it ends. `tasks.conversation_id` is the one key from a task to its
+    // session log, and a mid-run `subscribe_task` attach needs it while the
+    // run is still going — it is what turns a from-now attach into one that
+    // can replay what it missed. The end-of-run stamp below stays as the
+    // authority; this is the same value, earlier.
+    let _backlink = tokio::spawn(early_backlink(event_tx.subscribe(), task.id.clone()));
     let result = mermaid_cli::app::run_non_interactive_with(
         config,
         std::path::PathBuf::from(&task.project_path),
@@ -309,6 +316,41 @@ async fn execute_claimed_task(
             "final_report": report.clone(),
         }),
     );
+}
+
+/// Wait for the run's `session_started` line and write `conversation_id`
+/// onto the task row.
+///
+/// Returns as soon as it has stamped, and when the run's senders drop
+/// without ever announcing (a run that failed before it had a session).
+/// Best-effort: a store write that fails leaves the row for the end-of-run
+/// stamp, and the only cost is a catch-up-less attach in the meantime.
+#[cfg(any(unix, windows))]
+async fn early_backlink(
+    mut events: tokio::sync::broadcast::Receiver<mermaid_domain::RunEvent>,
+    task_id: String,
+) {
+    loop {
+        match events.recv().await {
+            Ok(mermaid_domain::RunEvent::SessionStarted { session_id, .. }) => {
+                if session_id.is_empty() {
+                    return;
+                }
+                let owned = task_id.clone();
+                if let Err(error) = mermaid_runtime::with_shared_store(move |store| {
+                    store.tasks().set_conversation(&owned, &session_id)
+                }) {
+                    tracing::warn!(task = %task_id, %error, "could not stamp the session backlink at run start");
+                }
+                return;
+            },
+            // Everything else on this stream is content; keep waiting for
+            // the identity line (which the driver sends first, so this is
+            // only reached if a lag marker beat it).
+            Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {},
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+        }
+    }
 }
 
 /// Recover state stranded by a previous daemon's crash (#120, #118) and prune
@@ -805,10 +847,81 @@ fn terminal_result_event(
     }
 }
 
-/// Serve one `subscribe_task` connection: ack line, then NDJSON `RunEvent`s
-/// until the terminal `result`. An already-terminal task gets the ack plus
-/// ONE synthesized result from the persisted record. Slow clients are
-/// dropped by a per-write timeout so they can't block the daemon.
+/// How many catch-up events one attach replays. The whole projection is
+/// built in memory and written to a single socket before the first live
+/// event can flow, so a long run's log needs a ceiling — the same reflex as
+/// F24/RC-F on the transcript read. Tail-first: a subscriber joining now
+/// wants the recent end.
+#[cfg(any(unix, windows))]
+const MAX_CATCH_UP_EVENTS: usize = 1_000;
+
+/// What a `subscribe_task` attach MISSED: the run's `session_started` line
+/// plus the committed transcript so far, projected onto the public stream.
+///
+/// The live broadcast carries only what happens from now, so a subscriber
+/// attaching at minute nine used to get nine minutes of silence and then
+/// whatever came next — not even the `session_started` line that names the
+/// session, the same empty-handed attach the terminal path was fixed for in
+/// #371. The session event log is the durable record of everything before
+/// the attach, and `tasks.conversation_id` — stamped when the run announces
+/// its session, not just at terminal status — is the key to it.
+///
+/// A daemon task never seeds a session (the scheduler passes no
+/// `RunOptions::seed`), so its log holds this run and nothing else: the
+/// catch-up cannot leak an unrelated conversation's history.
+///
+/// Best-effort by construction. No backlink yet (a queued task, or a run
+/// that has not announced), no log, a project directory that has since gone
+/// away, or an unreadable log all yield what is known rather than failing
+/// the subscription.
+#[cfg(any(unix, windows))]
+fn catch_up_events(task: &mermaid_runtime::TaskRecord) -> Vec<mermaid_domain::RunEvent> {
+    let Some(session_id) = task.conversation_id.as_deref().filter(|id| !id.is_empty()) else {
+        return Vec::new();
+    };
+    // Identity is stated from the TASK row, not the log's `started` event:
+    // this is the line the live driver emitted for THIS run, and the row is
+    // what knows the task it belongs to.
+    let started = mermaid_domain::RunEvent::SessionStarted {
+        protocol_version: mermaid_domain::RUN_EVENT_PROTOCOL_VERSION,
+        cli_version: env!("CARGO_PKG_VERSION").to_string(),
+        model: task.model_id.clone(),
+        task_id: Some(task.id.clone()),
+        session_id: session_id.to_string(),
+    };
+    // `ConversationManager::new` CREATES the conversations dir. A task whose
+    // project has been deleted must not resurrect it just because somebody
+    // subscribed, so check before constructing one.
+    if !std::path::Path::new(&task.project_path).is_dir() {
+        return vec![started];
+    }
+    let events = match mermaid_cli::session::ConversationManager::new(&task.project_path)
+        .and_then(|manager| manager.read_session_events(session_id))
+    {
+        Ok(Some(events)) => events,
+        Ok(None) => return vec![started],
+        Err(error) => {
+            tracing::warn!(task = %task.id, %error, "session log unreadable; attaching without catch-up");
+            return vec![started];
+        },
+    };
+    let mut replay = mermaid_domain::RunEvent::catch_up(&events);
+    if let Some(dropped) = replay
+        .len()
+        .checked_sub(MAX_CATCH_UP_EVENTS)
+        .filter(|n| *n > 0)
+    {
+        tracing::info!(task = %task.id, dropped, "catch-up over the cap; replaying the tail");
+        replay.drain(..dropped);
+    }
+    std::iter::once(started).chain(replay).collect()
+}
+
+/// Serve one `subscribe_task` connection: ack line, the catch-up the attach
+/// missed, then NDJSON `RunEvent`s until the terminal `result`. An
+/// already-terminal task gets ONE synthesized result from the persisted
+/// record in place of the live stream. Slow clients are dropped by a
+/// per-write timeout so they can't block the daemon.
 #[cfg(any(unix, windows))]
 async fn handle_subscribe_stream<S>(
     mut stream: S,
@@ -860,6 +973,22 @@ where
     // (the executor drops the stream only AFTER persisting the status).
     let mut rx = scheduler().stream_for(&task_id).subscribe();
     let task = store.tasks().get(&task_id)?.unwrap_or(task);
+    // Read the log AFTER attaching the receiver, in that order on purpose.
+    // A message committed while we read is then replayed AND delivered live
+    // — a duplicate bounded to the one in-flight message — where reading
+    // first would drop it from both. Repetition is recoverable by a
+    // consumer; a hole is not.
+    //
+    // On a blocking pool: the log is the one unbounded read on this path,
+    // and a multi-megabyte transcript must not stall the reactor for every
+    // other connection. A panicking read costs the catch-up, not the
+    // subscription.
+    let catch_up = {
+        let task = task.clone();
+        tokio::task::spawn_blocking(move || catch_up_events(&task))
+            .await
+            .unwrap_or_default()
+    };
     write_line(
         &mut stream,
         &serde_json::json!({
@@ -867,10 +996,17 @@ where
             "subscribed": task_id,
             "status": task.status.to_string(),
             "protocol_version": mermaid_domain::RUN_EVENT_PROTOCOL_VERSION,
+            // How many of the lines that follow are REPLAYED from the log
+            // rather than live. A consumer that only wants what happens
+            // from now skips exactly this many.
+            "replayed": catch_up.len(),
         })
         .to_string(),
     )
     .await?;
+    for event in &catch_up {
+        write_line(&mut stream, &serde_json::to_string(event)?).await?;
+    }
     let terminal_status = matches!(
         task.status,
         mermaid_runtime::TaskStatus::Completed
@@ -1748,6 +1884,390 @@ mod tests {
         // Drop guard cleans the entry; the next stream_for is a fresh channel.
         sched.drop_stream("t1");
         assert!(sched.streams.lock().unwrap().is_empty());
+    }
+
+    /// A task row pointing at `session` under `project`, mid-run.
+    fn running_task(
+        project: &std::path::Path,
+        session: Option<&str>,
+    ) -> mermaid_runtime::TaskRecord {
+        mermaid_runtime::TaskRecord {
+            id: "task-1".to_string(),
+            title: "t".to_string(),
+            status: mermaid_runtime::TaskStatus::Running,
+            priority: mermaid_runtime::TaskPriority::Normal,
+            project_path: project.display().to_string(),
+            model_id: "ollama/test".to_string(),
+            conversation_id: session.map(str::to_string),
+            created_at: "2026-08-10T00:00:00-04:00".to_string(),
+            updated_at: "2026-08-10T00:00:00-04:00".to_string(),
+            final_report: None,
+            prompt: Some("p".to_string()),
+        }
+    }
+
+    /// Write a real session log the way a run does — through the appender,
+    /// which backfills the transcript on first touch.
+    fn seeded_session(project: &std::path::Path, assistant_says: &str) -> String {
+        let manager =
+            mermaid_cli::session::ConversationManager::new(project).expect("conversation manager");
+        let mut conversation = mermaid_domain::ConversationHistory::new(
+            project.display().to_string(),
+            "ollama/test".to_string(),
+            chrono::Local::now(),
+        );
+        // `vec!` and not an array literal: two `ChatMessage`s together clear
+        // the 512-byte stack-array threshold, and this is a test helper, not
+        // a place to spend debt.
+        let turns = vec![
+            mermaid_model::models::ChatMessage::user("do the thing"),
+            mermaid_model::models::ChatMessage::assistant(assistant_says),
+        ];
+        conversation.add_messages(&turns, chrono::Local::now());
+        manager
+            .append_session_events(&conversation, &[])
+            .expect("append the log");
+        conversation.id
+    }
+
+    fn temp_project(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("mermaidd_catch_up_{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp project");
+        dir
+    }
+
+    /// A mid-run attach is served the identity line it missed plus the
+    /// transcript committed before it arrived — the whole point of the
+    /// catch-up.
+    #[test]
+    fn catch_up_replays_identity_and_the_transcript_so_far() {
+        let project = temp_project("transcript");
+        let session = seeded_session(&project, "half way there");
+        let events = super::catch_up_events(&running_task(&project, Some(&session)));
+
+        assert_eq!(
+            events[0],
+            mermaid_domain::RunEvent::SessionStarted {
+                protocol_version: mermaid_domain::RUN_EVENT_PROTOCOL_VERSION,
+                cli_version: env!("CARGO_PKG_VERSION").to_string(),
+                model: "ollama/test".to_string(),
+                task_id: Some("task-1".to_string()),
+                session_id: session,
+            },
+            "identity leads the catch-up: {events:?}"
+        );
+        assert_eq!(
+            events[1],
+            mermaid_domain::RunEvent::Text {
+                delta: "half way there".to_string()
+            },
+            "the committed assistant turn replays: {events:?}"
+        );
+        let _ = std::fs::remove_dir_all(&project);
+    }
+
+    /// No backlink yet (a still-queued task) means nothing to replay — the
+    /// subscription is live-only, exactly as before.
+    #[test]
+    fn catch_up_is_empty_without_a_session_backlink() {
+        let project = temp_project("no_backlink");
+        assert!(super::catch_up_events(&running_task(&project, None)).is_empty());
+        let _ = std::fs::remove_dir_all(&project);
+    }
+
+    /// A task whose project has been deleted still gets its identity line,
+    /// and subscribing must not recreate the directory tree to find that out.
+    #[test]
+    fn catch_up_does_not_resurrect_a_deleted_project() {
+        let project = temp_project("deleted");
+        let session = seeded_session(&project, "gone now");
+        std::fs::remove_dir_all(&project).expect("delete the project");
+
+        let events = super::catch_up_events(&running_task(&project, Some(&session)));
+
+        assert_eq!(events.len(), 1, "identity only: {events:?}");
+        assert!(matches!(
+            events[0],
+            mermaid_domain::RunEvent::SessionStarted { .. }
+        ));
+        assert!(!project.exists(), "the project dir stays deleted");
+    }
+
+    /// The backlink that makes a mid-run catch-up possible at all: the
+    /// watcher stamps `conversation_id` off the run's own `session_started`
+    /// line, long before the terminal status that used to be the only writer.
+    #[tokio::test]
+    async fn the_backlink_lands_when_the_run_announces_its_session() {
+        let data_dir = temp_project("backlink_data");
+        temp_env::async_with_vars(
+            [(
+                mermaid_model::utils::DATA_DIR_ENV,
+                Some(data_dir.display().to_string()),
+            )],
+            async {
+                let store = mermaid_runtime::RuntimeStore::open_default().expect("open store");
+                let task = store
+                    .tasks()
+                    .create(
+                        mermaid_runtime::NewTask::new("t", "/tmp/proj", "ollama/test")
+                            .daemon_owned()
+                            .with_prompt("do the thing"),
+                    )
+                    .expect("create task");
+                assert!(
+                    task.conversation_id.is_none(),
+                    "a task is created before its session exists"
+                );
+
+                let (events, _rx) = tokio::sync::broadcast::channel(16);
+                let watcher =
+                    tokio::spawn(super::early_backlink(events.subscribe(), task.id.clone()));
+                events
+                    .send(mermaid_domain::RunEvent::SessionStarted {
+                        protocol_version: mermaid_domain::RUN_EVENT_PROTOCOL_VERSION,
+                        cli_version: env!("CARGO_PKG_VERSION").to_string(),
+                        model: "ollama/test".to_string(),
+                        task_id: Some(task.id.clone()),
+                        session_id: "20260810_120000_000".to_string(),
+                    })
+                    .expect("the watcher is subscribed");
+                tokio::time::timeout(std::time::Duration::from_secs(20), watcher)
+                    .await
+                    .expect("the watcher stamps and returns")
+                    .expect("watcher joined");
+
+                let stamped = mermaid_runtime::RuntimeStore::open_default()
+                    .expect("reopen store")
+                    .tasks()
+                    .get(&task.id)
+                    .expect("read the task")
+                    .expect("the task exists");
+                assert_eq!(
+                    stamped.conversation_id.as_deref(),
+                    Some("20260810_120000_000"),
+                    "the session is reachable from the task while the run is still going"
+                );
+            },
+        )
+        .await;
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    /// End to end over a real connection: a subscriber attaching to a
+    /// RUNNING task reads the ack, then the catch-up, then the live stream —
+    /// in that order, on one socket.
+    ///
+    /// This is the behavior the projection tests above cannot show: that a
+    /// mid-run attach is served what it missed BEFORE it joins the
+    /// broadcast, and that the ack says how many of the lines that follow
+    /// were replayed rather than live.
+    #[tokio::test]
+    async fn a_mid_run_attach_reads_the_catch_up_then_the_live_stream() {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+
+        let data_dir = temp_project("stream_data");
+        let project = temp_project("stream_project");
+        let session = seeded_session(&project, "half way there");
+        let _ = super::SCHEDULER.set(super::Scheduler {
+            permits: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
+            running: std::sync::Mutex::new(std::collections::HashMap::new()),
+            wake: tokio::sync::Notify::new(),
+            task_timeout: None,
+            streams: std::sync::Mutex::new(std::collections::HashMap::new()),
+        });
+
+        let lines = temp_env::async_with_vars(
+            [(
+                mermaid_model::utils::DATA_DIR_ENV,
+                Some(data_dir.display().to_string()),
+            )],
+            async {
+                let store = mermaid_runtime::RuntimeStore::open_default().expect("open store");
+                let task = store
+                    .tasks()
+                    .create(
+                        mermaid_runtime::NewTask::new(
+                            "t",
+                            project.display().to_string(),
+                            "ollama/test",
+                        )
+                        .daemon_owned()
+                        .with_prompt("do the thing"),
+                    )
+                    .expect("create task");
+                store
+                    .tasks()
+                    .update_status(&task.id, mermaid_runtime::TaskStatus::Running, None)
+                    .expect("mark running");
+                // The backlink the executor stamps when the run announces
+                // its session — what makes the log reachable mid-run.
+                store
+                    .tasks()
+                    .set_conversation(&task.id, &session)
+                    .expect("stamp the backlink");
+
+                // Hold the sender BEFORE the handler subscribes, so the
+                // terminal event below cannot be sent into a void.
+                let live = super::scheduler().stream_for(&task.id);
+                let (subscriber, socket) = tokio::io::duplex(64 * 1024);
+                let handler = tokio::spawn(super::handle_subscribe_stream(
+                    socket,
+                    mermaid_cli::runtime_client::DaemonRequest::SubscribeTask {
+                        task_id: task.id.clone(),
+                    },
+                    true,
+                ));
+
+                let mut reader = BufReader::new(subscriber).lines();
+                let mut lines = Vec::new();
+                // Ack + the two catch-up lines. Reading them proves the
+                // handler is already past `subscribe()`, so the live event
+                // sent next cannot race the attach. Bounded, because a
+                // catch-up that never arrives would otherwise hang the
+                // suite instead of failing it.
+                for _ in 0..3 {
+                    lines.push(
+                        tokio::time::timeout(
+                            std::time::Duration::from_secs(20),
+                            reader.next_line(),
+                        )
+                        .await
+                        .expect("the catch-up arrives before the live stream")
+                        .expect("read")
+                        .expect("a line"),
+                    );
+                }
+                live.send(mermaid_domain::RunEvent::Result {
+                    response: "all done".to_string(),
+                    reasoning: None,
+                    total_tokens: 7,
+                    errors: vec![],
+                    session_id: session.clone(),
+                    structured_output: None,
+                })
+                .expect("the handler is subscribed");
+                while let Ok(Some(line)) = reader.next_line().await {
+                    lines.push(line);
+                }
+                handler.await.expect("handler joined").expect("served");
+                lines
+            },
+        )
+        .await;
+
+        let parsed: Vec<serde_json::Value> = lines
+            .iter()
+            .map(|line| serde_json::from_str(line).expect("each line is JSON"))
+            .collect();
+        assert_eq!(parsed.len(), 4, "ack + 2 replayed + 1 live: {lines:?}");
+        assert_eq!(parsed[0]["ok"], serde_json::json!(true));
+        assert_eq!(parsed[0]["status"], serde_json::json!("running"));
+        assert_eq!(
+            parsed[0]["replayed"],
+            serde_json::json!(2),
+            "the ack counts the replayed lines that follow"
+        );
+        assert_eq!(parsed[1]["type"], serde_json::json!("session_started"));
+        assert_eq!(parsed[1]["session_id"], serde_json::json!(session));
+        assert_eq!(parsed[2]["type"], serde_json::json!("text"));
+        assert_eq!(parsed[2]["delta"], serde_json::json!("half way there"));
+        // Only after the catch-up does the live broadcast reach the wire.
+        assert_eq!(parsed[3]["type"], serde_json::json!("result"));
+        assert_eq!(parsed[3]["response"], serde_json::json!("all done"));
+
+        let _ = std::fs::remove_dir_all(&project);
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    /// The rule is uniform: an attach gets what it missed, whenever it
+    /// arrives. A LATE one missed everything, so the catch-up precedes the
+    /// terminal event synthesized from the record — and the stream still
+    /// ends at `result`, so a consumer that stops there is unaffected.
+    #[tokio::test]
+    async fn a_late_attach_gets_the_catch_up_before_the_synthesized_result() {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+
+        let data_dir = temp_project("late_data");
+        let project = temp_project("late_project");
+        let session = seeded_session(&project, "the finished answer");
+        let _ = super::SCHEDULER.set(super::Scheduler {
+            permits: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
+            running: std::sync::Mutex::new(std::collections::HashMap::new()),
+            wake: tokio::sync::Notify::new(),
+            task_timeout: None,
+            streams: std::sync::Mutex::new(std::collections::HashMap::new()),
+        });
+
+        let lines = temp_env::async_with_vars(
+            [(
+                mermaid_model::utils::DATA_DIR_ENV,
+                Some(data_dir.display().to_string()),
+            )],
+            async {
+                let store = mermaid_runtime::RuntimeStore::open_default().expect("open store");
+                let task = store
+                    .tasks()
+                    .create(
+                        mermaid_runtime::NewTask::new(
+                            "t",
+                            project.display().to_string(),
+                            "ollama/test",
+                        )
+                        .daemon_owned()
+                        .with_prompt("do the thing"),
+                    )
+                    .expect("create task");
+                store
+                    .tasks()
+                    .update_status(
+                        &task.id,
+                        mermaid_runtime::TaskStatus::Completed,
+                        Some("the finished answer"),
+                    )
+                    .expect("mark completed");
+                store
+                    .tasks()
+                    .set_conversation(&task.id, &session)
+                    .expect("stamp the backlink");
+
+                let (subscriber, socket) = tokio::io::duplex(64 * 1024);
+                let handler = tokio::spawn(super::handle_subscribe_stream(
+                    socket,
+                    mermaid_cli::runtime_client::DaemonRequest::SubscribeTask {
+                        task_id: task.id.clone(),
+                    },
+                    true,
+                ));
+                let mut reader = BufReader::new(subscriber).lines();
+                let mut lines = Vec::new();
+                while let Ok(Ok(Some(line))) =
+                    tokio::time::timeout(std::time::Duration::from_secs(20), reader.next_line())
+                        .await
+                {
+                    lines.push(line);
+                }
+                handler.await.expect("handler joined").expect("served");
+                lines
+            },
+        )
+        .await;
+
+        let parsed: Vec<serde_json::Value> = lines
+            .iter()
+            .map(|line| serde_json::from_str(line).expect("each line is JSON"))
+            .collect();
+        assert_eq!(parsed.len(), 4, "ack + 2 replayed + 1 terminal: {lines:?}");
+        assert_eq!(parsed[0]["status"], serde_json::json!("completed"));
+        assert_eq!(parsed[0]["replayed"], serde_json::json!(2));
+        assert_eq!(parsed[1]["type"], serde_json::json!("session_started"));
+        assert_eq!(parsed[2]["type"], serde_json::json!("text"));
+        assert_eq!(parsed[2]["delta"], serde_json::json!("the finished answer"));
+        assert_eq!(parsed[3]["type"], serde_json::json!("result"));
+        assert_eq!(parsed[3]["session_id"], serde_json::json!(session));
+
+        let _ = std::fs::remove_dir_all(&project);
+        let _ = std::fs::remove_dir_all(&data_dir);
     }
 
     #[test]
