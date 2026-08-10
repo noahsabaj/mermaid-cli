@@ -74,6 +74,13 @@ pub enum DaemonRequest {
     CancelTask {
         id: String,
     },
+    /// Put a prompt into a task that is already running. Reaches the run's
+    /// `EngineHandle` mailbox, so the message lands in the same reducer, on
+    /// the same queue, as one the run produced itself.
+    SendToTask {
+        id: String,
+        text: String,
+    },
     UpdateTask {
         id: String,
         status: String,
@@ -148,6 +155,7 @@ impl DaemonRequest {
             Self::CreateTask { .. }
             | Self::Run { .. }
             | Self::CancelTask { .. }
+            | Self::SendToTask { .. }
             | Self::UpdateTask { .. }
             | Self::RestoreCheckpoint { .. }
             | Self::Approve { .. }

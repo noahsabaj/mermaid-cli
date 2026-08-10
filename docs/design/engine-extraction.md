@@ -35,6 +35,17 @@ child needs, because `drive_child` owns the reducer and cannot also relay
 progress. Two loops per subagent is the tell: the driving is not a thing you can
 hold, so anything that wants to watch it has to wrap it.
 
+**Correction, after PR 1 landed.** Sites 5 and 6 do not collapse into the actor,
+and this document said they would. They are not reducer loops at all: they
+supervise a child *task* — awaiting its completion future while draining a
+progress channel, with two escape arms (parent cancel, Ctrl+B detach) that
+return different things. Handing the child a mailbox and an event bus renames
+`child_progress_rx` to `handle.subscribe()` and leaves both loops exactly as
+long. What they share is "await a future while relaying a channel", which is a
+supervision helper and a separate piece of work; it is not what an engine is
+for. The four loops in rows 1-4 are the ones this design was about, and those
+are the ones that moved.
+
 What that costs, concretely:
 
 - **Fixes land once per copy.** #76 (a timed-out child dropped its runner
@@ -105,27 +116,38 @@ observable point.
 
 ### The actor
 
-`Engine` as written above is *owned* — the caller holds it and calls `step`. The
-interactive TUI must stay that way: it renders `&State` at 60fps in the same
-task, and an actor would either clone `State` per frame or per message.
+The first sketch of this section proposed an `EngineActor::spawn` that moved the
+`Engine` into a task of its own. That turned out to be a layer over something
+that already existed. `Engine::drive` *is* an actor loop: it pumps an `mpsc` of
+`Msg` and publishes through its observer. Spawning it somewhere else buys
+nothing — every driver already runs on a task, and the TUI must keep the engine
+in *its* task because it renders `&State` at 60fps and would otherwise clone
+`State` per frame.
 
-The actor is the second surface, over the same core:
+What was actually missing was a name for the two ends, so that something outside
+the drive could reach them:
 
 ```rust
-let handle = EngineActor::spawn(engine, policy);   // owns the Engine in a task
-handle.send(msg).await;                            // -> the engine's inbox
-let mut rx = handle.subscribe();                   // -> broadcast<EngineEvent>
+pub struct EngineHandle<E> { inbox: mpsc::Sender<Msg>, events: broadcast::Sender<E> }
+handle.send(msg).await;      // -> the engine's inbox
+let mut rx = handle.subscribe();
 ```
 
-`EngineEvent` carries *projections* (the `RunEvent` vocabulary, already frozen
-at v1), not `State`: a subscriber that is a daemon socket, a second TUI, or an
-SDK client cannot use a `State` it cannot render, and broadcasting one would put
-a deep clone on the hot streaming path. Subscribers that need history get it the
-way `subscribe_task` already does — catch up from the session event log, then
-join the broadcast.
+The mailbox is the SAME channel every effect result arrives on, and that is the
+design, not an implementation detail: a message from outside is indistinguishable
+from one the run produced itself, so it goes through the same reducer, the same
+stale-turn filter, the same recorder, and the same event log. There is no second
+way into the state — which is also why `send` needs no locking and no snapshot.
 
-This is what daemon attach and multi-session need, and it is deliberately *not*
-what the TUI uses.
+The bus carries *projections* (the `RunEvent` vocabulary, already frozen at v1),
+not `State`: a subscriber that is a daemon socket, a second TUI, or an SDK client
+cannot use a `State` it cannot render, and broadcasting one would put a deep
+clone on the hot streaming path. Subscribers that need history get it the way
+`subscribe_task` already does — catch up from the session event log, then join
+the broadcast.
+
+The daemon is the first consumer of the send half. It could already watch a task
+and kill it; it could not talk to one.
 
 ## Invariants
 
@@ -149,6 +171,11 @@ what the TUI uses.
    the recorder as an observer and `ComposeInEditor` peeled off by a sink.
    Sites 5 and 6 keep their relay loops: they are about the *child handle*, not
    the reducer, and collapse in PR 2. *(this PR)*
-2. **The actor.** `EngineActor::spawn` + `EngineHandle::{send, subscribe}`,
-   `EngineEvent`. The subagent's two relay loops become one `subscribe()`, and
-   daemon attach / multi-session / an SDK surface get the handle they need.
+2. **The mailbox.** `EngineHandle::{send, subscribe}`, published by the headless
+   driver through `RunOptions::handle_tx`, registered per task by the daemon, and
+   reachable as `mermaid task <id> --send "<text>"`. Attach stops being
+   read-only. *(this PR)*
+
+Not in the sequence, and deliberately: a supervision helper for the subagent's
+two relay loops (see the correction above), and multi-session — which needs a
+registry of handles and a way to name sessions, not more engine.

@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`mermaid task <id> --send "<text>"` -- you can talk to a task that is
+  already running.** Attaching to a daemon task could watch it and kill it,
+  and that was all: `subscribe_task` streams a task's events and
+  `cancel_task` fires its token, but nothing could put a message *into* a
+  run in flight. Noticing halfway through a twenty-minute task that you also
+  wanted the tests checked meant cancelling it or waiting it out and
+  starting again from `--resume`.
+
+  The run now publishes an `EngineHandle` -- its mailbox and its event bus --
+  the moment its engine exists, before the first model call. The daemon
+  registers it alongside the cancellation token it already kept, and drops
+  it with the task's event stream. The mailbox is the SAME channel every
+  effect result arrives on, which is the design and not an implementation
+  detail: a prompt sent from outside is indistinguishable from one the run
+  produced itself, so it goes through the same reducer, the same stale-turn
+  filter, the same recorder, and the same event log, and queues behind the
+  live turn exactly as a typed one does. There is no second way into the
+  state.
+
+  A task that is not running says so and points at `mermaid run --resume`,
+  rather than accepting a message with nowhere to go. The send is
+  non-blocking on the daemon's side, so a run that is behind on its own
+  effects cannot stall every other client.
+
 ### Changed
 
 - **The driving loop is a value now, and a timed-out headless run stops

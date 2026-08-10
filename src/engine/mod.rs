@@ -13,12 +13,20 @@
 //! (where a `Cmd` goes), [`StepObserver`] (what watches each message before the
 //! reducer consumes it), and [`DrivePolicy`] (when the loop stops).
 //!
+//! [`Engine::drive`] is an actor loop, and [`EngineHandle`] names its two ends
+//! so something outside it — a daemon socket, a second view of one session, an
+//! SDK client — can send messages in and watch what comes out.
+//!
 //! [`Engine::reduce`] — the kernel — is synchronous and observer-free on
 //! purpose: `--replay` folds a recorded log with no tokio runtime in sight, and
 //! keeping the kernel callable from a plain `for` loop is what proves this
 //! abstraction did not smuggle a runtime into the fold.
 //!
 //! See `docs/design/engine-extraction.md`.
+
+mod handle;
+
+pub use handle::{EngineGone, EngineHandle};
 
 use std::future::Future;
 use std::time::Duration;

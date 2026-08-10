@@ -223,6 +223,12 @@ pub enum Commands {
         /// `result`. Works on queued tasks too (waits for the run to start).
         #[arg(long)]
         follow: bool,
+        /// Send a prompt to a RUNNING task (daemon required): the text lands
+        /// in the running agent's queue and it answers in a turn of its own,
+        /// as if you had typed it. Finished tasks take `mermaid run --resume`
+        /// instead.
+        #[arg(long, value_name = "TEXT")]
+        send: Option<String>,
     },
     /// List Mermaid-managed background processes
     Processes {
@@ -662,9 +668,11 @@ mod tests {
     #[test]
     fn parses_task_follow() {
         let cli = Cli::parse_from(["mermaid", "task", "t1", "--follow"]);
-        assert!(matches!(cli.command, Some(Commands::Task { id, follow: true }) if id == "t1"));
+        assert!(matches!(cli.command, Some(Commands::Task { id, follow: true, .. }) if id == "t1"));
         let cli = Cli::parse_from(["mermaid", "task", "t1"]);
-        assert!(matches!(cli.command, Some(Commands::Task { id, follow: false }) if id == "t1"));
+        assert!(
+            matches!(cli.command, Some(Commands::Task { id, follow: false, .. }) if id == "t1")
+        );
     }
 
     #[test]

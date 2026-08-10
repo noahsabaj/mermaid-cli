@@ -399,3 +399,103 @@ async fn a_closed_lifecycle_channel_does_not_spin_the_drive() {
 fn a_fresh_state_has_no_turn() {
     assert_eq!(fresh_state().turn.id(), None::<TurnId>);
 }
+
+// ── the handle ──────────────────────────────────────────────────────────
+
+/// The claim the handle exists to make: a message from outside the process's
+/// own effects reaches the reducer of an already-running drive, and is handled
+/// exactly like one the run produced itself.
+///
+/// Drives to `Exit` rather than `Settled` on purpose — a follow-up prompt
+/// queued behind a live turn seeds a turn of its own the moment the first ends,
+/// so "settled" is not something this test can wait for without also playing
+/// the model.
+#[tokio::test]
+async fn a_handle_delivers_a_message_into_a_running_drive() {
+    let mut engine = generating();
+    let (tx, mut rx) = channel();
+    let handle: EngineHandle<()> = EngineHandle::with_capacity(tx, 8);
+
+    assert!(handle.is_running());
+    tokio::spawn({
+        let handle = handle.clone();
+        async move {
+            // A follow-up prompt, sent from outside while the turn is still
+            // generating. The reducer queues it exactly as it queues a typed
+            // one — same path, same stale-turn filter, no side door.
+            handle
+                .send(prompt("and check the tests too"))
+                .await
+                .expect("engine is running");
+            // Still reachable after the first message: the drive kept pumping.
+            handle.send(Msg::Quit).await.expect("engine is running");
+        }
+    });
+
+    let exit = engine
+        .drive(&mut Inbox::new(&mut rx), &DrivePolicy::until_exit())
+        .await;
+
+    assert_eq!(exit, DriveExit::Exited);
+    assert_eq!(
+        engine
+            .state()
+            .ui
+            .queued_messages
+            .iter()
+            .map(|q| q.text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["and check the tests too"],
+        "the sent prompt reached the reducer and queued behind the live turn"
+    );
+}
+
+#[tokio::test]
+async fn a_handle_reports_an_engine_whose_drive_has_ended() {
+    let (tx, rx) = channel();
+    let handle: EngineHandle<()> = EngineHandle::with_capacity(tx, 8);
+    assert!(handle.is_running());
+
+    // What the end of a drive looks like from outside: the receiver is gone.
+    drop(rx);
+
+    assert!(!handle.is_running());
+    let err = handle
+        .send(prompt("nobody is listening"))
+        .await
+        .expect_err("a finished engine takes no messages");
+    assert!(
+        matches!(err.message(), Msg::SubmitPrompt { text, .. } if text == "nobody is listening"),
+        "the message comes back, so the caller can still report or persist it"
+    );
+}
+
+#[tokio::test]
+async fn subscribers_see_what_the_engine_publishes() {
+    let handle: EngineHandle<&'static str> = EngineHandle::with_capacity(channel().0, 8);
+    let mut watcher = handle.subscribe();
+    let mut late = handle.subscribe();
+
+    handle.publisher().send("session_started").expect("send");
+
+    assert_eq!(watcher.recv().await.expect("event"), "session_started");
+    assert_eq!(
+        late.recv().await.expect("event"),
+        "session_started",
+        "every live subscriber sees the same event"
+    );
+}
+
+/// A `broadcast` carries only what happens from now, and a subscriber that
+/// needs the past reads the session event log first (the shape `subscribe_task`
+/// already uses). This pins that so nobody mistakes the bus for a replay.
+#[tokio::test]
+async fn a_late_subscriber_does_not_see_earlier_events() {
+    let handle: EngineHandle<&'static str> = EngineHandle::with_capacity(channel().0, 8);
+    handle.publisher().send("missed").ok();
+
+    let mut late = handle.subscribe();
+    handle.publisher().send("seen").expect("send");
+
+    assert_eq!(late.recv().await.expect("event"), "seen");
+}

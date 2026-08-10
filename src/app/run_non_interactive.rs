@@ -15,7 +15,8 @@ use crate::app::lifecycle::RuntimeLifecycle;
 use crate::cli::OutputFormat;
 use crate::effect::EffectRunner;
 use crate::engine::{
-    DriveExit, DrivePolicy, Engine, Inbox, Observation, OnCancel, StepObserver, StopWhen,
+    DriveExit, DrivePolicy, Engine, EngineHandle, Inbox, Observation, OnCancel, StepObserver,
+    StopWhen,
 };
 use crate::providers::ToolRegistry;
 use mermaid_domain::Config;
@@ -77,6 +78,17 @@ pub struct RunOptions {
     /// Every event that would print on an NDJSON stream is also broadcast
     /// here (send is sync + non-blocking; no-receiver errors are ignored).
     pub event_tx: Option<tokio::sync::broadcast::Sender<mermaid_domain::RunEvent>>,
+    /// Where to publish this run's [`EngineHandle`], once there is one.
+    ///
+    /// The handle is the run's mailbox: it is what lets the daemon put a
+    /// message into a task that is already happening, rather than only watching
+    /// it and killing it. Sent exactly once, as soon as the engine exists —
+    /// which is before the first model call, so a caller that awaits it can
+    /// reach the whole run.
+    ///
+    /// An `mpsc` rather than a `oneshot` only because `RunOptions` is `Clone`
+    /// and a `oneshot::Sender` is not.
+    pub handle_tx: Option<tokio::sync::mpsc::Sender<EngineHandle<RunEvent>>>,
     /// `mermaid run --plan`: enter plan mode before the prompt seeds, so the
     /// run explores read-only and delivers a plan file.
     pub plan: bool,
@@ -140,6 +152,17 @@ pub async fn run_non_interactive_with(
     // Captured before `model_id` is moved into `State`, for the NDJSON stream.
     let stream_ndjson = opts.stream_ndjson;
     let event_model = model_id.clone();
+
+    // One event bus for the whole run. The caller's when it supplied one — the
+    // daemon subscribes before the run starts, to catch the line that names the
+    // session — and otherwise one of ours, but only when a handle was asked
+    // for: an unwatched run must not pay to project events nobody reads. The
+    // handle and the observer share it, or `subscribe()` would be silent.
+    let event_tx = match (opts.event_tx.clone(), opts.handle_tx.is_some()) {
+        (Some(tx), _) => Some(tx),
+        (None, true) => Some(tokio::sync::broadcast::channel(RUN_EVENT_BUS_CAPACITY).0),
+        (None, false) => None,
+    };
 
     let mut state = State::new(
         config.clone(),
@@ -223,15 +246,24 @@ pub async fn run_non_interactive_with(
     if stream_ndjson {
         emit_run_event(&started);
     }
-    if let Some(tx) = &opts.event_tx {
+    if let Some(tx) = &event_tx {
         let _ = tx.send(started);
+    }
+
+    // Publish this run's mailbox before the engine takes the runner, so a
+    // caller awaiting the handle can reach the run from its first model call
+    // onward. The bus is the caller's own when it supplied one — the daemon
+    // subscribes before the run starts, to catch the line that names the
+    // session — and otherwise one of ours, which keeps `subscribe()` total.
+    if let Some((want, events)) = opts.handle_tx.as_ref().zip(event_tx.clone()) {
+        let _ = want.try_send(EngineHandle::new(runner.sender(), events));
     }
 
     // Everything the reducer needs is in place: hand the state and the runner
     // to the engine, which owns the drive from here.
     let mut engine = Engine::new(state, runner).with_observer(RunStream {
         stream_ndjson,
-        event_tx: opts.event_tx.clone(),
+        event_tx: event_tx.clone(),
     });
 
     // `--plan`: flip into plan mode BEFORE the prompt seeds, through the
@@ -311,11 +343,16 @@ pub async fn run_non_interactive_with(
     if stream_ndjson {
         emit_run_event(&terminal);
     }
-    if let Some(tx) = &opts.event_tx {
+    if let Some(tx) = &event_tx {
         let _ = tx.send(terminal);
     }
     Ok(result)
 }
+
+/// Slots on the run's event bus. Matches the daemon's own: a lagged
+/// subscriber gets a `RecvError::Lagged` marker rather than backpressure into
+/// the run, which must never stall on someone watching it.
+const RUN_EVENT_BUS_CAPACITY: usize = 1024;
 
 /// How long a cancelled run may keep unwinding before the drive hard-stops.
 /// Generous next to the turn scope's own ~2s teardown bound.
