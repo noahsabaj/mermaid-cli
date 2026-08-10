@@ -33,6 +33,7 @@ use crate::{ProgressEvent, SubagentPhase};
 use mermaid_model::models::{ChatMessage, MessageRole, ProviderContinuation, TokenUsage};
 use mermaid_runtime::TaskStatus;
 
+use super::action_display::action_display_for;
 use super::cmd::Cmd;
 use super::compaction::{
     CompactionArchive, CompactionRequest, CompactionResult, CompactionTrigger, format_compact_count,
@@ -43,8 +44,8 @@ use super::state::{
     TurnState, UiMode,
 };
 use super::transition::{
-    action_display_for, commit_assistant_message, fill_outcome, start_generating,
-    tool_result_messages, try_complete_outcomes,
+    commit_assistant_message, fill_outcome, start_generating, tool_result_messages,
+    try_complete_outcomes,
 };
 use mermaid_model::ids::TurnId;
 
@@ -4585,7 +4586,7 @@ pub(crate) fn finish_run(state: &mut State, cmds: &mut Vec<Cmd>, end: RunEnd) {
     let run_tokens = state.runtime.run_tokens;
     let mut summary = format!(
         "Worked for {} · used {}{} tokens",
-        super::transition::format_run_duration(elapsed),
+        super::action_display::format_run_duration(elapsed),
         if run_tokens.contains_estimate {
             "~"
         } else {

@@ -14,10 +14,10 @@ expect|clippy::too_many_arguments|src/providers/approval.rs 1
 expect|clippy::too_many_arguments|src/providers/ctx.rs 1
 expect|clippy::too_many_arguments|src/providers/tool/subagent.rs 1
 expect|clippy::too_many_arguments|src/render/widgets/status_line.rs 1
+expect|clippy::too_many_lines|crates/mermaid-domain/src/action_display.rs 2
 expect|clippy::too_many_lines|crates/mermaid-domain/src/cmd.rs 1
 expect|clippy::too_many_lines|crates/mermaid-domain/src/reducer.rs 6
 expect|clippy::too_many_lines|crates/mermaid-domain/src/reports.rs 1
-expect|clippy::too_many_lines|crates/mermaid-domain/src/transition.rs 2
 expect|clippy::too_many_lines|crates/mermaid-model/src/models/adapters/anthropic.rs 2
 expect|clippy::too_many_lines|crates/mermaid-model/src/models/adapters/gemini.rs 1
 expect|clippy::too_many_lines|crates/mermaid-model/src/models/adapters/openai_compat.rs 2

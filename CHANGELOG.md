@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`transition.rs` is the turn-state machine its doc says it is.** The
+  module opens with "helpers that enforce invariants during turn-state
+  transitions" — and then ~600 of its ~790 code lines were presentation:
+  `action_display_for`, `display_info_for`, the per-tool detail shaping
+  (diff summaries, web-fetch provenance lines, subagent spend), duration
+  and pluralization formatting. All of it moved byte-identically, tests
+  included, into `action_display.rs`, whose own doc says what it actually
+  is: tool calls and outcomes rendered as transcript action rows. The
+  state machine that gates "no follow-up model call with missing tool
+  outcomes" is now a ~150-line module a reader can hold in one look, and
+  the cohesion break stopped hiding behind a load-bearing doc comment. No
+  behavior change; the crate-root re-exports keep every consumer's names.
+
 - **Slash-command arity and usage text live in the command registry, not in
   the reducer.** Fourteen commands require an argument (`/task`, `/pause`,
   `/resume`, `/logs`, `/stop`, `/restart`, `/open`, `/approve`, `/deny`,

@@ -27,6 +27,7 @@
 //! `reqwest`, no `rusqlite`, no `crossterm`, no `clap`. A reducer that wants to
 //! await something cannot, because the runtime is not on the dependency list.
 
+pub mod action_display;
 pub mod checklist;
 pub mod cmd;
 pub mod compaction;
@@ -49,6 +50,7 @@ pub mod state;
 pub mod tool_search;
 pub mod transition;
 
+pub use action_display::{action_display_for, display_info_for, display_info_for_shell};
 pub use checklist::{
     ChecklistEdit, ChecklistItem, ChecklistOrigin, ChecklistSpec, ChecklistStatus, ChecklistStore,
     EvidenceEntry, Stamp, UserChecklistEdit, advisory_notes,
@@ -104,7 +106,6 @@ pub use state::{
     estimate_context_usage_for_request, estimate_tool_schema_tokens,
 };
 pub use transition::{
-    action_display_for, commit_assistant_message, display_info_for, display_info_for_shell,
-    fill_outcome, start_executing_tools, start_generating, tool_result_messages,
-    try_complete_outcomes,
+    commit_assistant_message, fill_outcome, start_executing_tools, start_generating,
+    tool_result_messages, try_complete_outcomes,
 };

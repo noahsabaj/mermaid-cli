@@ -944,7 +944,7 @@ fn build_live_messages<'a>(
             .iter()
             .zip(outcomes)
             .filter_map(|(call, outcome)| match outcome {
-                Some(outcome) => Some(mermaid_domain::transition::action_display_for_shell(
+                Some(outcome) => Some(mermaid_domain::action_display::action_display_for_shell(
                     call, outcome, host_shell,
                 )),
                 None => {
