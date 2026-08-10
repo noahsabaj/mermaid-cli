@@ -513,12 +513,13 @@ impl Cmd {
     /// True iff this command needs to run inside a `TurnScope` so it
     /// can be cancelled by `Cmd::CancelScope`. The effect runner uses
     /// this to decide between "spawn into `JoinSet`" and "spawn detached".
+    ///
+    /// Defined as `scope_turn().is_some()` so the two can never disagree —
+    /// they are documented as the same set, and until this delegation that
+    /// was a convention held by hand across two separate matches.
     #[must_use]
     pub fn is_turn_scoped(&self) -> bool {
-        matches!(
-            self,
-            Self::CallModel { .. } | Self::CompactConversation { .. } | Self::ExecuteTool { .. }
-        )
+        self.scope_turn().is_some()
     }
 
     /// The `TurnId` of the scope this command would spawn fresh work
@@ -533,13 +534,80 @@ impl Cmd {
     /// resurrect an un-cancelled scope via `scope_mut`'s `or_insert_with`
     /// (F38). `CancelScope` must keep working on a tombstoned turn, which
     /// is exactly why it is excluded here.
+    ///
+    /// Exhaustive on purpose, with the same two lints `update_step` denies:
+    /// this function gates the tombstone check, so a `_ => None` here would
+    /// let a new scope-spawning variant resurrect a cancelled turn's scope
+    /// silently. Adding a `Cmd` is now a compile error until its author
+    /// decides whether it spawns turn work.
     #[must_use]
+    #[deny(
+        clippy::wildcard_enum_match_arm,
+        clippy::match_wildcard_for_single_variants
+    )]
     pub fn scope_turn(&self) -> Option<TurnId> {
         match self {
             Self::CallModel { turn, .. }
             | Self::CompactConversation { turn, .. }
             | Self::ExecuteTool { turn, .. } => Some(*turn),
-            _ => None,
+            // Everything below runs detached (or is handled inline by the
+            // dispatcher) and must never populate a turn's scope.
+            Self::CancelScope(_)
+            | Self::BackgroundScope(_)
+            | Self::ResolveApproval { .. }
+            | Self::ResolveQuestion { .. }
+            | Self::SyncTaskStore(_)
+            | Self::PersistPlanConfig(_)
+            | Self::UserTaskEdit(_)
+            | Self::NotifyTaskCompleted { .. }
+            | Self::EnsureScratchpad { .. }
+            | Self::ListScratchpad { .. }
+            | Self::SaveConversation(_)
+            | Self::SaveCompactionArchive { .. }
+            | Self::SaveProcess(_)
+            | Self::PersistLastModel(_)
+            | Self::PersistReasoningFor { .. }
+            | Self::PersistOllamaNumCtxFor { .. }
+            | Self::PersistOllamaOffload(_)
+            | Self::PersistUiTheme(_)
+            | Self::ListMemory
+            | Self::RememberMemory { .. }
+            | Self::ForgetMemory { .. }
+            | Self::ConsolidateMemory { .. }
+            | Self::LoadConversation(_)
+            | Self::ListConversations
+            | Self::ListAvailableModels
+            | Self::ListProjectFiles
+            | Self::ListRuntimeTasks { .. }
+            | Self::LoadRuntimeTask { .. }
+            | Self::ListRuntimeProcesses { .. }
+            | Self::ShowRuntimeProcessLogs { .. }
+            | Self::StopRuntimeProcess { .. }
+            | Self::KillBackgroundAgent { .. }
+            | Self::RestartRuntimeProcess { .. }
+            | Self::OpenRuntimeTarget { .. }
+            | Self::ShowRuntimePorts
+            | Self::ListRuntimeApprovals
+            | Self::DecideRuntimeApproval { .. }
+            | Self::ListRuntimeCheckpoints { .. }
+            | Self::ListForkCheckpoints { .. }
+            | Self::ListRuntimePlugins
+            | Self::UpdateRuntimeTaskStatus { .. }
+            | Self::CreateRuntimeCheckpoint { .. }
+            | Self::RestoreRuntimeCheckpoint { .. }
+            | Self::ShowRuntimeModelInfo { .. }
+            | Self::InitMcpServers(_)
+            | Self::StopMcpServer { .. }
+            | Self::PullOllamaModel { .. }
+            | Self::ProbeVision { .. }
+            | Self::OpenInSystem(_)
+            | Self::WriteImageToTemp { .. }
+            | Self::ReadClipboard
+            | Self::CopyToClipboard(_)
+            | Self::ComposeInEditor { .. }
+            | Self::Exit
+            | Self::SetTerminalTitle(_)
+            | Self::AlertUser => None,
         }
     }
 

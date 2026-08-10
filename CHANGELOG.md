@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **A new turn-scoped message or command can no longer silently skip the
+  staleness gates.** `Msg::turn_id()` feeds the reducer's stale-turn filter
+  and `Cmd::scope_turn()` feeds the effect runner's cancelled-turn tombstone
+  check — and both ended in a `_ =>` wildcard, the one construction
+  `update_step`'s own exhaustiveness guarantee could not reach. A
+  turn-carrying variant added without touching those two lists would have
+  compiled clean and bypassed staleness/tombstone checking entirely, which
+  is precisely the bug class the filters exist to make impossible. Both
+  matches now name every variant and deny the two wildcard lints the same
+  way `update_step` does, so the next variant is a compile error until its
+  author decides which side of each gate it belongs on. `Cmd::is_turn_scoped`
+  is now defined as `scope_turn().is_some()` — the two were documented as
+  the same set but maintained as separate matches.
+
 ## [0.24.0] - 2026-08-09
 
 ### Fixed

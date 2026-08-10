@@ -655,7 +655,18 @@ impl Msg {
     /// for variants that aren't turn-scoped (user intent,
     /// housekeeping, MCP lifecycle). The reducer uses this to
     /// short-circuit stale events.
+    ///
+    /// Exhaustive on purpose, with the same two lints `update_step` denies:
+    /// this function GATES the reducer's stale-turn filter, so a `_ => None`
+    /// here would let a new turn-scoped variant bypass staleness checking
+    /// silently — the one hole `update_step`'s own exhaustiveness cannot
+    /// close. Adding a `Msg` is now a compile error until its author decides
+    /// which side of the filter it belongs on.
     #[must_use]
+    #[deny(
+        clippy::wildcard_enum_match_arm,
+        clippy::match_wildcard_for_single_variants
+    )]
     pub fn turn_id(&self) -> Option<TurnId> {
         match self {
             Self::StreamText { turn, .. }
@@ -673,7 +684,63 @@ impl Msg {
             | Self::QuestionAsked { turn, .. }
             | Self::HookContext { turn, .. } => Some(*turn),
             Self::TurnCancelled(turn) => Some(*turn),
-            _ => None,
+            // Deliberately not turn-scoped. User intent and housekeeping are
+            // obvious; the subtler residents each carry their own doc comment
+            // on the variant — model-level metadata staleness keys on
+            // `model_id` (`ProviderContextResolved`, `OllamaPlacementResolved`,
+            // `ProviderVisionResolved`), checklist truth must survive turn
+            // churn (`TasksUpdated`, `TaskNotice`), and `ScratchpadReady`
+            // gates on the conversation id instead.
+            Self::Key(_)
+            | Self::Paste(_)
+            | Self::ClipboardRead(_)
+            | Self::SubmitPrompt { .. }
+            | Self::Slash(_)
+            | Self::CancelTurn
+            | Self::ConfirmAccepted
+            | Self::ConfirmDeclined
+            | Self::Quit
+            | Self::RuntimeSignal(_)
+            | Self::ProviderContextResolved { .. }
+            | Self::OllamaPlacementResolved { .. }
+            | Self::ProviderVisionResolved { .. }
+            | Self::BuiltinToolSchemaTokens(_)
+            | Self::TasksUpdated { .. }
+            | Self::TaskNotice { .. }
+            | Self::McpServerReady { .. }
+            | Self::McpServerErrored { .. }
+            | Self::McpServerStopped { .. }
+            | Self::InstructionsChanged(_)
+            | Self::SessionProvenanceResolved(_)
+            | Self::MemoryChanged(_)
+            | Self::SessionSaved
+            | Self::ConversationLoaded(_)
+            | Self::ConversationsListed(_)
+            | Self::AvailableModelsListed(_)
+            | Self::ProjectFilesListed(_)
+            | Self::ScratchpadReady { .. }
+            | Self::RuntimeTasksListed(_)
+            | Self::RuntimeTaskLoaded { .. }
+            | Self::RuntimeProcessesListed(_)
+            | Self::RuntimeText(_)
+            | Self::RuntimeApprovalsListed(_)
+            | Self::RuntimeCheckpointsListed(_)
+            | Self::ForkCheckpointsFound(_)
+            | Self::RuntimePluginsListed(_)
+            | Self::ModelPullFinished { .. }
+            | Self::ModelPullProgress(_)
+            | Self::Tick
+            | Self::Resize { .. }
+            | Self::TransientStatus { .. }
+            | Self::Toast { .. }
+            | Self::EditorReturned { .. }
+            | Self::BackgroundAgentStarted { .. }
+            | Self::BackgroundAgentProgress { .. }
+            | Self::BackgroundAgentFinished { .. }
+            | Self::MouseScroll { .. }
+            | Self::FocusChanged(_)
+            | Self::OpenImageAt { .. }
+            | Self::CopySelection(_) => None,
         }
     }
 
