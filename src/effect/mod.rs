@@ -44,7 +44,9 @@ use tokio::sync::mpsc;
 
 use crate::providers::ctx::{ExecContext, StreamContext};
 use crate::providers::{ProviderFactory, StreamEvent, ToolRegistry};
-use mermaid_domain::{Cmd, CompactionRequest, CompactionResult, CompactionTrigger, Msg, TurnId};
+use mermaid_domain::{
+    Cmd, CompactionRequest, CompactionResult, CompactionTrigger, Msg, Query, QueryResult, TurnId,
+};
 use mermaid_domain::{Config, MemoryConfig};
 
 pub use turn_scope::TurnScope;
@@ -528,6 +530,161 @@ impl EffectRunner {
     /// work for such a turn is dropped rather than spinning up a fresh scope.
     fn is_tombstoned(&self, turn: TurnId) -> bool {
         self.cancelled_turns.contains(&turn)
+    }
+
+    /// Run one read-only `Cmd::Query` lookup and answer with
+    /// `Msg::QueryResult`. Conversation reads and provider discovery run
+    /// async; everything touching the runtime store or the filesystem walk
+    /// goes through [`Self::send_blocking_query`] so a synchronous read never
+    /// stalls an async worker thread (#40).
+    fn dispatch_query(&mut self, query: Query) {
+        let tx = self.msg_tx.clone();
+        match query {
+            Query::LoadConversation { id } => self.query_load_conversation(id, tx),
+            Query::ListConversations => self.query_list_conversations(tx),
+            Query::ListAvailableModels => {
+                let providers = self.providers.clone();
+                self.detached.spawn(async move {
+                    let choices = discover_available_models(providers).await;
+                    let _ = tx
+                        .send(Msg::QueryResult(QueryResult::AvailableModelsListed(
+                            choices,
+                        )))
+                        .await;
+                });
+            },
+            Query::ListProjectFiles => {
+                let workdir = self.workdir.clone();
+                self.send_blocking_query(move || {
+                    QueryResult::ProjectFilesListed(walk_project_files(&workdir))
+                });
+            },
+            Query::ListRuntimeTasks { limit } => self.send_blocking_query(move || {
+                QueryResult::RuntimeTasksListed(
+                    crate::runtime_client::RuntimeClient::auto()
+                        .list_tasks(limit)
+                        .map(|read| read.value)
+                        .unwrap_or_default(),
+                )
+            }),
+            Query::LoadRuntimeTask { id } => self.send_blocking_query(move || {
+                let (task, events) = crate::runtime_client::RuntimeClient::auto()
+                    .task_detail(&id)
+                    .map(|read| (Some(Box::new(read.value.task)), read.value.events))
+                    .unwrap_or((None, Vec::new()));
+                QueryResult::RuntimeTaskLoaded { task, events }
+            }),
+            Query::ListRuntimeProcesses { limit } => self.send_blocking_query(move || {
+                QueryResult::RuntimeProcessesListed(
+                    crate::runtime_client::RuntimeClient::auto()
+                        .list_processes(limit)
+                        .map(|read| read.value)
+                        .unwrap_or_default(),
+                )
+            }),
+            Query::ListRuntimeApprovals => self.send_blocking_query(move || {
+                QueryResult::RuntimeApprovalsListed(
+                    crate::runtime_client::RuntimeClient::auto()
+                        .list_approvals()
+                        .map(|read| read.value)
+                        .unwrap_or_default(),
+                )
+            }),
+            Query::ListRuntimeCheckpoints { limit } => self.send_blocking_query(move || {
+                QueryResult::RuntimeCheckpointsListed(
+                    crate::runtime_client::RuntimeClient::auto()
+                        .list_checkpoints(limit)
+                        .map(|read| read.value)
+                        .unwrap_or_default(),
+                )
+            }),
+            Query::ListForkCheckpoints {
+                session_id,
+                message_index,
+            } => self.send_blocking_query(move || {
+                QueryResult::ForkCheckpointsFound(
+                    mermaid_runtime::RuntimeStore::open_default()
+                        .and_then(|store| {
+                            store
+                                .checkpoints()
+                                .list_for_session(&session_id, message_index as i64)
+                        })
+                        .unwrap_or_default(),
+                )
+            }),
+            Query::ListRuntimePlugins => self.send_blocking_query(move || {
+                QueryResult::RuntimePluginsListed(
+                    crate::runtime_client::RuntimeClient::auto()
+                        .list_plugins()
+                        .map(|read| read.value)
+                        .unwrap_or_default(),
+                )
+            }),
+        }
+    }
+
+    /// `Query::LoadConversation` — read one saved conversation off disk. A
+    /// missing/corrupt file answers nothing: the failure is logged and the
+    /// picker simply does not advance.
+    fn query_load_conversation(&mut self, id: String, tx: MsgSender) {
+        let workdir = self.workdir.clone();
+        self.detached.spawn(async move {
+            match crate::session::ConversationManager::new(&workdir) {
+                Ok(mgr) => match mgr.load_conversation(&id) {
+                    Ok(history) => {
+                        let _ = tx
+                            .send(Msg::QueryResult(QueryResult::ConversationLoaded(Box::new(
+                                history,
+                            ))))
+                            .await;
+                    },
+                    Err(e) => {
+                        tracing::warn!(id = %id, error = %e, "LoadConversation failed");
+                    },
+                },
+                Err(e) => {
+                    tracing::warn!(error = %e, "ConversationManager init failed");
+                },
+            }
+        });
+    }
+
+    /// `Query::ListConversations` — scan the conversations directory for the
+    /// `/load` picker (newest first).
+    fn query_list_conversations(&mut self, tx: MsgSender) {
+        let workdir = self.workdir.clone();
+        self.detached.spawn(async move {
+            let summaries = match crate::session::ConversationManager::new(&workdir) {
+                Ok(mgr) => mgr
+                    .list_conversation_metas()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|m| mermaid_domain::ConversationSummary {
+                        id: m.id,
+                        title: m.title,
+                        message_count: m.message_count,
+                        updated_at: m.updated_at.to_rfc3339(),
+                    })
+                    .collect(),
+                Err(_) => Vec::new(),
+            };
+            let _ = tx
+                .send(Msg::QueryResult(QueryResult::ConversationsListed(
+                    summaries,
+                )))
+                .await;
+        });
+    }
+
+    /// Run a synchronous lookup on the blocking pool and deliver its
+    /// `Msg::QueryResult` — the shared plumbing of every store/filesystem
+    /// query (rusqlite reads and the project walk must never stall an async
+    /// worker thread, #40).
+    fn send_blocking_query(&mut self, run: impl FnOnce() -> QueryResult + Send + 'static) {
+        let tx = self.msg_tx.clone();
+        self.detached.spawn_blocking(move || {
+            let _ = tx.blocking_send(Msg::QueryResult(run()));
+        });
     }
 
     /// Drop the scope for a turn, signalling cancellation to every
@@ -1169,95 +1326,7 @@ impl EffectRunner {
                     consolidate_memory(tx, providers, workdir, model_id).await;
                 });
             },
-            Cmd::LoadConversation(id) => {
-                let tx = self.msg_tx.clone();
-                let workdir = self.workdir.clone();
-                self.detached.spawn(async move {
-                    match crate::session::ConversationManager::new(&workdir) {
-                        Ok(mgr) => match mgr.load_conversation(&id) {
-                            Ok(history) => {
-                                let _ = tx.send(Msg::ConversationLoaded(history)).await;
-                            },
-                            Err(e) => {
-                                tracing::warn!(id = %id, error = %e, "LoadConversation failed");
-                            },
-                        },
-                        Err(e) => {
-                            tracing::warn!(error = %e, "ConversationManager init failed");
-                        },
-                    }
-                });
-            },
-            Cmd::ListConversations => {
-                let tx = self.msg_tx.clone();
-                let workdir = self.workdir.clone();
-                self.detached.spawn(async move {
-                    let summaries = match crate::session::ConversationManager::new(&workdir) {
-                        Ok(mgr) => mgr
-                            .list_conversation_metas()
-                            .unwrap_or_default()
-                            .into_iter()
-                            .map(|m| mermaid_domain::ConversationSummary {
-                                id: m.id,
-                                title: m.title,
-                                message_count: m.message_count,
-                                updated_at: m.updated_at.to_rfc3339(),
-                            })
-                            .collect(),
-                        Err(_) => Vec::new(),
-                    };
-                    let _ = tx.send(Msg::ConversationsListed(summaries)).await;
-                });
-            },
-            Cmd::ListAvailableModels => {
-                let tx = self.msg_tx.clone();
-                let providers = self.providers.clone();
-                self.detached.spawn(async move {
-                    let choices = discover_available_models(providers).await;
-                    let _ = tx.send(Msg::AvailableModelsListed(choices)).await;
-                });
-            },
-            Cmd::ListProjectFiles => {
-                let tx = self.msg_tx.clone();
-                let workdir = self.workdir.clone();
-                // Filesystem walk — blocking pool, like the other sync I/O.
-                self.detached.spawn_blocking(move || {
-                    let files = walk_project_files(&workdir);
-                    let _ = tx.blocking_send(Msg::ProjectFilesListed(files));
-                });
-            },
-            Cmd::ListRuntimeTasks { limit } => {
-                let tx = self.msg_tx.clone();
-                // Synchronous rusqlite read — run on the blocking pool so it
-                // never stalls an async worker thread (#40).
-                self.detached.spawn_blocking(move || {
-                    let tasks = crate::runtime_client::RuntimeClient::auto()
-                        .list_tasks(limit)
-                        .map(|read| read.value)
-                        .unwrap_or_default();
-                    let _ = tx.blocking_send(Msg::RuntimeTasksListed(tasks));
-                });
-            },
-            Cmd::LoadRuntimeTask { id } => {
-                let tx = self.msg_tx.clone();
-                self.detached.spawn_blocking(move || {
-                    let (task, events) = crate::runtime_client::RuntimeClient::auto()
-                        .task_detail(&id)
-                        .map(|read| (Some(read.value.task), read.value.events))
-                        .unwrap_or((None, Vec::new()));
-                    let _ = tx.blocking_send(Msg::RuntimeTaskLoaded { task, events });
-                });
-            },
-            Cmd::ListRuntimeProcesses { limit } => {
-                let tx = self.msg_tx.clone();
-                self.detached.spawn_blocking(move || {
-                    let processes = crate::runtime_client::RuntimeClient::auto()
-                        .list_processes(limit)
-                        .map(|read| read.value)
-                        .unwrap_or_default();
-                    let _ = tx.blocking_send(Msg::RuntimeProcessesListed(processes));
-                });
-            },
+            Cmd::Query(query) => self.dispatch_query(query),
             Cmd::ShowRuntimeProcessLogs { id } => {
                 let tx = self.msg_tx.clone();
                 self.detached.spawn_blocking(move || {
@@ -1348,16 +1417,6 @@ impl EffectRunner {
                     let _ = tx.blocking_send(Msg::RuntimeText(text));
                 });
             },
-            Cmd::ListRuntimeApprovals => {
-                let tx = self.msg_tx.clone();
-                self.detached.spawn_blocking(move || {
-                    let approvals = crate::runtime_client::RuntimeClient::auto()
-                        .list_approvals()
-                        .map(|read| read.value)
-                        .unwrap_or_default();
-                    let _ = tx.blocking_send(Msg::RuntimeApprovalsListed(approvals));
-                });
-            },
             Cmd::DecideRuntimeApproval { id, decision } => {
                 let tx = self.msg_tx.clone();
                 self.detached.spawn_blocking(move || {
@@ -1379,42 +1438,6 @@ impl EffectRunner {
                         },
                     };
                     let _ = tx.blocking_send(msg);
-                });
-            },
-            Cmd::ListRuntimeCheckpoints { limit } => {
-                let tx = self.msg_tx.clone();
-                self.detached.spawn_blocking(move || {
-                    let checkpoints = crate::runtime_client::RuntimeClient::auto()
-                        .list_checkpoints(limit)
-                        .map(|read| read.value)
-                        .unwrap_or_default();
-                    let _ = tx.blocking_send(Msg::RuntimeCheckpointsListed(checkpoints));
-                });
-            },
-            Cmd::ListForkCheckpoints {
-                session_id,
-                message_index,
-            } => {
-                let tx = self.msg_tx.clone();
-                self.detached.spawn_blocking(move || {
-                    let checkpoints = mermaid_runtime::RuntimeStore::open_default()
-                        .and_then(|store| {
-                            store
-                                .checkpoints()
-                                .list_for_session(&session_id, message_index as i64)
-                        })
-                        .unwrap_or_default();
-                    let _ = tx.blocking_send(Msg::ForkCheckpointsFound(checkpoints));
-                });
-            },
-            Cmd::ListRuntimePlugins => {
-                let tx = self.msg_tx.clone();
-                self.detached.spawn_blocking(move || {
-                    let plugins = crate::runtime_client::RuntimeClient::auto()
-                        .list_plugins()
-                        .map(|read| read.value)
-                        .unwrap_or_default();
-                    let _ = tx.blocking_send(Msg::RuntimePluginsListed(plugins));
                 });
             },
             Cmd::UpdateRuntimeTaskStatus {

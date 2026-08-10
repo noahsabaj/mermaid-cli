@@ -40,6 +40,7 @@ pub mod msg;
 pub mod plan;
 pub mod progress;
 pub mod prompts;
+pub mod query;
 pub mod reducer;
 pub mod reports;
 pub mod request;
@@ -87,6 +88,7 @@ pub use msg::{
     ClipboardRead, ContextCmd, Key, KeyCode, KeyMods, Msg, MsgKind, Paste, SlashCmd, StartupConfig,
 };
 pub use progress::{ProgressEvent, SubagentPhase};
+pub use query::{Query, QueryResult};
 pub use reducer::update;
 pub use request::build_chat_request;
 pub use run_event::{RUN_EVENT_PROTOCOL_VERSION, RunEvent};

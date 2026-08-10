@@ -5,7 +5,7 @@
 //! completing inserts the plain relative path as text (`@src/foo.rs `) —
 //! the model reads the file with its own tools, so the mention survives
 //! persistence, compaction, replay, and every provider adapter with zero
-//! new machinery. File enumeration is an effect (`Cmd::ListProjectFiles`);
+//! new machinery. File enumeration is an effect (`Cmd::Query(crate::query::Query::ListProjectFiles)`);
 //! this module is pure computation over the resulting list.
 
 /// The active `@`-token under the cursor.

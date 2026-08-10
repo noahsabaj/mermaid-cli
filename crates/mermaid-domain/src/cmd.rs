@@ -212,34 +212,11 @@ pub enum Cmd {
     /// Model-assisted prune of duplicate/obsolete memories, reversible via a
     /// checkpoint. Emits `Msg::RuntimeText` (the report) + `Msg::MemoryChanged`.
     ConsolidateMemory { model_id: String },
-    /// Load a specific conversation by ID and emit
-    /// `Msg::ConversationLoaded`. Reducer consumes that event to
-    /// replace the current session.
-    LoadConversation(String),
-    /// Scan the conversations directory for the /load picker. Emits
-    /// `Msg::ConversationsListed` with one `ConversationSummary` per
-    /// saved session (newest first). The reducer transitions to
-    /// `UiMode::ConversationList` and the render shows the picker.
-    ListConversations,
-    /// Discover every model the user could switch to, for the `/model` picker.
-    /// Emits `Msg::AvailableModelsListed`.
-    ///
-    /// Best-effort and strictly read-only: a dead Ollama is NOT started (a
-    /// cloud-only user who stopped it to free VRAM must not have it
-    /// resurrected by opening a list) and an unreachable provider is skipped
-    /// rather than failing the whole listing. Provider keys are resolved
-    /// inside the handler, never carried on this Cmd.
-    ListAvailableModels,
-    /// Walk the project for the @-mention file picker (gitignore-aware,
-    /// capped, sorted). Emits `Msg::ProjectFilesListed` with relative paths
-    /// (directories carry a trailing `/`).
-    ListProjectFiles,
-    /// List durable daemon/runtime tasks.
-    ListRuntimeTasks { limit: usize },
-    /// Load one durable daemon/runtime task and its timeline.
-    LoadRuntimeTask { id: String },
-    /// List durable daemon/runtime background processes.
-    ListRuntimeProcesses { limit: usize },
+    /// A read-only lookup — the whole list/load family in one variant; see
+    /// [`crate::query`] for the request/response pairs. The effect layer
+    /// answers with `Msg::QueryResult`. Provider keys are resolved inside
+    /// the handlers, never carried on the Cmd.
+    Query(crate::query::Query),
     /// Print one durable process log into the conversation.
     ShowRuntimeProcessLogs { id: String },
     /// Stop a durable process by pid.
@@ -254,22 +231,8 @@ pub enum Cmd {
     OpenRuntimeTarget { target: String },
     /// Show listening ports.
     ShowRuntimePorts,
-    /// List pending approval records.
-    ListRuntimeApprovals,
     /// Mark one approval as approved or denied.
     DecideRuntimeApproval { id: String, decision: String },
-    /// List restore checkpoints.
-    ListRuntimeCheckpoints { limit: usize },
-    /// Query checkpoints of `session_id` anchored strictly past
-    /// `message_index` — fired by rewind/fork so the reducer can tell the
-    /// user which file checkpoints the discarded timeline left behind.
-    /// Replies with `Msg::ForkCheckpointsFound`.
-    ListForkCheckpoints {
-        session_id: String,
-        message_index: usize,
-    },
-    /// List installed plugins.
-    ListRuntimePlugins,
     /// Update one durable task's status.
     UpdateRuntimeTaskStatus {
         id: String,
@@ -473,24 +436,14 @@ impl Cmd {
             Self::RememberMemory { .. } => "remember_memory",
             Self::ForgetMemory { .. } => "forget_memory",
             Self::ConsolidateMemory { .. } => "consolidate_memory",
-            Self::LoadConversation(_) => "load_conversation",
-            Self::ListConversations => "list_conversations",
-            Self::ListAvailableModels => "list_available_models",
-            Self::ListProjectFiles => "list_project_files",
-            Self::ListRuntimeTasks { .. } => "list_runtime_tasks",
-            Self::LoadRuntimeTask { .. } => "load_runtime_task",
-            Self::ListRuntimeProcesses { .. } => "list_runtime_processes",
+            Self::Query(query) => query.tag(),
             Self::ShowRuntimeProcessLogs { .. } => "show_runtime_process_logs",
             Self::StopRuntimeProcess { .. } => "stop_runtime_process",
             Self::KillBackgroundAgent { .. } => "kill_background_agent",
             Self::RestartRuntimeProcess { .. } => "restart_runtime_process",
             Self::OpenRuntimeTarget { .. } => "open_runtime_target",
             Self::ShowRuntimePorts => "show_runtime_ports",
-            Self::ListRuntimeApprovals => "list_runtime_approvals",
             Self::DecideRuntimeApproval { .. } => "decide_runtime_approval",
-            Self::ListRuntimeCheckpoints { .. } => "list_runtime_checkpoints",
-            Self::ListForkCheckpoints { .. } => "list_fork_checkpoints",
-            Self::ListRuntimePlugins => "list_runtime_plugins",
             Self::UpdateRuntimeTaskStatus { .. } => "update_runtime_task_status",
             Self::CreateRuntimeCheckpoint { .. } => "create_runtime_checkpoint",
             Self::RestoreRuntimeCheckpoint { .. } => "restore_runtime_checkpoint",
@@ -574,24 +527,14 @@ impl Cmd {
             | Self::RememberMemory { .. }
             | Self::ForgetMemory { .. }
             | Self::ConsolidateMemory { .. }
-            | Self::LoadConversation(_)
-            | Self::ListConversations
-            | Self::ListAvailableModels
-            | Self::ListProjectFiles
-            | Self::ListRuntimeTasks { .. }
-            | Self::LoadRuntimeTask { .. }
-            | Self::ListRuntimeProcesses { .. }
+            | Self::Query(_)
             | Self::ShowRuntimeProcessLogs { .. }
             | Self::StopRuntimeProcess { .. }
             | Self::KillBackgroundAgent { .. }
             | Self::RestartRuntimeProcess { .. }
             | Self::OpenRuntimeTarget { .. }
             | Self::ShowRuntimePorts
-            | Self::ListRuntimeApprovals
             | Self::DecideRuntimeApproval { .. }
-            | Self::ListRuntimeCheckpoints { .. }
-            | Self::ListForkCheckpoints { .. }
-            | Self::ListRuntimePlugins
             | Self::UpdateRuntimeTaskStatus { .. }
             | Self::CreateRuntimeCheckpoint { .. }
             | Self::RestoreRuntimeCheckpoint { .. }
@@ -703,15 +646,7 @@ impl Cmd {
             Self::RememberMemory { .. } => "remember_memory".to_string(),
             Self::ForgetMemory { .. } => "forget_memory".to_string(),
             Self::ConsolidateMemory { .. } => "consolidate_memory".to_string(),
-            Self::LoadConversation(id) => format!("load_conversation({id})"),
-            Self::ListConversations => "list_conversations".to_string(),
-            Self::ListAvailableModels => "list_available_models".to_string(),
-            Self::ListProjectFiles => "list_project_files".to_string(),
-            Self::ListRuntimeTasks { limit } => format!("list_runtime_tasks(limit={limit})"),
-            Self::LoadRuntimeTask { id } => format!("load_runtime_task({id})"),
-            Self::ListRuntimeProcesses { limit } => {
-                format!("list_runtime_processes(limit={limit})")
-            },
+            Self::Query(query) => query.summary(),
             Self::ShowRuntimeProcessLogs { id } => format!("show_runtime_process_logs({id})"),
             Self::StopRuntimeProcess { id } => format!("stop_runtime_process({id})"),
             Self::KillBackgroundAgent { agent_id } => format!(
@@ -721,20 +656,9 @@ impl Cmd {
             Self::RestartRuntimeProcess { id } => format!("restart_runtime_process({id})"),
             Self::OpenRuntimeTarget { target } => format!("open_runtime_target({target})"),
             Self::ShowRuntimePorts => "show_runtime_ports".to_string(),
-            Self::ListRuntimeApprovals => "list_runtime_approvals".to_string(),
             Self::DecideRuntimeApproval { id, decision } => {
                 format!("decide_runtime_approval({id}, {decision})")
             },
-            Self::ListForkCheckpoints {
-                session_id,
-                message_index,
-            } => {
-                format!("list_fork_checkpoints({session_id} > {message_index})")
-            },
-            Self::ListRuntimeCheckpoints { limit } => {
-                format!("list_runtime_checkpoints(limit={limit})")
-            },
-            Self::ListRuntimePlugins => "list_runtime_plugins".to_string(),
             Self::UpdateRuntimeTaskStatus { id, status, .. } => {
                 format!("update_runtime_task_status({id}, {status})")
             },

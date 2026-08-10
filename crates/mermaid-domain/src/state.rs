@@ -1078,7 +1078,7 @@ pub struct UiState {
     /// dirs with a trailing `/`). `None` until the first walk completes;
     /// stale-while-revalidate — every picker OPEN refreshes it.
     pub project_files: Option<Vec<String>>,
-    /// A `Cmd::ListProjectFiles` walk is in flight (dedupe: opening the
+    /// A `Query::ListProjectFiles` walk is in flight (dedupe: opening the
     /// picker again while loading must not spawn a second walk).
     pub project_files_loading: bool,
     /// Current fuzzy matches for the active @-token, best first (top 50).
@@ -1282,7 +1282,7 @@ pub struct RewindCandidate {
 }
 
 /// Summary row for the conversation picker. Produced by
-/// `Cmd::ListConversations` → `Msg::ConversationsListed`.
+/// `Query::ListConversations` → `QueryResult::ConversationsListed`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ConversationSummary {
     pub id: String,

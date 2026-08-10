@@ -360,6 +360,7 @@ impl Iterator for Replay {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mermaid_domain::QueryResult;
     use mermaid_domain::{ClipboardRead, MsgKind, Paste, TurnId};
 
     fn tmpfile(name: &str) -> PathBuf {
@@ -718,9 +719,7 @@ mod tests {
                 | MsgKind::MemoryChanged
                 | MsgKind::SessionProvenanceResolved
                 | MsgKind::SessionSaved
-                | MsgKind::ConversationLoaded
-                | MsgKind::ConversationsListed
-                | MsgKind::ProjectFilesListed
+                | MsgKind::QueryResult
                 | MsgKind::ScratchpadReady
                 | MsgKind::RuntimeStore
                 | MsgKind::ModelPullFinished
@@ -730,7 +729,6 @@ mod tests {
                 | MsgKind::MouseScroll
                 | MsgKind::FocusChanged
                 | MsgKind::OpenImageAt
-                | MsgKind::AvailableModelsListed
                 | MsgKind::TransientStatus
                 | MsgKind::Toast
                 | MsgKind::EditorReturned
@@ -974,33 +972,36 @@ mod tests {
                 cli_version: Some("0.21.1".to_string()),
             }),
             Msg::SessionSaved,
-            Msg::ConversationLoaded(ConversationHistory::new(
-                "/p".to_string(),
-                "m".to_string(),
-                fixed_ts(),
-            )),
-            Msg::ConversationsListed(vec![mermaid_domain::ConversationSummary {
-                id: "20260702_120000_123".to_string(),
-                title: "t".to_string(),
-                message_count: 1,
-                updated_at: "2026-07-02".to_string(),
-            }]),
-            Msg::ProjectFilesListed(vec!["src/main.rs".to_string(), "docs/".to_string()]),
+            Msg::QueryResult(QueryResult::ConversationLoaded(Box::new(
+                ConversationHistory::new("/p".to_string(), "m".to_string(), fixed_ts()),
+            ))),
+            Msg::QueryResult(QueryResult::ConversationsListed(vec![
+                mermaid_domain::ConversationSummary {
+                    id: "20260702_120000_123".to_string(),
+                    title: "t".to_string(),
+                    message_count: 1,
+                    updated_at: "2026-07-02".to_string(),
+                },
+            ])),
+            Msg::QueryResult(QueryResult::ProjectFilesListed(vec![
+                "src/main.rs".to_string(),
+                "docs/".to_string(),
+            ])),
             Msg::ScratchpadReady {
                 session_id: "20260702_120000_123".to_string(),
                 path: std::path::PathBuf::from("/data/tmp/scratchpad/-proj/20260702_120000_123"),
             },
             Msg::RuntimeText("daemon says hi".to_string()),
-            Msg::RuntimeTasksListed(Vec::new()),
-            Msg::RuntimeTaskLoaded {
+            Msg::QueryResult(QueryResult::RuntimeTasksListed(Vec::new())),
+            Msg::QueryResult(QueryResult::RuntimeTaskLoaded {
                 task: None,
                 events: Vec::new(),
-            },
-            Msg::RuntimeProcessesListed(Vec::new()),
-            Msg::RuntimeApprovalsListed(Vec::new()),
-            Msg::RuntimeCheckpointsListed(Vec::new()),
-            Msg::ForkCheckpointsFound(Vec::new()),
-            Msg::RuntimePluginsListed(Vec::new()),
+            }),
+            Msg::QueryResult(QueryResult::RuntimeProcessesListed(Vec::new())),
+            Msg::QueryResult(QueryResult::RuntimeApprovalsListed(Vec::new())),
+            Msg::QueryResult(QueryResult::RuntimeCheckpointsListed(Vec::new())),
+            Msg::QueryResult(QueryResult::ForkCheckpointsFound(Vec::new())),
+            Msg::QueryResult(QueryResult::RuntimePluginsListed(Vec::new())),
             Msg::ModelPullFinished {
                 model: "qwen3".to_string(),
             },
@@ -1063,9 +1064,7 @@ mod tests {
             MsgKind::MemoryChanged,
             MsgKind::SessionProvenanceResolved,
             MsgKind::SessionSaved,
-            MsgKind::ConversationLoaded,
-            MsgKind::ConversationsListed,
-            MsgKind::ProjectFilesListed,
+            MsgKind::QueryResult,
             MsgKind::RuntimeStore,
             MsgKind::ModelPullFinished,
             MsgKind::ModelPullProgress,
