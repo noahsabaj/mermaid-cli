@@ -23,9 +23,7 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
-use mermaid_model::models::{ReasoningChunk, StreamCallback, StreamEvent as ModelStreamEvent};
-
-use super::super::ctx::StreamEvent;
+use mermaid_model::models::{StreamCallback, StreamEvent};
 
 /// Construct an unbounded staging channel + spawn a relay task that
 /// forwards events to `bounded_sink` in FIFO order. Returns the sender
@@ -60,39 +58,23 @@ pub fn ordered_relay(
     (tx, handle)
 }
 
-/// Adapt an adapter's sync `ModelStreamEvent` callback onto the staging
-/// sender from [`ordered_relay`]. Every provider wrapper maps these events
-/// identically, so the mapping lives here rather than in four copies.
+/// Plug an adapter's sync `StreamCallback` into the staging sender from
+/// [`ordered_relay`].
 ///
-/// No adapter emits `Done` through this callback — the wrapper sends the
-/// authoritative terminal `Done` built from the returned `ModelResponse`.
-/// Map it defensively without inventing usage (an earlier placeholder
-/// misfiled everything as completion tokens).
+/// There is no translation left to do — the adapters and the effect layer
+/// speak the same `StreamEvent` — so this is the synchronous send and
+/// nothing else. Ignore errors: a closed receiver means the turn is
+/// already gone.
 pub fn forward_callback(sink: mpsc::UnboundedSender<StreamEvent>) -> StreamCallback {
-    Arc::new(move |event: ModelStreamEvent| {
-        let mapped = match event {
-            ModelStreamEvent::Text(s) => StreamEvent::Text(s),
-            ModelStreamEvent::Reasoning(chunk) => StreamEvent::Reasoning(ReasoningChunk {
-                text: chunk.text,
-                signature: chunk.signature,
-            }),
-            ModelStreamEvent::ToolCall(tc) => StreamEvent::ToolCall(tc),
-            ModelStreamEvent::Status(s) => StreamEvent::Status(s),
-            ModelStreamEvent::Done { .. } => StreamEvent::Done {
-                usage: None,
-                provider_continuation: None,
-                stop_reason: None,
-            },
-        };
-        // Synchronous send preserves ordering. Ignore errors — a closed
-        // receiver means the turn is already gone.
-        let _ = sink.send(mapped);
+    Arc::new(move |event: StreamEvent| {
+        let _ = sink.send(event);
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mermaid_model::models::{FinishReason, ProviderContinuation, ReasoningChunk, TokenUsage};
 
     /// Regression guard for F2: events pushed in order must arrive in
     /// order on the bounded sink. Spawning one task per callback
@@ -140,7 +122,7 @@ mod tests {
     async fn stream_callback_forwards_text_event() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let cb = forward_callback(tx);
-        cb(ModelStreamEvent::Text("hello".to_string()));
+        cb(StreamEvent::Text("hello".to_string()));
         let recv = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
             .await
             .expect("recv")
@@ -154,11 +136,11 @@ mod tests {
     #[tokio::test]
     async fn stream_callback_forwards_status_notice() {
         // The autostart notice rides the same ordered relay as content
-        // events; the bridge must map it 1:1 so it reaches the effect
-        // layer (→ Msg::TransientStatus → system line / stderr).
+        // events, so it reaches the effect layer (→ Msg::TransientStatus →
+        // system line / stderr) rather than being swallowed as non-content.
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let cb = forward_callback(tx);
-        cb(ModelStreamEvent::Status(
+        cb(StreamEvent::Status(
             "Starting the local Ollama server…".to_string(),
         ));
         let recv = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
@@ -172,19 +154,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_callback_done_never_invents_usage() {
-        // The wrapper's terminal Done (built from ModelResponse) is the only
-        // authoritative usage carrier; a callback Done must map to None
-        // rather than misfiling its bare count as completion tokens.
+    async fn terminal_done_keeps_its_continuation_through_the_relay() {
+        // The reason there is one `StreamEvent` and not two. Anthropic's
+        // extended thinking only continues across turns if the opaque
+        // signature reaches the reducer, and the adapter-side `Done` this
+        // used to map from carried a bare `tokens: usize` — nothing to
+        // rebuild a continuation out of. Same enum end to end means the
+        // payload simply survives.
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let cb = forward_callback(tx);
-        cb(ModelStreamEvent::Done { tokens: 42 });
+        cb(StreamEvent::Done {
+            usage: Some(TokenUsage::provider(7, 11)),
+            provider_continuation: Some(ProviderContinuation::Anthropic {
+                signature: "opaque".to_string(),
+            }),
+            stop_reason: Some(FinishReason::ToolUse),
+        });
         let recv = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
             .await
             .expect("recv")
             .expect("sender");
         match recv {
-            StreamEvent::Done { usage, .. } => assert!(usage.is_none()),
+            StreamEvent::Done {
+                usage,
+                provider_continuation,
+                stop_reason,
+            } => {
+                assert_eq!(usage.expect("usage").total_tokens(), 18);
+                assert!(matches!(
+                    provider_continuation,
+                    Some(ProviderContinuation::Anthropic { signature }) if signature == "opaque"
+                ));
+                assert_eq!(stop_reason, Some(FinishReason::ToolUse));
+            },
             _ => panic!("wrong variant"),
         }
     }

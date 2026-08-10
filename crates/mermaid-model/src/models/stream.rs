@@ -1,29 +1,33 @@
 //! Typed streaming events emitted by model adapters.
 //!
-//! Replaces the legacy `StreamCallback = Arc<dyn Fn(&str)>` text-only
-//! callback. The typed event surface lets future adapters (Anthropic,
-//! OpenAI, etc.) emit reasoning chunks, tool calls, and completion
-//! signals as first-class events instead of stuffing them into the text
-//! channel. Roo Code (`src/api/transform/stream.rs`) and OpenCode
-//! (`provider/processor.ts`) both validated this pattern as the way out
-//! of per-provider stream-shape sniffing.
+//! The typed event surface is what lets adapters emit reasoning chunks,
+//! tool calls, and completion signals as first-class events instead of
+//! stuffing them into a text channel. Roo Code
+//! (`src/api/transform/stream.rs`) and OpenCode (`provider/processor.ts`)
+//! both validated this pattern as the way out of per-provider stream-shape
+//! sniffing.
 //!
-//! For Step 1 the only adapter is Ollama; Wave 3 wires it to emit these
-//! events. Earlier waves carry the legacy text callback through a default
-//! impl that synthesizes `Text` + `Done` events from the existing
-//! callback shape — see `Model::chat_typed` in `traits.rs`.
+//! This is the ONE stream event type. `providers::ctx` re-exports it: the
+//! CLI used to define a structurally-identical twin whose only difference
+//! was a richer `Done`, and `stream_bridge::forward_callback` existed to
+//! map one onto the other variant by variant. The `Done` here is that
+//! richer one, so there is nothing left to map.
 
 use std::sync::Arc;
 
 use super::reasoning::ReasoningChunk;
 use super::tool_call::ToolCall;
+use super::types::{FinishReason, ProviderContinuation, TokenUsage};
 
 /// A single event emitted during a streaming model call.
 ///
-/// Adapters MUST emit `Done` exactly once at the end of a successful
-/// stream. `Text` and `Reasoning` may interleave in any order. `ToolCall`
-/// events typically arrive at the end of generation but the contract is
-/// "before `Done`".
+/// Exactly one `Done` ends a successful stream. `Text` and `Reasoning` may
+/// interleave in any order. `ToolCall` events typically arrive at the end
+/// of generation but the contract is "before `Done`".
+///
+/// Adapters themselves never emit `Done` — the provider wrapper builds the
+/// authoritative one from the returned `ModelResponse`, which is where the
+/// usage and the provider continuation actually live (F3).
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
     /// Plain assistant content. Append to the response buffer.
@@ -38,10 +42,16 @@ pub enum StreamEvent {
     /// system line, never appended to the assistant message. May arrive
     /// before any `Text`.
     Status(String),
-    /// Stream complete. Carries the total token usage if reported by the
-    /// provider; `0` if unavailable (still meaningful — the caller knows
-    /// generation finished).
-    Done { tokens: usize },
+    /// Stream complete. Carries final token usage (`None` when the provider
+    /// never reported any, so the reducer keeps its estimate rather than
+    /// resetting the gauge to zero), any opaque provider continuation state
+    /// to round-trip on the next request, and why generation stopped (so the
+    /// reducer can flag truncation or a content block).
+    Done {
+        usage: Option<TokenUsage>,
+        provider_continuation: Option<ProviderContinuation>,
+        stop_reason: Option<FinishReason>,
+    },
 }
 
 /// Callback invoked once per `StreamEvent` during a chat request.
@@ -64,10 +74,32 @@ mod tests {
     }
 
     #[test]
-    fn stream_event_done_carries_tokens() {
-        let ev = StreamEvent::Done { tokens: 42 };
+    fn stream_event_done_carries_the_whole_terminal_payload() {
+        // The reason this type is shared rather than mapped: `Done` has to
+        // reach the reducer with the continuation intact. The adapter-side
+        // `Done` used to carry a bare `tokens: usize`, so anything mapped
+        // from it lost all three of these, and the wrapper had to route its
+        // authoritative `Done` around the mapping to compensate.
+        let ev = StreamEvent::Done {
+            usage: Some(TokenUsage::provider(10, 20)),
+            provider_continuation: Some(ProviderContinuation::Anthropic {
+                signature: "sig".to_string(),
+            }),
+            stop_reason: Some(FinishReason::ToolUse),
+        };
         match ev {
-            StreamEvent::Done { tokens } => assert_eq!(tokens, 42),
+            StreamEvent::Done {
+                usage,
+                provider_continuation,
+                stop_reason,
+            } => {
+                assert_eq!(usage.expect("usage").total_tokens(), 30);
+                assert!(matches!(
+                    provider_continuation,
+                    Some(ProviderContinuation::Anthropic { .. })
+                ));
+                assert_eq!(stop_reason, Some(FinishReason::ToolUse));
+            },
             _ => panic!("expected Done"),
         }
     }

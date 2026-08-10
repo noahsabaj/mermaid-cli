@@ -28,9 +28,7 @@ use tokio_util::sync::CancellationToken;
 
 use mermaid_domain::{Msg, ToolCallId, TurnId};
 use mermaid_model::models::tool_call::ToolCall as ModelToolCall;
-use mermaid_model::models::{
-    ChatMessage, FinishReason, ProviderContinuation, ReasoningChunk, TokenUsage,
-};
+use mermaid_model::models::{ChatMessage, FinishReason, ProviderContinuation, TokenUsage};
 use mermaid_runtime::SafetyMode;
 
 use super::approval::ApprovalBroker;
@@ -115,28 +113,16 @@ impl StreamContext {
     }
 }
 
-/// One event emitted during a streaming model call. Adapters MUST
-/// emit exactly one `Done` at the end of a successful stream. `Text`
-/// and `Reasoning` may interleave. `ToolCall` events typically arrive
-/// near the end but the contract is "before `Done`".
-#[derive(Debug, Clone)]
-pub enum StreamEvent {
-    Text(String),
-    Reasoning(ReasoningChunk),
-    ToolCall(ModelToolCall),
-    /// Out-of-band, user-visible plumbing notice (e.g. "Starting the local
-    /// Ollama server…"). Not response content — the effect layer routes it
-    /// to a transient/system line, never into the assistant message.
-    Status(String),
-    /// Stream complete. Carries final token usage (None if unknown),
-    /// any provider continuation state, and why generation stopped
-    /// (so the reducer can flag truncation / a content block).
-    Done {
-        usage: Option<TokenUsage>,
-        provider_continuation: Option<ProviderContinuation>,
-        stop_reason: Option<FinishReason>,
-    },
-}
+/// One event emitted during a streaming model call — the adapters' own type,
+/// re-exported rather than redefined.
+///
+/// This was a second enum with the same five variants, and the only thing it
+/// added was a richer `Done`; `stream_bridge::forward_callback` spent a match
+/// arm per variant translating one into the other, and could only fill the
+/// extra `Done` fields with `None` because the adapter-side `Done` it mapped
+/// from carried a bare token count. `mermaid_model`'s `Done` carries the whole
+/// terminal payload now, so there is nothing left for a second type to add.
+pub use mermaid_model::models::StreamEvent;
 
 /// Final response returned by `ModelProvider::chat()` after the
 /// stream drains. Carries what the reducer can't derive from the
