@@ -1,11 +1,15 @@
 //! The per-session event-log appender and fold-reader.
 //!
-//! Design: `docs/design/event-log.md` (PR C). One JSONL file per session at
-//! `.mermaid/conversations/<id>.jsonl` — invisible to every listing path
-//! (they filter on the `json` extension) and cascaded by
-//! `delete_conversation`. The snapshot stays the resume authority; this file
-//! is the history behind it and the recovery source when the snapshot is
-//! lost or corrupt.
+//! Design: `docs/design/event-log.md`, then `docs/design/fold-first-resume.md`.
+//! One JSONL file per session at `.mermaid/conversations/<id>.jsonl`, cascaded
+//! by `delete_conversation`.
+//!
+//! This file is the session's TRUTH. The `<id>.json` beside it is a
+//! checkpoint: a fold materialized at a known offset, stamped with the last
+//! `seq` it contains, and resume replays only what came after. Anything that
+//! makes the checkpoint untrustworthy falls back to folding this log from
+//! zero, which is the property the arrangement exists for — the checkpoint is
+//! never load-bearing, only faster.
 //!
 //! This module is the ONE disk chokepoint for events, owning the same
 //! properties the snapshot writer owns for its file: session-id validation
@@ -194,34 +198,64 @@ impl EventLog {
         }
     }
 
-    /// Rebuild the conversation from the log. `Ok(None)` when there is no
-    /// log, it is over the size cap, its format is newer than this build,
-    /// or it does not begin with a `started` event. A malformed or torn
-    /// line ends the fold THERE (prefix semantics): a crash mid-append
-    /// yields the pre-tear state instead of a refusal.
-    pub(crate) fn fold(&self, id: &str) -> Result<Option<ConversationHistory>> {
+    /// Does this session have a log at all? Distinguishes a session whose
+    /// truth lives in the log from a legacy one that predates it and has
+    /// only a snapshot.
+    pub(crate) fn exists(&self, id: &str) -> bool {
+        self.path_for(id).is_file()
+    }
+
+    /// The last `seq` this process appended for `id`, i.e. the watermark a
+    /// checkpoint written right now would carry.
+    ///
+    /// `None` when this process has not appended for this session, and
+    /// deliberately so: the cursor would then be a guess derived from a
+    /// file another process may be writing, and a checkpoint stamped with a
+    /// guessed watermark is worse than one with no watermark at all — the
+    /// first is trusted, the second falls back to a full fold.
+    pub(crate) fn checkpoint_seq(&self, id: &str) -> Option<u64> {
+        self.next_seq
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(id)
+            .and_then(|next| next.checked_sub(1))
+    }
+
+    /// Read the log's events, optionally skipping everything at or below
+    /// `after_seq` — the checkpoint-replay half of fold-first resume.
+    ///
+    /// Returns `(events, highest_seq_seen)`. `None` when there is no log,
+    /// it is over the size cap, or its format is newer than this build.
+    /// A malformed or torn line ends the read THERE (prefix semantics): a
+    /// crash mid-append yields the pre-tear state instead of a refusal.
+    pub(crate) fn read_events(
+        &self,
+        id: &str,
+        after_seq: Option<u64>,
+    ) -> Result<Option<(Vec<SessionEvent>, u64)>> {
         let path = self.path_for(id);
         let Ok(meta) = std::fs::metadata(&path) else {
             return Ok(None);
         };
-        // Not a file means there is nothing to fold. Worth stating: on Linux
+        // Not a file means there is nothing to read. Worth stating: on Linux
         // a directory here would open cleanly and then fail every read.
         if !meta.is_file() {
             return Ok(None);
         }
         if meta.len() > MAX_LOG_BYTES {
-            tracing::warn!(path = %path.display(), "session event log over the read cap; not folding");
+            tracing::warn!(path = %path.display(), "session event log over the read cap; not reading");
             return Ok(None);
         }
         let file =
             File::open(&path).with_context(|| format!("open {} for fold", path.display()))?;
         let mut events = Vec::new();
+        let mut highest = 0u64;
         for line in BufReader::new(file).lines() {
             let raw = line.context("read session event line")?;
             let parsed: SessionEventLine = match serde_json::from_str(&raw) {
                 Ok(parsed) => parsed,
                 Err(error) => {
-                    tracing::warn!(path = %path.display(), %error, "malformed session event line; folding the prefix");
+                    tracing::warn!(path = %path.display(), %error, "malformed session event line; reading the prefix only");
                     break;
                 },
             };
@@ -229,13 +263,61 @@ impl EventLog {
                 tracing::warn!(
                     path = %path.display(),
                     version = parsed.v,
-                    "session event log written by a newer mermaid; not folding"
+                    "session event log written by a newer mermaid; not reading"
                 );
                 return Ok(None);
             }
+            highest = highest.max(parsed.seq);
+            // The skip happens AFTER the version and parse checks, so a
+            // replay past a watermark still refuses a log it cannot read
+            // rather than silently returning a short tail.
+            if after_seq.is_some_and(|seq| parsed.seq <= seq) {
+                continue;
+            }
             events.push(parsed.event);
         }
+        Ok(Some((events, highest)))
+    }
+
+    /// Rebuild the conversation by folding the whole log from zero.
+    /// `Ok(None)` when there is no readable log, or it does not begin with
+    /// a `started` event.
+    pub(crate) fn fold(&self, id: &str) -> Result<Option<ConversationHistory>> {
+        let Some((events, _)) = self.read_events(id, None)? else {
+            return Ok(None);
+        };
         Ok(fold_session(events))
+    }
+
+    /// Bring `checkpoint` — a fold of this log up to and including
+    /// `checkpoint_seq` — up to date by replaying everything after it.
+    ///
+    /// `Ok(None)` means the checkpoint cannot be trusted for this log and
+    /// the caller should fold from zero instead: either the log is
+    /// unreadable, or its highest seq is BELOW the watermark, which says
+    /// the log was truncated or replaced since the checkpoint was written.
+    /// Being wrong in that direction would silently resume a conversation
+    /// containing events that no longer exist.
+    pub(crate) fn replay_onto(
+        &self,
+        id: &str,
+        mut checkpoint: ConversationHistory,
+        checkpoint_seq: u64,
+    ) -> Result<Option<ConversationHistory>> {
+        let Some((events, highest)) = self.read_events(id, Some(checkpoint_seq))? else {
+            return Ok(None);
+        };
+        if highest < checkpoint_seq {
+            tracing::warn!(
+                id,
+                checkpoint_seq,
+                highest,
+                "checkpoint is ahead of its log; folding from zero instead"
+            );
+            return Ok(None);
+        }
+        mermaid_domain::replay_events(&mut checkpoint, events);
+        Ok(Some(checkpoint))
     }
 }
 
@@ -651,6 +733,190 @@ mod tests {
             .unwrap()
             .expect("prefix folds");
         assert_eq!(folded.messages().len(), 2, "the pre-tear state survives");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Drive a session, save it, then append more WITHOUT re-saving — the
+    /// state a checkpoint-plus-tail resume exists to handle.
+    fn checkpointed_then_advanced(root: &Path) -> (ConversationManager, ConversationHistory) {
+        let manager = ConversationManager::new(root).expect("manager");
+        let mut state = driven_state(root);
+        let checkpointed = state.session.snapshot_conversation();
+        let events = state.session.drain_events(&checkpointed);
+        manager
+            .append_session_events(&checkpointed, &events)
+            .expect("append");
+        manager
+            .save_conversation(&checkpointed)
+            .expect("checkpoint");
+
+        // Two more messages that exist only in the log.
+        state
+            .session
+            .append(ChatMessage::user("after the checkpoint"), fixed_ts());
+        state
+            .session
+            .append(ChatMessage::assistant("still here"), fixed_ts());
+        let latest = state.session.snapshot_conversation();
+        let tail = state.session.drain_events(&latest);
+        manager
+            .append_session_events(&latest, &tail)
+            .expect("append tail");
+        (manager, latest)
+    }
+
+    #[test]
+    fn resume_replays_the_tail_past_the_checkpoint() {
+        let root = temp_root("replay_tail");
+        let (manager, latest) = checkpointed_then_advanced(&root);
+
+        let resumed = manager.load_conversation(&latest.id).expect("resume");
+        assert_eq!(
+            json_of(&resumed),
+            json_of(&latest),
+            "resume must equal the live session, not the stale checkpoint"
+        );
+        assert!(
+            resumed
+                .messages()
+                .iter()
+                .any(|m| m.content == "after the checkpoint"),
+            "the events past the checkpoint must be replayed"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn resume_ignores_a_checkpoint_it_cannot_place_in_the_log() {
+        let root = temp_root("untrusted_ckpt");
+        let (manager, latest) = checkpointed_then_advanced(&root);
+        let path = manager
+            .conversations_dir()
+            .join(format!("{}.json", latest.id));
+
+        // A checkpoint with no watermark cannot be placed against the log,
+        // so resume must fold from zero rather than trust it. Strip the key
+        // and leave the (stale, two-messages-short) body.
+        let raw = std::fs::read_to_string(&path).expect("read checkpoint");
+        let mut value: serde_json::Value = serde_json::from_str(&raw).expect("parse");
+        assert!(
+            value
+                .as_object_mut()
+                .expect("object")
+                .remove("checkpoint_seq")
+                .is_some(),
+            "the checkpoint must have carried a watermark for this to prove anything"
+        );
+        std::fs::write(&path, serde_json::to_string(&value).unwrap()).expect("rewrite");
+
+        let resumed = manager.load_conversation(&latest.id).expect("resume");
+        assert_eq!(
+            json_of(&resumed),
+            json_of(&latest),
+            "a watermark-less checkpoint must fall back to a full fold"
+        );
+
+        // Same for a checkpoint claiming a position its log cannot account
+        // for -- the log was truncated or replaced under it.
+        let mut value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        value.as_object_mut().unwrap().insert(
+            "checkpoint_seq".to_string(),
+            serde_json::Value::from(9_999_u64),
+        );
+        std::fs::write(&path, serde_json::to_string(&value).unwrap()).expect("rewrite");
+        let resumed = manager.load_conversation(&latest.id).expect("resume");
+        assert_eq!(
+            json_of(&resumed),
+            json_of(&latest),
+            "a checkpoint ahead of its log must fall back to a full fold"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_deleted_checkpoint_costs_nothing_but_time() {
+        // The property the whole design is for: the checkpoint is a cache.
+        let root = temp_root("ckpt_deleted");
+        let (manager, latest) = checkpointed_then_advanced(&root);
+        std::fs::remove_file(
+            manager
+                .conversations_dir()
+                .join(format!("{}.json", latest.id)),
+        )
+        .expect("delete the checkpoint");
+
+        let resumed = manager.load_conversation(&latest.id).expect("resume");
+        assert_eq!(json_of(&resumed), json_of(&latest));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn continue_and_the_picker_see_a_session_with_no_checkpoint_yet() {
+        // A short session checkpoints only on exit, so `--continue` and the
+        // picker must find it from the log alone.
+        let root = temp_root("no_ckpt_yet");
+        let manager = ConversationManager::new(&root).expect("manager");
+        let mut state = driven_state(&root);
+        let snapshot = state.session.snapshot_conversation();
+        let events = state.session.drain_events(&snapshot);
+        manager
+            .append_session_events(&snapshot, &events)
+            .expect("append");
+        assert!(
+            !manager
+                .conversations_dir()
+                .join(format!("{}.json", snapshot.id))
+                .exists(),
+            "this test is about the no-checkpoint case"
+        );
+
+        let last = manager
+            .load_last_conversation()
+            .expect("continue")
+            .expect("a session with a log is resumable");
+        assert_eq!(last.id, snapshot.id);
+        assert_eq!(json_of(&last), json_of(&snapshot));
+
+        let metas = manager.list_conversation_metas().expect("picker list");
+        assert_eq!(metas.len(), 1, "the picker must see it: {metas:?}");
+        assert_eq!(metas[0].id, snapshot.id);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_legacy_session_without_a_log_still_loads() {
+        // Written before the log existed: the snapshot is all there is, and
+        // it stays the truth for that session.
+        let root = temp_root("legacy");
+        let manager = ConversationManager::new(&root).expect("manager");
+        let mut state = driven_state(&root);
+        let snapshot = state.session.snapshot_conversation();
+        let _ = state.session.drain_events(&snapshot);
+        manager.save_conversation(&snapshot).expect("save");
+        std::fs::remove_file(
+            manager
+                .conversations_dir()
+                .join(format!("{}.jsonl", snapshot.id)),
+        )
+        .ok();
+        assert!(
+            !manager
+                .conversations_dir()
+                .join(format!("{}.jsonl", snapshot.id))
+                .exists()
+        );
+
+        let loaded = manager.load_conversation(&snapshot.id).expect("load");
+        assert_eq!(json_of(&loaded), json_of(&snapshot));
+        assert_eq!(
+            manager
+                .load_last_conversation()
+                .expect("continue")
+                .expect("legacy session is resumable")
+                .id,
+            snapshot.id
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

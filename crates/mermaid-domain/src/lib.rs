@@ -101,6 +101,7 @@ pub use runtime::{
 };
 pub use session_event::{
     SESSION_EVENT_FORMAT_VERSION, SessionEvent, SessionEventLine, SessionScalars, fold_session,
+    replay_events,
 };
 pub use slash_commands::{
     COMMAND_GROUPS, COMMAND_REGISTRY, SlashCommand, filter_by_prefix, parse_slash_command,
