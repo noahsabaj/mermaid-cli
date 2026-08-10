@@ -17,6 +17,7 @@ use crate::{ProgressEvent, SubagentPhase};
 use mermaid_model::models::{ChatMessage, MessageRole, ProviderContinuation, TokenUsage};
 use mermaid_runtime::TaskStatus;
 
+use super::action_display::action_display_for;
 use super::cmd::{ChatRequest, Cmd};
 use super::compaction::{
     CompactionArchive, CompactionRequest, CompactionResult, CompactionTrigger,
@@ -28,8 +29,8 @@ use super::state::{
     TurnState, UiMode,
 };
 use super::transition::{
-    action_display_for, commit_assistant_message, fill_outcome, start_generating,
-    tool_result_messages, try_complete_outcomes,
+    commit_assistant_message, fill_outcome, start_generating, tool_result_messages,
+    try_complete_outcomes,
 };
 use super::{COMMAND_GROUPS, COMMAND_REGISTRY};
 use mermaid_model::ids::TurnId;
