@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **One store handle per process on the hot paths.** Every runtime-store
+  touch used to run its own `RuntimeStore::open_default()` -- the per-call
+  open, ACL probe, and migration check repeated on paths that fire per tool
+  call (tool-run bookkeeping, capability-probe caching, process upserts,
+  compaction rows). Those now share one process-wide handle via the new
+  `with_shared_store`, which opens lazily, never caches an open failure,
+  and evicts the handle after an operation error -- so a transient failure
+  (this store has lived on a drive that drops off the bus) self-heals
+  exactly like the open-per-call world did, minus the churn. One-shot
+  paths (CLI subcommands, startup, the daemon's own ownership of its
+  store) deliberately keep direct opens: the helper's doc states the
+  policy, and the store remains multi-process by design -- WAL plus the
+  owner-kind column keep a live session and a running daemon out of each
+  other's rows, which this change documents at the type.
+
 - **The tool-dispatch seam wears its three hats as three types.** One tool
   call used to cross the reducer/effect boundary as eleven loose fields on
   `Cmd::ExecuteTool`, a 24-argument `dispatch_execute_tool`, and a 16-argument

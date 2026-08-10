@@ -1,6 +1,8 @@
-//! Where mermaid's durable data lives -- the one resolver for the app data
-//! directory, in the bottom crate so both the store (`mermaid-runtime`) and
-//! the temp-dir policy here can share it without a dependency cycle.
+//! Where mermaid's durable data lives.
+//!
+//! The one resolver for the app data directory, in the bottom crate so both
+//! the store (`mermaid-runtime`) and the temp-dir policy here can share it
+//! without a dependency cycle.
 
 use std::path::PathBuf;
 

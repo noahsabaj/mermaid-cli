@@ -243,14 +243,14 @@ impl PersistenceState {
         let path = manager.save_compaction_archive(&save.archive)?;
         manager.save_conversation(&save.conversation)?;
 
-        if let Ok(store) = mermaid_runtime::RuntimeStore::open_default() {
-            let _ = store.compactions().create(compaction_row(
+        let _ = mermaid_runtime::with_shared_store(|store| {
+            store.compactions().create(compaction_row(
                 &save.record,
                 &path,
                 save.task_id.clone(),
                 save.archive.conversation_id.clone(),
-            ));
-        }
+            ))
+        });
 
         Ok(PersistedCompaction {
             id: save.record.id.clone(),
@@ -603,13 +603,12 @@ impl EffectRunner {
                 message_index,
             } => self.send_blocking_query(move || {
                 QueryResult::ForkCheckpointsFound(
-                    mermaid_runtime::RuntimeStore::open_default()
-                        .and_then(|store| {
-                            store
-                                .checkpoints()
-                                .list_for_session(&session_id, message_index as i64)
-                        })
-                        .unwrap_or_default(),
+                    mermaid_runtime::with_shared_store(|store| {
+                        store
+                            .checkpoints()
+                            .list_for_session(&session_id, message_index as i64)
+                    })
+                    .unwrap_or_default(),
                 )
             }),
             Query::ListRuntimePlugins => self.send_blocking_query(move || {
@@ -1186,8 +1185,8 @@ impl EffectRunner {
                 let task_id = self.task_id.clone();
                 self.detached.spawn(async move {
                     let status = process.status;
-                    if let Ok(store) = mermaid_runtime::RuntimeStore::open_default() {
-                        let _ = store.processes().upsert(mermaid_runtime::NewProcess {
+                    let _ = mermaid_runtime::with_shared_store(|store| {
+                        store.processes().upsert(mermaid_runtime::NewProcess {
                             id: Some(process.id),
                             task_id,
                             pid: process.pid,
@@ -1197,8 +1196,8 @@ impl EffectRunner {
                             detected_url: process.detected_url,
                             status,
                             health: None,
-                        });
-                    }
+                        })
+                    });
                 });
             },
             Cmd::PersistPlanConfig(plan) => {
@@ -1429,19 +1428,18 @@ impl EffectRunner {
             } => {
                 let tx = self.msg_tx.clone();
                 self.detached.spawn_blocking(move || {
-                    let msg =
-                        match mermaid_runtime::RuntimeStore::open_default().and_then(|store| {
-                            store
-                                .tasks()
-                                .update_status(&id, status, final_report.as_deref())
-                        }) {
-                            Ok(()) => Msg::TransientStatus {
-                                text: format!("Task {id} -> {status}"),
-                            },
-                            Err(err) => Msg::TransientStatus {
-                                text: format!("Task update failed: {err}"),
-                            },
-                        };
+                    let msg = match mermaid_runtime::with_shared_store(|store| {
+                        store
+                            .tasks()
+                            .update_status(&id, status, final_report.as_deref())
+                    }) {
+                        Ok(()) => Msg::TransientStatus {
+                            text: format!("Task {id} -> {status}"),
+                        },
+                        Err(err) => Msg::TransientStatus {
+                            text: format!("Task update failed: {err}"),
+                        },
+                    };
                     let _ = tx.blocking_send(msg);
                 });
             },

@@ -32,7 +32,7 @@ use std::path::PathBuf;
 use crate::providers::{ApprovalBroker, ApprovalDecision, allowlist_key};
 use mermaid_domain::{ApprovalKind, ToolOutcome};
 use mermaid_runtime::{
-    ActionRequest, NewApproval, PolicyDecision, PolicyEngine, RiskClass, RuntimeStore,
+    ActionRequest, NewApproval, PolicyDecision, PolicyEngine, RiskClass,
     create_checkpoint_for_task, run_plugin_hooks,
 };
 
@@ -678,36 +678,35 @@ fn block_for_approval(
         None => request.summary.clone(),
     };
 
-    let approval_id = RuntimeStore::open_default()
-        .and_then(|store| {
-            let approval = store.approvals().create(NewApproval {
-                task_id: ctx.task_id.clone(),
-                proposed_action: proposed_action.clone(),
-                risk_classification: risk_str.clone(),
-                policy_decision: "ask".to_string(),
-                args_summary: Some(args_summary),
-                checkpoint_id: checkpoint_id.clone(),
-                pending_action_json,
-            })?;
-            if let Some(checkpoint_id) = checkpoint_id.as_deref() {
-                let _ = store
-                    .checkpoints()
-                    .set_approval(checkpoint_id, &approval.id);
-            }
-            let _ = run_plugin_hooks(
-                "approval_requested",
-                &serde_json::json!({
-                    "id": approval.id.clone(),
-                    "task_id": approval.task_id.clone(),
-                    "tool": tool,
-                    "risk": risk_str,
-                    "checkpoint_id": checkpoint_id.clone(),
-                }),
-            );
-            Ok(approval)
-        })
-        .map(|approval| approval.id)
-        .ok();
+    let approval_id = mermaid_runtime::with_shared_store(|store| {
+        let approval = store.approvals().create(NewApproval {
+            task_id: ctx.task_id.clone(),
+            proposed_action: proposed_action.clone(),
+            risk_classification: risk_str.clone(),
+            policy_decision: "ask".to_string(),
+            args_summary: Some(args_summary),
+            checkpoint_id: checkpoint_id.clone(),
+            pending_action_json,
+        })?;
+        if let Some(checkpoint_id) = checkpoint_id.as_deref() {
+            let _ = store
+                .checkpoints()
+                .set_approval(checkpoint_id, &approval.id);
+        }
+        let _ = run_plugin_hooks(
+            "approval_requested",
+            &serde_json::json!({
+                "id": approval.id.clone(),
+                "task_id": approval.task_id.clone(),
+                "tool": tool,
+                "risk": risk_str,
+                "checkpoint_id": checkpoint_id.clone(),
+            }),
+        );
+        Ok(approval)
+    })
+    .map(|approval| approval.id)
+    .ok();
 
     Gate::Block(ToolOutcome::error(
         format!(

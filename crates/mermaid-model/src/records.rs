@@ -20,9 +20,11 @@ use serde::{Deserialize, Serialize};
 /// startup (F18/RC-E).
 pub const OWNER_KIND_DAEMON: &str = "daemon";
 
-/// A stored enum label this build does not know -- the tolerant-decode error
-/// for [`TaskStatus::from_db`] and friends, so one unreadable row degrades to
-/// a reported error instead of sinking a whole listing.
+/// A stored enum label this build does not know.
+///
+/// The tolerant-decode error for [`TaskStatus::from_db`] and friends, so one
+/// unreadable row degrades to a reported error instead of sinking a whole
+/// listing.
 #[derive(Debug)]
 pub struct UnknownRuntimeEnum {
     kind: &'static str,
@@ -75,6 +77,13 @@ impl TaskStatus {
         }
     }
 
+    /// Parse the stored label back into the enum.
+    ///
+    /// # Errors
+    ///
+    /// [`UnknownRuntimeEnum`] when the label is one this build does not
+    /// know (a row written by a newer build); the caller degrades that one
+    /// row instead of sinking the listing.
     pub fn from_db(value: &str) -> std::result::Result<Self, UnknownRuntimeEnum> {
         match value {
             "queued" => Ok(Self::Queued),
@@ -113,6 +122,13 @@ impl TaskPriority {
         }
     }
 
+    /// Parse the stored label back into the enum.
+    ///
+    /// # Errors
+    ///
+    /// [`UnknownRuntimeEnum`] when the label is one this build does not
+    /// know (a row written by a newer build); the caller degrades that one
+    /// row instead of sinking the listing.
     pub fn from_db(value: &str) -> std::result::Result<Self, UnknownRuntimeEnum> {
         match value {
             "low" => Ok(Self::Low),
@@ -147,6 +163,13 @@ impl ProcessStatus {
         }
     }
 
+    /// Parse the stored label back into the enum.
+    ///
+    /// # Errors
+    ///
+    /// [`UnknownRuntimeEnum`] when the label is one this build does not
+    /// know (a row written by a newer build); the caller degrades that one
+    /// row instead of sinking the listing.
     pub fn from_db(value: &str) -> std::result::Result<Self, UnknownRuntimeEnum> {
         match value {
             "running" => Ok(Self::Running),

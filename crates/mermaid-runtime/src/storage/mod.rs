@@ -15,6 +15,45 @@ use rusqlite::{Connection, params};
 // History: v2 added the additive `tasks.owner_kind` column (F18/RC-E); v3 added
 // the F75 covering indexes; v4 added the `outcomes` table.
 
+use std::sync::{Mutex, PoisonError};
+
+/// The one store handle this process shares. Before this existed every call
+/// site ran `RuntimeStore::open_default()` -- ~40 sites, each paying the
+/// open + ACL check + migration probe per call and racing the others on
+/// first-open migration. One handle per process removes the churn; SQLite's
+/// WAL already serializes actual writes, so the mutex adds no meaningful
+/// contention (every op here is a short read or insert).
+///
+/// The store is deliberately MULTI-PROCESS: a live `mermaid` session and a
+/// running `mermaidd` share the database by design (WAL + the owner-kind
+/// column keep them out of each other's rows -- see `OWNER_KIND_DAEMON`).
+/// This helper unifies access WITHIN a process, not across processes.
+static SHARED_STORE: Mutex<Option<RuntimeStore>> = Mutex::new(None);
+
+/// Run one operation against the process-wide shared store, opening it on
+/// first use. An open failure is returned and NOT cached, so a transient
+/// failure (the data dir's drive dropping off the bus) self-heals on the
+/// next call. An operation error evicts the cached handle for the same
+/// reason: before this helper, every call re-opened fresh and a dead
+/// connection could not outlive its call -- eviction preserves that
+/// self-healing at the cost of one re-open after a genuine error.
+///
+/// # Errors
+///
+/// Whatever `RuntimeStore::open_default` or the operation itself returns.
+pub fn with_shared_store<T>(op: impl FnOnce(&RuntimeStore) -> Result<T>) -> Result<T> {
+    let mut guard = SHARED_STORE.lock().unwrap_or_else(PoisonError::into_inner);
+    let store = match guard.as_mut() {
+        Some(store) => store,
+        None => guard.insert(RuntimeStore::open_default()?),
+    };
+    let result = op(store);
+    if result.is_err() {
+        *guard = None;
+    }
+    result
+}
+
 pub mod repos;
 pub mod rows;
 

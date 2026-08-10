@@ -18,7 +18,7 @@ use mermaid_model::models::adapters::ollama_sizing::{
     resolve_ollama_num_ctx,
 };
 use mermaid_model::models::{BackendConfig, Model, ModelConfig, ModelError, Result};
-use mermaid_runtime::{NewProviderProbe, RuntimeStore};
+use mermaid_runtime::NewProviderProbe;
 
 use super::super::ctx::{FinalResponse, StreamContext, StreamEvent};
 use super::{
@@ -401,11 +401,12 @@ fn estimate_prompt_tokens(request: &ChatRequest) -> usize {
 /// SQLite read off the async runtime. Best-effort: any failure → `None`.
 async fn load_probe_from_db(model: String) -> Option<OllamaModelInfo> {
     tokio::task::spawn_blocking(move || {
-        let store = RuntimeStore::open_default().ok()?;
-        let rec = store
-            .provider_probes()
-            .get("ollama", &model, "context_probe")
-            .ok()??;
+        let rec = mermaid_runtime::with_shared_store(|store| {
+            store
+                .provider_probes()
+                .get("ollama", &model, "context_probe")
+        })
+        .ok()??;
         if probe_is_stale(&rec.probed_at) {
             return None;
         }
@@ -420,10 +421,8 @@ async fn load_probe_from_db(model: String) -> Option<OllamaModelInfo> {
 async fn save_probe_to_db(model: String, info: OllamaModelInfo) {
     let _ = tokio::task::spawn_blocking(move || -> Option<()> {
         let value = serde_json::to_string(&info).ok()?;
-        let store = RuntimeStore::open_default().ok()?;
-        store
-            .provider_probes()
-            .upsert(NewProviderProbe {
+        mermaid_runtime::with_shared_store(|store| {
+            store.provider_probes().upsert(NewProviderProbe {
                 provider: "ollama".into(),
                 model_id: model,
                 capability_key: "context_probe".into(),
@@ -431,7 +430,8 @@ async fn save_probe_to_db(model: String, info: OllamaModelInfo) {
                 confidence: "probed".into(),
                 error: None,
             })
-            .ok()?;
+        })
+        .ok()?;
         Some(())
     })
     .await;

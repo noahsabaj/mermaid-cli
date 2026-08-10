@@ -21,7 +21,7 @@ use mermaid_domain::{ChatRequest, TurnId};
 use mermaid_model::models::adapters::ModelLimits;
 use mermaid_model::models::adapters::ollama_sizing::NumCtxSource;
 use mermaid_model::models::{ModelError, Result, TokenUsage};
-use mermaid_runtime::{NewProviderProbe, RuntimeStore};
+use mermaid_runtime::NewProviderProbe;
 
 use super::ctx::{FinalResponse, StreamContext, StreamEvent};
 use mermaid_model::models::ModelCapabilities;
@@ -198,11 +198,12 @@ pub(crate) const LIMITS_PROBE_KEY: &str = "limits_probe";
 /// Load fresh cached limits, off the async runtime. Best-effort → `None`.
 pub(crate) async fn load_limits_from_db(provider: String, model: String) -> Option<CachedLimits> {
     tokio::task::spawn_blocking(move || {
-        let store = RuntimeStore::open_default().ok()?;
-        let rec = store
-            .provider_probes()
-            .get(&provider, &model, LIMITS_PROBE_KEY)
-            .ok()??;
+        let rec = mermaid_runtime::with_shared_store(|store| {
+            store
+                .provider_probes()
+                .get(&provider, &model, LIMITS_PROBE_KEY)
+        })
+        .ok()??;
         if probe_is_stale(&rec.probed_at) {
             return None;
         }
@@ -220,10 +221,8 @@ pub(crate) async fn save_limits_to_db(provider: String, model: String, limits: &
         Err(_) => return,
     };
     let _ = tokio::task::spawn_blocking(move || -> Option<()> {
-        let store = RuntimeStore::open_default().ok()?;
-        store
-            .provider_probes()
-            .upsert(NewProviderProbe {
+        mermaid_runtime::with_shared_store(|store| {
+            store.provider_probes().upsert(NewProviderProbe {
                 provider,
                 model_id: model,
                 capability_key: LIMITS_PROBE_KEY.into(),
@@ -231,7 +230,8 @@ pub(crate) async fn save_limits_to_db(provider: String, model: String, limits: &
                 confidence: "probed".into(),
                 error: None,
             })
-            .ok()?;
+        })
+        .ok()?;
         Some(())
     })
     .await;
@@ -338,21 +338,21 @@ pub(crate) fn output_cap_from_error(err: &ModelError) -> Option<usize> {
 /// better than dropping it — and upserts as "probed". Best-effort.
 pub(crate) async fn learn_output_cap(provider: String, model: String, cap: usize) {
     let _ = tokio::task::spawn_blocking(move || -> Option<()> {
-        let store = RuntimeStore::open_default().ok()?;
-        let existing = store
-            .provider_probes()
-            .get(&provider, &model, LIMITS_PROBE_KEY)
-            .ok()
-            .flatten()
-            .and_then(|rec| serde_json::from_str::<CachedLimits>(&rec.capability_value).ok());
+        let existing = mermaid_runtime::with_shared_store(|store| {
+            store
+                .provider_probes()
+                .get(&provider, &model, LIMITS_PROBE_KEY)
+        })
+        .ok()
+        .flatten()
+        .and_then(|rec| serde_json::from_str::<CachedLimits>(&rec.capability_value).ok());
         let merged = CachedLimits {
             max_context_tokens: existing.and_then(|l| l.max_context_tokens),
             max_output_tokens: Some(cap),
         };
         let value = serde_json::to_string(&merged).ok()?;
-        store
-            .provider_probes()
-            .upsert(NewProviderProbe {
+        mermaid_runtime::with_shared_store(|store| {
+            store.provider_probes().upsert(NewProviderProbe {
                 provider,
                 model_id: model,
                 capability_key: LIMITS_PROBE_KEY.into(),
@@ -360,7 +360,8 @@ pub(crate) async fn learn_output_cap(provider: String, model: String, cap: usize
                 confidence: "probed".into(),
                 error: None,
             })
-            .ok()?;
+        })
+        .ok()?;
         Some(())
     })
     .await;
