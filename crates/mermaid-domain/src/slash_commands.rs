@@ -626,9 +626,9 @@ pub fn parse_slash_command(raw: &str) -> crate::SlashCmd {
         Some("safety") => match arg.as_deref() {
             None => SlashCmd::Safety(None),
             // Invalid value ⇒ `None` ⇒ the reducer shows current + options.
-            Some(mode) => {
-                SlashCmd::Safety(mermaid_runtime::SafetyMode::parse(&mode.to_lowercase()))
-            },
+            Some(mode) => SlashCmd::Safety(mermaid_model::safety::SafetyMode::parse(
+                &mode.to_lowercase(),
+            )),
         },
         Some("plan") => SlashCmd::Plan(arg),
         Some("config") => SlashCmd::Config,

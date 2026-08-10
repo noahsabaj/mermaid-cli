@@ -113,7 +113,7 @@ pub fn read_file_capped(
 /// Like [`read_file_capped`], but reads from an already-open [`std::fs::File`].
 ///
 /// Used when the caller has obtained the handle through a confinement-checked
-/// open (e.g. [`mermaid_runtime::open_beneath`]) and must read the *same* inode
+/// open (e.g. `mermaid-runtime`'s `open_beneath`) and must read the *same* inode
 /// the check resolved — feeding a path back to [`read_file_capped`] would reopen
 /// by name and reintroduce the symlink TOCTOU (#77).
 ///

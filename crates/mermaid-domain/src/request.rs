@@ -13,7 +13,7 @@
 use crate::prompts::get_system_prompt;
 use crate::{ProgressEvent, SubagentPhase};
 use mermaid_model::models::{ChatMessage, MessageRole, ProviderContinuation, TokenUsage};
-use mermaid_runtime::TaskStatus;
+use mermaid_model::records::TaskStatus;
 
 use super::action_display::action_display_for;
 use super::cmd::{ChatRequest, Cmd};
@@ -346,7 +346,7 @@ pub(crate) fn evict_stale_screenshots(mut messages: Vec<ChatMessage>) -> Vec<Cha
 /// - only tool-result messages (`MessageRole::Tool`) are considered, so a user
 ///   message or model turn that merely quotes the phrase is untouched;
 /// - the match is the *contiguous* denial signature (`blocked by policy:` +
-///   [`mermaid_runtime::READ_ONLY_DENIAL_MARKER`]), so a `grep` hit that happens
+///   [`mermaid_model::safety::READ_ONLY_DENIAL_MARKER`]), so a `grep` hit that happens
 ///   to contain the marker text is not rewritten;
 /// - it is a no-op in `read_only` (the denials still apply) and self-corrects if
 ///   the user toggles back down.
@@ -356,9 +356,9 @@ pub(crate) fn evict_stale_screenshots(mut messages: Vec<ChatMessage>) -> Vec<Cha
 /// `tool_use/tool_result` pairing is preserved.
 pub(crate) fn neutralize_superseded_policy_denials(
     messages: &mut [ChatMessage],
-    mode: mermaid_runtime::SafetyMode,
+    mode: mermaid_model::safety::SafetyMode,
 ) {
-    use mermaid_runtime::SafetyMode;
+    use mermaid_model::safety::SafetyMode;
     // `Plan` carries the same read-only floor, so a read-only denial recorded
     // earlier still describes reality and must NOT be retired.
     if matches!(mode, SafetyMode::ReadOnly | SafetyMode::Plan) {
@@ -389,13 +389,13 @@ pub(crate) fn neutralize_superseded_policy_denials(
 /// The `content` infix that marks a persisted **read-only** policy denial: the
 /// gate wraps a `PolicyDecision::Deny` as `"{summary} blocked by policy:
 /// {reason}"`, and every read-only reason starts with
-/// [`mermaid_runtime::READ_ONLY_DENIAL_MARKER`]. Matching the *contiguous* phrase
+/// [`mermaid_model::safety::READ_ONLY_DENIAL_MARKER`]. Matching the *contiguous* phrase
 /// (not the bare marker) avoids rewriting a `grep` hit that merely contains the
 /// marker text.
 pub(crate) fn readonly_denial_signature() -> String {
     format!(
         "blocked by policy: {}",
-        mermaid_runtime::READ_ONLY_DENIAL_MARKER
+        mermaid_model::safety::READ_ONLY_DENIAL_MARKER
     )
 }
 

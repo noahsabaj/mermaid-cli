@@ -15,7 +15,7 @@
 use crate::prompts::get_system_prompt;
 use crate::{ProgressEvent, SubagentPhase};
 use mermaid_model::models::{ChatMessage, MessageRole, ProviderContinuation, TokenUsage};
-use mermaid_runtime::TaskStatus;
+use mermaid_model::records::TaskStatus;
 
 use super::action_display::action_display_for;
 use super::cmd::{ChatRequest, Cmd};
@@ -511,7 +511,7 @@ pub(crate) fn context_text(state: &State) -> String {
     lines.join("\n")
 }
 
-pub(crate) fn tasks_text(tasks: &[mermaid_runtime::TaskRecord]) -> String {
+pub(crate) fn tasks_text(tasks: &[mermaid_model::records::TaskRecord]) -> String {
     let mut lines = vec!["Tasks".to_string()];
     if tasks.is_empty() {
         lines.push("No tasks recorded yet.".to_string());
@@ -529,8 +529,8 @@ pub(crate) fn tasks_text(tasks: &[mermaid_runtime::TaskRecord]) -> String {
 }
 
 pub(crate) fn task_detail_text(
-    task: Option<&mermaid_runtime::TaskRecord>,
-    events: &[mermaid_runtime::TaskTimelineEvent],
+    task: Option<&mermaid_model::records::TaskRecord>,
+    events: &[mermaid_model::records::TaskTimelineEvent],
 ) -> String {
     let Some(task) = task else {
         return "Task not found.".to_string();
@@ -563,7 +563,7 @@ pub(crate) fn task_detail_text(
     lines.join("\n")
 }
 
-pub(crate) fn processes_text(processes: &[mermaid_runtime::ProcessRecord]) -> String {
+pub(crate) fn processes_text(processes: &[mermaid_model::records::ProcessRecord]) -> String {
     let mut lines = vec!["Processes".to_string()];
     if processes.is_empty() {
         lines.push("No processes recorded yet.".to_string());
@@ -590,7 +590,7 @@ pub(crate) fn processes_text(processes: &[mermaid_runtime::ProcessRecord]) -> St
     lines.join("\n")
 }
 
-pub(crate) fn approvals_text(approvals: &[mermaid_runtime::ApprovalRecord]) -> String {
+pub(crate) fn approvals_text(approvals: &[mermaid_model::records::ApprovalRecord]) -> String {
     let mut lines = vec!["Approvals".to_string()];
     if approvals.is_empty() {
         lines.push("No pending approvals.".to_string());
@@ -611,7 +611,7 @@ pub(crate) fn approvals_text(approvals: &[mermaid_runtime::ApprovalRecord]) -> S
     lines.join("\n")
 }
 
-pub(crate) fn checkpoints_text(checkpoints: &[mermaid_runtime::CheckpointRecord]) -> String {
+pub(crate) fn checkpoints_text(checkpoints: &[mermaid_model::records::CheckpointRecord]) -> String {
     let mut lines = vec!["Checkpoints".to_string()];
     if checkpoints.is_empty() {
         lines.push("No checkpoints recorded yet.".to_string());
@@ -626,7 +626,7 @@ pub(crate) fn checkpoints_text(checkpoints: &[mermaid_runtime::CheckpointRecord]
     lines.join("\n")
 }
 
-pub(crate) fn plugins_text(plugins: &[mermaid_runtime::PluginInstallRecord]) -> String {
+pub(crate) fn plugins_text(plugins: &[mermaid_model::records::PluginInstallRecord]) -> String {
     let mut lines = vec!["Plugins".to_string()];
     if plugins.is_empty() {
         lines.push("No plugins installed.".to_string());

@@ -34,7 +34,7 @@ class Layer(NamedTuple):
 LAYERS: dict[str, Layer] = {
     # -- rank 1: the pure MVU core -----------------------------------------
     "crates/mermaid-domain/src": Layer(
-        may_use=frozenset({"models", "constants", "utils", "runtime"}),
+        may_use=frozenset({"models", "constants", "utils"}),
         pure=True,
         why=(
             "`mermaid-domain` is the pure MVU core: `fn update(State, Msg) -> "
@@ -44,13 +44,14 @@ LAYERS: dict[str, Layer] = {
             "record), move the type DOWN; do not reach up for it. "
             "Direction is enforced by the crate boundary now; this guard covers "
             "the purity half, which no manifest can express. "
-            "(`SafetyMode`, `TaskStatus`, the storage record structs) are plain "
-            "value types."
+            "The vocabulary it speaks (`SafetyMode`, `TaskStatus`, the record "
+            "structs) lives in `mermaid-model` -- the bottom crate -- so this "
+            "crate carries no `mermaid-runtime` dependency at all."
         ),
     ),
     # -- rank 2: the pure view ---------------------------------------------
     "src/render": Layer(
-        may_use=frozenset({"domain", "mermaid_domain", "models", "constants", "utils", "runtime"}),
+        may_use=frozenset({"domain", "mermaid_domain", "models", "constants", "utils"}),
         pure=True,
         why=(
             "`render(&State) -> Frame` is a pure function of domain state. "

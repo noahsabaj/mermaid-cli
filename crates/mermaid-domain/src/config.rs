@@ -17,7 +17,7 @@ use std::collections::HashMap;
 
 use mermaid_model::constants::{DEFAULT_OLLAMA_PORT, DEFAULT_TEMPERATURE};
 use mermaid_model::models::ReasoningLevel;
-use mermaid_runtime::{PolicyOverride, SafetyMode};
+use mermaid_model::safety::{PolicyOverride, SafetyMode};
 
 /// Main configuration structure
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -321,7 +321,7 @@ pub struct SafetyConfig {
     /// (aligned runs silently, off-task escalates). `allow` restores the old
     /// unconditional-allow behavior.
     #[serde(default)]
-    pub external_writes: mermaid_runtime::FloorLevel,
+    pub external_writes: mermaid_model::safety::FloorLevel,
     /// Enforcement floor for machine-scoped package operations (`npm -g`,
     /// `cargo install`, `pip install`, `brew`/`apt`/`winget` installs) —
     /// same levels and default as `external_writes`. They mutate the
@@ -329,7 +329,7 @@ pub struct SafetyConfig {
     /// `full_access` vets them. Project-local installs (`npm install`,
     /// `cargo add`) are untouched.
     #[serde(default)]
-    pub system_installs: mermaid_runtime::FloorLevel,
+    pub system_installs: mermaid_model::safety::FloorLevel,
     /// Model id the `Auto`-mode safety classifier uses to vet borderline
     /// actions. `None` ⇒ vet with the session's active model. Set this to
     /// point the vet at a cheaper/faster model than the one driving the work.
@@ -360,8 +360,8 @@ impl Default for SafetyConfig {
             network: NetworkPolicy::default(),
             filesystem: FilesystemPolicy::default(),
             overrides: Vec::new(),
-            external_writes: mermaid_runtime::FloorLevel::default(),
-            system_installs: mermaid_runtime::FloorLevel::default(),
+            external_writes: mermaid_model::safety::FloorLevel::default(),
+            system_installs: mermaid_model::safety::FloorLevel::default(),
             auto_classifier_model: None,
             allow_untrusted_headless_tools: false,
             allow_readonly_web: false,

@@ -31,7 +31,7 @@ use super::reports::*;
 use super::request::*;
 use crate::{ProgressEvent, SubagentPhase};
 use mermaid_model::models::{ChatMessage, MessageRole, ProviderContinuation, TokenUsage};
-use mermaid_runtime::TaskStatus;
+use mermaid_model::records::TaskStatus;
 
 use super::action_display::action_display_for;
 use super::cmd::Cmd;
@@ -2428,8 +2428,10 @@ pub(crate) fn cycle_reasoning(
 /// one (`permissiveness() == 0`), so the walk starts there. Entering it still
 /// allocates a plan path and may swap the model; that side of the transition
 /// lives in [`apply_safety_mode`], which every mode switch routes through.
-pub(crate) fn cycle_safety(current: mermaid_runtime::SafetyMode) -> mermaid_runtime::SafetyMode {
-    use mermaid_runtime::SafetyMode as S;
+pub(crate) fn cycle_safety(
+    current: mermaid_model::safety::SafetyMode,
+) -> mermaid_model::safety::SafetyMode {
+    use mermaid_model::safety::SafetyMode as S;
     match current {
         S::Plan => S::ReadOnly,
         S::ReadOnly => S::Ask,
@@ -5318,7 +5320,7 @@ const SAFETY_NUDGE_PREFIX: &str = "Safety mode is now ";
 /// request it steers has gone out. Pairs with
 /// `neutralize_superseded_policy_denials`, which rewrites the denials
 /// themselves on every request.
-pub(crate) fn safety_loosened_note(mode: mermaid_runtime::SafetyMode) -> String {
+pub(crate) fn safety_loosened_note(mode: mermaid_model::safety::SafetyMode) -> String {
     format!(
         "{SAFETY_NUDGE_PREFIX}{}; earlier read-only policy blocks no longer apply. \
          Re-attempt gated actions instead of assuming they'll fail.",
@@ -5341,11 +5343,11 @@ pub(crate) fn safety_loosened_note(mode: mermaid_runtime::SafetyMode) -> String 
 pub(crate) fn note_safety_mode_change(
     state: &mut State,
     cmds: &mut Vec<Cmd>,
-    previous: mermaid_runtime::SafetyMode,
-    next: mermaid_runtime::SafetyMode,
+    previous: mermaid_model::safety::SafetyMode,
+    next: mermaid_model::safety::SafetyMode,
 ) {
     use mermaid_model::models::ChatMessageKind;
-    use mermaid_runtime::SafetyMode;
+    use mermaid_model::safety::SafetyMode;
     let messages = state.session.conversation.messages_mut();
     let before = messages.len();
     messages.retain(|m| {
@@ -5567,7 +5569,7 @@ pub(crate) fn cycle_plan_config_row(state: &mut State, row: usize, forward: bool
 pub(crate) fn apply_safety_mode(
     state: &mut State,
     cmds: &mut Vec<Cmd>,
-    next: mermaid_runtime::SafetyMode,
+    next: mermaid_model::safety::SafetyMode,
 ) {
     let previous = state.session.safety_mode;
     if previous == next {
@@ -5603,10 +5605,10 @@ pub(crate) fn apply_safety_mode(
 ///
 /// There is deliberately no remembered per-session restore target: plan is a
 /// safety mode like the others, and a mode does not carry the mode before it.
-pub(crate) fn mode_after_plan(state: &State) -> mermaid_runtime::SafetyMode {
+pub(crate) fn mode_after_plan(state: &State) -> mermaid_model::safety::SafetyMode {
     let configured = state.settings.safety.mode;
     if configured.is_planning() {
-        mermaid_runtime::SafetyMode::Ask
+        mermaid_model::safety::SafetyMode::Ask
     } else {
         configured
     }
@@ -5652,7 +5654,7 @@ pub(crate) fn enter_plan_mode_state(
     }
     // The mode BECOMES plan. `session.plan` carries only the plan's data, so
     // there is no second value that can disagree with the floor.
-    state.session.safety_mode = mermaid_runtime::SafetyMode::Plan;
+    state.session.safety_mode = mermaid_model::safety::SafetyMode::Plan;
     state.session.plan = Some(super::state::PlanState {
         plan_path: plan_path.clone(),
         prev_model_id,
@@ -5745,9 +5747,12 @@ pub(crate) fn retract_plan_reminder(state: &mut State) {
 
 /// The `content` infix that marks a persisted **plan-mode** policy denial.
 /// Sibling of [`readonly_denial_signature`], keyed on
-/// [`mermaid_runtime::PLAN_DENIAL_MARKER`].
+/// [`mermaid_model::safety::PLAN_DENIAL_MARKER`].
 pub(crate) fn plan_denial_signature() -> String {
-    format!("blocked by policy: {}", mermaid_runtime::PLAN_DENIAL_MARKER)
+    format!(
+        "blocked by policy: {}",
+        mermaid_model::safety::PLAN_DENIAL_MARKER
+    )
 }
 
 /// True if the conversation still carries a plan-mode policy denial.
@@ -11104,7 +11109,7 @@ mod tests {
 
     #[test]
     fn cycle_safety_walks_by_permissiveness() {
-        use mermaid_runtime::SafetyMode as S;
+        use mermaid_model::safety::SafetyMode as S;
         // Plan is the strictest position (permissiveness 0), so the walk
         // starts there and wraps back to it — one flat cycle, no side door.
         assert_eq!(cycle_safety(S::Plan), S::ReadOnly);
@@ -11339,9 +11344,14 @@ mod tests {
         let state = fresh_state();
         let (state, _) = update(
             state,
-            Msg::Slash(SlashCmd::Safety(Some(mermaid_runtime::SafetyMode::Auto))),
+            Msg::Slash(SlashCmd::Safety(Some(
+                mermaid_model::safety::SafetyMode::Auto,
+            ))),
         );
-        assert_eq!(state.session.safety_mode, mermaid_runtime::SafetyMode::Auto);
+        assert_eq!(
+            state.session.safety_mode,
+            mermaid_model::safety::SafetyMode::Auto
+        );
     }
 
     /// A tool-result shaped exactly like a real read-only policy denial
@@ -11353,14 +11363,14 @@ mod tests {
             "execute_command",
             format!(
                 "{summary} blocked by policy: {} blocks mutations and control actions",
-                mermaid_runtime::READ_ONLY_DENIAL_MARKER
+                mermaid_model::safety::READ_ONLY_DENIAL_MARKER
             ),
         )
     }
 
     #[test]
     fn superseded_readonly_denial_is_rewritten_when_mode_loosened() {
-        use mermaid_runtime::SafetyMode;
+        use mermaid_model::safety::SafetyMode;
         let mut msgs = vec![readonly_denial_message("write_file(main.qml)")];
         neutralize_superseded_policy_denials(&mut msgs, SafetyMode::FullAccess);
         let content = &msgs[0].content;
@@ -11384,7 +11394,7 @@ mod tests {
 
     #[test]
     fn readonly_denial_preserved_in_read_only_mode() {
-        use mermaid_runtime::SafetyMode;
+        use mermaid_model::safety::SafetyMode;
         let original = readonly_denial_message("write_file(x)");
         let mut msgs = vec![original.clone()];
         neutralize_superseded_policy_denials(&mut msgs, SafetyMode::ReadOnly);
@@ -11396,11 +11406,11 @@ mod tests {
 
     #[test]
     fn neutralizer_ignores_non_tool_and_non_denial_messages() {
-        use mermaid_runtime::SafetyMode;
+        use mermaid_model::safety::SafetyMode;
         // Role gate: a USER message quoting the full signature is left alone.
         let quote = ChatMessage::user(format!(
             "it said: blocked by policy: {} blocks mutations and control actions",
-            mermaid_runtime::READ_ONLY_DENIAL_MARKER
+            mermaid_model::safety::READ_ONLY_DENIAL_MARKER
         ));
         // Contiguous-signature gate: a tool result that merely contains the
         // marker text (e.g. a grep of the source) is not a denial.
@@ -11409,7 +11419,7 @@ mod tests {
             "execute_command",
             format!(
                 "policy.rs: const MARKER = {:?};",
-                mermaid_runtime::READ_ONLY_DENIAL_MARKER
+                mermaid_model::safety::READ_ONLY_DENIAL_MARKER
             ),
         );
         let mut msgs = vec![quote.clone(), grep.clone()];
@@ -11423,7 +11433,7 @@ mod tests {
 
     #[test]
     fn leaving_read_only_past_a_stale_denial_injects_a_hidden_nudge() {
-        use mermaid_runtime::SafetyMode;
+        use mermaid_model::safety::SafetyMode;
         let mut state = fresh_state();
         state.session.safety_mode = SafetyMode::ReadOnly;
         state
@@ -11447,7 +11457,7 @@ mod tests {
 
     #[test]
     fn further_loosening_replaces_the_pending_nudge_instead_of_stacking() {
-        use mermaid_runtime::SafetyMode;
+        use mermaid_model::safety::SafetyMode;
         let mut state = fresh_state();
         state.session.safety_mode = SafetyMode::ReadOnly;
         state
@@ -11476,7 +11486,7 @@ mod tests {
 
     #[test]
     fn loosening_after_the_nudge_was_spent_stays_silent() {
-        use mermaid_runtime::SafetyMode;
+        use mermaid_model::safety::SafetyMode;
         let mut state = fresh_state();
         state.session.safety_mode = SafetyMode::ReadOnly;
         state
@@ -11497,7 +11507,7 @@ mod tests {
 
     #[test]
     fn tightening_back_to_read_only_retracts_the_pending_nudge() {
-        use mermaid_runtime::SafetyMode;
+        use mermaid_model::safety::SafetyMode;
         let mut state = fresh_state();
         state.session.safety_mode = SafetyMode::ReadOnly;
         state
@@ -11520,7 +11530,7 @@ mod tests {
 
     #[test]
     fn clean_mode_cycle_stays_silent() {
-        use mermaid_runtime::SafetyMode;
+        use mermaid_model::safety::SafetyMode;
         let mut state = fresh_state();
         state.session.safety_mode = SafetyMode::ReadOnly;
         let (state, _) = update(state, key(KeyCode::BackTab));
@@ -11537,7 +11547,7 @@ mod tests {
 
     #[test]
     fn slash_safety_loosening_announces_when_denial_present() {
-        use mermaid_runtime::SafetyMode;
+        use mermaid_model::safety::SafetyMode;
         let mut state = fresh_state();
         state.session.safety_mode = SafetyMode::ReadOnly;
         state
@@ -11560,7 +11570,7 @@ mod tests {
 
     #[test]
     fn build_chat_request_neutralizes_a_superseded_denial() {
-        use mermaid_runtime::SafetyMode;
+        use mermaid_model::safety::SafetyMode;
         // Full production path: a read_only denial sits in history behind a valid
         // tool_use/tool_result pair (so `normalize_history` keeps it); once the
         // live mode is looser, `build_chat_request` must hand the model a
@@ -11584,7 +11594,7 @@ mod tests {
                 "write_file",
                 format!(
                     "write_file(main.qml) blocked by policy: {} blocks mutations and control actions",
-                    mermaid_runtime::READ_ONLY_DENIAL_MARKER
+                    mermaid_model::safety::READ_ONLY_DENIAL_MARKER
                 ),
             ),
             state.now,
@@ -12568,7 +12578,7 @@ mod tests {
     /// way allocates the plan file exactly as `/plan` does.
     #[test]
     fn shift_tab_cycles_into_plan_mode_and_allocates_a_plan_path() {
-        use mermaid_runtime::SafetyMode as S;
+        use mermaid_model::safety::SafetyMode as S;
         let tab = || {
             Msg::Key(Key {
                 code: KeyCode::BackTab,
@@ -12686,7 +12696,7 @@ mod tests {
     /// without the mode is the state this refactor made unrepresentable, so
     /// tests must not hand-roll it.
     fn enter_planning(state: &mut State, plan_path: &str) {
-        state.session.safety_mode = mermaid_runtime::SafetyMode::Plan;
+        state.session.safety_mode = mermaid_model::safety::SafetyMode::Plan;
         state.session.plan = Some(crate::PlanState {
             plan_path: PathBuf::from(plan_path),
             ..Default::default()
@@ -12698,7 +12708,7 @@ mod tests {
     /// is the same half-state `enter_planning` guards against.
     fn exit_planning(state: &mut State) {
         state.session.plan = None;
-        state.session.safety_mode = mermaid_runtime::SafetyMode::default();
+        state.session.safety_mode = mermaid_model::safety::SafetyMode::default();
     }
 
     fn markers(request: &ChatRequest) -> Vec<String> {
@@ -12723,7 +12733,7 @@ mod tests {
     /// leaving plan and dropping the floor are the same event.
     #[test]
     fn shift_tab_out_of_plan_moves_the_live_mode_and_drops_the_floor_together() {
-        use mermaid_runtime::SafetyMode;
+        use mermaid_model::safety::SafetyMode;
         let mut state = fresh_state();
         dispatch(&mut state, 1);
         let (mut state, _) = update(state, Msg::Slash(SlashCmd::Plan(None)));
@@ -12915,7 +12925,7 @@ mod tests {
                 "write_file",
                 format!(
                     "write_file(x) blocked by policy: {} is active",
-                    mermaid_runtime::PLAN_DENIAL_MARKER
+                    mermaid_model::safety::PLAN_DENIAL_MARKER
                 ),
             ),
             state.now,
@@ -12946,7 +12956,7 @@ mod tests {
 
     #[test]
     fn safety_mode_flip_is_announced_exactly_once() {
-        use mermaid_runtime::SafetyMode;
+        use mermaid_model::safety::SafetyMode;
         let mut state = fresh_state();
         dispatch(&mut state, 1);
         state.session.safety_mode = SafetyMode::ReadOnly;
@@ -12980,7 +12990,7 @@ mod tests {
 
     #[test]
     fn subagents_get_no_markers_or_reminders() {
-        use mermaid_runtime::SafetyMode;
+        use mermaid_model::safety::SafetyMode;
         let mut state = fresh_state();
         state.session.is_subagent = true;
         dispatch(&mut state, 1);
@@ -13098,7 +13108,7 @@ mod tests {
             format!(
                 "execute_command echo x > src/a.rs blocked by policy: {} is active — planning \
                  only",
-                mermaid_runtime::PLAN_DENIAL_MARKER
+                mermaid_model::safety::PLAN_DENIAL_MARKER
             ),
             0.0,
         )
@@ -13298,7 +13308,7 @@ mod tests {
 
     #[test]
     fn plan_mode_floors_dispatch_to_read_only_and_stamps_the_plan_file() {
-        use mermaid_runtime::SafetyMode;
+        use mermaid_model::safety::SafetyMode;
         let mut state = state_with_two_exchanges();
         // Entering plan mode from full_access: the MODE becomes plan, and
         // full_access is staged as the resume target.
@@ -13376,7 +13386,7 @@ mod tests {
                 "write_file",
                 format!(
                     "write_file(main.qml) blocked by policy: {} is active — planning only",
-                    mermaid_runtime::PLAN_DENIAL_MARKER
+                    mermaid_model::safety::PLAN_DENIAL_MARKER
                 ),
             ),
             state.now,
@@ -13414,7 +13424,7 @@ mod tests {
 
     #[test]
     fn plan_mode_keeps_read_only_denials_standing() {
-        use mermaid_runtime::SafetyMode;
+        use mermaid_model::safety::SafetyMode;
         // full_access + planning: the EFFECTIVE mode is the read-only floor,
         // so a pre-plan read-only denial still describes reality — the
         // loosened-mode rewrite must not fire.
@@ -13438,7 +13448,7 @@ mod tests {
                 "write_file",
                 format!(
                     "write_file(main.qml) blocked by policy: {} blocks mutations and control actions",
-                    mermaid_runtime::READ_ONLY_DENIAL_MARKER
+                    mermaid_model::safety::READ_ONLY_DENIAL_MARKER
                 ),
             ),
             state.now,
@@ -13963,8 +13973,8 @@ mod tests {
         assert_ne!(state.session.conversation.id, original_id, "forked");
     }
 
-    fn anchored_checkpoint(id: &str, index: i64) -> mermaid_runtime::CheckpointRecord {
-        mermaid_runtime::CheckpointRecord {
+    fn anchored_checkpoint(id: &str, index: i64) -> mermaid_model::records::CheckpointRecord {
+        mermaid_model::records::CheckpointRecord {
             id: id.to_string(),
             task_id: None,
             project_path: "/tmp/p".to_string(),
@@ -14792,7 +14802,7 @@ mod tests {
                         cwd: Some("/tmp/project".to_string()),
                         log_path: "/tmp/mermaid-bg.log".to_string(),
                         detected_url: Some("http://127.0.0.1:5173".to_string()),
-                        status: mermaid_runtime::ProcessStatus::Running,
+                        status: mermaid_model::records::ProcessStatus::Running,
                     }),
                     ..crate::ToolRunMetadata::default()
                 }),

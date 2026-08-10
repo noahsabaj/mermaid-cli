@@ -82,7 +82,7 @@ fn snapshot_cache() -> RenderCache {
     let mut cache = RenderCache::new("snaphost".to_string(), "snapuser".to_string());
     cache.version = "0.0.0".to_string();
     // Pin the exec-row shell label: frames must not vary by build platform.
-    cache.host_shell = mermaid_runtime::HostShell::Posix;
+    cache.host_shell = mermaid_model::safety::HostShell::Posix;
     cache
 }
 

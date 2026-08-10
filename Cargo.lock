@@ -2393,7 +2393,6 @@ dependencies = [
  "base64",
  "chrono",
  "mermaid-model",
- "mermaid-runtime",
  "nucleo-matcher",
  "regex",
  "serde",
@@ -2414,10 +2413,10 @@ dependencies = [
  "chrono",
  "clap",
  "dbus-secret-service",
+ "directories",
  "futures",
  "getrandom 0.4.3",
  "keyring",
- "mermaid-runtime",
  "regex",
  "reqwest",
  "serde",
@@ -2427,6 +2426,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "url",
 ]
 
 [[package]]
@@ -2436,11 +2436,10 @@ dependencies = [
  "anyhow",
  "base64",
  "chrono",
- "directories",
  "getrandom 0.4.3",
  "landlock",
  "libc",
- "regex",
+ "mermaid-model",
  "rusqlite",
  "rustix",
  "seccompiler",
@@ -2451,7 +2450,6 @@ dependencies = [
  "temp-env",
  "toml",
  "tracing",
- "url",
  "windows-sys 0.61.2",
 ]
 

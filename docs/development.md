@@ -68,7 +68,7 @@ git push origin v0.23.0
 ```
 
 The tag triggers `release.yml`: it verifies the versions again, builds five
-platforms, publishes the crates in dependency order (runtime, model, domain,
+platforms, publishes the crates in dependency order (model, runtime, domain,
 cli), then the package managers.
 
 If a build fails, nothing is published — the publish jobs `needs:` the builds.

@@ -21,7 +21,7 @@ pub struct ManagedProcess {
     pub cwd: Option<String>,
     pub log_path: String,
     pub detected_url: Option<String>,
-    pub status: mermaid_runtime::ProcessStatus,
+    pub status: crate::records::ProcessStatus,
 }
 
 /// Structured metadata extracted from a completed tool run.

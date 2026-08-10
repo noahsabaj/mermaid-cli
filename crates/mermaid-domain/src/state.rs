@@ -27,7 +27,7 @@ use crate::{Config, McpServerConfig};
 use mermaid_model::models::ChatMessage;
 use mermaid_model::models::tool_call::ToolCall as ModelToolCall;
 use mermaid_model::models::{ProviderContinuation, ReasoningLevel, TokenUsage, TokenUsageSource};
-use mermaid_runtime::SafetyMode;
+use mermaid_model::safety::SafetyMode;
 
 use super::cmd::ChatRequest;
 use super::compaction::CompactionTrigger;
@@ -1421,7 +1421,7 @@ pub enum ApprovalChoice {
 
 /// Category of the gated action — drives the prompt's label.
 ///
-/// A deliberately coarser projection of `mermaid_runtime::ToolCategory`: seven
+/// A deliberately coarser projection of `mermaid_model::safety::ToolCategory`: seven
 /// prompt labels for twelve policy categories, plus `Classify` which has no
 /// `ToolCategory` at all. The mapping is the `From` impl below, exhaustive so a
 /// new `ToolCategory` variant is a compile error in exactly one place.
@@ -1441,9 +1441,9 @@ pub enum ApprovalKind {
     Classify,
 }
 
-impl From<mermaid_runtime::ToolCategory> for ApprovalKind {
-    fn from(category: mermaid_runtime::ToolCategory) -> Self {
-        use mermaid_runtime::ToolCategory as C;
+impl From<mermaid_model::safety::ToolCategory> for ApprovalKind {
+    fn from(category: mermaid_model::safety::ToolCategory) -> Self {
+        use mermaid_model::safety::ToolCategory as C;
         match category {
             C::Edit => Self::FileMutation,
             C::Shell | C::Git | C::Process => Self::Shell,

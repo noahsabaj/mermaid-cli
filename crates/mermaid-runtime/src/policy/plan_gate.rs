@@ -5,18 +5,7 @@ use std::path::Path;
 use super::RiskClass;
 use super::shell::*;
 
-/// Marker embedded verbatim in every read-only policy-denial `reason` (see
-/// `PolicyEngine::decide`). Exposed so the message-history layer can detect a
-/// denial that a since-loosened safety mode has superseded, without
-/// re-hardcoding the wording in a second place.
-pub const READ_ONLY_DENIAL_MARKER: &str = "read-only safety mode";
-
-/// Marker embedded verbatim in every plan-mode policy-denial `reason` (the
-/// policy gate rewrites the read-only mode-default deny to a plan-flavored one
-/// while a plan is being drafted). Sibling of [`READ_ONLY_DENIAL_MARKER`]: the
-/// message-history layer matches `"blocked by policy: "` + this marker to
-/// neutralize denials once plan mode ends.
-pub const PLAN_DENIAL_MARKER: &str = "plan mode";
+pub use mermaid_model::safety::{PLAN_DENIAL_MARKER, READ_ONLY_DENIAL_MARKER};
 
 /// True when `command` is a build/test invocation plan mode auto-allows even
 /// though it spawns processes: every segment is either read-only or a known

@@ -23,7 +23,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::state::{ConversationSummary, ModelChoice};
-use mermaid_runtime::{
+use mermaid_model::records::{
     ApprovalRecord, CheckpointRecord, PluginInstallRecord, ProcessRecord, TaskRecord,
     TaskTimelineEvent,
 };

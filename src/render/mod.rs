@@ -49,7 +49,7 @@ pub struct RenderCache {
     /// A field, not a `HostShell::current()` read at use sites, for the same
     /// reason `hostname`/`username` are: the snapshot rig pins it (`Posix`)
     /// so one set of `.snap` files serves every platform.
-    pub host_shell: mermaid_runtime::HostShell,
+    pub host_shell: mermaid_model::safety::HostShell,
     /// Per-message render cache: `(content, theme, width)` hash → fully wrapped,
     /// role-prefixed assistant lines, so committed messages aren't re-parsed or
     /// re-wrapped every frame (#134).
@@ -105,7 +105,7 @@ impl RenderCache {
     pub fn new(hostname: String, username: String) -> Self {
         Self {
             chat: ChatState::new(),
-            host_shell: mermaid_runtime::HostShell::current(),
+            host_shell: mermaid_model::safety::HostShell::current(),
             wrapped_line_cache: FxHashMap::default(),
             theme: theme::Theme::dark(),
             hostname,
@@ -934,7 +934,7 @@ fn build_live_messages<'a>(
     committed: &'a [mermaid_model::models::ChatMessage],
     turn: &TurnState,
     now: chrono::DateTime<chrono::Local>,
-    host_shell: mermaid_runtime::HostShell,
+    host_shell: mermaid_model::safety::HostShell,
 ) -> std::borrow::Cow<'a, [mermaid_model::models::ChatMessage]> {
     if let TurnState::ExecutingTools {
         calls, outcomes, ..
@@ -1272,7 +1272,7 @@ mod tests {
             &[],
             &state.turn,
             chrono::Local::now(),
-            mermaid_runtime::HostShell::Posix,
+            mermaid_model::safety::HostShell::Posix,
         );
         assert!(
             live.is_empty(),
@@ -1336,7 +1336,7 @@ mod tests {
             &[],
             &state.turn,
             chrono::Local::now(),
-            mermaid_runtime::HostShell::Posix,
+            mermaid_model::safety::HostShell::Posix,
         );
         assert_eq!(live.len(), 1, "one synthetic message carries the rows");
         let actions = &live[0].actions;
@@ -1367,7 +1367,7 @@ mod tests {
             &committed,
             &TurnState::Idle,
             now,
-            mermaid_runtime::HostShell::Posix,
+            mermaid_model::safety::HostShell::Posix,
         );
         assert!(matches!(idle, Cow::Borrowed(_)));
         assert_eq!(idle.len(), 1);
@@ -1385,7 +1385,12 @@ mod tests {
             pending_tool_calls: Vec::new(),
             continuation: false,
         };
-        let live = build_live_messages(&committed, &turn, now, mermaid_runtime::HostShell::Posix);
+        let live = build_live_messages(
+            &committed,
+            &turn,
+            now,
+            mermaid_model::safety::HostShell::Posix,
+        );
         assert!(matches!(live, Cow::Owned(_)));
         assert_eq!(live.len(), 2);
         assert_eq!(live[1].timestamp, now);
@@ -1569,7 +1574,7 @@ mod tests {
             &committed,
             &turn,
             chrono::Local::now(),
-            mermaid_runtime::HostShell::Posix,
+            mermaid_model::safety::HostShell::Posix,
         );
         let streamed = live.last().expect("pseudo-message appended");
         assert_eq!(

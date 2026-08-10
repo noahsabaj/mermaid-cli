@@ -57,7 +57,7 @@ pub struct ConversationHistory {
     /// `#[serde(default)]`: sessions saved before these existed omit them, and
     /// a `None` safety mode falls back to the config default on resume.
     #[serde(default)]
-    pub safety_mode: Option<mermaid_runtime::SafetyMode>,
+    pub safety_mode: Option<mermaid_model::safety::SafetyMode>,
     /// Plan-mode-in-progress (see `domain::PlanState`): `Some` only when the
     /// session was saved mid-planning, so `--resume` re-enters plan mode with
     /// the same plan file and restore target.

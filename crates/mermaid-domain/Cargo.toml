@@ -62,4 +62,3 @@ sha2 = "0.11"
 toml = "1.1"
 url = "2.5"
 mermaid-model = { path = "../mermaid-model", version = "0.24.0" }
-mermaid-runtime = { path = "../mermaid-runtime", version = "0.24.0" }

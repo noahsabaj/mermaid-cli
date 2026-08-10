@@ -6,7 +6,7 @@
 //! outcome half: the completed `ActionDisplay` the chat renderer draws,
 //! with per-tool detail shaping ("Update main.rs -- Added 3 lines, took
 //! 0.2s"). Both have `_shell` variants taking an injected
-//! [`HostShell`](mermaid_runtime::HostShell) so render snapshots stay
+//! [`HostShell`](mermaid_model::safety::HostShell) so render snapshots stay
 //! byte-stable across platforms; the plain forms follow the machine.
 //!
 //! Everything is pure string shaping over data the reducer already owns.
@@ -24,7 +24,7 @@ use mermaid_model::tool_run::ToolMetadata;
 /// the chat renderer can show "Read main.rs → 1,234 bytes" etc.
 #[must_use]
 pub fn action_display_for(call: &PendingToolCall, outcome: &ToolOutcome) -> ActionDisplay {
-    action_display_for_shell(call, outcome, mermaid_runtime::HostShell::current())
+    action_display_for_shell(call, outcome, mermaid_model::safety::HostShell::current())
 }
 
 /// [`action_display_for`] with the shell label injected — the render layer's
@@ -34,7 +34,7 @@ pub fn action_display_for(call: &PendingToolCall, outcome: &ToolOutcome) -> Acti
 pub fn action_display_for_shell(
     call: &PendingToolCall,
     outcome: &ToolOutcome,
-    host_shell: mermaid_runtime::HostShell,
+    host_shell: mermaid_model::safety::HostShell,
 ) -> ActionDisplay {
     let (action_type, target) = display_info_for_shell(call, host_shell);
     // `write_file` that overwrote an existing file is an *update*, not a fresh
@@ -476,13 +476,13 @@ fn count_search_results(output: &str) -> usize {
 }
 
 /// [`display_info_for_shell`] with the machine's own
-/// [`HostShell`](mermaid_runtime::HostShell) — what the committed
+/// [`HostShell`](mermaid_model::safety::HostShell) — what the committed
 /// transcript and activity labels want. The render layer passes its
 /// `RenderCache`-pinned value instead so snapshot frames stay byte-stable
 /// across platforms.
 #[must_use]
 pub fn display_info_for(call: &PendingToolCall) -> (String, String) {
-    display_info_for_shell(call, mermaid_runtime::HostShell::current())
+    display_info_for_shell(call, mermaid_model::safety::HostShell::current())
 }
 
 /// Best-effort name + target extraction from a tool call, for chat
@@ -500,7 +500,7 @@ pub fn display_info_for(call: &PendingToolCall) -> (String, String) {
 #[must_use]
 pub fn display_info_for_shell(
     call: &PendingToolCall,
-    host_shell: mermaid_runtime::HostShell,
+    host_shell: mermaid_model::safety::HostShell,
 ) -> (String, String) {
     let name = call.source.function.name.as_str();
     let args = &call.source.function.arguments;
@@ -531,7 +531,7 @@ pub fn display_info_for_shell(
         // showing the POSIX spelling on Windows would teach wrong syntax.
         "create_directory" => (
             host_shell.display_name().to_string(),
-            if host_shell == mermaid_runtime::HostShell::PowerShell {
+            if host_shell == mermaid_model::safety::HostShell::PowerShell {
                 format!("mkdir {}", string_arg("path").unwrap_or_default())
             } else {
                 format!("mkdir -p {}", string_arg("path").unwrap_or_default())
@@ -659,7 +659,7 @@ mod tests {
         // used to render as `Bash(Get-ChildItem ...)`. Both dialects assert
         // on every platform; `display_info_for` itself follows
         // `HostShell::current()`.
-        use mermaid_runtime::HostShell;
+        use mermaid_model::safety::HostShell;
         let call = sample_call_args(
             1,
             "execute_command",
@@ -1074,7 +1074,7 @@ mod tests {
                     cwd: None,
                     log_path: "/tmp/mermaid-bg.log".to_string(),
                     detected_url: Some("http://127.0.0.1:5173".to_string()),
-                    status: mermaid_runtime::ProcessStatus::Running,
+                    status: mermaid_model::records::ProcessStatus::Running,
                 }),
                 ..ToolRunMetadata::default()
             });

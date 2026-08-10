@@ -1,33 +1,51 @@
-//! The row DTOs: one `XRecord` for reads, one `NewX` for writes, per table.
+//! The durable-store row DTOs: one `XRecord` for reads, one `NewX` for
+//! writes, per table.
 //!
-//! ~490 lines of plain data with no behavior beyond `Default`. Split out
-//! because "what shape is a task row" and "how does the store open a
-//! connection" are different questions and were 600 lines apart.
+//! Plain data with no behavior beyond `Default` and display labels. It
+//! lives in this bottom crate because the shapes are shared vocabulary --
+//! the store (`mermaid-runtime`), the daemon, the runtime client, and the
+//! domain's `QueryResult`s all speak them -- and the pure MVU core must be
+//! able to do so without depending on `mermaid-runtime`. Storage
+//! implementation details (the schema version, owner-kind markers) stay
+//! with the store.
 
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use super::*;
+/// `tasks.owner_kind` value for a task the daemon runs in-process. Only these
+/// are reset by the daemon's `reconcile_after_restart`; a `NULL` owner (an
+/// interactive CLI run, or any other creator) is left alone so a live
+/// `mermaid` session that shares the store isn't wrongly failed on daemon
+/// startup (F18/RC-E).
+pub const OWNER_KIND_DAEMON: &str = "daemon";
 
-// Bumped to 5 for the additive `tasks.prompt` column (the daemon scheduler
-// executes queued tasks later, so the full prompt must be persisted at enqueue
-// time — `title` is truncated at 80 chars). Additive, but the bump lets a DB
-// already at v4 re-run the migration once to pick it up. The bump is
-// load-bearing alongside the F17 early-return in `init_schema`: a DB at an
-// older version still runs the migration (the idempotent baseline plus any
-// per-version step dispatched by `migrate_within_txn`) exactly once, while an
-// already-current DB skips the write lock entirely.
-//
-// History: v2 added the additive `tasks.owner_kind` column (F18/RC-E); v3 added
-// the F75 covering indexes; v4 added the `outcomes` table.
-pub(crate) const SCHEMA_VERSION: i32 = 6;
+/// A stored enum label this build does not know -- the tolerant-decode error
+/// for [`TaskStatus::from_db`] and friends, so one unreadable row degrades to
+/// a reported error instead of sinking a whole listing.
+#[derive(Debug)]
+pub struct UnknownRuntimeEnum {
+    kind: &'static str,
+    value: String,
+}
 
-/// `tasks.owner_kind` value for a task the daemon runs in-process. Only these are
-/// reset by `reconcile_after_restart`; a `NULL` owner (an interactive CLI run, or
-/// any other creator) is left alone so a live `mermaid` session that shares the
-/// store isn't wrongly failed on daemon startup (F18/RC-E).
-pub(crate) const OWNER_KIND_DAEMON: &str = "daemon";
+impl UnknownRuntimeEnum {
+    #[must_use]
+    pub fn new(kind: &'static str, value: &str) -> Self {
+        Self {
+            kind,
+            value: value.to_string(),
+        }
+    }
+}
+
+impl fmt::Display for UnknownRuntimeEnum {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "unknown {} value `{}`", self.kind, self.value)
+    }
+}
+
+impl std::error::Error for UnknownRuntimeEnum {}
 
 /// Durable task state. A task is the daemon-level work unit; a chat
 /// transcript is just one artifact linked to it.
@@ -57,7 +75,7 @@ impl TaskStatus {
         }
     }
 
-    pub(crate) fn from_db(value: &str) -> std::result::Result<Self, UnknownRuntimeEnum> {
+    pub fn from_db(value: &str) -> std::result::Result<Self, UnknownRuntimeEnum> {
         match value {
             "queued" => Ok(Self::Queued),
             "running" => Ok(Self::Running),
@@ -95,7 +113,7 @@ impl TaskPriority {
         }
     }
 
-    pub(crate) fn from_db(value: &str) -> std::result::Result<Self, UnknownRuntimeEnum> {
+    pub fn from_db(value: &str) -> std::result::Result<Self, UnknownRuntimeEnum> {
         match value {
             "low" => Ok(Self::Low),
             "normal" => Ok(Self::Normal),
@@ -129,7 +147,7 @@ impl ProcessStatus {
         }
     }
 
-    pub(crate) fn from_db(value: &str) -> std::result::Result<Self, UnknownRuntimeEnum> {
+    pub fn from_db(value: &str) -> std::result::Result<Self, UnknownRuntimeEnum> {
         match value {
             "running" => Ok(Self::Running),
             "exited" => Ok(Self::Exited),
