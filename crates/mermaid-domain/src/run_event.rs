@@ -14,7 +14,9 @@
 use serde::{Deserialize, Serialize};
 
 use super::msg::Msg;
-use mermaid_model::models::FinishReason;
+use super::session_event::SessionEvent;
+use mermaid_model::action::{ActionDisplay, ActionResult};
+use mermaid_model::models::{ChatMessage, FinishReason, MessageRole};
 use mermaid_model::tool_run::{ToolMetadata, ToolStatus};
 
 /// Wire-format version of the `RunEvent` stream. Bump only on a breaking change
@@ -245,21 +247,7 @@ impl RunEvent {
                 status: status_str(outcome.status).to_string(),
                 summary: outcome.summary.clone(),
                 error: outcome.error.clone(),
-                plan: match &outcome.metadata.detail {
-                    ToolMetadata::Plan {
-                        path,
-                        start,
-                        fresh,
-                        fork,
-                        ..
-                    } => Some(PlanApproved {
-                        path: path.clone(),
-                        start: *start,
-                        fresh: *fresh,
-                        fork: *fork,
-                    }),
-                    _ => None,
-                },
+                plan: plan_approved(&outcome.metadata.detail),
                 web: web_event_details(&outcome.metadata.detail).map(Box::new),
             },
             Msg::ApprovalRequested {
@@ -293,6 +281,202 @@ impl RunEvent {
             },
             _ => return None,
         })
+    }
+
+    /// Project committed session-log events onto the public stream: the
+    /// CATCH-UP a `subscribe_task` attach replays before it joins the live
+    /// broadcast.
+    ///
+    /// The log is coarse where the live stream is fine — one committed
+    /// message against the dozens of deltas that produced it — so this is a
+    /// projection, not a recording. Everything a consumer accumulates
+    /// (answer text, reasoning, tool activity, the checklist) arrives in
+    /// order at message granularity, which is what a subscriber that missed
+    /// the deltas actually needs.
+    ///
+    /// The ASSIGNING events (`compaction`, `reset`) clear what came before,
+    /// exactly as [`fold_session`](crate::fold_session) does: the catch-up
+    /// describes the transcript as it now stands, not every message that
+    /// ever existed. That rule also keeps tool calls single — a replacement
+    /// message carries its actions inline, and the clear drops the `action`
+    /// events that already replayed them.
+    ///
+    /// `tasks` is a whole snapshot, so only the last one is emitted, after
+    /// the transcript: the checklist is session state, not transcript, and
+    /// must survive a clear.
+    ///
+    /// Identity is deliberately absent. The log's `started` event describes
+    /// the SESSION, which for a resumed one predates this run, and only the
+    /// caller knows which task the stream belongs to — so the daemon states
+    /// `session_started` itself.
+    #[must_use]
+    pub fn catch_up(events: &[SessionEvent]) -> Vec<Self> {
+        let mut out = Vec::new();
+        // Replayed pairs need call ids the live stream never issued. The
+        // prefix is what keeps them from colliding with a provider's, and
+        // it stays monotonic across a clear so no two lines in one
+        // catch-up can share an id.
+        let mut calls = 0usize;
+        let mut tasks = None;
+        for event in events {
+            match event {
+                SessionEvent::Message { message }
+                | SessionEvent::InsertedBeforeLast { message } => {
+                    push_message(&mut out, &mut calls, message);
+                },
+                SessionEvent::Action { action } => push_action(&mut out, &mut calls, action),
+                SessionEvent::Compaction { replacement, .. } => {
+                    out.clear();
+                    for message in replacement {
+                        push_message(&mut out, &mut calls, message);
+                    }
+                },
+                SessionEvent::Reset { messages, .. } => {
+                    out.clear();
+                    for message in messages {
+                        push_message(&mut out, &mut calls, message);
+                    }
+                },
+                SessionEvent::Tasks { store } => tasks = Some(store),
+                // Identity, scalars, prompt history, and screenshot bytes
+                // have no projection on this wire. Exhaustive on purpose: a
+                // new event type has to decide whether a catch-up shows it.
+                SessionEvent::Started { .. }
+                | SessionEvent::State(_)
+                | SessionEvent::Input { .. }
+                | SessionEvent::Image { .. } => {},
+            }
+        }
+        // An EMPTY checklist is not news to a subscriber that has never seen
+        // one — and every log carries one from the backfill, so sending it
+        // would put a `tasks_updated { total: 0 }` on the front of every
+        // catch-up.
+        if let Some(store) = tasks.filter(|store| !store.is_empty()) {
+            let (completed, total) = store.counts();
+            out.push(Self::TasksUpdated {
+                tasks: store.visible().map(TaskLine::from).collect(),
+                completed: u32::try_from(completed).unwrap_or(u32::MAX),
+                total: u32::try_from(total).unwrap_or(u32::MAX),
+            });
+        }
+        out
+    }
+}
+
+/// Prefix on the `call_id` of a tool pair replayed from the log. The
+/// committed transcript keeps no provider call ids, so a catch-up mints its
+/// own — and says so, rather than inventing something that could be mistaken
+/// for the live stream's.
+const CATCH_UP_CALL_PREFIX: &str = "catchup-";
+
+/// Cap on a replayed tool summary. A `target` can be a whole shell command,
+/// and this line is a one-liner by contract.
+const MAX_CATCH_UP_SUMMARY_CHARS: usize = 200;
+
+/// One committed message's contribution to a catch-up: the assistant's
+/// reasoning and answer text, then the tool calls attached to it.
+///
+/// Only an assistant turn yields text. The live stream has no variant for a
+/// user prompt, a system note, or a tool result — replaying them would
+/// invent content a from-the-start subscriber never saw.
+fn push_message(out: &mut Vec<RunEvent>, calls: &mut usize, message: &ChatMessage) {
+    if matches!(message.role, MessageRole::Assistant) {
+        if let Some(thinking) = message.thinking.as_ref().filter(|text| !text.is_empty()) {
+            out.push(RunEvent::Reasoning {
+                delta: thinking.clone(),
+            });
+        }
+        if !message.content.is_empty() {
+            out.push(RunEvent::Text {
+                delta: message.content.clone(),
+            });
+        }
+    }
+    for action in &message.actions {
+        push_action(out, calls, action);
+    }
+}
+
+/// A committed tool run, replayed as the started/finished pair the live
+/// stream emitted at the time. `name`, `plan`, and `web` come off the same
+/// run metadata [`RunEvent::from_msg`] reads, so a replayed line matches the
+/// live one wherever that metadata survived to disk.
+fn push_action(out: &mut Vec<RunEvent>, calls: &mut usize, action: &ActionDisplay) {
+    *calls += 1;
+    let call_id = format!("{CATCH_UP_CALL_PREFIX}{calls}");
+    out.push(RunEvent::ToolStarted {
+        call_id: call_id.clone(),
+    });
+    // `Running` is synthesized by the renderer and never committed. If one
+    // reaches disk anyway it describes a call still in flight, so the pair
+    // stays open — exactly as it would live, where the `tool_finished` is
+    // still to come on the broadcast.
+    let (status, error) = match &action.result {
+        ActionResult::Success { .. } => (ToolStatus::Success, None),
+        ActionResult::Error { error } => (ToolStatus::Error, Some(error.clone())),
+        ActionResult::Running => return,
+    };
+    let detail = action.metadata.as_ref().map(|meta| &meta.detail);
+    out.push(RunEvent::ToolFinished {
+        call_id,
+        name: detail.map_or_else(|| fallback_tool_name(&action.action_type), tool_name),
+        status: status_str(status).to_string(),
+        summary: action_summary(action),
+        error,
+        plan: detail.and_then(plan_approved),
+        web: detail.and_then(web_event_details).map(Box::new),
+    });
+}
+
+/// The wire name for an action with no run metadata — a simple action, or
+/// one saved before metadata existed. Its display kind is all there is, so
+/// normalize `"Web Search"` into the wire's `snake_case` shape rather than
+/// answer the useless generic `tool`.
+fn fallback_tool_name(action_type: &str) -> String {
+    let name = action_type.trim().to_lowercase().replace([' ', '-'], "_");
+    if name.is_empty() {
+        "tool".to_string()
+    } else {
+        name
+    }
+}
+
+/// The one-line summary on a replayed `tool_finished`. The transcript keeps
+/// the action's display header, not the live `ToolOutcome::summary`, so this
+/// is the closest honest equivalent.
+fn action_summary(action: &ActionDisplay) -> String {
+    let target = action.target.trim();
+    let summary = if target.is_empty() {
+        action.action_type.clone()
+    } else {
+        format!("{} {}", action.action_type, target)
+    };
+    if summary.chars().count() <= MAX_CATCH_UP_SUMMARY_CHARS {
+        return summary;
+    }
+    let mut capped: String = summary.chars().take(MAX_CATCH_UP_SUMMARY_CHARS).collect();
+    capped.push('…');
+    capped
+}
+
+/// The approved-plan payload a `tool_finished` carries, when the call was
+/// `exit_plan_mode` resolving with a plan. Shared by the live projection and
+/// the catch-up so the two cannot drift.
+fn plan_approved(detail: &ToolMetadata) -> Option<PlanApproved> {
+    match detail {
+        ToolMetadata::Plan {
+            path,
+            start,
+            fresh,
+            fork,
+            ..
+        } => Some(PlanApproved {
+            path: path.clone(),
+            start: *start,
+            fresh: *fresh,
+            fork: *fork,
+        }),
+        _ => None,
     }
 }
 
@@ -910,5 +1094,302 @@ mod tests {
         })
         .unwrap();
         assert!(!json.contains("\"plan\""));
+    }
+
+    fn action(action_type: &str, target: &str, result: ActionResult) -> ActionDisplay {
+        ActionDisplay {
+            action_type: action_type.to_string(),
+            target: target.to_string(),
+            result,
+            details: mermaid_model::action::ActionDetails::Simple,
+            duration_seconds: Some(0.1),
+            metadata: Some(ToolRunMetadata {
+                detail: ToolMetadata::ReadFile {
+                    paths: vec![target.to_string()],
+                    line_count: 3,
+                    byte_count: 30,
+                    truncated: false,
+                },
+                ..ToolRunMetadata::default()
+            }),
+        }
+    }
+
+    fn ok(output: &str) -> ActionResult {
+        ActionResult::Success {
+            output: output.to_string(),
+            images: None,
+        }
+    }
+
+    /// The whole point of the catch-up: what a from-now attach missed comes
+    /// back as coarse lines of the same wire — reasoning, answer text, and
+    /// the tool pairs — in the order the session committed them.
+    #[test]
+    fn catch_up_replays_the_committed_transcript_as_wire_lines() {
+        let mut assistant = ChatMessage::assistant("the answer");
+        assistant.thinking = Some("first, think".to_string());
+        let events = vec![
+            SessionEvent::Message {
+                message: ChatMessage::user("do the thing"),
+            },
+            SessionEvent::Message { message: assistant },
+            SessionEvent::Action {
+                action: Box::new(action("Read", "src/main.rs", ok("contents"))),
+            },
+        ];
+
+        let replay = RunEvent::catch_up(&events);
+
+        // The user turn has no projection — the live stream never carried
+        // one, so replaying it would invent content.
+        assert_eq!(
+            replay,
+            vec![
+                RunEvent::Reasoning {
+                    delta: "first, think".to_string()
+                },
+                RunEvent::Text {
+                    delta: "the answer".to_string()
+                },
+                RunEvent::ToolStarted {
+                    call_id: "catchup-1".to_string()
+                },
+                RunEvent::ToolFinished {
+                    call_id: "catchup-1".to_string(),
+                    // Off the same run metadata the live projection reads.
+                    name: "read_file".to_string(),
+                    status: "success".to_string(),
+                    summary: "Read src/main.rs".to_string(),
+                    error: None,
+                    plan: None,
+                    web: None,
+                },
+            ]
+        );
+    }
+
+    /// A failed call replays as an error line, not a silent success.
+    #[test]
+    fn catch_up_carries_a_failed_tool_run() {
+        let events = vec![SessionEvent::Action {
+            action: Box::new(action(
+                "Read",
+                "nope.rs",
+                ActionResult::Error {
+                    error: "no such file".to_string(),
+                },
+            )),
+        }];
+
+        assert_eq!(
+            finished(&RunEvent::catch_up(&events)[1]),
+            Some(("read_file", "error", Some("no such file")))
+        );
+    }
+
+    /// `(name, status, error)` of a `tool_finished` line, or `None` for
+    /// anything else — so an assertion can name what it expects instead of
+    /// destructuring.
+    fn finished(event: &RunEvent) -> Option<(&str, &str, Option<&str>)> {
+        if let RunEvent::ToolFinished {
+            name,
+            status,
+            error,
+            ..
+        } = event
+        {
+            Some((name, status, error.as_deref()))
+        } else {
+            None
+        }
+    }
+
+    /// The `delta` of every `text` line, in order.
+    fn texts(events: &[RunEvent]) -> Vec<&str> {
+        events
+            .iter()
+            .filter_map(|event| {
+                if let RunEvent::Text { delta } = event {
+                    Some(delta.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// An assigning event replaces the transcript, so the catch-up describes
+    /// what the session HOLDS, not everything it ever held — the same rule
+    /// `fold_session` applies. It is also what keeps a replacement message's
+    /// inline actions from replaying a second time.
+    #[test]
+    fn catch_up_clears_at_a_compaction_boundary() {
+        let mut summary = ChatMessage::assistant("summary of the above");
+        summary.actions = vec![action("Read", "src/main.rs", ok("contents"))];
+        let events = vec![
+            SessionEvent::Message {
+                message: ChatMessage::assistant("a long first turn"),
+            },
+            SessionEvent::Action {
+                action: Box::new(action("Read", "src/main.rs", ok("contents"))),
+            },
+            SessionEvent::Compaction {
+                at: chrono::Local::now(),
+                record: compaction_record(),
+                replacement: vec![summary],
+            },
+            SessionEvent::Message {
+                message: ChatMessage::assistant("and on we go"),
+            },
+        ];
+
+        let replay = RunEvent::catch_up(&events);
+
+        assert_eq!(texts(&replay), vec!["summary of the above", "and on we go"]);
+        // Exactly one tool pair survives: the replacement's inline action.
+        // The pre-compaction `action` event went with the messages it
+        // belonged to.
+        let started: Vec<&str> = replay
+            .iter()
+            .filter_map(|event| {
+                if let RunEvent::ToolStarted { call_id } = event {
+                    Some(call_id.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(
+            started,
+            vec!["catchup-2"],
+            "call ids stay unique per attach"
+        );
+    }
+
+    /// Every log carries a checklist event from its backfill, so an empty
+    /// one must not put a `tasks_updated { total: 0 }` on the front of every
+    /// catch-up. A subscriber that has never seen a list cannot tell an
+    /// empty one from none.
+    #[test]
+    fn catch_up_stays_quiet_about_an_empty_checklist() {
+        let events = vec![SessionEvent::Tasks {
+            store: crate::checklist::ChecklistStore::default(),
+        }];
+        assert!(RunEvent::catch_up(&events).is_empty());
+    }
+
+    /// The checklist is session state, not transcript: it survives a clear,
+    /// and only the newest snapshot is worth sending.
+    #[test]
+    fn catch_up_ends_with_the_latest_checklist_only() {
+        let first = checklist(&["write the test"]);
+        let second = checklist(&["write the test", "ship it"]);
+        let events = vec![
+            SessionEvent::Tasks { store: first },
+            SessionEvent::Reset {
+                at: chrono::Local::now(),
+                messages: vec![ChatMessage::assistant("fresh start")],
+            },
+            SessionEvent::Tasks { store: second },
+        ];
+
+        let replay = RunEvent::catch_up(&events);
+
+        assert_eq!(replay.len(), 2, "one text line, one checklist: {replay:?}");
+        assert_eq!(texts(&replay), vec!["fresh start"]);
+        let counted = replay.iter().find_map(|event| {
+            if let RunEvent::TasksUpdated {
+                completed, total, ..
+            } = event
+            {
+                Some((*completed, *total))
+            } else {
+                None
+            }
+        });
+        assert_eq!(
+            counted,
+            Some((0, 2)),
+            "the checklist lands last: {replay:?}"
+        );
+    }
+
+    /// Identity, scalars, prompt history, and screenshots are not stream
+    /// content — a log of nothing else replays as nothing.
+    #[test]
+    fn catch_up_projects_nothing_for_the_non_transcript_events() {
+        let events = vec![
+            SessionEvent::Started {
+                session_id: "20260709_120000_000".to_string(),
+                project_path: "/tmp/proj".to_string(),
+                model_id: "ollama/test".to_string(),
+                created_at: chrono::Local::now(),
+                forked_from: None,
+                parent_session: None,
+            },
+            SessionEvent::Input {
+                text: "do the thing".to_string(),
+            },
+            SessionEvent::Image {
+                data: "AAAA".to_string(),
+            },
+        ];
+        assert!(RunEvent::catch_up(&events).is_empty());
+    }
+
+    fn checklist(subjects: &[&str]) -> crate::checklist::ChecklistStore {
+        let mut store = crate::checklist::ChecklistStore::default();
+        store.create(
+            subjects
+                .iter()
+                .map(|subject| crate::checklist::ChecklistSpec {
+                    subject: (*subject).to_string(),
+                    active_form: format!("{subject}…"),
+                    description: None,
+                    in_progress: false,
+                })
+                .collect(),
+            crate::checklist::ChecklistOrigin::Model,
+            crate::checklist::Stamp {
+                now_epoch: 1_700_000_000,
+                run_tokens: 0,
+            },
+        );
+        store
+    }
+
+    fn compaction_record() -> crate::compaction::CompactionEvent {
+        crate::compaction::CompactionEvent {
+            id: "c1".to_string(),
+            trigger: crate::compaction::CompactionTrigger::Manual,
+            created_at: chrono::Local::now(),
+            before_tokens: 1000,
+            after_tokens: 100,
+            archived_message_count: 2,
+            preserved_message_count: 1,
+            preserved_turn_count: 1,
+            summary_tokens: 90,
+            duration_secs: 1.5,
+            review_status: crate::compaction::CompactionReviewStatus::Reviewed,
+            review_error: None,
+            focus: None,
+            archive_path: None,
+        }
+    }
+
+    /// A pre-metadata action still names itself on the wire.
+    #[test]
+    fn catch_up_falls_back_to_the_display_kind_when_metadata_is_gone() {
+        let mut legacy = action("Web Search", "rust lifetimes", ok("3 results"));
+        legacy.metadata = None;
+        let replay = RunEvent::catch_up(&[SessionEvent::Action {
+            action: Box::new(legacy),
+        }]);
+        assert_eq!(
+            finished(&replay[1]),
+            Some(("web_search", "success", None)),
+            "the display kind normalizes onto the wire: {replay:?}"
+        );
     }
 }

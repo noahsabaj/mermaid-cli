@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`subscribe_task` replays what an attach missed instead of joining
+  from-now.** `mermaid task <id> --follow` used to start at whatever
+  happened next: attach at minute nine and you saw nine minutes of
+  silence, and never the `session_started` line that names the session --
+  the same empty-handed attach the terminal path was fixed for, still
+  shipping for every live one. The session event log is the durable record
+  of everything before the attach, so the daemon now reads it and replays
+  a catch-up first: identity, then the transcript committed so far as
+  coarse `text` / `reasoning` / tool lines (one per committed message
+  rather than the deltas that produced it), then the newest checklist.
+  The ack gained a `replayed` count so a consumer that only wants what
+  happens from now skips exactly that many lines; the `RunEvent` wire
+  itself is unchanged and still v1.
+
+  Reaching the log mid-run needed the key to exist mid-run:
+  `tasks.conversation_id` was stamped at terminal status, and is now
+  stamped when the run *announces* its session, with the end-of-run write
+  kept as the authority. `mermaid task <id>` shows the conversation while
+  the task is still running as a result. The receiver is attached before
+  the log is read, so a message committed during the read is replayed and
+  also delivered live -- an overlap bounded to that one message, and the
+  right way round, since repetition is recoverable by a consumer and a
+  hole is not.
+
 - **Modal precedence is one resolver, and every picker shares one
   navigation core.** Which surface owned a keystroke used to be a 25-deep
   chain of early-return guards in `handle_key`; which pane owned the bottom

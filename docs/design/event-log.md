@@ -211,16 +211,42 @@ And the dead key comes alive: after `run_non_interactive_with` returns, the daem
 stamps `RunResult.session_id` onto the task row (`tasks.conversation_id`) alongside
 the terminal status. `mermaid task <id>` then joins to a real session.
 
-### The daemon: late attach stops lying
+### The daemon: attach stops lying, late or mid-run
 
 `subscribe_task` on an already-terminal task currently synthesizes an empty-handed
 `Result`. With the backlink and the log in place it reads the task row →
 `conversation_id` → session content, and emits a real terminal event: the actual
 final response (the continuation-join logic in `build_result` extracts to a
 helper over `&[ChatMessage]`), the real `session_id`, and the persisted token
-total. Mid-run attach keeps the live broadcast semantics unchanged (from-now +
-lag markers); replaying coarse `message` events from the log as catch-up for
-mid-run attaches is a follow-up, not in this sequence.
+total.
+
+**The mid-run attach (shipped after the sequence, #378).** The follow-up this
+section deferred: every attach now replays what it missed before it joins the
+broadcast. `RunEvent::catch_up` projects the log's committed events onto the
+same frozen wire — one `text` line per committed assistant message instead of
+the deltas that produced it, tool pairs off the same run metadata the live
+projection reads, the newest checklist last. Three things the deferral had not
+worked out, now settled:
+
+- **The backlink has to exist mid-run.** `tasks.conversation_id` was stamped at
+  terminal status, so during the run there was no key from the task to its log.
+  It is now stamped when the run *announces* its session — a small watcher on
+  the task's own broadcast, waiting for `session_started`. The end-of-run write
+  stays as the authority; this is the same value, earlier. `mermaid task <id>`
+  shows the session mid-run as a side effect.
+- **Assigning events clear the replay.** `compaction` / `reset` drop everything
+  projected before them, exactly as `fold_session` does, so the catch-up
+  describes the transcript as it stands. That rule is also what keeps a
+  replacement message's inline actions from replaying tool calls a second time.
+- **Subscribe first, read second.** The receiver attaches before the log is
+  read, so a message committed during the read is replayed *and* delivered
+  live. The overlap is bounded to that one in-flight message, and it is the
+  right way round: repetition is recoverable by a consumer, a hole is not. The
+  ack's `replayed` count says how many of the following lines are replay.
+
+Identity is stated from the task row rather than the log's `started` event: the
+log describes the SESSION (which for a resumed one predates this run), and only
+the row knows the task the stream belongs to.
 
 ### Compaction: the archive is a boundary, not a copy
 
