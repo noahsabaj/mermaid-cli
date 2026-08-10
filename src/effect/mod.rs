@@ -106,9 +106,41 @@ fn compaction_row(
     }
 }
 
+/// Feed the cross-project session index off a successful snapshot save.
+/// Best-effort by design: the row is an index over the files, never the
+/// truth, so a store hiccup must not fail the save that just succeeded.
+fn upsert_session_index(
+    manager: &crate::session::ConversationManager,
+    snapshot: &mermaid_domain::ConversationHistory,
+) {
+    let conversation_path = manager
+        .conversations_dir()
+        .join(format!("{}.json", snapshot.id));
+    let _ = mermaid_runtime::with_shared_store(|store| {
+        store.sessions().upsert(mermaid_runtime::NewSession {
+            id: Some(snapshot.id.clone()),
+            // The snapshot's own field, not the runner's workdir: they are
+            // the same string by construction (`State::new` derives it from
+            // `cwd`), and one source beats two that must agree.
+            project_path: snapshot.project_path.clone(),
+            model_id: snapshot.model_name.clone(),
+            title: Some(snapshot.title.clone()),
+            conversation_path: Some(conversation_path.display().to_string()),
+            // Saturating rather than `as`: the column is signed, and a
+            // count that somehow exceeded i64 must not land negative.
+            total_tokens: Some(
+                i64::try_from(snapshot.cumulative_token_usage.total_tokens()).unwrap_or(i64::MAX),
+            ),
+        })
+    });
+}
+
 #[derive(Clone)]
 enum PersistenceJob {
-    Conversation(Box<mermaid_domain::ConversationHistory>),
+    Conversation {
+        snapshot: Box<mermaid_domain::ConversationHistory>,
+        events: Vec<mermaid_domain::SessionEvent>,
+    },
     Compaction(Box<PendingCompactionSave>),
 }
 
@@ -117,6 +149,10 @@ struct PendingCompactionSave {
     archive: mermaid_domain::CompactionArchive,
     record: mermaid_domain::CompactionEvent,
     conversation: mermaid_domain::ConversationHistory,
+    events: Vec<mermaid_domain::SessionEvent>,
+    /// The event append is attempted exactly once per queued save (a retry
+    /// after a failed ARCHIVE write must not re-append and duplicate lines).
+    events_appended: bool,
     task_id: Option<String>,
 }
 
@@ -155,16 +191,24 @@ impl PersistenceState {
     /// be re-emitted (its save is already popped).
     fn process(&mut self, job: PersistenceJob) -> (Vec<PersistedCompaction>, anyhow::Result<()>) {
         match job {
-            PersistenceJob::Conversation(history) => {
+            PersistenceJob::Conversation { snapshot, events } => {
                 // Barrier: a still-blocked compaction must persist before any
                 // newer (stripped) conversation snapshot may overwrite the file.
-                let (persisted, retried) = self.retry_blocked(&history.id);
+                let (persisted, retried) = self.retry_blocked(&snapshot.id);
                 if retried.is_err() {
                     return (persisted, retried);
                 }
-                let saved = self
-                    .manager()
-                    .and_then(|manager| manager.save_conversation(&history).map(|_| ()));
+                let saved = self.manager().and_then(|manager| {
+                    // History first, then the snapshot it explains. The append
+                    // is best-effort: a log hiccup must not block the
+                    // authoritative save, and the log self-heals forward.
+                    if let Err(error) = manager.append_session_events(&snapshot, &events) {
+                        tracing::warn!(id = %snapshot.id, %error, "session event append failed; saving the snapshot anyway");
+                    }
+                    manager.save_conversation(&snapshot)?;
+                    upsert_session_index(manager, &snapshot);
+                    Ok(())
+                });
                 (persisted, saved)
             },
             PersistenceJob::Compaction(save) => {
@@ -201,7 +245,7 @@ impl PersistenceState {
             .blocked
             .get_mut(conversation_id)
             .expect("checked above");
-        while let Some(save) = queue.front() {
+        while let Some(save) = queue.front_mut() {
             match Self::persist_compaction(manager, save) {
                 // Pop only after a successful write: `persist_compaction` runs
                 // inside `spawn_blocking`, and a panic there must not lose the
@@ -238,10 +282,26 @@ impl PersistenceState {
 
     fn persist_compaction(
         manager: &crate::session::ConversationManager,
-        save: &PendingCompactionSave,
+        save: &mut PendingCompactionSave,
     ) -> anyhow::Result<PersistedCompaction> {
+        // The compaction event lands in the log BEFORE the stripped snapshot
+        // can overwrite the file it explains — the same crash property the
+        // archive-first ordering below provides. Attempted exactly once per
+        // queued save: a retry after a failed archive write must not
+        // re-append and duplicate lines.
+        if !save.events_appended {
+            save.events_appended = true;
+            if let Err(error) = manager.append_session_events(&save.conversation, &save.events) {
+                tracing::warn!(
+                    id = %save.conversation.id,
+                    %error,
+                    "compaction event append failed; archive + snapshot still persist"
+                );
+            }
+        }
         let path = manager.save_compaction_archive(&save.archive)?;
         manager.save_conversation(&save.conversation)?;
+        upsert_session_index(manager, &save.conversation);
 
         let _ = mermaid_runtime::with_shared_store(|store| {
             store.compactions().create(compaction_row(
@@ -1164,26 +1224,25 @@ impl EffectRunner {
                 // return a normal outcome, so the turn finishes naturally.
                 self.scope_mut(turn).background();
             },
-            // `events` lands in the per-session log when the appender ships
-            // (design doc PR C); until then the snapshot save is the whole
-            // effect, exactly as before the payload split.
-            Cmd::SaveConversation {
-                snapshot: history,
-                events: _,
-            } => {
-                self.queue_persistence(PersistenceJob::Conversation(Box::new(history)));
+            Cmd::SaveConversation { snapshot, events } => {
+                self.queue_persistence(PersistenceJob::Conversation {
+                    snapshot: Box::new(snapshot),
+                    events,
+                });
             },
             Cmd::SaveCompactionArchive {
                 archive,
                 record,
                 conversation,
-                events: _,
+                events,
             } => {
                 self.queue_persistence(PersistenceJob::Compaction(Box::new(
                     PendingCompactionSave {
                         archive,
                         record,
                         conversation,
+                        events,
+                        events_appended: false,
                         task_id: self.task_id.clone(),
                     },
                 )));
@@ -2391,6 +2450,8 @@ mod tests {
                 archive,
                 record,
                 conversation: compacted,
+                events: Vec::new(),
+                events_appended: false,
                 task_id: None,
             },
         )
@@ -2420,7 +2481,10 @@ mod tests {
             )],
             chrono::Local::now(),
         );
-        let (_, outcome) = state.process(PersistenceJob::Conversation(Box::new(newer)));
+        let (_, outcome) = state.process(PersistenceJob::Conversation {
+            snapshot: Box::new(newer),
+            events: Vec::new(),
+        });
         outcome.unwrap();
 
         let loaded = crate::session::ConversationManager::new(&root)
@@ -2457,9 +2521,10 @@ mod tests {
         );
         assert!(
             state
-                .process(PersistenceJob::Conversation(Box::new(
-                    compaction.conversation,
-                )))
+                .process(PersistenceJob::Conversation {
+                    snapshot: Box::new(compaction.conversation),
+                    events: Vec::new(),
+                })
                 .1
                 .is_err()
         );

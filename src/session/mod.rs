@@ -1,5 +1,6 @@
 /// Session management module - Gateway
 mod conversation;
+mod event_log;
 pub mod scratchpad;
 mod selector;
 

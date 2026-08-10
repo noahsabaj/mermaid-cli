@@ -188,6 +188,9 @@ pub struct ConversationManager {
     /// cloned manager sees the same baselines; separate processes have separate
     /// maps, which is exactly the cross-process clobber we want to catch.
     seen: Arc<Mutex<HashMap<String, FileStamp>>>,
+    /// The per-session `.jsonl` appender/reader (see `event_log`). Shared
+    /// across clones like `seen`, so one process keeps one seq cursor.
+    events: Arc<crate::session::event_log::EventLog>,
 }
 
 impl ConversationManager {
@@ -210,10 +213,52 @@ impl ConversationManager {
 
         Ok(Self {
             project_dir: project_dir.as_ref().to_path_buf(),
+            events: Arc::new(crate::session::event_log::EventLog::new(
+                conversations_dir.clone(),
+            )),
             conversations_dir,
             compactions_dir,
             seen: Arc::new(Mutex::new(HashMap::new())),
         })
+    }
+
+    /// Append session events for `snapshot` to its `.jsonl` log, creating
+    /// the log (with a backfill from the snapshot) on first touch. Called by
+    /// the persistence chain BEFORE the snapshot rewrite, so the history
+    /// lands before the file it explains is overwritten.
+    ///
+    /// # Errors
+    ///
+    /// An `id` that would escape the conversations dir, and the append I/O
+    /// itself. The caller treats a failure as a warning: the snapshot save
+    /// must still run, and the log self-heals on the next save.
+    pub fn append_session_events(
+        &self,
+        snapshot: &ConversationHistory,
+        events: &[mermaid_domain::SessionEvent],
+    ) -> Result<()> {
+        validate_conversation_id(&snapshot.id)?;
+        self.events.append(snapshot, events)
+    }
+
+    /// Rebuild a conversation from its event log — the recovery source when
+    /// the snapshot is missing or will not parse. `Ok(None)` when there is
+    /// no (foldable) log.
+    ///
+    /// # Errors
+    ///
+    /// An `id` that would escape the conversations dir, and read I/O on the
+    /// log file. A log that is absent, capped, newer-format, or headerless
+    /// is `Ok(None)`, not an error.
+    pub fn fold_conversation_from_log(&self, id: &str) -> Result<Option<ConversationHistory>> {
+        validate_conversation_id(id)?;
+        let Some(folded) = self.events.fold(id)? else {
+            return Ok(None);
+        };
+        // The folded id drives later saves exactly like a parsed one; hold
+        // it to the same rule.
+        validate_conversation_id(&folded.id)?;
+        Ok(Some(folded))
     }
 
     /// Record the on-disk `(mtime, len)` of `path` as the baseline for `id`, so a
@@ -390,8 +435,28 @@ impl ConversationManager {
         let filename = format!("{id}.json");
         let path = self.conversations_dir.join(filename);
 
-        let json = read_conversation_capped(&path)?;
-        let conversation: ConversationHistory = serde_json::from_str(&json)?;
+        let parsed = read_conversation_capped(&path)
+            .map_err(anyhow::Error::from)
+            .and_then(|json| {
+                serde_json::from_str::<ConversationHistory>(&json).map_err(Into::into)
+            });
+        let conversation = match parsed {
+            Ok(conversation) => conversation,
+            // The snapshot is missing or will not parse — fold the event log
+            // instead of failing the load. Only when the fold also has
+            // nothing does the original error surface.
+            Err(error) => match self.fold_conversation_from_log(id)? {
+                Some(folded) => {
+                    tracing::warn!(
+                        id,
+                        %error,
+                        "conversation snapshot unreadable; recovered from the session event log"
+                    );
+                    return Ok(folded);
+                },
+                None => return Err(error),
+            },
+        };
         // The file name was validated, but the deserialized `id` (which drives
         // later saves) is independent on-disk state — validate it too.
         validate_conversation_id(&conversation.id)?;
@@ -552,8 +617,9 @@ impl ConversationManager {
         if path.exists() {
             fs::remove_file(path)?;
         }
-        // Best-effort sidecar cleanup — its absence is harmless.
+        // Best-effort sidecar + event-log cleanup — their absence is harmless.
         let _ = fs::remove_file(self.conversations_dir.join(format!("{id}.meta")));
+        let _ = fs::remove_file(self.conversations_dir.join(format!("{id}.jsonl")));
         // Cascade to the session's scratch directory (skipped if another
         // live mermaid still holds its pid lock). Best-effort: the sweep
         // eventually reaps whatever this misses.
@@ -764,6 +830,7 @@ mod tests {
         ];
         let store = ConversationManager {
             project_dir: dir.clone(),
+            events: Arc::new(crate::session::event_log::EventLog::new(dir.clone())),
             conversations_dir: dir.clone(),
             compactions_dir: dir.clone(),
             seen: Arc::new(Mutex::new(HashMap::new())),
@@ -796,6 +863,7 @@ mod tests {
         ];
         let store = ConversationManager {
             project_dir: dir.clone(),
+            events: Arc::new(crate::session::event_log::EventLog::new(dir.clone())),
             conversations_dir: dir.clone(),
             compactions_dir: dir.clone(),
             seen: Arc::new(Mutex::new(HashMap::new())),
