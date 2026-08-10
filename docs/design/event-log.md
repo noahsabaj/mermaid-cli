@@ -271,6 +271,27 @@ CI, verdict read from the output file, then merge).
   dead reads. The v7 arm in `migrate_within_txn` is the first genuinely
   non-additive step, exercising the F76 structure as designed.
 
+## What the sequence learned (all six shipped: #367-372)
+
+Three things this plan did not anticipate, recorded because they are now
+load-bearing:
+
+- **Creating a log needs the batch's *assigning* events.** PR C's rule — a
+  backfill subsumes the batch, so drop it — is right only for ADDITIVE events
+  (`message`, `action`, …), whose effects the snapshot already contains.
+  Assigning events (`compaction`, `reset`, `state`, `tasks`) restate what the
+  backfill says and carry a fact the transcript cannot; dropping those lost the
+  boundary whenever a compaction happened to create the log. The split is an
+  exhaustive match, so a new variant has to choose a side.
+- **The compaction append is not best-effort.** Once PR D removed the archive
+  file, the append became the only record that the dropped messages existed, so
+  it runs with `?` ahead of the snapshot rewrite — inheriting exactly the
+  ordering guarantee the archive-first rule used to provide.
+- **F24/RC-F had to move with the read it guarded.** The daemon's transcript cap
+  lived in the SQL query PR F deleted; it now bounds `transcript_rows`
+  tail-first. Dropping the table without carrying the cap forward would have
+  quietly removed an OOM guard.
+
 ## Rejected alternatives
 
 - **`Msg`-granularity always-on log** (make the recorder the store): captures

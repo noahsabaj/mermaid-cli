@@ -91,16 +91,6 @@ pub(crate) fn session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Sess
     })
 }
 
-pub(crate) fn message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MessageRecord> {
-    Ok(MessageRecord {
-        id: row.get("id")?,
-        session_id: row.get("session_id")?,
-        role: row.get("role")?,
-        content_json: row.get("content_json")?,
-        created_at: row.get("created_at")?,
-    })
-}
-
 pub(crate) fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRecord> {
     let status_raw: String = row.get("status")?;
     let priority_raw: String = row.get("priority")?;
@@ -386,13 +376,6 @@ pub(crate) const MAX_QUERY_LIMIT: usize = 10_000;
 pub(crate) fn clamp_limit(limit: usize) -> i64 {
     limit.min(MAX_QUERY_LIMIT) as i64
 }
-
-/// Upper bound on the rows [`MessagesRepo::list_for_session`] returns (F24/RC-F).
-/// A session transcript is unbounded and the daemon `session_messages` path loads
-/// it whole into RAM; this caps the worst-case load at the most recent N messages
-/// so one pathological session can't OOM the daemon. 5000 turns is far beyond any
-/// real interactive session yet bounds memory.
-pub(crate) const MAX_SESSION_MESSAGES: i64 = 5_000;
 
 pub(crate) fn fresh_id(prefix: &str) -> String {
     // In-process monotonic counter: two ids minted in the same nanosecond (a

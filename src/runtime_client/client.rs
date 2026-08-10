@@ -806,6 +806,11 @@ impl RuntimeClient {
     }
 }
 
+/// Upper bound on the transcript rows [`transcript_rows`] returns
+/// (F24/RC-F, carried over from the storage query it replaced). 5000 turns
+/// is far beyond any real interactive session yet bounds the worst case.
+const MAX_SESSION_MESSAGES: usize = 5_000;
+
 /// A session's transcript, shaped as the `MessageRecord` rows this wire has
 /// always carried.
 ///
@@ -818,6 +823,12 @@ impl RuntimeClient {
 /// Best-effort: a session row whose project or file has since gone away
 /// yields no rows rather than an error, matching the previous behavior of
 /// the (always-empty) query it replaces.
+///
+/// Capped at [`MAX_SESSION_MESSAGES`], carrying forward F24/RC-F from the
+/// query this replaces: the daemon loads a whole transcript into RAM to
+/// answer, so one pathological session must not be able to OOM it. The
+/// most recent messages are the ones a viewer wants, so the cap takes the
+/// tail while keeping chronological order.
 fn transcript_rows(session: &SessionRecord) -> Vec<MessageRecord> {
     let Ok(manager) = crate::session::ConversationManager::new(&session.project_path) else {
         return Vec::new();
@@ -825,8 +836,9 @@ fn transcript_rows(session: &SessionRecord) -> Vec<MessageRecord> {
     let Ok(conversation) = manager.load_conversation(&session.id) else {
         return Vec::new();
     };
-    conversation
-        .messages()
+    let messages = conversation.messages();
+    let start = messages.len().saturating_sub(MAX_SESSION_MESSAGES);
+    messages[start..]
         .iter()
         .enumerate()
         .map(|(index, message)| MessageRecord {
@@ -1794,21 +1806,63 @@ mod tests {
         assert_eq!(messages[0].role, "user");
         assert!(messages[0].content_json.contains("what shipped?"));
         assert_eq!(messages[1].role, "assistant");
-        assert!(
-            service
-                .store
-                .messages()
-                .list_for_session(&conversation.id)
-                .expect("table query")
-                .is_empty(),
-            "the messages table must still be empty -- nothing writes it"
-        );
 
         // An unknown session is empty, not an error.
         let (missing, none) = service
             .session_messages("20990101_000000_999")
             .expect("unknown id is Ok");
         assert!(missing.is_none() && none.is_empty());
+        let _ = std::fs::remove_dir_all(path.parent().expect("temp dir"));
+    }
+
+    #[test]
+    fn a_huge_transcript_is_capped_at_the_tail() {
+        // F24/RC-F followed the read here: the daemon loads a whole
+        // transcript into RAM to answer, so one pathological session must
+        // not be able to OOM it.
+        let path = temp_db("session_cap");
+        let project = path.parent().expect("temp dir").join("project");
+        std::fs::create_dir_all(&project).expect("project dir");
+        let manager = crate::session::ConversationManager::new(&project).expect("manager");
+        let mut conversation = mermaid_domain::ConversationHistory::new(
+            project.display().to_string(),
+            "ollama/test".to_string(),
+            chrono::Local::now(),
+        );
+        let over = MAX_SESSION_MESSAGES + 10;
+        let seeded: Vec<_> = (0..over)
+            .map(|i| mermaid_model::models::ChatMessage::user(format!("m{i}")))
+            .collect();
+        conversation.add_messages(&seeded, chrono::Local::now());
+        manager.save_conversation(&conversation).expect("save");
+
+        let service = RuntimeService::from_store(RuntimeStore::open(&path).expect("open store"));
+        service
+            .store
+            .sessions()
+            .upsert(mermaid_runtime::NewSession {
+                id: Some(conversation.id.clone()),
+                project_path: project.display().to_string(),
+                model_id: "ollama/test".to_string(),
+                title: None,
+                conversation_path: None,
+                total_tokens: None,
+            })
+            .expect("index row");
+
+        let (_, messages) = service
+            .session_messages(&conversation.id)
+            .expect("session_messages");
+        assert_eq!(messages.len(), MAX_SESSION_MESSAGES, "capped at the max");
+        assert!(
+            messages[0].content_json.contains("\"m10\""),
+            "the cap keeps the TAIL, so the first 10 are the ones dropped: {}",
+            messages[0].content_json
+        );
+        assert!(
+            messages.windows(2).all(|w| w[0].id < w[1].id),
+            "chronological order preserved across the capped tail"
+        );
         let _ = std::fs::remove_dir_all(path.parent().expect("temp dir"));
     }
 
