@@ -264,6 +264,8 @@ pub(crate) struct DoctorReport {
     pub(crate) project_instructions: DoctorCheck,
     pub(crate) tools: Vec<String>,
     pub(crate) runtime: DoctorRuntime,
+    /// Whether each session's checkpoint still matches a fold of its log.
+    pub(crate) session_logs: DoctorCheck,
     pub(crate) next_steps: Vec<String>,
 }
 
@@ -509,6 +511,8 @@ pub(crate) async fn build_doctor_report(
         );
     }
 
+    let session_logs = session_log_drift(cwd);
+
     let ok = active_model.is_some()
         && local_store.status != "warning"
         && (ollama.status == "ok" || !remote_providers.is_empty());
@@ -531,7 +535,87 @@ pub(crate) async fn build_doctor_report(
             daemon,
             local_store,
         },
+        session_logs,
         next_steps,
+    }
+}
+
+/// Fold every session's log from zero and compare it against what a resume
+/// would actually load.
+///
+/// The `fold == snapshot` invariant is asserted in CI against sessions the
+/// tests construct. This asks it of sessions a user really produced, which
+/// is where the answer might differ — and it matters more now that the log
+/// is the truth: a transcript mutation that forgets to emit its event used
+/// to make a test red, and now quietly loses a message instead.
+///
+/// Drift is reported as a warning rather than an error. A mismatch means
+/// the checkpoint disagrees with the log, not that anything is lost: the
+/// fold is what resume falls back to, so the honest signal is "these two
+/// should agree and do not".
+fn session_log_drift(cwd: &Path) -> DoctorCheck {
+    let Ok(manager) = ConversationManager::new(cwd) else {
+        return DoctorCheck {
+            status: "ok",
+            message: "no .mermaid directory in this project".to_string(),
+        };
+    };
+    let Ok(metas) = manager.list_conversation_metas() else {
+        return DoctorCheck {
+            status: "warning",
+            message: "could not list this project's sessions".to_string(),
+        };
+    };
+
+    let mut checked = 0usize;
+    let mut drifted = Vec::new();
+    for meta in &metas {
+        let Ok(Some(folded)) = manager.fold_conversation_from_log(&meta.id) else {
+            // No log: a session that predates it, and its snapshot is still
+            // its truth. Nothing to compare.
+            continue;
+        };
+        let Ok(loaded) = manager.load_conversation(&meta.id) else {
+            drifted.push(format!("{} (would not load)", meta.id));
+            continue;
+        };
+        checked += 1;
+        // Compare the transcripts rather than the whole value: `updated_at`
+        // and the meters are assigned by whichever path ran last, and a
+        // difference there is not drift in what the session SAYS.
+        let same = folded.messages().len() == loaded.messages().len()
+            && folded
+                .messages()
+                .iter()
+                .zip(loaded.messages())
+                .all(|(a, b)| a.role == b.role && a.content == b.content);
+        if !same {
+            drifted.push(format!(
+                "{} (log folds to {} messages, resume loads {})",
+                meta.id,
+                folded.messages().len(),
+                loaded.messages().len()
+            ));
+        }
+    }
+
+    if drifted.is_empty() {
+        return DoctorCheck {
+            status: "ok",
+            message: match checked {
+                0 => "no session event logs in this project yet".to_string(),
+                1 => "1 session: its log and checkpoint agree".to_string(),
+                n => format!("{n} sessions: every log and checkpoint agree"),
+            },
+        };
+    }
+    DoctorCheck {
+        status: "warning",
+        message: format!(
+            "{} of {checked} sessions disagree with their log: {}",
+            drifted.len(),
+            drifted.join(", ")
+        ),
     }
 }
 
@@ -623,6 +707,11 @@ fn print_doctor_text(report: &DoctorReport) {
         "  [{}] Runtime store: {}",
         label(report.runtime.local_store.status),
         report.runtime.local_store.message
+    );
+    println!(
+        "  [{}] Session logs: {}",
+        label(report.session_logs.status),
+        report.session_logs.message
     );
     println!("  [OK] Tool surface:");
     for tool in &report.tools {
@@ -2820,6 +2909,67 @@ fn build_pr_argv(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_log_drift_reports_agreement_and_catches_a_diverged_checkpoint() {
+        let root = unique_temp_dir("mermaid-doctor-drift");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("project dir");
+
+        // No sessions yet: nothing to disagree about.
+        let empty = session_log_drift(&root);
+        assert_eq!(empty.status, "ok", "{}", empty.message);
+
+        // A real session, saved the way the persistence chain does.
+        let manager = ConversationManager::new(&root).expect("manager");
+        let mut state = mermaid_domain::State::new(
+            Config::default(),
+            root.clone(),
+            "ollama/test".to_string(),
+            chrono::Local::now(),
+            std::env::temp_dir(),
+        );
+        state
+            .session
+            .append(mermaid_model::models::ChatMessage::user("hello"), state.now);
+        let snapshot = state.session.snapshot_conversation();
+        let events = state.session.drain_events(&snapshot);
+        manager
+            .append_session_events(&snapshot, &events)
+            .expect("append");
+        manager.save_conversation(&snapshot).expect("checkpoint");
+
+        let agreed = session_log_drift(&root);
+        assert_eq!(agreed.status, "ok", "{}", agreed.message);
+        assert!(agreed.message.contains('1'), "{}", agreed.message);
+
+        // Now make the checkpoint claim a message the log never had -- the
+        // shape a missed event emission would leave behind.
+        let path = manager
+            .conversations_dir()
+            .join(format!("{}.json", snapshot.id));
+        let mut value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let planted = serde_json::to_value(mermaid_model::models::ChatMessage::user(
+            "never reached the log",
+        ))
+        .unwrap();
+        value
+            .get_mut("messages")
+            .and_then(serde_json::Value::as_array_mut)
+            .expect("messages array")
+            .push(planted);
+        std::fs::write(&path, serde_json::to_string(&value).unwrap()).unwrap();
+
+        let drifted = session_log_drift(&root);
+        assert_eq!(drifted.status, "warning", "{}", drifted.message);
+        assert!(
+            drifted.message.contains(&snapshot.id),
+            "the warning must name the session: {}",
+            drifted.message
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn doctor_uses_resolved_keyless_web_capabilities() {

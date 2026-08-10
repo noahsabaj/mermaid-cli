@@ -368,6 +368,10 @@ mod tests {
                     message: "ready".to_string(),
                 },
             },
+            session_logs: DoctorCheck {
+                status: "ok",
+                message: "no session event logs in this project yet".to_string(),
+            },
             next_steps: Vec::new(),
         }
     }
