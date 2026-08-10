@@ -229,6 +229,11 @@ pub struct NewSession {
     pub total_tokens: Option<i64>,
 }
 
+/// One transcript row on the daemon wire.
+///
+/// There is no longer a table behind it: the `messages` table never had a
+/// production writer and was dropped at schema v7, so these are shaped
+/// from the conversation files.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MessageRecord {
     pub id: i64,
@@ -236,13 +241,6 @@ pub struct MessageRecord {
     pub role: String,
     pub content_json: String,
     pub created_at: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NewMessage {
-    pub session_id: String,
-    pub role: String,
-    pub content_json: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

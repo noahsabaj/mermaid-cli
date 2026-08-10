@@ -72,7 +72,7 @@ pub use rows::*;
 //
 // History: v2 added the additive `tasks.owner_kind` column (F18/RC-E); v3 added
 // the F75 covering indexes; v4 added the `outcomes` table.
-pub(crate) const SCHEMA_VERSION: i32 = 6;
+pub(crate) const SCHEMA_VERSION: i32 = 7;
 
 /// Windows ACL hardening for the data directory, and the repair path for
 /// machines an earlier version locked out of their own database.
@@ -314,10 +314,6 @@ impl RuntimeStore {
         SessionsRepo { conn: &self.conn }
     }
 
-    pub fn messages(&self) -> MessagesRepo<'_> {
-        MessagesRepo { conn: &self.conn }
-    }
-
     pub fn tasks(&self) -> TasksRepo<'_> {
         TasksRepo { conn: &self.conn }
     }
@@ -487,16 +483,9 @@ impl RuntimeStore {
             "DELETE FROM compactions WHERE created_at < ?1",
             params![cutoff],
         )? as u64;
-        // Sessions untouched for the whole window are treated as finished. Delete
-        // their messages first (so the freed rows are counted) — the FK cascade
-        // would remove them anyway — then the sessions themselves. A session
-        // updated within the window is active and is kept along with all its
-        // messages.
-        removed += tx.execute(
-            "DELETE FROM messages
-             WHERE session_id IN (SELECT id FROM sessions WHERE updated_at < ?1)",
-            params![cutoff],
-        )? as u64;
+        // Sessions untouched for the whole window are treated as finished.
+        // Their transcripts live in the project's conversation files, not
+        // here, so pruning the index row is the whole job.
         removed += tx.execute(
             "DELETE FROM sessions WHERE updated_at < ?1",
             params![cutoff],
@@ -600,15 +589,6 @@ impl RuntimeStore {
                 updated_at TEXT NOT NULL,
                 total_tokens INTEGER
             );
-
-            CREATE TABLE IF NOT EXISTS messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-                role TEXT NOT NULL,
-                content_json TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_messages_session_id ON messages(session_id);
 
             CREATE TABLE IF NOT EXISTS tasks (
                 id TEXT PRIMARY KEY,
@@ -853,7 +833,9 @@ impl RuntimeStore {
                 // v6: additive `checkpoints.session_id`/`message_index` columns
                 // + covering index — applied by the idempotent baseline above.
                 6 => {},
-                // A future v7+ adds its non-additive step here.
+                // v7: the first genuinely NON-additive step — see below.
+                7 => self.migrate_to_v7()?,
+                // A future v8+ adds its non-additive step here.
                 _ => {},
             }
         }
@@ -883,6 +865,25 @@ impl RuntimeStore {
     /// the additive `tasks.prompt` column (applied by `ensure_column` in the
     /// baseline), so this is intentionally a no-op.
     pub(crate) fn migrate_to_v5(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// v7: drop the `messages` table — the structure's first real use.
+    ///
+    /// It never had a production writer: only tests ever inserted into it,
+    /// while three read paths served its permanently empty contents as if
+    /// they were session history. Those readers now go to the conversation
+    /// files, so the table is dead weight with a foreign key into
+    /// `sessions`. Dropping it is exactly what the idempotent baseline
+    /// cannot express, which is what the versioned dispatch is for.
+    ///
+    /// Safe in both directions: an older mermaid re-creates the (empty)
+    /// table from its own baseline on the next open, so a rollback loses
+    /// nothing that was ever there.
+    pub(crate) fn migrate_to_v7(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "DROP INDEX IF EXISTS idx_messages_session_id; DROP TABLE IF EXISTS messages;",
+        )?;
         Ok(())
     }
 }
@@ -1274,6 +1275,78 @@ mod tests {
     }
 
     #[test]
+    pub(crate) fn v7_drops_the_messages_table_and_keeps_its_session() {
+        // The first genuinely non-additive migration. A v6 DB carrying the
+        // table (with rows, as only tests ever produced) must open, lose the
+        // table, and keep the session row that outlived it.
+        let path = temp_db("v7_drop_messages");
+        {
+            let conn = Connection::open(&path).expect("raw open");
+            conn.execute_batch(
+                r"
+                CREATE TABLE sessions (
+                    id TEXT PRIMARY KEY,
+                    project_path TEXT NOT NULL,
+                    model_id TEXT NOT NULL,
+                    title TEXT,
+                    conversation_path TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    total_tokens INTEGER
+                );
+                CREATE TABLE messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                    role TEXT NOT NULL,
+                    content_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX idx_messages_session_id ON messages(session_id);
+                INSERT INTO sessions (id, project_path, model_id, created_at, updated_at)
+                    VALUES ('s-old', '/repo', 'm', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+                INSERT INTO messages (session_id, role, content_json, created_at)
+                    VALUES ('s-old', 'user', '{}', '2026-01-01T00:00:00Z');
+                PRAGMA user_version = 6;
+                ",
+            )
+            .expect("seed a v6 schema");
+        }
+
+        let store = RuntimeStore::open(&path).expect("upgrade open");
+        let version: i32 = store
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        let table_count: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'messages'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(table_count, 0, "the messages table must be dropped");
+        assert!(
+            store.sessions().get("s-old").unwrap().is_some(),
+            "the session it referenced must survive"
+        );
+        // And the baseline must not resurrect it on the next open.
+        drop(store);
+        let store = RuntimeStore::open(&path).expect("reopen");
+        let table_count: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'messages'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(table_count, 0, "a reopen must not re-create it");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
     pub(crate) fn v5_database_upgrades_with_null_checkpoint_anchors() {
         // A DB created by the previous build (schema v5, no anchor columns)
         // must open cleanly, gain the columns, and load old rows as None.
@@ -1578,23 +1651,6 @@ mod tests {
             })
             .expect("upsert session");
         assert_eq!(session.id, "session-1");
-        let message = store
-            .messages()
-            .add(NewMessage {
-                session_id: session.id.clone(),
-                role: "user".to_string(),
-                content_json: "{\"text\":\"hi\"}".to_string(),
-            })
-            .expect("add message");
-        assert_eq!(message.role, "user");
-        assert_eq!(
-            store
-                .messages()
-                .list_for_session(&session.id)
-                .unwrap()
-                .len(),
-            1
-        );
 
         let mut new = NewTask::new("Run tests", "/repo", "anthropic/claude");
         new.priority = TaskPriority::High;
@@ -2372,14 +2428,6 @@ mod tests {
                 total_tokens: None,
             })
             .expect("stale session");
-        store
-            .messages()
-            .add(NewMessage {
-                session_id: stale_session.id.clone(),
-                role: "user".to_string(),
-                content_json: "{}".to_string(),
-            })
-            .expect("stale message");
         let active_session = store
             .sessions()
             .upsert(NewSession {
@@ -2391,14 +2439,6 @@ mod tests {
                 total_tokens: None,
             })
             .expect("active session");
-        store
-            .messages()
-            .add(NewMessage {
-                session_id: active_session.id.clone(),
-                role: "user".to_string(),
-                content_json: "{}".to_string(),
-            })
-            .expect("active message");
         store
             .conn
             .execute(
@@ -2502,31 +2542,16 @@ mod tests {
             .unwrap();
 
         let removed = store.gc(30, 180).expect("gc");
-        assert!(removed >= 5, "stale rows pruned (got {removed})");
+        // Four, not five: the message row this used to count went away with
+        // the table at schema v7.
+        assert!(removed >= 4, "stale rows pruned (got {removed})");
         assert!(
             store.sessions().get(&stale_session.id).unwrap().is_none(),
             "stale session gone"
         );
         assert!(
-            store
-                .messages()
-                .list_for_session(&stale_session.id)
-                .unwrap()
-                .is_empty(),
-            "stale messages gone"
-        );
-        assert!(
             store.sessions().get(&active_session.id).unwrap().is_some(),
             "active session kept"
-        );
-        assert_eq!(
-            store
-                .messages()
-                .list_for_session(&active_session.id)
-                .unwrap()
-                .len(),
-            1,
-            "active message kept"
         );
         assert!(
             store.tool_runs().get("tr-finished").unwrap().is_none(),
@@ -2611,51 +2636,6 @@ mod tests {
         assert!(
             !store.checkpoints().delete(&ckpt.id).unwrap(),
             "second delete is a no-op"
-        );
-        let _ = std::fs::remove_dir_all(path.parent().unwrap());
-    }
-
-    #[test]
-    pub(crate) fn list_for_session_caps_at_max_and_keeps_ascending_order() {
-        // F24 (RC-F): a huge session is bounded — list_for_session returns at most
-        // MAX_SESSION_MESSAGES, the most recent ones, in ascending id order.
-        let path = temp_db("session_cap");
-        let store = RuntimeStore::open(&path).expect("open store");
-        let session = store
-            .sessions()
-            .upsert(NewSession {
-                id: Some("big".to_string()),
-                project_path: "/repo".to_string(),
-                model_id: "m".to_string(),
-                title: None,
-                conversation_path: None,
-                total_tokens: None,
-            })
-            .expect("session");
-        let total = MAX_SESSION_MESSAGES + 10;
-        let now = now_rfc3339();
-        let tx = store.conn.unchecked_transaction().unwrap();
-        for i in 0..total {
-            tx.execute(
-                "INSERT INTO messages (session_id, role, content_json, created_at)
-                 VALUES (?1, 'user', ?2, ?3)",
-                params![session.id, format!("{{\"n\":{i}}}"), now],
-            )
-            .unwrap();
-        }
-        tx.commit().unwrap();
-        let listed = store
-            .messages()
-            .list_for_session(&session.id)
-            .expect("list");
-        assert_eq!(
-            listed.len() as i64,
-            MAX_SESSION_MESSAGES,
-            "capped at the max"
-        );
-        assert!(
-            listed.windows(2).all(|w| w[0].id < w[1].id),
-            "ascending id order preserved across the capped tail"
         );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }

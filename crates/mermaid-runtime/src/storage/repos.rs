@@ -94,69 +94,6 @@ impl SessionsRepo<'_> {
     }
 }
 
-pub struct MessagesRepo<'a> {
-    pub(crate) conn: &'a Connection,
-}
-
-impl MessagesRepo<'_> {
-    /// # Errors
-    ///
-    /// Errors if the write statement fails, or if the row cannot be read back
-    /// afterwards -- the reload is what produces the returned record.
-    pub fn add(&self, new: NewMessage) -> Result<MessageRecord> {
-        self.conn.execute(
-            "INSERT INTO messages (session_id, role, content_json, created_at)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![new.session_id, new.role, new.content_json, now_rfc3339()],
-        )?;
-        let id = self.conn.last_insert_rowid();
-        self.get(id)?
-            .context("message was inserted but could not be reloaded")
-    }
-
-    /// # Errors
-    ///
-    /// Errors if the query fails or the stored row does not decode. A row that is
-    /// not there is `Ok(None)`, not an error.
-    pub fn get(&self, id: i64) -> Result<Option<MessageRecord>> {
-        self.conn
-            .query_row(
-                "SELECT id, session_id, role, content_json, created_at
-                 FROM messages WHERE id = ?1",
-                [id],
-                message_from_row,
-            )
-            .optional()
-            .map_err(Into::into)
-    }
-
-    /// Load a session's messages in chronological order, capped at
-    /// [`MAX_SESSION_MESSAGES`] (F24/RC-F).
-    ///
-    /// A session transcript is otherwise unbounded, and the daemon
-    /// `session_messages` path loads it whole into RAM — a pathological session
-    /// could OOM the daemon. We return the **most recent** `MAX_SESSION_MESSAGES`
-    /// (newest activity is what a viewer wants) but still in ascending `id`
-    /// order, by taking the tail in a subquery and re-sorting it ascending.
-    ///
-    /// # Errors
-    ///
-    /// Errors if the statement fails to prepare or run, or if any row does not
-    /// decode -- one undecodable row fails the whole call.
-    pub fn list_for_session(&self, session_id: &str) -> Result<Vec<MessageRecord>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, session_id, role, content_json, created_at FROM (
-                 SELECT id, session_id, role, content_json, created_at
-                 FROM messages WHERE session_id = ?1
-                 ORDER BY id DESC LIMIT ?2
-             ) ORDER BY id ASC",
-        )?;
-        let rows = stmt.query_map(params![session_id, MAX_SESSION_MESSAGES], message_from_row)?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(Into::into)
-    }
-}
-
 impl TasksRepo<'_> {
     /// # Errors
     ///
