@@ -24,15 +24,19 @@ use chrono::{DateTime, Local};
 use crate::ConversationHistory;
 use crate::LoadedInstructions;
 use crate::{Config, McpServerConfig};
+use mermaid_model::action::ActionDisplay;
 use mermaid_model::models::ChatMessage;
 use mermaid_model::models::tool_call::ToolCall as ModelToolCall;
-use mermaid_model::models::{ProviderContinuation, ReasoningLevel, TokenUsage, TokenUsageSource};
+use mermaid_model::models::{
+    MessageRole, ProviderContinuation, ReasoningLevel, TokenUsage, TokenUsageSource,
+};
 use mermaid_model::safety::SafetyMode;
 
 use super::cmd::ChatRequest;
 use super::compaction::CompactionTrigger;
 use super::msg::Msg;
 use super::runtime::RuntimeState;
+use super::session_event::{SessionEvent, SessionScalars};
 use mermaid_model::ids::{IdAllocator, ToolCallId, TurnId};
 use mermaid_model::question::PendingQuestionSet;
 use mermaid_model::tool_run::{ToolArtifact, ToolRunMetadata, ToolStatus};
@@ -187,6 +191,9 @@ impl State {
                 // `Cmd::EnsureScratchpad`; the pure constructor never touches
                 // the filesystem.
                 scratchpad: None,
+                pending_events: Vec::new(),
+                last_scalars: None,
+                last_tasks: None,
             },
             turn: TurnState::Idle,
             ui: UiState {
@@ -238,7 +245,7 @@ impl State {
         self.session.last_token_usage = history.last_token_usage;
         self.session.cumulative_token_usage = history.cumulative_token_usage;
         self.session.context_usage = history.context_usage.clone();
-        self.session.conversation = history;
+        self.session.replace_conversation(history);
         // A session persisted mid-tool (an assistant `tool_use` with no committed
         // result, or a result whose call was archived out) would otherwise resume
         // with an orphan and 400 the first request. Repair pairing on the loaded
@@ -672,6 +679,18 @@ pub struct Session {
     /// those points. The reducer stamps this onto `Cmd::ExecuteTool` so tools
     /// see it via `ExecContext::scratchpad`. Runtime-only, never persisted.
     pub scratchpad: Option<PathBuf>,
+    /// Session events accrued since the last save, drained into
+    /// `Cmd::SaveConversation` / `Cmd::SaveCompactionArchive` by
+    /// [`Session::drain_events`]. Private on purpose: every transcript
+    /// mutation must go through a `Session` method that emits its event —
+    /// the `fold == snapshot` invariant test is what catches one that
+    /// doesn't. Runtime-only, never persisted.
+    pending_events: Vec<SessionEvent>,
+    /// The scalar state as last emitted, so `drain_events` writes a `state`
+    /// event only on change.
+    last_scalars: Option<Box<SessionScalars>>,
+    /// The checklist as last emitted, same dedup as `last_scalars`.
+    last_tasks: Option<crate::ChecklistStore>,
 }
 
 impl Session {
@@ -710,7 +729,111 @@ impl Session {
     /// is a pure function and `--replay` recommits identical messages.
     pub fn append(&mut self, mut msg: ChatMessage, now: DateTime<Local>) {
         msg.timestamp = now;
+        // RecoveryNudge rows are per-dispatch steering — swept at turn end
+        // and deliberately absent from the event log (see `session_event`).
+        if msg.kind != mermaid_model::models::ChatMessageKind::RecoveryNudge {
+            self.pending_events.push(SessionEvent::Message {
+                message: msg.clone(),
+            });
+        }
         self.conversation.add_messages(&[msg], now);
+    }
+
+    /// Insert `msg` just *before* the transcript's last entry — the mid-turn
+    /// system-note path that must not split a trailing `tool_use` pair
+    /// (`push_system`'s `would_split` branch).
+    pub fn insert_before_last(&mut self, msg: ChatMessage) {
+        if msg.kind != mermaid_model::models::ChatMessageKind::RecoveryNudge {
+            self.pending_events.push(SessionEvent::InsertedBeforeLast {
+                message: msg.clone(),
+            });
+        }
+        let messages = self.conversation.messages_mut();
+        let pos = messages.len().saturating_sub(1);
+        messages.insert(pos, msg);
+    }
+
+    /// Record one prompt-history entry. Emits unconditionally; the fold
+    /// routes it through the same deduplicating `add_to_input_history`.
+    pub fn record_input(&mut self, text: String) {
+        self.pending_events
+            .push(SessionEvent::Input { text: text.clone() });
+        self.conversation.add_to_input_history(text);
+    }
+
+    /// Attach an action display to the last assistant message (the
+    /// `ToolFinished` render payload). A non-assistant tail is a no-op, and
+    /// no event is emitted for one.
+    pub fn attach_action(&mut self, action: ActionDisplay) {
+        if let Some(last) = self.conversation.messages_mut().last_mut()
+            && last.role == MessageRole::Assistant
+        {
+            last.actions.push(action.clone());
+            self.pending_events.push(SessionEvent::Action {
+                action: Box::new(action),
+            });
+        }
+    }
+
+    /// Attach a base64 image to the last assistant message (a tool's
+    /// screenshot artifact routed onto the transcript).
+    pub fn attach_image(&mut self, data: String) {
+        if let Some(last) = self.conversation.messages_mut().last_mut()
+            && last.role == MessageRole::Assistant
+        {
+            last.images.get_or_insert_with(Vec::new).push(data.clone());
+            self.pending_events.push(SessionEvent::Image { data });
+        }
+    }
+
+    /// Record a completed compaction. The caller has already replaced the
+    /// transcript (replacement + spliced-in intervening messages) and pushed
+    /// the record via `add_compaction`; this emits the event carrying the
+    /// FINAL post-compaction transcript, so the fold reproduces both steps.
+    pub fn note_compaction(&mut self, at: DateTime<Local>, record: crate::CompactionEvent) {
+        self.pending_events.push(SessionEvent::Compaction {
+            at,
+            record,
+            replacement: self.conversation.messages().to_vec(),
+        });
+    }
+
+    /// Swap in a different conversation (seed, `/load`, rewind fork, plan
+    /// handoff). The event buffer belongs to the OLD conversation and must
+    /// not leak into the new one's log; the new conversation's log file is
+    /// created by the appender's backfill on its first save.
+    pub fn replace_conversation(&mut self, next: ConversationHistory) {
+        self.conversation = next;
+        self.pending_events.clear();
+        self.last_scalars = None;
+        self.last_tasks = None;
+    }
+
+    /// Drain everything accrued since the last save, appending `state` /
+    /// `tasks` events when those changed since the previous drain.
+    /// `snapshot` must be the value the save will persist
+    /// (`snapshot_conversation`), so the emitted scalars match it exactly.
+    pub fn drain_events(&mut self, snapshot: &ConversationHistory) -> Vec<SessionEvent> {
+        let scalars = Box::new(SessionScalars::of(snapshot));
+        if self.last_scalars.as_ref() != Some(&scalars) {
+            self.pending_events
+                .push(SessionEvent::State(scalars.clone()));
+            self.last_scalars = Some(scalars);
+        }
+        if self.last_tasks.as_ref() != Some(&snapshot.tasks) {
+            self.pending_events.push(SessionEvent::Tasks {
+                store: snapshot.tasks.clone(),
+            });
+            self.last_tasks = Some(snapshot.tasks.clone());
+        }
+        std::mem::take(&mut self.pending_events)
+    }
+
+    /// The standard save command: the snapshot plus the events behind it.
+    pub fn save_conversation_cmd(&mut self) -> super::cmd::Cmd {
+        let snapshot = self.snapshot_conversation();
+        let events = self.drain_events(&snapshot);
+        super::cmd::Cmd::SaveConversation { snapshot, events }
     }
 }
 

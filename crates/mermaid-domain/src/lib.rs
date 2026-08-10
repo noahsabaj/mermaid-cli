@@ -47,6 +47,7 @@ pub mod reports;
 pub mod request;
 pub mod run_event;
 pub mod runtime;
+pub mod session_event;
 pub mod slash_commands;
 pub mod state;
 pub mod tool_search;
@@ -97,6 +98,9 @@ pub use run_event::{RUN_EVENT_PROTOCOL_VERSION, RunEvent};
 pub use runtime::{
     ProviderCapabilitySnapshot, RuntimeSignal, RuntimeState, RuntimeTimelineEvent,
     RuntimeTimelineKind,
+};
+pub use session_event::{
+    SESSION_EVENT_FORMAT_VERSION, SessionEvent, SessionEventLine, SessionScalars, fold_session,
 };
 pub use slash_commands::{
     COMMAND_GROUPS, COMMAND_REGISTRY, SlashCommand, filter_by_prefix, parse_slash_command,

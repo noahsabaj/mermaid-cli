@@ -1164,13 +1164,20 @@ impl EffectRunner {
                 // return a normal outcome, so the turn finishes naturally.
                 self.scope_mut(turn).background();
             },
-            Cmd::SaveConversation(history) => {
+            // `events` lands in the per-session log when the appender ships
+            // (design doc PR C); until then the snapshot save is the whole
+            // effect, exactly as before the payload split.
+            Cmd::SaveConversation {
+                snapshot: history,
+                events: _,
+            } => {
                 self.queue_persistence(PersistenceJob::Conversation(Box::new(history)));
             },
             Cmd::SaveCompactionArchive {
                 archive,
                 record,
                 conversation,
+                events: _,
             } => {
                 self.queue_persistence(PersistenceJob::Compaction(Box::new(
                     PendingCompactionSave {
@@ -2006,13 +2013,14 @@ mod tests {
     #[tokio::test]
     async fn dispatch_save_emits_session_saved() {
         let (mut r, mut rx) = runner();
-        r.dispatch(Cmd::SaveConversation(
-            mermaid_domain::ConversationHistory::new(
+        r.dispatch(Cmd::SaveConversation {
+            snapshot: mermaid_domain::ConversationHistory::new(
                 "/p".to_string(),
                 "m".to_string(),
                 chrono::Local::now(),
             ),
-        ));
+            events: Vec::new(),
+        });
         let msg = tokio::time::timeout(Duration::from_millis(200), rx.recv())
             .await
             .expect("sender emits")
@@ -2319,13 +2327,14 @@ mod tests {
     async fn shutdown_drains_pending_saves() {
         let (mut r, _rx) = runner();
         for _ in 0..5 {
-            r.dispatch(Cmd::SaveConversation(
-                mermaid_domain::ConversationHistory::new(
+            r.dispatch(Cmd::SaveConversation {
+                snapshot: mermaid_domain::ConversationHistory::new(
                     "/p".to_string(),
                     "m".to_string(),
                     chrono::Local::now(),
                 ),
-            ));
+                events: Vec::new(),
+            });
         }
         // Shutdown waits for all five to complete (should be instant).
         let start = std::time::Instant::now();

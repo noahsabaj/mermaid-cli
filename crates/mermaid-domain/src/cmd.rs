@@ -33,6 +33,7 @@ use super::state::ApprovalChoice;
 use mermaid_model::question::QuestionResolution;
 
 use super::compaction::{CompactionArchive, CompactionEvent, CompactionRequest};
+use super::session_event::SessionEvent;
 use mermaid_model::ids::{ToolCallId, TurnId};
 use mermaid_model::tool_run::ManagedProcess;
 
@@ -184,17 +185,25 @@ pub enum Cmd {
 
     // ── Persistence ─────────────────────────────────────────────────
     /// Save the current conversation to disk. No-op if unchanged since
-    /// last save (effect-side idempotence).
-    SaveConversation(ConversationHistory),
+    /// last save (effect-side idempotence). `events` is the session-event
+    /// tail behind this snapshot (see `session_event`), drained by
+    /// `Session::save_conversation_cmd` and appended to the per-session
+    /// log before the snapshot rewrite.
+    SaveConversation {
+        snapshot: ConversationHistory,
+        events: Vec<SessionEvent>,
+    },
     /// Persist the raw messages removed by a compaction, then the compacted
     /// (message-stripped) conversation. Both are written by ONE effect task,
     /// archive first — only overwriting the conversation if the archive
     /// persisted — so a failed/lagging archive can never lose messages while
-    /// the stripped conversation is saved over the old one.
+    /// the stripped conversation is saved over the old one. `events` as on
+    /// [`Cmd::SaveConversation`]; it carries the `compaction` event.
     SaveCompactionArchive {
         archive: CompactionArchive,
         record: CompactionEvent,
         conversation: ConversationHistory,
+        events: Vec<SessionEvent>,
     },
     /// Persist a daemon-visible background process record.
     SaveProcess(ManagedProcess),
@@ -436,7 +445,7 @@ impl Cmd {
             Self::NotifyTaskCompleted { .. } => "notify_task_completed",
             Self::EnsureScratchpad { .. } => "ensure_scratchpad",
             Self::ListScratchpad { .. } => "list_scratchpad",
-            Self::SaveConversation(_) => "save_conversation",
+            Self::SaveConversation { .. } => "save_conversation",
             Self::SaveCompactionArchive { .. } => "save_compaction_archive",
             Self::SaveProcess(_) => "save_process",
             Self::PersistLastModel(_) => "persist_last_model",
@@ -527,7 +536,7 @@ impl Cmd {
             | Self::NotifyTaskCompleted { .. }
             | Self::EnsureScratchpad { .. }
             | Self::ListScratchpad { .. }
-            | Self::SaveConversation(_)
+            | Self::SaveConversation { .. }
             | Self::SaveCompactionArchive { .. }
             | Self::SaveProcess(_)
             | Self::PersistLastModel(_)
@@ -635,7 +644,9 @@ impl Cmd {
             Self::ListScratchpad { path } => {
                 format!("list_scratchpad({})", path.display())
             },
-            Self::SaveConversation(c) => format!("save_conversation(id={})", c.id),
+            Self::SaveConversation { snapshot, .. } => {
+                format!("save_conversation(id={})", snapshot.id)
+            },
             Self::SaveCompactionArchive {
                 archive, record, ..
             } => format!(
@@ -740,11 +751,14 @@ mod tests {
             .is_turn_scoped()
         );
         assert!(
-            !Cmd::SaveConversation(ConversationHistory::new(
-                "/p".to_string(),
-                "m".to_string(),
-                chrono::Local::now()
-            ))
+            !Cmd::SaveConversation {
+                snapshot: ConversationHistory::new(
+                    "/p".to_string(),
+                    "m".to_string(),
+                    chrono::Local::now()
+                ),
+                events: Vec::new(),
+            }
             .is_turn_scoped()
         );
         assert!(!Cmd::Exit.is_turn_scoped());

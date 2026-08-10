@@ -73,7 +73,10 @@ fn happy_path_turn_ends_idle_with_assistant_message() {
     let summary = state.session.messages().last().unwrap();
     assert_eq!(summary.kind, ChatMessageKind::RunSummary);
     assert!(summary.content.contains("Worked for"));
-    assert!(cmds.iter().any(|c| matches!(c, Cmd::SaveConversation(_))));
+    assert!(
+        cmds.iter()
+            .any(|c| matches!(c, Cmd::SaveConversation { .. }))
+    );
 }
 
 // ─── stale-event filtering ─────────────────────────────────────────
@@ -396,7 +399,10 @@ fn slash_clear_requires_confirmation_before_wiping() {
 #[test]
 fn slash_save_emits_save_conversation() {
     let (_state, cmds) = update(fresh(), Msg::Slash(SlashCmd::Save(None)));
-    assert!(cmds.iter().any(|c| matches!(c, Cmd::SaveConversation(_))));
+    assert!(
+        cmds.iter()
+            .any(|c| matches!(c, Cmd::SaveConversation { .. }))
+    );
 }
 
 #[test]
@@ -698,7 +704,10 @@ fn slash_unknown_posts_to_transcript() {
             .is_some_and(|m| m.content.contains("Unknown command: /nope")),
         "unknown command posts a note to the chat transcript"
     );
-    assert!(cmds.iter().any(|c| matches!(c, Cmd::SaveConversation(_))));
+    assert!(
+        cmds.iter()
+            .any(|c| matches!(c, Cmd::SaveConversation { .. }))
+    );
 }
 
 // ─── Quit + exit ───────────────────────────────────────────────────
@@ -707,7 +716,10 @@ fn slash_unknown_posts_to_transcript() {
 fn quit_saves_and_sets_exit() {
     let (state, cmds) = update(fresh(), Msg::Quit);
     assert!(state.should_exit);
-    assert!(cmds.iter().any(|c| matches!(c, Cmd::SaveConversation(_))));
+    assert!(
+        cmds.iter()
+            .any(|c| matches!(c, Cmd::SaveConversation { .. }))
+    );
     assert!(cmds.iter().any(|c| matches!(c, Cmd::Exit)));
 }
 
@@ -1174,4 +1186,195 @@ fn r_toggles_remember_flag() {
         Some(QuestionResolution::Answered { remember, .. }) => assert!(*remember),
         other => panic!("expected Answered, got {other:?}"),
     }
+}
+
+// ─── session event log: fold == persisted snapshot ─────────────────
+
+/// Collect the session events (and last persisted snapshot) off a batch of
+/// emitted commands — the appender's view of one reducer step.
+fn absorb_save_cmds(
+    cmds: &[Cmd],
+    log: &mut Vec<mermaid_domain::SessionEvent>,
+    last: &mut Option<mermaid_domain::ConversationHistory>,
+) {
+    for cmd in cmds {
+        match cmd {
+            Cmd::SaveConversation { snapshot, events } => {
+                log.extend(events.iter().cloned());
+                *last = Some(snapshot.clone());
+            },
+            Cmd::SaveCompactionArchive {
+                conversation,
+                events,
+                ..
+            } => {
+                log.extend(events.iter().cloned());
+                *last = Some(conversation.clone());
+            },
+            _ => {},
+        }
+    }
+}
+
+/// Fold `log` (with a synthesized `started`, the appender's job) and require
+/// it to equal `expected` — JSON-compared, `revision` being `serde(skip)`
+/// and outside the contract.
+fn assert_fold_matches(
+    log: &[mermaid_domain::SessionEvent],
+    expected: &mermaid_domain::ConversationHistory,
+    stage: &str,
+) {
+    let mut events = vec![mermaid_domain::SessionEvent::Started {
+        session_id: expected.id.clone(),
+        project_path: expected.project_path.clone(),
+        model_id: expected.model_name.clone(),
+        created_at: expected.created_at,
+        forked_from: expected.forked_from.clone(),
+        parent_session: expected.parent_session.clone(),
+    }];
+    events.extend(log.iter().cloned());
+    let folded = mermaid_domain::fold_session(events).expect("a started event leads");
+    assert_eq!(
+        serde_json::to_value(&folded).unwrap(),
+        serde_json::to_value(expected).unwrap(),
+        "fold(events) must reproduce the persisted snapshot ({stage})"
+    );
+}
+
+fn stream_done_msg(turn: TurnId) -> Msg {
+    Msg::StreamDone {
+        turn,
+        usage: None,
+        provider_continuation: None,
+        stop_reason: None,
+    }
+}
+
+/// The canned compaction result the compaction flow test also uses.
+fn canned_compaction_result() -> CompactionResult {
+    let snapshot = ContextUsageSnapshot::from_estimate(
+        PromptTokenBreakdown {
+            system_tokens: 10,
+            instructions_tokens: 0,
+            message_tokens: 20,
+            tool_schema_tokens: 0,
+            image_count: 0,
+            message_count: 2,
+            tool_count: 0,
+        },
+        Some(1_000),
+    );
+    let mut checkpoint = ChatMessage::user("MERMAID CONTEXT CHECKPOINT\n## Goal\n- continue");
+    checkpoint.kind = ChatMessageKind::ContextCheckpoint;
+    CompactionResult {
+        record: CompactionEvent {
+            id: "compact_fold".to_string(),
+            trigger: CompactionTrigger::Manual,
+            created_at: chrono::Local::now(),
+            before_tokens: 100,
+            after_tokens: 30,
+            archived_message_count: 2,
+            preserved_message_count: 1,
+            preserved_turn_count: 1,
+            summary_tokens: 10,
+            duration_secs: 0.5,
+            review_status: mermaid_domain::CompactionReviewStatus::Reviewed,
+            review_error: None,
+            focus: None,
+            archive_path: None,
+        },
+        replacement_messages: vec![
+            checkpoint,
+            ChatMessage::assistant("Context compacted: 100 -> 30 tokens."),
+        ],
+        archived_messages: vec![ChatMessage::user("read the file")],
+        before_snapshot: snapshot.clone(),
+        after_snapshot: snapshot,
+        usage: None,
+        source_boundaries: Vec::new(),
+    }
+}
+
+/// Drive a full real flow — prompt, tool call, action attach, answer,
+/// compaction — through `update`, collecting the session events every save
+/// command carries, then require `fold_session` to rebuild exactly the last
+/// persisted snapshot. This is the cross-layer half of the completeness
+/// guard (`session_event`'s unit test covers the mutators directly): any
+/// reducer path that mutates the transcript without its event breaks this.
+#[test]
+fn emitted_session_events_fold_to_the_persisted_snapshot() {
+    let mut log = Vec::new();
+    let mut last_saved: Option<mermaid_domain::ConversationHistory> = None;
+
+    // Turn 1: prompt -> tool call -> tool finished (action attach) ->
+    // follow-up stream -> idle.
+    let (state, cmds) = user_submit(fresh(), "read the file");
+    absorb_save_cmds(&cmds, &mut log, &mut last_saved);
+    let id = state.current_turn_id().unwrap();
+    let (state, cmds) = update(
+        state,
+        Msg::StreamToolCall {
+            turn: id,
+            call: ModelToolCall {
+                id: Some("call_1".to_string()),
+                function: FunctionCall {
+                    name: "read_file".to_string(),
+                    arguments: serde_json::json!({"path": "src/lib.rs"}),
+                },
+            },
+        },
+    );
+    absorb_save_cmds(&cmds, &mut log, &mut last_saved);
+    let (state, cmds) = update(state, stream_done_msg(id));
+    absorb_save_cmds(&cmds, &mut log, &mut last_saved);
+    let call_id = match &state.turn {
+        TurnState::ExecutingTools { calls, .. } => calls[0].call_id,
+        other => panic!("expected ExecutingTools, got {other:?}"),
+    };
+    let (state, cmds) = update(
+        state,
+        Msg::ToolFinished {
+            turn: id,
+            call_id,
+            outcome: ToolOutcome::success("contents", "read 3 lines", 0.2),
+        },
+    );
+    absorb_save_cmds(&cmds, &mut log, &mut last_saved);
+    let follow_up = state.current_turn_id().unwrap();
+    let (state, cmds) = update(
+        state,
+        Msg::StreamText {
+            turn: follow_up,
+            chunk: "here is the answer".to_string(),
+        },
+    );
+    absorb_save_cmds(&cmds, &mut log, &mut last_saved);
+    let (state, cmds) = update(state, stream_done_msg(follow_up));
+    absorb_save_cmds(&cmds, &mut log, &mut last_saved);
+    assert!(matches!(state.turn, TurnState::Idle));
+
+    // Mid-flow checkpoint: the compaction below replaces the transcript
+    // wholesale, which would mask a missing pre-compaction emission — so
+    // the fold must already match HERE.
+    assert_fold_matches(
+        &log,
+        last_saved.as_ref().expect("turn 1 persisted"),
+        "after turn 1",
+    );
+
+    // Turn 2: a manual compaction with a canned result.
+    let (state, cmds) = update(state, Msg::Slash(SlashCmd::Compact(None)));
+    absorb_save_cmds(&cmds, &mut log, &mut last_saved);
+    let turn = state.turn.id().expect("compaction turn");
+    let result = canned_compaction_result();
+    let (state, cmds) = update(state, Msg::CompactionFinished { turn, result });
+    absorb_save_cmds(&cmds, &mut log, &mut last_saved);
+    assert_eq!(state.session.conversation.compactions.len(), 1);
+
+    // Final checkpoint: the whole log, across the compaction.
+    assert_fold_matches(
+        &log,
+        &last_saved.expect("the flow persisted at least once"),
+        "after compaction",
+    );
 }
