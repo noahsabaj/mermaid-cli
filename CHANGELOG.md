@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A short terminal keeps the composer and the mode band on screen.** The
+  chat zone's 10-row floor (`Constraint::Min`) outranks the fixed-height
+  zones below it in the layout solver, so on a terminal shorter than the
+  floor plus the fixed zones the transcript consumed every row: no input
+  box, no footer — the two surfaces the user drives were exactly the ones
+  that vanished, silently, while typing kept working invisibly. The chat
+  zone now yields (`Fill`): the composer and mode band win the shortage
+  and the transcript absorbs it. On terminals tall enough for everything,
+  the layout is unchanged.
+
 - **Pasting into the `@` file picker now filters it.** The picker's match
   list is cached state, re-ranked by the keystroke path — and only the
   keystroke path: text arriving as a paste (terminal bracketed paste,
