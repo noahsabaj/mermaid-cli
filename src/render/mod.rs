@@ -333,16 +333,13 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             let body_lines = state
                 .pending_approval
                 .front()
-                .map(|item| item.prompt.lines().count())
-                .unwrap_or(1)
+                .map_or(1, |item| item.prompt.lines().count())
                 .clamp(1, 6) as u16;
             2 + body_lines + 1 + 3
         },
-        BottomPane::Question => state
-            .pending_question
-            .front()
-            .map(|qset| widgets::question_modal_height(qset, &rstate.theme, frame.area().width))
-            .unwrap_or(2),
+        BottomPane::Question => state.pending_question.front().map_or(2, |qset| {
+            widgets::question_modal_height(qset, &rstate.theme, frame.area().width)
+        }),
         BottomPane::Confirm => 6,
         BottomPane::ConversationList | BottomPane::Rewind => 12,
         BottomPane::PlanConfig => widgets::PLAN_CONFIG_HEIGHT,
@@ -672,13 +669,15 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
     }
 }
 
-/// The bottom zone's pane for this frame. The exclusive tiers come straight
-/// from the reducer's [`mermaid_domain::Focus`] resolver — the same
-/// authority that routes keys — so the pane the user sees and the surface
-/// their keys reach are one decision. Composer-attached surfaces rank below
-/// every exclusive tier: the @-file picker, then the slash palette (whose
-/// filtered entries are computed here ONCE — the old ladders each ran the
-/// filter, one for height and one for rows).
+/// The bottom zone's pane for this frame.
+///
+/// The exclusive tiers come straight from the reducer's
+/// [`mermaid_domain::Focus`] resolver — the same authority that routes keys
+/// — so the pane the user sees and the surface their keys reach are one
+/// decision. Composer-attached surfaces rank below every exclusive tier:
+/// the @-file picker, then the slash palette (whose filtered entries are
+/// computed here ONCE — the old ladders each ran the filter, one for height
+/// and one for rows).
 enum BottomPane<'a> {
     Approval,
     Question,
