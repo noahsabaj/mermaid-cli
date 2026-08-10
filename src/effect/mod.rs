@@ -146,12 +146,12 @@ enum PersistenceJob {
 
 #[derive(Clone)]
 struct PendingCompactionSave {
-    archive: mermaid_domain::CompactionArchive,
     record: mermaid_domain::CompactionEvent,
     conversation: mermaid_domain::ConversationHistory,
     events: Vec<mermaid_domain::SessionEvent>,
-    /// The event append is attempted exactly once per queued save (a retry
-    /// after a failed ARCHIVE write must not re-append and duplicate lines).
+    /// Set once the events are durably appended, so a retry after a later
+    /// failure in the same save re-runs only what did not land — appending
+    /// twice would duplicate the boundary in the log.
     events_appended: bool,
     task_id: Option<String>,
 }
@@ -212,11 +212,12 @@ impl PersistenceState {
                 (persisted, saved)
             },
             PersistenceJob::Compaction(save) => {
-                // Queue first, then drain. The archive is the only durable copy
-                // of the stripped messages, so the save must survive an Err AND
-                // a panic in the write path (pop happens only after success),
-                // and it must land behind any older still-blocked saves (FIFO).
-                let conversation_id = save.archive.conversation_id.clone();
+                // Queue first, then drain. The boundary event is the only
+                // record that the dropped messages ever existed, so the save
+                // must survive an Err AND a panic in the write path (pop
+                // happens only after success), and it must land behind any
+                // older still-blocked saves (FIFO).
+                let conversation_id = save.conversation.id.clone();
                 self.blocked
                     .entry(conversation_id.clone())
                     .or_default()
@@ -284,39 +285,36 @@ impl PersistenceState {
         manager: &crate::session::ConversationManager,
         save: &mut PendingCompactionSave,
     ) -> anyhow::Result<PersistedCompaction> {
-        // The compaction event lands in the log BEFORE the stripped snapshot
-        // can overwrite the file it explains — the same crash property the
-        // archive-first ordering below provides. Attempted exactly once per
-        // queued save: a retry after a failed archive write must not
-        // re-append and duplicate lines.
+        // Order is the whole guarantee. A compaction drops messages from the
+        // conversation, and the only remaining record of them is this
+        // session's log — the earlier `message` events plus the `compaction`
+        // event that marks the boundary. So the append must land BEFORE the
+        // stripped snapshot overwrites the file that still holds the fuller
+        // history, and a failed append must abort the save (this is where
+        // the archive file's `?` used to be), leaving the queue blocked and
+        // the old snapshot intact for the retry.
         if !save.events_appended {
+            manager.append_session_events(&save.conversation, &save.events)?;
             save.events_appended = true;
-            if let Err(error) = manager.append_session_events(&save.conversation, &save.events) {
-                tracing::warn!(
-                    id = %save.conversation.id,
-                    %error,
-                    "compaction event append failed; archive + snapshot still persist"
-                );
-            }
         }
-        let path = manager.save_compaction_archive(&save.archive)?;
         manager.save_conversation(&save.conversation)?;
         upsert_session_index(manager, &save.conversation);
 
+        let log_path = manager.event_log_path(&save.conversation.id);
         let _ = mermaid_runtime::with_shared_store(|store| {
             store.compactions().create(compaction_row(
                 &save.record,
-                &path,
+                &log_path,
                 save.task_id.clone(),
-                save.archive.conversation_id.clone(),
+                save.conversation.id.clone(),
             ))
         });
 
         Ok(PersistedCompaction {
             id: save.record.id.clone(),
             task_id: save.task_id.clone(),
-            session_id: save.archive.conversation_id.clone(),
-            archive_path: path,
+            session_id: save.conversation.id.clone(),
+            archive_path: log_path,
         })
     }
 }
@@ -1230,15 +1228,13 @@ impl EffectRunner {
                     events,
                 });
             },
-            Cmd::SaveCompactionArchive {
-                archive,
+            Cmd::SaveCompaction {
                 record,
                 conversation,
                 events,
             } => {
                 self.queue_persistence(PersistenceJob::Compaction(Box::new(
                     PendingCompactionSave {
-                        archive,
                         record,
                         conversation,
                         events,
@@ -2403,7 +2399,7 @@ mod tests {
 
     fn persistence_fixture(
         root: &std::path::Path,
-        archive_id: &str,
+        record_id: &str,
     ) -> (mermaid_domain::ConversationHistory, PendingCompactionSave) {
         let now = chrono::Local::now();
         let mut full = mermaid_domain::ConversationHistory::new(
@@ -2422,14 +2418,8 @@ mod tests {
             )],
             now,
         );
-        let archive = mermaid_domain::CompactionArchive {
-            id: archive_id.to_string(),
-            conversation_id: full.id.clone(),
-            created_at: now,
-            messages: full.messages().to_vec(),
-        };
         let record = mermaid_domain::CompactionEvent {
-            id: archive_id.to_string(),
+            id: record_id.to_string(),
             trigger: mermaid_domain::CompactionTrigger::Manual,
             created_at: now,
             before_tokens: 100,
@@ -2447,14 +2437,27 @@ mod tests {
         (
             full,
             PendingCompactionSave {
-                archive,
                 record,
                 conversation: compacted,
-                events: Vec::new(),
+                // The boundary event the save must land before it overwrites
+                // the snapshot.
+                events: vec![mermaid_domain::SessionEvent::Input {
+                    text: "compaction boundary".to_string(),
+                }],
                 events_appended: false,
                 task_id: None,
             },
         )
+    }
+
+    /// Make every event append for `id` fail, by planting a directory where
+    /// its log file goes. This is the failure the barrier exists for now
+    /// that the boundary event -- not an archive file -- is the only record
+    /// of a compaction's dropped messages.
+    fn block_event_log(root: &std::path::Path, id: &str) {
+        let dir = root.join(".mermaid").join("conversations");
+        std::fs::create_dir_all(&dir).expect("conversations dir");
+        std::fs::create_dir_all(dir.join(format!("{id}.jsonl"))).expect("plant a blocker");
     }
 
     #[test]
@@ -2501,16 +2504,17 @@ mod tests {
     }
 
     #[test]
-    fn failed_archive_blocks_later_stripped_conversation_save() {
+    fn failed_event_append_blocks_later_stripped_conversation_save() {
         let root = std::env::temp_dir().join(format!(
             "mermaid-persistence-barrier-{}-{:?}",
             std::process::id(),
             std::thread::current().id()
         ));
         let _ = std::fs::remove_dir_all(&root);
-        let (full, compaction) = persistence_fixture(&root, "../invalid");
+        let (full, compaction) = persistence_fixture(&root, "compact_blocked");
         let manager = crate::session::ConversationManager::new(&root).unwrap();
         manager.save_conversation(&full).unwrap();
+        block_event_log(&root, &full.id);
 
         let mut state = PersistenceState::new(root.clone());
         assert!(
@@ -2546,10 +2550,10 @@ mod tests {
             std::thread::current().id()
         ));
         let _ = std::fs::remove_dir_all(&root);
-        let (full, first) = persistence_fixture(&root, "../invalid");
+        let (full, first) = persistence_fixture(&root, "compact_first");
         let mut second = first.clone();
-        second.archive.id = "compact_second".to_string();
         second.record.id = "compact_second".to_string();
+        block_event_log(&root, &full.id);
 
         let mut state = PersistenceState::new(root.clone());
         assert!(
@@ -2559,7 +2563,7 @@ mod tests {
                 .is_err()
         );
         // The older barrier still fails; the new save must queue behind it —
-        // its archive is the only durable copy of the stripped messages.
+        // its boundary event is the only record of the stripped messages.
         assert!(
             state
                 .process(PersistenceJob::Compaction(Box::new(second)))
@@ -2568,8 +2572,8 @@ mod tests {
         );
         let queued = state.blocked.get(&full.id).expect("barrier queue");
         assert_eq!(queued.len(), 2);
-        assert_eq!(queued[0].archive.id, "../invalid");
-        assert_eq!(queued[1].archive.id, "compact_second");
+        assert_eq!(queued[0].record.id, "compact_first");
+        assert_eq!(queued[1].record.id, "compact_second");
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2581,13 +2585,13 @@ mod tests {
             std::thread::current().id()
         ));
         let _ = std::fs::remove_dir_all(&root);
-        let (bad_full, bad) = persistence_fixture(&root, "../invalid");
+        let (bad_full, bad) = persistence_fixture(&root, "compact_bad");
         let (mut good_full, mut good) = persistence_fixture(&root, "compact_good");
+        block_event_log(&root, &bad_full.id);
         // Conversation ids are millisecond timestamps; two fixtures minted in
         // the same instant would collide into one barrier queue. Force the
         // second conversation onto a distinct (still format-valid) id.
         good_full.id = "20990101_000000_001".to_string();
-        good.archive.conversation_id = good_full.id.clone();
         good.conversation.id = good_full.id.clone();
 
         let mut state = PersistenceState::new(root.clone());
@@ -2629,8 +2633,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         let (full, good) = persistence_fixture(&root, "compact_good");
         let mut bad = good.clone();
-        bad.archive.id = "../invalid".to_string();
-        bad.record.id = "../invalid".to_string();
+        bad.record.id = "compact_bad".to_string();
+        // Both saves sit in ONE queue, so the blocker cannot be the shared
+        // log path: give the tail an id that fails validation instead.
+        bad.conversation.id = "../invalid".to_string();
 
         let mut state = PersistenceState::new(root.clone());
         let queue = state.blocked.entry(full.id.clone()).or_default();

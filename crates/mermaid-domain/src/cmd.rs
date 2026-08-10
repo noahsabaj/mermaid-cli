@@ -32,7 +32,7 @@ use mermaid_model::safety::SafetyMode;
 use super::state::ApprovalChoice;
 use mermaid_model::question::QuestionResolution;
 
-use super::compaction::{CompactionArchive, CompactionEvent, CompactionRequest};
+use super::compaction::{CompactionEvent, CompactionRequest};
 use super::session_event::SessionEvent;
 use mermaid_model::ids::{ToolCallId, TurnId};
 use mermaid_model::tool_run::ManagedProcess;
@@ -83,11 +83,10 @@ pub struct ToolDispatch {
 /// A single side-effect request. Most variants are one-shot; `CallModel`
 /// and `ExecuteTool` spawn long-running tasks inside a per-turn
 /// `TurnScope`.
-// Several variants legitimately carry large payloads (a full
-// `ConversationHistory` / `ChatRequest`). Boxing them would churn ~20
-// construction + match sites for no real gain — `Cmd` values are short-lived
-// and moved, not stored in bulk.
-#[expect(clippy::large_enum_variant)]
+// The `large_enum_variant` suppression this used to carry is gone: dropping
+// the compaction archive's message copy from `SaveCompaction` brought the
+// spread between the largest and second-largest variants back under the
+// lint's threshold on its own.
 #[derive(Debug, Clone)]
 pub enum Cmd {
     // ── Model + tool execution (the scope-spawning variants) ────────
@@ -193,14 +192,17 @@ pub enum Cmd {
         snapshot: ConversationHistory,
         events: Vec<SessionEvent>,
     },
-    /// Persist the raw messages removed by a compaction, then the compacted
-    /// (message-stripped) conversation. Both are written by ONE effect task,
-    /// archive first — only overwriting the conversation if the archive
-    /// persisted — so a failed/lagging archive can never lose messages while
-    /// the stripped conversation is saved over the old one. `events` as on
-    /// [`Cmd::SaveConversation`]; it carries the `compaction` event.
-    SaveCompactionArchive {
-        archive: CompactionArchive,
+    /// Persist a completed compaction: the `compaction` event (in `events`)
+    /// and then the compacted, message-stripped conversation, written by
+    /// ONE effect task in that order.
+    ///
+    /// The messages a compaction drops are NOT copied anywhere: they are the
+    /// earlier `message` events of the same session log, and the `compaction`
+    /// event marks the boundary. That is what makes the ordering
+    /// load-bearing — the event must land before the stripped snapshot can
+    /// overwrite the file describing the fuller history, so a failed append
+    /// aborts the save rather than proceeding.
+    SaveCompaction {
         record: CompactionEvent,
         conversation: ConversationHistory,
         events: Vec<SessionEvent>,
@@ -446,7 +448,7 @@ impl Cmd {
             Self::EnsureScratchpad { .. } => "ensure_scratchpad",
             Self::ListScratchpad { .. } => "list_scratchpad",
             Self::SaveConversation { .. } => "save_conversation",
-            Self::SaveCompactionArchive { .. } => "save_compaction_archive",
+            Self::SaveCompaction { .. } => "save_compaction",
             Self::SaveProcess(_) => "save_process",
             Self::PersistLastModel(_) => "persist_last_model",
             Self::PersistReasoningFor { .. } => "persist_reasoning_for",
@@ -537,7 +539,7 @@ impl Cmd {
             | Self::EnsureScratchpad { .. }
             | Self::ListScratchpad { .. }
             | Self::SaveConversation { .. }
-            | Self::SaveCompactionArchive { .. }
+            | Self::SaveCompaction { .. }
             | Self::SaveProcess(_)
             | Self::PersistLastModel(_)
             | Self::PersistReasoningFor { .. }
@@ -647,11 +649,13 @@ impl Cmd {
             Self::SaveConversation { snapshot, .. } => {
                 format!("save_conversation(id={})", snapshot.id)
             },
-            Self::SaveCompactionArchive {
-                archive, record, ..
+            Self::SaveCompaction {
+                record,
+                conversation,
+                ..
             } => format!(
-                "save_compaction_archive(conversation={}, id={})",
-                archive.conversation_id, record.id
+                "save_compaction(conversation={}, id={})",
+                conversation.id, record.id
             ),
             Self::SaveProcess(p) => format!("save_process(id={}, pid={})", p.id, p.pid),
             Self::PersistLastModel(m) => format!("persist_last_model({m})"),

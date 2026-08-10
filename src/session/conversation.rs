@@ -1,6 +1,6 @@
 use anyhow::Result;
 use chrono::{DateTime, Local};
-use mermaid_domain::{CompactionArchive, ConversationHistory};
+use mermaid_domain::ConversationHistory;
 use mermaid_model::models::{ChatMessage, MessageRole};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -180,7 +180,6 @@ pub struct ConversationManager {
     /// scratchpad cascade in [`ConversationManager::delete_conversation`].
     project_dir: PathBuf,
     conversations_dir: PathBuf,
-    compactions_dir: PathBuf,
     /// Per-id `(mtime, len)` of the conversation file as THIS process last
     /// observed it — recorded at load and after each of our own saves. Used to
     /// detect a concurrent writer before `save_conversation` overwrites (F73).
@@ -198,18 +197,13 @@ impl ConversationManager {
     ///
     /// # Errors
     ///
-    /// Creating `.mermaid/conversations` or `.mermaid/compactions` under
-    /// `project_dir` — a read-only or unwritable project. Both are created
-    /// here, so the later load and list paths can treat an unreadable
-    /// directory as "no conversations" rather than a failure.
+    /// Creating `.mermaid/conversations` under `project_dir` — a read-only
+    /// or unwritable project. It is created here, so the later load and list
+    /// paths can treat an unreadable directory as "no conversations" rather
+    /// than a failure.
     pub fn new(project_dir: impl AsRef<Path>) -> Result<Self> {
-        let mermaid_dir = project_dir.as_ref().join(".mermaid");
-        let conversations_dir = mermaid_dir.join("conversations");
-        let compactions_dir = mermaid_dir.join("compactions");
-
-        // Create conversations directory if it doesn't exist
+        let conversations_dir = project_dir.as_ref().join(".mermaid").join("conversations");
         fs::create_dir_all(&conversations_dir)?;
-        fs::create_dir_all(&compactions_dir)?;
 
         Ok(Self {
             project_dir: project_dir.as_ref().to_path_buf(),
@@ -217,7 +211,6 @@ impl ConversationManager {
                 conversations_dir.clone(),
             )),
             conversations_dir,
-            compactions_dir,
             seen: Arc::new(Mutex::new(HashMap::new())),
         })
     }
@@ -239,6 +232,14 @@ impl ConversationManager {
     ) -> Result<()> {
         validate_conversation_id(&snapshot.id)?;
         self.events.append(snapshot, events)
+    }
+
+    /// Where a session's event log lives. The compaction bookkeeping row
+    /// records this instead of a per-compaction archive file: the dropped
+    /// messages are the log's earlier `message` events.
+    #[must_use]
+    pub fn event_log_path(&self, id: &str) -> PathBuf {
+        self.events.path_for(id)
     }
 
     /// Rebuild a conversation from its event log — the recovery source when
@@ -376,50 +377,6 @@ impl ConversationManager {
         }
 
         Ok(())
-    }
-
-    /// Save the raw messages removed by a compaction. Archives live
-    /// outside the hot conversation JSON so `/load` and `/list` don't
-    /// parse old transcripts on every startup.
-    ///
-    /// # Errors
-    ///
-    /// A conversation id or archive id that would traverse, creating the
-    /// per-conversation archive directory, serializing the archive, and the
-    /// atomic 0600 write. Nothing here is best-effort: this is the only
-    /// durable copy of the compacted-out messages, so a failed write must
-    /// reach the caller rather than silently drop them.
-    pub fn save_compaction_archive(&self, archive: &CompactionArchive) -> Result<PathBuf> {
-        // Both the conversation id (a directory component) and the archive id
-        // (a file component) come from persisted state and must not traverse.
-        validate_conversation_id(&archive.conversation_id)?;
-        anyhow::ensure!(
-            !archive.id.is_empty()
-                && !archive.id.contains(['/', '\\'])
-                && !archive.id.contains(".."),
-            "invalid compaction archive id: {:?}",
-            archive.id
-        );
-        let dir = self.compactions_dir.join(&archive.conversation_id);
-        fs::create_dir_all(&dir)?;
-        let path = dir.join(format!("{}.json", archive.id));
-        // The archive is the only durable copy of compacted-out messages; scrub
-        // screenshot bytes AND credential-shaped strings here too so neither
-        // survives in compaction archives (#99). Clones only when scrubbing.
-        let mut value = match strip_persisted_screenshots(&archive.messages) {
-            Some(sanitized) => {
-                let mut stripped = archive.clone();
-                stripped.messages = sanitized;
-                serde_json::to_value(&stripped)?
-            },
-            None => serde_json::to_value(archive)?,
-        };
-        mermaid_model::utils::redact_json(&mut value);
-        let json = serde_json::to_string_pretty(&value)?;
-        // Atomic write: the archive is the ONLY durable copy of messages
-        // dropped by a compaction — a partial write would lose them. Owner-only.
-        mermaid_runtime::write_atomic_with_mode(&path, json.as_bytes(), 0o600)?;
-        Ok(path)
     }
 
     /// Load a specific conversation by ID
@@ -633,11 +590,6 @@ impl ConversationManager {
     pub fn conversations_dir(&self) -> &Path {
         &self.conversations_dir
     }
-
-    #[must_use]
-    pub fn compactions_dir(&self) -> &Path {
-        &self.compactions_dir
-    }
 }
 
 /// Probe the session's provenance. Impure — spawns `git` twice — so it is a
@@ -832,7 +784,6 @@ mod tests {
             project_dir: dir.clone(),
             events: Arc::new(crate::session::event_log::EventLog::new(dir.clone())),
             conversations_dir: dir.clone(),
-            compactions_dir: dir.clone(),
             seen: Arc::new(Mutex::new(HashMap::new())),
         };
         store.save_conversation(&conv).expect("save");
@@ -865,7 +816,6 @@ mod tests {
             project_dir: dir.clone(),
             events: Arc::new(crate::session::event_log::EventLog::new(dir.clone())),
             conversations_dir: dir.clone(),
-            compactions_dir: dir.clone(),
             seen: Arc::new(Mutex::new(HashMap::new())),
         };
         store.save_conversation(&conv).expect("save");

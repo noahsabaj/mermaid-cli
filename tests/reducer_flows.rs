@@ -521,14 +521,14 @@ fn compaction_finished_replaces_history_and_archives_head() {
         ChatMessageKind::ContextCheckpoint
     );
     assert_eq!(state.session.conversation.compactions.len(), 1);
-    // Compaction now emits a single SaveCompactionArchive that embeds the
-    // stripped conversation (archive + conversation persisted in order by one
+    // Compaction emits a single SaveCompaction carrying the boundary event
+    // and the stripped conversation (appended, then saved, in order by one
     // effect task), rather than two independent save commands.
     let archive_cmd = cmds
         .iter()
-        .find(|cmd| matches!(cmd, Cmd::SaveCompactionArchive { .. }));
+        .find(|cmd| matches!(cmd, Cmd::SaveCompaction { .. }));
     assert!(archive_cmd.is_some());
-    if let Some(Cmd::SaveCompactionArchive { conversation, .. }) = archive_cmd {
+    if let Some(Cmd::SaveCompaction { conversation, .. }) = archive_cmd {
         assert_eq!(conversation.compactions.len(), 1);
     }
 }
@@ -1201,7 +1201,7 @@ fn absorb_save_cmds(
         if let Cmd::SaveConversation { snapshot, events } = cmd {
             log.extend(events.iter().cloned());
             *last = Some(snapshot.clone());
-        } else if let Cmd::SaveCompactionArchive {
+        } else if let Cmd::SaveCompaction {
             conversation,
             events,
             ..

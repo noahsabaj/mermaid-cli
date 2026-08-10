@@ -273,14 +273,6 @@ pub struct CompactionEvent {
     pub archive_path: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CompactionArchive {
-    pub id: String,
-    pub conversation_id: String,
-    pub created_at: DateTime<Local>,
-    pub messages: Vec<ChatMessage>,
-}
-
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CompactionResult {
     pub record: CompactionEvent,
