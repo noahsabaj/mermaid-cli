@@ -4421,28 +4421,26 @@ pub(crate) fn handle_stream_done(
                 turn,
                 call_id: call.call_id,
                 source: call.source.clone(),
-                // F7: pass the session's current model id so subagent
-                // tools can spawn children against the same provider.
-                model_id: state.session.model_id.clone(),
-                safety_mode: effective_safety,
-                plan_file: plan_file.clone(),
-                plan_permissions: state.settings.plan.permissions,
-                context_percent: state
-                    .session
-                    .context_usage
-                    .as_ref()
-                    .and_then(|c| c.used_percent),
-                intent: intent.clone(),
-                // Checkpoint anchoring: conversation id + length at DISPATCH.
-                // History here is [..., user@k, assistant(tool_use)], so any
-                // checkpoint this run takes has message_index >= k+1 and a
-                // fork at k discards it iff message_index > k (strict).
-                session_id: state.session.conversation.id.clone(),
-                message_index: state.session.messages().len(),
-                // The session's scratch dir, when already materialized —
-                // `None` before `Msg::ScratchpadReady` lands (tools fall
-                // back to workdir-relative temp space).
-                scratchpad: state.session.scratchpad.clone(),
+                dispatch: crate::cmd::ToolDispatch {
+                    model_id: state.session.model_id.clone(),
+                    safety_mode: effective_safety,
+                    plan_file: plan_file.clone(),
+                    plan_permissions: state.settings.plan.permissions,
+                    context_percent: state
+                        .session
+                        .context_usage
+                        .as_ref()
+                        .and_then(|c| c.used_percent),
+                    intent: intent.clone(),
+                    // Checkpoint anchoring: conversation id + length at
+                    // DISPATCH. History here is [..., user@k,
+                    // assistant(tool_use)], so any checkpoint this run takes
+                    // has message_index >= k+1 and a fork at k discards it
+                    // iff message_index > k (strict).
+                    session_id: state.session.conversation.id.clone(),
+                    message_index: state.session.messages().len(),
+                    scratchpad: state.session.scratchpad.clone(),
+                },
             });
         }
         state.turn = super::transition::start_executing_tools(
@@ -12534,12 +12532,11 @@ mod tests {
         let (session_id, message_index, scratchpad) = cmds
             .iter()
             .find_map(|c| match c {
-                Cmd::ExecuteTool {
-                    session_id,
-                    message_index,
-                    scratchpad,
-                    ..
-                } => Some((session_id.clone(), *message_index, scratchpad.clone())),
+                Cmd::ExecuteTool { dispatch, .. } => Some((
+                    dispatch.session_id.clone(),
+                    dispatch.message_index,
+                    dispatch.scratchpad.clone(),
+                )),
                 _ => None,
             })
             .expect("ExecuteTool dispatched");
@@ -13344,11 +13341,9 @@ mod tests {
         let (mode, plan_file) = cmds
             .iter()
             .find_map(|c| match c {
-                Cmd::ExecuteTool {
-                    safety_mode,
-                    plan_file,
-                    ..
-                } => Some((*safety_mode, plan_file.clone())),
+                Cmd::ExecuteTool { dispatch, .. } => {
+                    Some((dispatch.safety_mode, dispatch.plan_file.clone()))
+                },
                 _ => None,
             })
             .expect("ExecuteTool dispatched");

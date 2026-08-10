@@ -1454,24 +1454,11 @@ mod tests {
     ) -> (ExecContext, tokio::sync::mpsc::Receiver<ProgressEvent>) {
         let mut config = mermaid_domain::Config::default();
         config.safety.mode = mode;
-        let (tx, rx) = tokio::sync::mpsc::channel(8);
-        let mut ctx = ExecContext::new(
-            tokio_util::sync::CancellationToken::new(),
-            tx,
-            ToolCallId(1),
+        let (mut ctx, rx) = crate::providers::ctx::test_exec_context_with_config(
             TurnId(1),
+            ToolCallId(1),
             workdir,
-            std::sync::Arc::new(config),
-            String::new(),
-            None,
-            None,
-            None,
-            mode,
-            None,
-            None,
-            None,
-            None,
-            None,
+            config,
         );
         ctx.scratchpad = scratchpad;
         (ctx, rx)

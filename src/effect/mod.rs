@@ -930,15 +930,7 @@ impl EffectRunner {
                 turn,
                 call_id,
                 source,
-                model_id,
-                safety_mode,
-                plan_file,
-                plan_permissions,
-                context_percent,
-                intent,
-                session_id,
-                message_index,
-                scratchpad,
+                dispatch,
             } => {
                 let tx = self.msg_tx.clone();
                 let tools = self.tools.clone();
@@ -960,55 +952,45 @@ impl EffectRunner {
                 // resolve through `PolicyDecision::Classify`, which fails
                 // safe to escalate without a classifier bound.
                 let classifier: Option<Arc<dyn crate::providers::AutoClassifier>> =
-                    if safety_mode == mermaid_runtime::SafetyMode::Auto || plan_file.is_some() {
+                    if dispatch.safety_mode == mermaid_runtime::SafetyMode::Auto
+                        || dispatch.plan_file.is_some()
+                    {
                         self.providers.as_ref().map(|p| {
                             let model = config
                                 .safety
                                 .auto_classifier_model
                                 .clone()
-                                .unwrap_or_else(|| model_id.clone());
+                                .unwrap_or_else(|| dispatch.model_id.clone());
                             Arc::new(crate::providers::ModelAutoClassifier::new(p.clone(), model))
                                 as Arc<dyn crate::providers::AutoClassifier>
                         })
                     } else {
                         None
                     };
-                let task_id = self.task_id.clone();
-                let approval = self.approval.clone();
-                let questions = self.questions.clone();
-                let task_broker = self.tasks.clone();
+                let services = crate::providers::ctx::ToolServices {
+                    workdir,
+                    config,
+                    task_id: self.task_id.clone(),
+                    // Detached work (backgrounded subagents) reports back
+                    // through the main msg channel after this turn's
+                    // progress relay is gone.
+                    notify: Some(self.msg_tx.clone()),
+                    classifier,
+                    approval: self.approval.clone(),
+                    questions: self.questions.clone(),
+                    tasks: Some(self.tasks.clone()),
+                };
                 let scope = self.scope_mut(turn);
-                let token = scope.token();
-                let background = scope.background_token();
-                let web_bytes = scope.web_bytes();
+                let signals = crate::providers::ctx::TurnSignals {
+                    token: scope.token(),
+                    background: scope.background_token(),
+                    web_bytes: scope.web_bytes(),
+                };
                 scope.spawn(async move {
                     use futures::FutureExt;
                     let fallback_tx = tx.clone();
                     if std::panic::AssertUnwindSafe(dispatch_execute_tool(
-                        tx,
-                        tools,
-                        workdir,
-                        turn,
-                        call_id,
-                        source,
-                        token,
-                        background,
-                        web_bytes,
-                        config,
-                        model_id,
-                        task_id,
-                        session_id,
-                        message_index,
-                        scratchpad,
-                        safety_mode,
-                        plan_file,
-                        plan_permissions,
-                        context_percent,
-                        intent,
-                        classifier,
-                        approval,
-                        questions,
-                        task_broker,
+                        tx, tools, turn, call_id, source, signals, dispatch, services,
                     ))
                     .catch_unwind()
                     .await
@@ -2219,15 +2201,17 @@ mod tests {
             turn,
             call_id,
             source,
-            model_id: "ollama/test".to_string(),
-            safety_mode: mermaid_runtime::SafetyMode::Ask,
-            plan_file: None,
-            plan_permissions: mermaid_domain::PlanPermissions::default(),
-            context_percent: None,
-            intent: None,
-            session_id: "sess-test".to_string(),
-            message_index: 0,
-            scratchpad: None,
+            dispatch: mermaid_domain::ToolDispatch {
+                model_id: "ollama/test".to_string(),
+                safety_mode: mermaid_runtime::SafetyMode::Ask,
+                plan_file: None,
+                plan_permissions: mermaid_domain::PlanPermissions::default(),
+                context_percent: None,
+                intent: None,
+                session_id: "sess-test".to_string(),
+                message_index: 0,
+                scratchpad: None,
+            },
         });
         let first = tokio::time::timeout(Duration::from_millis(200), rx.recv())
             .await

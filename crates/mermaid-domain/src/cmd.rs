@@ -36,6 +36,49 @@ use super::compaction::{CompactionArchive, CompactionEvent, CompactionRequest};
 use mermaid_model::ids::{ToolCallId, TurnId};
 use mermaid_model::tool_run::ManagedProcess;
 
+/// Everything the reducer stamps onto one tool call at dispatch time — the
+/// LIVE session context a tool needs that the frozen startup `Config`
+/// cannot supply. `Cmd::ExecuteTool` carries it whole; the effect layer
+/// threads it into the exec context untouched. One struct, one hat: this is
+/// the "session identity + policy inputs at dispatch" half of what used to
+/// be eleven loose fields on the Cmd and a 24-argument effect signature.
+#[derive(Debug, Clone)]
+pub struct ToolDispatch {
+    /// The active session's model id at the moment this call was emitted,
+    /// so tools like `SubagentTool` spawn children against the same
+    /// provider the parent is using (F7).
+    pub model_id: String,
+    /// Effective live safety mode at the moment this call was emitted
+    /// (`state.session.safety_mode`, floored to `ReadOnly` while a plan
+    /// is being drafted). The runner builds the policy gate / Auto
+    /// classifier from this rather than the static config.
+    pub safety_mode: SafetyMode,
+    /// `Some(path)` while the session is in plan mode: the one path the
+    /// policy gate exempts from the read-only floor, and the flag the
+    /// plan carve-outs (memory writes, known-safe builds) key on.
+    pub plan_file: Option<std::path::PathBuf>,
+    /// LIVE per-category plan permission levels (`/plan config` edits
+    /// them mid-session; the startup `Config` snapshot in the exec context
+    /// would go stale). Only consulted while `plan_file` is `Some`.
+    pub plan_permissions: crate::PlanPermissions,
+    /// Context-window fill at dispatch, when known. `exit_plan_mode`
+    /// shows it on the clear-context option so the tradeoff is legible.
+    pub context_percent: Option<u8>,
+    /// The user's stated intent for the turn (latest user message),
+    /// passed to the Auto-mode classifier as alignment context.
+    pub intent: Option<String>,
+    /// Conversation id at dispatch — checkpoint-anchoring provenance
+    /// (rides onto any checkpoint this call takes).
+    pub session_id: String,
+    /// Conversation length (`messages().len()`) at dispatch. A fork at
+    /// user-message index `k` discards checkpoints with index > k.
+    pub message_index: usize,
+    /// Per-session scratch directory (`Session::scratchpad`) at dispatch.
+    /// `None` until `Msg::ScratchpadReady` lands — tools fall back to
+    /// workdir-relative temp space.
+    pub scratchpad: Option<PathBuf>,
+}
+
 /// A single side-effect request. Most variants are one-shot; `CallModel`
 /// and `ExecuteTool` spawn long-running tasks inside a per-turn
 /// `TurnScope`.
@@ -57,47 +100,15 @@ pub enum Cmd {
         request: CompactionRequest,
     },
     /// Run one tool in parallel with any other tools in the same turn.
-    /// The runner wires `ExecContext::token` to the turn's scope so
-    /// `Cmd::CancelScope` aborts them all at once.
-    ///
-    /// `model_id` is the active session's model id at the moment this
-    /// tool call was emitted. The runner passes it into `ExecContext`
-    /// so tools like `SubagentTool` can spawn children against the
-    /// same provider the parent is using.
+    /// The runner wires the exec context's cancellation token to the turn's
+    /// scope so `Cmd::CancelScope` aborts them all at once. Everything the
+    /// reducer stamps from live session state rides in [`ToolDispatch`] —
+    /// one struct, one hat.
     ExecuteTool {
         turn: TurnId,
         call_id: ToolCallId,
         source: ModelToolCall,
-        model_id: String,
-        /// Effective live safety mode at the moment this call was emitted
-        /// (`state.session.safety_mode`, floored to `ReadOnly` while a plan
-        /// is being drafted). The runner builds the policy gate / Auto
-        /// classifier from this rather than the static config.
-        safety_mode: SafetyMode,
-        /// `Some(path)` while the session is in plan mode: the one path the
-        /// policy gate exempts from the read-only floor, and the flag the
-        /// plan carve-outs (memory writes, known-safe builds) key on.
-        plan_file: Option<std::path::PathBuf>,
-        /// LIVE per-category plan permission levels (`/plan config` edits
-        /// them mid-session; the startup `Config` snapshot in `ExecContext`
-        /// would go stale). Only consulted while `plan_file` is `Some`.
-        plan_permissions: crate::PlanPermissions,
-        /// Context-window fill at dispatch, when known. `exit_plan_mode`
-        /// shows it on the clear-context option so the tradeoff is legible.
-        context_percent: Option<u8>,
-        /// The user's stated intent for the turn (latest user message),
-        /// passed to the Auto-mode classifier as alignment context.
-        intent: Option<String>,
-        /// Conversation id at dispatch — checkpoint-anchoring provenance
-        /// (rides into `ExecContext` and onto any checkpoint this call takes).
-        session_id: String,
-        /// Conversation length (`messages().len()`) at dispatch. A fork at
-        /// user-message index `k` discards checkpoints with index > k.
-        message_index: usize,
-        /// Per-session scratch directory (`Session::scratchpad`) at dispatch.
-        /// `None` until `Msg::ScratchpadReady` lands — the runner threads it
-        /// into `ExecContext::scratchpad` for tools to use as temp space.
-        scratchpad: Option<PathBuf>,
+        dispatch: ToolDispatch,
     },
     /// Cancel every task in the given turn's `TurnScope`. After the
     /// scope's `JoinSet` drains (bounded by a ~2s timeout), the runner
