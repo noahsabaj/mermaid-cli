@@ -844,19 +844,21 @@ mod tests {
         ); // alias
         assert_eq!(
             mermaid_domain::parse_slash_command("remember prefer ripgrep"),
-            SlashCmd::Remember(Some("prefer ripgrep".to_string()))
+            SlashCmd::Remember("prefer ripgrep".to_string())
         );
         assert_eq!(
             mermaid_domain::parse_slash_command("remember"),
-            SlashCmd::Remember(None)
+            SlashCmd::MissingArg("Usage: /remember <fact>".to_string()),
+            "a bare required-arg command answers with the registry usage line"
         );
         assert_eq!(
             mermaid_domain::parse_slash_command("forget prefer-ripgrep"),
-            SlashCmd::Forget(Some("prefer-ripgrep".to_string()))
+            SlashCmd::Forget("prefer-ripgrep".to_string())
         );
         assert_eq!(
             mermaid_domain::parse_slash_command("forget"),
-            SlashCmd::Forget(None)
+            SlashCmd::MissingArg("Usage: /forget <name> (see /memory for names)".to_string()),
+            "the usage note rides along from the registry"
         );
         assert_eq!(
             mermaid_domain::parse_slash_command("consolidate-memory"),
@@ -876,15 +878,15 @@ mod tests {
         );
         assert_eq!(
             mermaid_domain::parse_slash_command("task task-123"),
-            SlashCmd::Task(Some("task-123".to_string()))
+            SlashCmd::Task("task-123".to_string())
         );
         assert_eq!(
             mermaid_domain::parse_slash_command("pause task-123"),
-            SlashCmd::Pause(Some("task-123".to_string()))
+            SlashCmd::Pause("task-123".to_string())
         );
         assert_eq!(
             mermaid_domain::parse_slash_command("resume task-123"),
-            SlashCmd::Resume(Some("task-123".to_string()))
+            SlashCmd::Resume("task-123".to_string())
         );
         assert_eq!(
             mermaid_domain::parse_slash_command("cancel"),
@@ -908,15 +910,15 @@ mod tests {
         );
         assert_eq!(
             mermaid_domain::parse_slash_command("approve approval-1"),
-            SlashCmd::Approve(Some("approval-1".to_string()))
+            SlashCmd::Approve("approval-1".to_string())
         );
         assert_eq!(
             mermaid_domain::parse_slash_command("deny approval-1"),
-            SlashCmd::Deny(Some("approval-1".to_string()))
+            SlashCmd::Deny("approval-1".to_string())
         );
         assert_eq!(
             mermaid_domain::parse_slash_command("checkpoint src/lib.rs"),
-            SlashCmd::Checkpoint(Some("src/lib.rs".to_string()))
+            SlashCmd::Checkpoint("src/lib.rs".to_string())
         );
         assert_eq!(
             mermaid_domain::parse_slash_command("checkpoints"),
@@ -924,7 +926,7 @@ mod tests {
         );
         assert_eq!(
             mermaid_domain::parse_slash_command("restore checkpoint-1"),
-            SlashCmd::Restore(Some("checkpoint-1".to_string()))
+            SlashCmd::Restore("checkpoint-1".to_string())
         );
         assert_eq!(
             mermaid_domain::parse_slash_command("plugins"),

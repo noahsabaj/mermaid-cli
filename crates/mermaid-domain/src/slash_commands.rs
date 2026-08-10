@@ -18,10 +18,47 @@ pub struct SlashCommand {
     /// One-line user-visible description shown in palette and `/help`.
     pub description: &'static str,
     /// Optional argument hint shown after the command name in the
-    /// palette, e.g. `Some("[name]")` for `/model [name]`.
+    /// palette, e.g. `Some("[name]")` for `/model [name]`. The bracket is
+    /// load-bearing: `<...>` means the argument is REQUIRED — the parser
+    /// answers a bare invocation with the usage line instead of dispatching —
+    /// while `[...]` means optional. `hints_are_well_formed` pins the
+    /// convention.
     pub arg_hint: Option<&'static str>,
+    /// Extra guidance appended to the derived usage line in parentheses,
+    /// e.g. `/forget`'s "see /memory for names". Not shown in the palette.
+    pub usage_note: Option<&'static str>,
     /// UX grouping used by `/help`; the palette still preserves registry order.
     pub group: SlashCommandGroup,
+}
+
+impl SlashCommand {
+    /// Whether the command's argument is required (`<...>` hint). The hint IS
+    /// the arity: one notation drives the palette, the parser's missing-arg
+    /// guard, and the usage line, so they cannot disagree.
+    #[must_use]
+    pub fn requires_arg(&self) -> bool {
+        self.arg_hint.is_some_and(|hint| hint.starts_with('<'))
+    }
+
+    /// The full usage line for this command, derived from the registry entry:
+    /// `Usage: /<name> <hint>` plus the parenthesized `usage_note` when one
+    /// exists. The parser hands this to the reducer via `SlashCmd::MissingArg`,
+    /// so every "you forgot the argument" message is registry truth rather
+    /// than a string retyped per reducer arm.
+    #[must_use]
+    pub fn usage_line(&self) -> String {
+        let mut line = format!("Usage: /{}", self.name);
+        if let Some(hint) = self.arg_hint {
+            line.push(' ');
+            line.push_str(hint);
+        }
+        if let Some(note) = self.usage_note {
+            line.push_str(" (");
+            line.push_str(note);
+            line.push(')');
+        }
+        line
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,6 +120,7 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         aliases: &[],
         description: "Open the model picker, or switch directly with a name",
         arg_hint: Some("[name]"),
+        usage_note: None,
         group: SlashCommandGroup::ModelContext,
     },
     SlashCommand {
@@ -90,6 +128,7 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         aliases: &[],
         description: "Set reasoning depth (none, minimal, low, medium, high, max, xhigh)",
         arg_hint: Some("[level]"),
+        usage_note: None,
         group: SlashCommandGroup::ModelContext,
     },
     SlashCommand {
@@ -97,6 +136,7 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         aliases: &["visiblereasoning"],
         description: "Show, hide, or toggle reasoning blocks in the transcript",
         arg_hint: Some("[on|off|toggle]"),
+        usage_note: None,
         group: SlashCommandGroup::ModelContext,
     },
     SlashCommand {
@@ -104,6 +144,7 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         aliases: &[],
         description: "Clear chat history",
         arg_hint: None,
+        usage_note: None,
         group: SlashCommandGroup::Everyday,
     },
     SlashCommand {
@@ -111,6 +152,7 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         aliases: &[],
         description: "Save current conversation",
         arg_hint: Some("[name]"),
+        usage_note: None,
         group: SlashCommandGroup::Everyday,
     },
     SlashCommand {
@@ -118,6 +160,7 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         aliases: &[],
         description: "Load a conversation",
         arg_hint: Some("[name]"),
+        usage_note: None,
         group: SlashCommandGroup::Everyday,
     },
     SlashCommand {
@@ -125,6 +168,7 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         aliases: &[],
         description: "List saved conversations",
         arg_hint: None,
+        usage_note: None,
         group: SlashCommandGroup::Everyday,
     },
     SlashCommand {
@@ -132,6 +176,7 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         aliases: &["todo"],
         description: "Show or edit the task checklist",
         arg_hint: Some("[add <subject>|rm <id>|done <id>|clear]"),
+        usage_note: None,
         group: SlashCommandGroup::Everyday,
     },
     SlashCommand {
@@ -139,6 +184,7 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         aliases: &[],
         description: "Show the session scratch directory and its contents",
         arg_hint: None,
+        usage_note: None,
         group: SlashCommandGroup::Everyday,
     },
     SlashCommand {
@@ -146,6 +192,7 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         aliases: &[],
         description: "Show provider token usage and session totals",
         arg_hint: None,
+        usage_note: None,
         group: SlashCommandGroup::ModelContext,
     },
     SlashCommand {
@@ -153,6 +200,7 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         aliases: &[],
         description: "Show context window/budget; set Ollama num_ctx (Ollama auto-fits to VRAM)",
         arg_hint: Some("[n|auto|max|offload on|off]"),
+        usage_note: None,
         group: SlashCommandGroup::ModelContext,
     },
     SlashCommand {
@@ -160,6 +208,7 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         aliases: &["compress", "summarize"],
         description: "Compact conversation context with optional focus instructions",
         arg_hint: Some("[instructions]"),
+        usage_note: None,
         group: SlashCommandGroup::ModelContext,
     },
     SlashCommand {
@@ -167,6 +216,7 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         aliases: &["memories"],
         description: "List durable memories saved across sessions",
         arg_hint: None,
+        usage_note: None,
         group: SlashCommandGroup::ModelContext,
     },
     SlashCommand {
@@ -174,6 +224,7 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         aliases: &[],
         description: "Save a fact to private durable memory",
         arg_hint: Some("<fact>"),
+        usage_note: None,
         group: SlashCommandGroup::ModelContext,
     },
     SlashCommand {
@@ -181,6 +232,7 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         aliases: &[],
         description: "Delete a saved memory by name",
         arg_hint: Some("<name>"),
+        usage_note: Some("see /memory for names"),
         group: SlashCommandGroup::ModelContext,
     },
     SlashCommand {
@@ -188,6 +240,7 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         aliases: &["memory-consolidate", "prune-memory"],
         description: "Prune duplicate or obsolete memories (model-assisted, reversible)",
         arg_hint: None,
+        usage_note: None,
         group: SlashCommandGroup::ModelContext,
     },
     SlashCommand {
@@ -195,6 +248,7 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         aliases: &[],
         description: "Show in-session readiness, model, safety, and instruction status",
         arg_hint: None,
+        usage_note: None,
         group: SlashCommandGroup::Everyday,
     },
     SlashCommand {
@@ -202,6 +256,7 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         aliases: &[],
         description: "List durable runtime tasks",
         arg_hint: None,
+        usage_note: None,
         group: SlashCommandGroup::AdvancedRuntime,
     },
     SlashCommand {
@@ -209,6 +264,7 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         aliases: &[],
         description: "Show a durable runtime task",
         arg_hint: Some("<id>"),
+        usage_note: None,
         group: SlashCommandGroup::AdvancedRuntime,
     },
     SlashCommand {
@@ -216,6 +272,7 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         aliases: &[],
         description: "Pause a durable task by marking it blocked",
         arg_hint: Some("<task-id>"),
+        usage_note: None,
         group: SlashCommandGroup::AdvancedRuntime,
     },
     SlashCommand {
@@ -223,6 +280,7 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         aliases: &[],
         description: "Resume a durable task by marking it running",
         arg_hint: Some("<task-id>"),
+        usage_note: None,
         group: SlashCommandGroup::AdvancedRuntime,
     },
     SlashCommand {
@@ -230,6 +288,7 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         aliases: &[],
         description: "Cancel the active turn or a durable task",
         arg_hint: Some("[task-id]"),
+        usage_note: None,
         group: SlashCommandGroup::Everyday,
     },
     SlashCommand {
@@ -237,6 +296,7 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         aliases: &[],
         description: "Write a handoff report for the current or named task",
         arg_hint: Some("[task-id]"),
+        usage_note: None,
         group: SlashCommandGroup::Everyday,
     },
     SlashCommand {
@@ -244,6 +304,7 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         aliases: &[],
         description: "Show current context report or task report",
         arg_hint: Some("[task-id]"),
+        usage_note: None,
         group: SlashCommandGroup::Everyday,
     },
     SlashCommand {
@@ -251,6 +312,7 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         aliases: &[],
         description: "List or kill background agents",
         arg_hint: Some("[kill <id>|all]"),
+        usage_note: None,
         group: SlashCommandGroup::AdvancedRuntime,
     },
     SlashCommand {
@@ -258,6 +320,7 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         aliases: &["procs"],
         description: "List durable runtime processes",
         arg_hint: None,
+        usage_note: None,
         group: SlashCommandGroup::AdvancedRuntime,
     },
     SlashCommand {
@@ -265,6 +328,7 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         aliases: &[],
         description: "Show a durable runtime process log",
         arg_hint: Some("<process-id>"),
+        usage_note: None,
         group: SlashCommandGroup::AdvancedRuntime,
     },
     SlashCommand {
@@ -272,6 +336,7 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         aliases: &[],
         description: "Stop a durable runtime process",
         arg_hint: Some("<process-id>"),
+        usage_note: None,
         group: SlashCommandGroup::AdvancedRuntime,
     },
     SlashCommand {
@@ -279,6 +344,7 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         aliases: &[],
         description: "Restart a durable runtime process",
         arg_hint: Some("<process-id>"),
+        usage_note: None,
         group: SlashCommandGroup::AdvancedRuntime,
     },
     SlashCommand {
@@ -286,6 +352,7 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         aliases: &[],
         description: "Open a URL, file, or process target",
         arg_hint: Some("<url|path|process-id>"),
+        usage_note: None,
         group: SlashCommandGroup::AdvancedRuntime,
     },
     SlashCommand {
@@ -293,6 +360,7 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         aliases: &[],
         description: "Show listening TCP ports",
         arg_hint: None,
+        usage_note: None,
         group: SlashCommandGroup::AdvancedRuntime,
     },
     SlashCommand {
@@ -300,6 +368,7 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         aliases: &["permission"],
         description: "Show or set the session safety mode (Shift+Tab also cycles)",
         arg_hint: Some("[plan|read_only|ask|auto|full_access]"),
+        usage_note: None,
         group: SlashCommandGroup::SafetyRecovery,
     },
     SlashCommand {
@@ -307,6 +376,7 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         aliases: &[],
         description: "Enter or leave plan mode (Shift+Tab cycles into it too)",
         arg_hint: Some("[off|show|config]"),
+        usage_note: None,
         group: SlashCommandGroup::SafetyRecovery,
     },
     SlashCommand {
@@ -314,6 +384,7 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         aliases: &[],
         description: "Open the settings picker (plan mode section)",
         arg_hint: None,
+        usage_note: None,
         group: SlashCommandGroup::Everyday,
     },
     SlashCommand {
@@ -321,6 +392,7 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         aliases: &[],
         description: "List pending approvals",
         arg_hint: None,
+        usage_note: None,
         group: SlashCommandGroup::SafetyRecovery,
     },
     SlashCommand {
@@ -328,6 +400,7 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         aliases: &[],
         description: "Approve a pending action",
         arg_hint: Some("<approval-id>"),
+        usage_note: None,
         group: SlashCommandGroup::SafetyRecovery,
     },
     SlashCommand {
@@ -335,6 +408,7 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         aliases: &[],
         description: "Deny a pending action",
         arg_hint: Some("<approval-id>"),
+        usage_note: None,
         group: SlashCommandGroup::SafetyRecovery,
     },
     SlashCommand {
@@ -342,6 +416,7 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         aliases: &[],
         description: "Create a restore checkpoint for one or more paths",
         arg_hint: Some("<path...>"),
+        usage_note: None,
         group: SlashCommandGroup::SafetyRecovery,
     },
     SlashCommand {
@@ -349,13 +424,15 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         aliases: &[],
         description: "List restore checkpoints",
         arg_hint: None,
+        usage_note: None,
         group: SlashCommandGroup::SafetyRecovery,
     },
     SlashCommand {
         name: "restore",
         aliases: &[],
         description: "Restore a checkpoint",
-        arg_hint: Some("<id>"),
+        arg_hint: Some("<checkpoint-id>"),
+        usage_note: None,
         group: SlashCommandGroup::SafetyRecovery,
     },
     SlashCommand {
@@ -363,6 +440,7 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         aliases: &[],
         description: "List installed plugins",
         arg_hint: None,
+        usage_note: None,
         group: SlashCommandGroup::Integrations,
     },
     SlashCommand {
@@ -370,6 +448,7 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         aliases: &[],
         description: "Show provider/model capability information",
         arg_hint: Some("<model>"),
+        usage_note: None,
         group: SlashCommandGroup::ModelContext,
     },
     SlashCommand {
@@ -377,6 +456,7 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         aliases: &[],
         description: "Configure Ollama Cloud API key",
         arg_hint: None,
+        usage_note: None,
         group: SlashCommandGroup::Integrations,
     },
     SlashCommand {
@@ -384,6 +464,7 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         aliases: &[],
         description: "Switch the color theme or show the current one",
         arg_hint: Some("[dark|light]"),
+        usage_note: None,
         group: SlashCommandGroup::Everyday,
     },
     SlashCommand {
@@ -391,6 +472,7 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         aliases: &[],
         description: "Compose the prompt in $VISUAL/$EDITOR (Ctrl+O)",
         arg_hint: None,
+        usage_note: None,
         group: SlashCommandGroup::Everyday,
     },
     SlashCommand {
@@ -398,6 +480,7 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         aliases: &["h"],
         description: "Show command help",
         arg_hint: None,
+        usage_note: None,
         group: SlashCommandGroup::Everyday,
     },
     SlashCommand {
@@ -405,6 +488,7 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         aliases: &["q"],
         description: "Quit the application",
         arg_hint: None,
+        usage_note: None,
         group: SlashCommandGroup::Everyday,
     },
 ];
@@ -501,6 +585,12 @@ pub fn filter_by_prefix(typed: &str) -> Vec<&'static SlashCommand> {
 /// `SlashCmd`. Returns `SlashCmd::Unknown` if the command isn't in
 /// the registry. Shared between the TUI dispatcher (C8) and any
 /// non-interactive command dispatch.
+///
+/// Arity is enforced HERE, from the registry: a command whose hint marks its
+/// argument required answers a bare (or blank) invocation with
+/// [`SlashCmd::Usage`] carrying [`SlashCommand::usage_line`], so the reducer
+/// never sees a required-arg command without its argument and the usage text
+/// exists in exactly one place.
 pub fn parse_slash_command(raw: &str) -> crate::SlashCmd {
     use crate::SlashCmd;
     let trimmed = raw.trim();
@@ -511,10 +601,20 @@ pub fn parse_slash_command(raw: &str) -> crate::SlashCmd {
 
     // Route through the registry so command aliases (/q → /quit) work.
     use COMMAND_REGISTRY;
-    let canonical = COMMAND_REGISTRY
+    let entry = COMMAND_REGISTRY
         .iter()
-        .find(|c| c.name == name.as_str() || c.aliases.contains(&name.as_str()))
-        .map(|c| c.name);
+        .find(|c| c.name == name.as_str() || c.aliases.contains(&name.as_str()));
+    if let Some(cmd) = entry
+        && cmd.requires_arg()
+        && arg.as_deref().is_none_or(|a| a.trim().is_empty())
+    {
+        return SlashCmd::MissingArg(cmd.usage_line());
+    }
+    let canonical = entry.map(|c| c.name);
+    // The guard above proved required-arg commands carry a non-blank
+    // argument; their arms unwrap through this (a miss would surface as an
+    // empty argument, not a panic).
+    let required = |a: Option<String>| a.unwrap_or_default();
 
     match canonical {
         Some("model") => SlashCmd::Model(arg),
@@ -565,32 +665,32 @@ pub fn parse_slash_command(raw: &str) -> crate::SlashCmd {
         },
         Some("compact") => SlashCmd::Compact(arg),
         Some("memory") => SlashCmd::Memory,
-        Some("remember") => SlashCmd::Remember(arg),
-        Some("forget") => SlashCmd::Forget(arg),
+        Some("remember") => SlashCmd::Remember(required(arg)),
+        Some("forget") => SlashCmd::Forget(required(arg)),
         Some("consolidate-memory") => SlashCmd::ConsolidateMemory,
         Some("doctor") => SlashCmd::Doctor,
         Some("tasks") => SlashCmd::Tasks,
-        Some("task") => SlashCmd::Task(arg),
-        Some("pause") => SlashCmd::Pause(arg),
-        Some("resume") => SlashCmd::Resume(arg),
+        Some("task") => SlashCmd::Task(required(arg)),
+        Some("pause") => SlashCmd::Pause(required(arg)),
+        Some("resume") => SlashCmd::Resume(required(arg)),
         Some("cancel") => SlashCmd::Cancel(arg),
         Some("handoff") => SlashCmd::Handoff(arg),
         Some("report") => SlashCmd::Report(arg),
         Some("agents") => SlashCmd::Agents(arg),
         Some("processes") => SlashCmd::Processes,
-        Some("logs") => SlashCmd::Logs(arg),
-        Some("stop") => SlashCmd::Stop(arg),
-        Some("restart") => SlashCmd::Restart(arg),
-        Some("open") => SlashCmd::Open(arg),
+        Some("logs") => SlashCmd::Logs(required(arg)),
+        Some("stop") => SlashCmd::Stop(required(arg)),
+        Some("restart") => SlashCmd::Restart(required(arg)),
+        Some("open") => SlashCmd::Open(required(arg)),
         Some("ports") => SlashCmd::Ports,
         Some("approvals") => SlashCmd::Approvals,
-        Some("approve") => SlashCmd::Approve(arg),
-        Some("deny") => SlashCmd::Deny(arg),
-        Some("checkpoint") => SlashCmd::Checkpoint(arg),
+        Some("approve") => SlashCmd::Approve(required(arg)),
+        Some("deny") => SlashCmd::Deny(required(arg)),
+        Some("checkpoint") => SlashCmd::Checkpoint(required(arg)),
         Some("checkpoints") => SlashCmd::Checkpoints,
-        Some("restore") => SlashCmd::Restore(arg),
+        Some("restore") => SlashCmd::Restore(required(arg)),
         Some("plugins") => SlashCmd::Plugins,
-        Some("model-info") => SlashCmd::ModelInfo(arg),
+        Some("model-info") => SlashCmd::ModelInfo(required(arg)),
         Some("cloud-setup") => SlashCmd::CloudSetup,
         Some("theme") => SlashCmd::Theme(arg),
         Some("editor") => SlashCmd::Editor,
@@ -674,6 +774,84 @@ mod tests {
         let upper = filter_by_prefix("MODEL");
         assert!(upper.iter().any(|c| c.name == "model"));
         assert_eq!(upper[0].name, "model");
+    }
+
+    #[test]
+    fn hints_are_well_formed_and_arity_bearing() {
+        // The bracket is the arity: `<...>` = required, `[...]` = optional.
+        // A malformed hint would silently change a command's arity, so every
+        // hint must open with one of the two.
+        for cmd in COMMAND_REGISTRY {
+            if let Some(hint) = cmd.arg_hint {
+                assert!(
+                    hint.starts_with('<') || hint.starts_with('['),
+                    "/{}'s hint {hint:?} must open with < (required) or [ (optional)",
+                    cmd.name
+                );
+            }
+            if cmd.usage_note.is_some() {
+                assert!(
+                    cmd.requires_arg(),
+                    "/{}: a usage note without a required arg never renders",
+                    cmd.name
+                );
+            }
+        }
+        // Pin one of each so a bracket flip fails by name, not by count.
+        let by_name = |n: &str| COMMAND_REGISTRY.iter().find(|c| c.name == n).unwrap();
+        assert!(by_name("task").requires_arg());
+        assert!(
+            !by_name("model").requires_arg(),
+            "/model opens the picker bare"
+        );
+        assert!(!by_name("clear").requires_arg());
+    }
+
+    #[test]
+    fn usage_line_derives_from_the_entry() {
+        let by_name = |n: &str| COMMAND_REGISTRY.iter().find(|c| c.name == n).unwrap();
+        assert_eq!(by_name("task").usage_line(), "Usage: /task <id>");
+        assert_eq!(
+            by_name("forget").usage_line(),
+            "Usage: /forget <name> (see /memory for names)"
+        );
+        assert_eq!(by_name("clear").usage_line(), "Usage: /clear");
+    }
+
+    #[test]
+    fn required_arg_commands_parse_to_usage_when_bare() {
+        use crate::SlashCmd;
+        // Loop over the registry itself, so a future required-arg command is
+        // covered the day it lands rather than when someone remembers.
+        let required: Vec<_> = COMMAND_REGISTRY
+            .iter()
+            .filter(|c| c.requires_arg())
+            .collect();
+        assert!(
+            required.len() >= 14,
+            "the required-arg family lost members unexpectedly"
+        );
+        for cmd in required {
+            assert_eq!(
+                parse_slash_command(cmd.name),
+                SlashCmd::MissingArg(cmd.usage_line()),
+                "/{} without its argument must answer with usage",
+                cmd.name
+            );
+            // A blank argument ("/task " with trailing space) is missing too —
+            // previously it dispatched an empty id downstream.
+            assert_eq!(
+                parse_slash_command(&format!("{} ", cmd.name)),
+                SlashCmd::MissingArg(cmd.usage_line()),
+                "/{} with a blank argument must answer with usage",
+                cmd.name
+            );
+        }
+        // With the argument present, dispatch proceeds untouched.
+        assert_eq!(
+            parse_slash_command("stop proc-1"),
+            SlashCmd::Stop("proc-1".to_string())
+        );
     }
 
     #[test]
