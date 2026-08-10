@@ -228,10 +228,29 @@ pub fn fold_session(events: impl IntoIterator<Item = SessionEvent>) -> Option<Co
     conversation.id = session_id;
     conversation.forked_from = forked_from;
     conversation.parent_session = parent_session;
-    for event in events {
-        apply(&mut conversation, event);
-    }
+    replay_events(&mut conversation, events);
     Some(conversation)
+}
+
+/// Replay `events` onto a conversation that already holds an earlier prefix
+/// of the same log — the checkpoint half of fold-first resume (see
+/// `docs/design/fold-first-resume.md`).
+///
+/// This is [`fold_session`] minus the identity step, and it is the same
+/// `apply` either way, so a resume that replays a tail and one that folds
+/// from zero cannot diverge in how they interpret an event.
+///
+/// The caller owns the correspondence: `conversation` must be a fold of
+/// exactly the events preceding these. Feed it a mismatched prefix and it
+/// will happily produce a mismatched conversation, which is why the reader
+/// validates the checkpoint's watermark against the log before using it.
+pub fn replay_events(
+    conversation: &mut ConversationHistory,
+    events: impl IntoIterator<Item = SessionEvent>,
+) {
+    for event in events {
+        apply(conversation, event);
+    }
 }
 
 /// Apply one event to a conversation under fold. A mid-stream `started` is

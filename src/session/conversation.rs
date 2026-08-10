@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{DateTime, Local};
 use mermaid_domain::ConversationHistory;
 use mermaid_model::models::{ChatMessage, MessageRole};
@@ -51,6 +51,12 @@ fn read_conversation_capped(path: &Path) -> std::io::Result<String> {
 
 /// Marker left in a message's text when its screenshot bytes are dropped on save.
 const SCREENSHOT_ELIDED_MARKER: &str = "\n[screenshot not persisted]";
+
+/// Top-level key in a checkpoint file naming the last log `seq` folded into
+/// it. Absent on legacy snapshots and on any file written before the log
+/// existed, which is exactly the signal to fold from zero instead of
+/// trusting the checkpoint. See `docs/design/fold-first-resume.md`.
+const CHECKPOINT_SEQ_KEY: &str = "checkpoint_seq";
 
 /// Return a sanitized copy of `messages` with computer-use screenshot bytes
 /// removed before they reach durable storage (#99). Screenshots — which can
@@ -119,9 +125,13 @@ pub fn detect_git_sha(dir: &Path) -> Option<String> {
 }
 
 /// Lightweight session metadata, persisted as an `<id>.meta` sidecar so listing
-/// sessions doesn't have to parse every full transcript. The `<id>.json` stays
-/// the source of truth; a session without a sidecar (older, or pre-sidecar) is
-/// listed by fully parsing it.
+/// sessions doesn't have to read a transcript at all.
+///
+/// A cache of a cache: the log is the truth, the checkpoint materializes it,
+/// and this indexes the checkpoint. Written on every append, because with
+/// checkpoints on a coarse cadence a short session has no checkpoint yet and
+/// would otherwise be invisible to the picker. A session missing one is
+/// listed by reading its checkpoint, or failing that by folding its log.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConversationMeta {
     pub id: String,
@@ -157,6 +167,24 @@ impl ConversationMeta {
 struct FileStamp {
     mtime: SystemTime,
     len: u64,
+}
+
+/// Read a checkpoint file: the conversation plus the log watermark it was
+/// materialized at, when it carries one.
+///
+/// The watermark is read off the raw JSON rather than the deserialized
+/// value, because it is deliberately not a field of `ConversationHistory`
+/// (see [`CHECKPOINT_SEQ_KEY`]). A file without it is a legacy snapshot or
+/// one written by a build that did not stamp, and the caller treats a
+/// missing watermark as "cannot trust this as a checkpoint".
+fn read_checkpoint(path: &Path) -> Result<(ConversationHistory, Option<u64>)> {
+    let json = read_conversation_capped(path)?;
+    let value: serde_json::Value = serde_json::from_str(&json)?;
+    let seq = value
+        .get(CHECKPOINT_SEQ_KEY)
+        .and_then(serde_json::Value::as_u64);
+    let conversation: ConversationHistory = serde_json::from_value(value)?;
+    Ok((conversation, seq))
 }
 
 /// Stat `path` into a [`FileStamp`]. `None` when the file is absent/unreadable.
@@ -231,7 +259,30 @@ impl ConversationManager {
         events: &[mermaid_domain::SessionEvent],
     ) -> Result<()> {
         validate_conversation_id(&snapshot.id)?;
-        self.events.append(snapshot, events)
+        let appended = self.events.append(snapshot, events);
+        // The picker's index rides the append, not the checkpoint. With
+        // checkpoints on a ~200-event cadence a short session has none at
+        // all until it exits, so a sidecar written only alongside one would
+        // leave real sessions invisible to `--resume`. Best-effort as ever:
+        // the sidecar is a cache of a cache.
+        self.write_meta(snapshot);
+        appended
+    }
+
+    /// Write the tiny `<id>.meta` sidecar the session picker lists from.
+    /// Best-effort by construction — every field is recoverable from the
+    /// log, so a failed write costs a slower listing, never data.
+    fn write_meta(&self, conversation: &ConversationHistory) {
+        if conversation.messages().is_empty() {
+            return;
+        }
+        let meta = ConversationMeta::from_history(conversation);
+        if let Ok(json) = serde_json::to_string(&meta) {
+            let path = self
+                .conversations_dir
+                .join(format!("{}.meta", conversation.id));
+            let _ = mermaid_runtime::write_atomic_with_mode(&path, json.as_bytes(), 0o600);
+        }
     }
 
     /// Where a session's event log lives. The compaction bookkeeping row
@@ -326,6 +377,18 @@ impl ConversationManager {
             None => serde_json::to_value(conversation)?,
         };
         mermaid_model::utils::redact_json(&mut value);
+        // Stamp WHICH events this checkpoint already contains. Storage's
+        // business, not the domain's: a `ConversationHistory` describes a
+        // conversation, while the log offset a cache was materialized at
+        // describes the cache. Injected into the serialized object rather
+        // than added as a field, and unknown keys are ignored on the way
+        // back in, so the value round-trips through the reducer untouched
+        // and an older mermaid reads the file as a plain snapshot.
+        if let Some(seq) = self.events.checkpoint_seq(&conversation.id)
+            && let Some(object) = value.as_object_mut()
+        {
+            object.insert(CHECKPOINT_SEQ_KEY.to_string(), seq.into());
+        }
         let json = serde_json::to_string_pretty(&value)?;
 
         // Optimistic-concurrency guard (F73). Without this, two processes (e.g. a
@@ -364,17 +427,10 @@ impl ConversationManager {
         // process compares against our own write, not the pre-save state.
         self.record_stamp(&conversation.id, &path);
 
-        // Write a tiny `<id>.meta` sidecar so `list_conversation_metas` can list
-        // sessions without parsing this whole transcript. Best-effort: a failed
-        // sidecar must never fail the save (the `.json` is the source of truth).
-        let meta = ConversationMeta::from_history(conversation);
-        if let Ok(meta_json) = serde_json::to_string(&meta) {
-            let meta_path = self
-                .conversations_dir
-                .join(format!("{}.meta", conversation.id));
-            let _ =
-                mermaid_runtime::write_atomic_with_mode(&meta_path, meta_json.as_bytes(), 0o600);
-        }
+        // Keep the picker's sidecar current for a checkpoint written without
+        // a preceding append (the QA paths do this). The append writes it
+        // too, which is what covers sessions with no checkpoint yet.
+        self.write_meta(conversation);
 
         Ok(())
     }
@@ -389,40 +445,38 @@ impl ConversationManager {
     /// because that field is on-disk state that drives later saves.
     pub fn load_conversation(&self, id: &str) -> Result<ConversationHistory> {
         validate_conversation_id(id)?;
-        let filename = format!("{id}.json");
-        let path = self.conversations_dir.join(filename);
+        let path = self.conversations_dir.join(format!("{id}.json"));
+        let checkpoint = read_checkpoint(&path);
 
-        let parsed = read_conversation_capped(&path)
-            .map_err(anyhow::Error::from)
-            .and_then(|json| {
-                serde_json::from_str::<ConversationHistory>(&json).map_err(Into::into)
-            });
-        let conversation = match parsed {
-            Ok(conversation) => conversation,
-            // The snapshot is missing or will not parse — fold the event log
-            // instead of failing the load. Only when the fold also has
-            // nothing does the original error surface.
-            Err(error) => match self.fold_conversation_from_log(id)? {
-                Some(folded) => {
-                    tracing::warn!(
-                        id,
-                        %error,
-                        "conversation snapshot unreadable; recovered from the session event log"
-                    );
-                    return Ok(folded);
-                },
-                None => return Err(error),
-            },
-        };
-        // The file name was validated, but the deserialized `id` (which drives
-        // later saves) is independent on-disk state — validate it too.
-        validate_conversation_id(&conversation.id)?;
+        // A session with no log is one that predates it: the snapshot is
+        // all there is, so it is still the truth for that session. Every
+        // other case goes through the log.
+        if !self.events.exists(id) {
+            let (conversation, _) = checkpoint?;
+            validate_conversation_id(&conversation.id)?;
+            self.record_stamp(&conversation.id, &path);
+            return Ok(conversation);
+        }
 
-        // Capture the load-time baseline so a later save can detect a concurrent
-        // writer that touched this file in between (F73).
-        self.record_stamp(&conversation.id, &path);
+        // Checkpoint plus the events after its watermark. Anything that
+        // makes the checkpoint untrustworthy — unreadable, unparseable, no
+        // watermark, or a watermark its log cannot account for — falls
+        // through to folding the log from zero. That fallback is the
+        // property this design is for: the checkpoint is never
+        // load-bearing, only faster.
+        if let Ok((checkpoint, Some(seq))) = checkpoint
+            && validate_conversation_id(&checkpoint.id).is_ok()
+            && let Some(resumed) = self.events.replay_onto(id, checkpoint, seq)?
+        {
+            self.record_stamp(id, &path);
+            return Ok(resumed);
+        }
 
-        Ok(conversation)
+        let folded = self
+            .fold_conversation_from_log(id)?
+            .with_context(|| format!("session {id} has a log that could not be folded"))?;
+        self.record_stamp(id, &path);
+        Ok(folded)
     }
 
     /// Load the most recent *valid* conversation.
@@ -441,46 +495,77 @@ impl ConversationManager {
     /// kept for callers that already handle one and so this can grow a real
     /// failure later.
     pub fn load_last_conversation(&self) -> Result<Option<ConversationHistory>> {
-        let Ok(entries) = fs::read_dir(&self.conversations_dir) else {
-            return Ok(None);
-        };
-
-        let mut candidates: Vec<(std::time::SystemTime, PathBuf)> = entries
-            .flatten()
-            .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
-            .filter_map(|e| {
-                let mtime = e.metadata().ok()?.modified().ok()?;
-                Some((mtime, e.path()))
-            })
-            .collect();
-        candidates.sort_by_key(|(mtime, _)| std::cmp::Reverse(*mtime));
-
-        for (_, path) in candidates {
-            let Ok(json) = read_conversation_capped(&path) else {
-                tracing::warn!(path = %path.display(), "skipping unreadable or oversized conversation file");
-                continue;
+        // Newest-first over LOGS, then checkpoints for sessions that predate
+        // the log. Ranking by log mtime matters: a session's checkpoint can
+        // be many events stale (it is written every ~200), so ordering by
+        // checkpoint mtime would answer with the wrong session.
+        for id in self.session_ids_newest_first() {
+            // One resume algorithm, whatever the entry point: `load_conversation`
+            // already picks checkpoint-plus-replay or a full fold.
+            let conv = match self.load_conversation(&id) {
+                Ok(conv) => conv,
+                Err(error) => {
+                    tracing::warn!(id, %error, "skipping session that would not load");
+                    continue;
+                },
             };
-            let Ok(conv) = serde_json::from_str::<ConversationHistory>(&json) else {
-                tracing::warn!(path = %path.display(), "skipping unparseable conversation file");
-                continue;
-            };
-            // A planted session file with a traversing `id` must not become the
-            // resumed conversation (its id would later drive an out-of-dir save).
-            if validate_conversation_id(&conv.id).is_err() {
-                tracing::warn!(path = %path.display(), id = %conv.id, "skipping conversation with invalid id");
-                continue;
-            }
             // Skip untouched (message-less) sessions — `--continue` resumes the
             // last chat with real history, not a blank one opened and closed.
             if conv.messages().is_empty() {
                 continue;
             }
-            // Capture the load-time baseline for the optimistic-concurrency
-            // guard so a later save can detect a concurrent writer (F73).
-            self.record_stamp(&conv.id, &path);
             return Ok(Some(conv));
         }
         Ok(None)
+    }
+
+    /// Every session id in this project, newest activity first.
+    ///
+    /// Ranked by the LOG's mtime where there is one, since that is what a
+    /// save touches every time; a checkpoint is written on a much coarser
+    /// cadence and would rank a busy session as stale. Sessions with only a
+    /// checkpoint (written before logs existed) rank by that instead.
+    fn session_ids_newest_first(&self) -> Vec<String> {
+        let Ok(entries) = fs::read_dir(&self.conversations_dir) else {
+            return Vec::new();
+        };
+        // Per id, keep the log's mtime if there is a log, else the
+        // checkpoint's. `is_log` wins over recency, not the other way
+        // round: a checkpoint written after the last append is still the
+        // coarser clock.
+        let mut best: HashMap<String, (bool, SystemTime)> = HashMap::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(ext) = path.extension().and_then(|ext| ext.to_str()) else {
+                continue;
+            };
+            let is_log = match ext {
+                "jsonl" => true,
+                "json" => false,
+                _ => continue,
+            };
+            let Some(id) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            if validate_conversation_id(id).is_err() {
+                continue;
+            }
+            let Ok(mtime) = entry.metadata().and_then(|meta| meta.modified()) else {
+                continue;
+            };
+            match best.get(id) {
+                Some((had_log, _)) if *had_log && !is_log => {},
+                _ => {
+                    best.insert(id.to_string(), (is_log, mtime));
+                },
+            }
+        }
+        let mut ranked: Vec<(SystemTime, String)> = best
+            .into_iter()
+            .map(|(id, (_, mtime))| (mtime, id))
+            .collect();
+        ranked.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+        ranked.into_iter().map(|(_, id)| id).collect()
     }
 
     /// List all conversations in the project
@@ -551,6 +636,23 @@ impl ConversationManager {
                 && !seen.contains(stem)
                 && let Ok(json) = read_conversation_capped(path)
                 && let Ok(conv) = serde_json::from_str::<ConversationHistory>(&json)
+                && !conv.messages().is_empty()
+            {
+                seen.insert(stem.to_string());
+                metas.push(ConversationMeta::from_history(&conv));
+            }
+        }
+        // Last resort: a session with a log but neither sidecar nor
+        // checkpoint. Rare (both are written on every save), but the log is
+        // the truth, so a session that has one must be listable — otherwise
+        // the picker would hide a resumable session because a cache is
+        // missing. Folding here is the expensive path, which is exactly why
+        // it runs only for what the two cheap passes missed.
+        for path in &paths {
+            if path.extension().is_some_and(|e| e == "jsonl")
+                && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+                && !seen.contains(stem)
+                && let Ok(Some(conv)) = self.fold_conversation_from_log(stem)
                 && !conv.messages().is_empty()
             {
                 metas.push(ConversationMeta::from_history(&conv));
