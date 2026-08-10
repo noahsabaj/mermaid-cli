@@ -9,6 +9,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The driving loop is a value now, and a timed-out headless run stops
+  leaking its MCP children.** `update(State, Msg) -> (State, Vec<Cmd>)` is the
+  whole product; driving it is five lines -- stamp the clock, reduce, route the
+  commands, stop on exit -- and those five lines were written out longhand in
+  six places, each with its own spelling of the loop around them. The cost was
+  never the duplication, it was that fixes landed once per copy: #76 (a
+  timed-out child dropped its effect runner mid-flight and leaked the MCP
+  servers it was still holding) was fixed in the subagent's loop by moving the
+  deadline into the `select!`, and `mermaid run` kept the identical bug,
+  unfixed, because it was a different function -- its `timeout()` wrapper
+  returned `Err` through `?` while the runner was still sitting on the caller's
+  stack.
+
+  `crate::engine::Engine` now owns the reducer state and the effect sink and
+  exposes that loop once, with three seams for the axes the callers really
+  differ on: where a `Cmd` goes (`EffectSink`), what watches each message
+  before the reducer consumes it (`StepObserver`), and when the loop stops
+  (`DrivePolicy` -- which turns "abort" versus "inject `CancelTurn` and give
+  the turn 15 seconds to unwind" from two undocumented behaviours into two
+  named ones). The deadline is a `select!` arm, so a timed-out run still owns
+  its state and still reaches its own shutdown path.
+
+  The kernel is deliberately synchronous and observer-free, because `--replay`
+  folds a recorded log with no tokio runtime in sight; it now names dropping
+  the emitted commands as a policy (`DropEffects`) rather than leaving it to a
+  `let (next, _cmds)`.
+
+  All four drive loops are callers: the replay fold, `mermaid run`, the
+  subagent's child, and the interactive TUI -- which keeps its own `select!`,
+  because terminal events and the `$EDITOR` round-trip are genuinely
+  run-loop-owned, but now feeds one `step` call, and reaches its stated
+  "~30-line main loop" for the first time. What each of them contributes is
+  now a named thing rather than an inlined one: the `--record` writer and the
+  `RunEvent` projection are observers, `Cmd::ComposeInEditor` is a sink that
+  peels it off, and the child's progress relay is the observer wrapping the
+  state machine it already had.
+
+  `--replay`, `mermaid run`, `--record`, the subagent, and the daemon's NDJSON
+  and `subscribe_task` streams behave exactly as before -- the `RunEvent` wire
+  is untouched and still v1. See `docs/design/engine-extraction.md`; the actor
+  form (`send`/`subscribe`), which daemon attach and multi-session need,
+  follows.
+
 - **`subscribe_task` replays what an attach missed instead of joining
   from-now.** `mermaid task <id> --follow` used to start at whatever
   happened next: attach at minute nine and you saw nine minutes of

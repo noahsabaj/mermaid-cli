@@ -10,14 +10,16 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Result;
-use tokio::time::timeout;
 
 use crate::app::lifecycle::RuntimeLifecycle;
 use crate::cli::OutputFormat;
 use crate::effect::EffectRunner;
+use crate::engine::{
+    DriveExit, DrivePolicy, Engine, Inbox, Observation, OnCancel, StepObserver, StopWhen,
+};
 use crate::providers::ToolRegistry;
 use mermaid_domain::Config;
-use mermaid_domain::{Msg, RUN_EVENT_PROTOCOL_VERSION, RunEvent, State, TurnState, update};
+use mermaid_domain::{Msg, RUN_EVENT_PROTOCOL_VERSION, RunEvent, State};
 use mermaid_model::models::MessageRole;
 
 /// Output shape the CLI prints.
@@ -225,88 +227,75 @@ pub async fn run_non_interactive_with(
         let _ = tx.send(started);
     }
 
+    // Everything the reducer needs is in place: hand the state and the runner
+    // to the engine, which owns the drive from here.
+    let mut engine = Engine::new(state, runner).with_observer(RunStream {
+        stream_ndjson,
+        event_tx: opts.event_tx.clone(),
+    });
+
     // `--plan`: flip into plan mode BEFORE the prompt seeds, through the
     // same reducer path as the interactive `/plan` (path allocation, model
     // swap, prompt injection all included).
+    //
+    // Both this and the seed below go through `reduce`, not `step`: they are
+    // synthetic inputs the driver manufactures, and projecting them onto the
+    // public stream would announce events no client sent.
     if opts.plan {
-        state.now = chrono::Local::now();
-        let (new_state, cmds) = update(state, Msg::Slash(mermaid_domain::SlashCmd::Plan(None)));
-        state = new_state;
-        for cmd in cmds {
-            runner.dispatch(cmd);
-        }
+        engine.reduce(
+            chrono::Local::now(),
+            Msg::Slash(mermaid_domain::SlashCmd::Plan(None)),
+        );
     }
 
-    // Seed the turn.
-    let seed = Msg::SubmitPrompt {
-        text: prompt,
-        attachment_ids: vec![],
-    };
-    // Inject the wall clock as data so the reducer stays pure (Cause 3).
-    state.now = chrono::Local::now();
-    let (new_state, cmds) = update(state, seed);
-    state = new_state;
-    for cmd in cmds {
-        runner.dispatch(cmd);
-    }
+    // Seed the turn. The clock is injected as data so the reducer stays pure.
+    engine.reduce(
+        chrono::Local::now(),
+        Msg::SubmitPrompt {
+            text: prompt,
+            attachment_ids: vec![],
+        },
+    );
 
     let deadline = opts.deadline.unwrap_or(Duration::from_secs(20 * 60));
     let cancel = opts.cancel.clone();
+    let policy = DrivePolicy {
+        stop: StopWhen::Settled,
+        cancel: cancel.clone(),
+        // Cancellation unwinds the turn through the reducer — the same
+        // `Msg::CancelTurn` the TUI's Esc sends — rather than dropping it.
+        on_cancel: OnCancel::Unwind {
+            grace: CANCEL_GRACE,
+        },
+        deadline: Some(deadline),
+    };
+    let mut inbox = Inbox::new(&mut msg_rx).with_lifecycle(&mut lifecycle);
 
-    let final_state = timeout(
-        deadline,
-        drive_to_idle(
-            state,
-            &mut runner,
-            &mut msg_rx,
-            &mut lifecycle,
-            cancel.as_ref(),
-            stream_ndjson,
-            opts.event_tx.as_ref(),
-        ),
-    )
-    .await
-    .map_err(|_| {
-        anyhow::anyhow!(
-            "non-interactive run exceeded {} seconds",
-            deadline.as_secs()
-        )
-    })?;
+    if engine.drive(&mut inbox, &policy).await == DriveExit::TimedOut {
+        let (_, runner, _) = engine.into_parts();
+        return timed_out(runner, "non-interactive run", deadline).await;
+    }
 
-    let mut result = build_result(&final_state);
+    let mut result = build_result(engine.state());
 
     // `--output-schema`: one extra formatting turn on the completed run.
     if let Some(schema) = opts.output_schema.clone() {
         let cancelled = cancel.as_ref().is_some_and(|t| t.is_cancelled());
-        if cancelled || final_state.should_exit || result.response.is_empty() {
+        if cancelled || engine.state().should_exit || result.response.is_empty() {
             result
                 .errors
                 .push("output_schema: skipped (run ended without a final answer)".to_string());
         } else {
-            let final_state = timeout(
-                deadline,
-                run_formatting_turn(
-                    final_state,
-                    schema.clone(),
-                    &mut runner,
-                    &mut msg_rx,
-                    &mut lifecycle,
-                    cancel.as_ref(),
-                    stream_ndjson,
-                    opts.event_tx.as_ref(),
-                ),
-            )
-            .await
-            .map_err(|_| {
-                anyhow::anyhow!(
-                    "output-schema formatting turn exceeded {} seconds",
-                    deadline.as_secs()
-                )
-            })?;
-            apply_schema_outcome(&mut result, &final_state, &schema);
+            let exit = run_formatting_turn(&mut engine, schema.clone(), &mut inbox, &policy).await;
+            if exit == DriveExit::TimedOut {
+                let (_, runner, _) = engine.into_parts();
+                return timed_out(runner, "output-schema formatting turn", deadline).await;
+            }
+            apply_schema_outcome(&mut result, engine.state(), &schema);
         }
     }
 
+    let (_, runner, _) = engine.into_parts();
     runner.shutdown().await;
     // Terminal line of the stream: the aggregated result — sent to daemon
     // subscribers even when stdout NDJSON is off (that's how a
@@ -328,93 +317,61 @@ pub async fn run_non_interactive_with(
     Ok(result)
 }
 
-/// Drive the reducer until the turn is idle and the queue is drained (or the
-/// run is cancelled / the channel closes). Shared by the main run and the
-/// `--output-schema` formatting turn.
-async fn drive_to_idle(
-    mut state: State,
-    runner: &mut EffectRunner,
-    msg_rx: &mut tokio::sync::mpsc::Receiver<Msg>,
-    lifecycle: &mut RuntimeLifecycle,
-    cancel: Option<&tokio_util::sync::CancellationToken>,
+/// How long a cancelled run may keep unwinding before the drive hard-stops.
+/// Generous next to the turn scope's own ~2s teardown bound.
+const CANCEL_GRACE: Duration = Duration::from_secs(15);
+
+/// Everything a headless run says out loud, as an engine observer.
+///
+/// Runs before `update` consumes the message, so the projection sees fields the
+/// reducer strips, and each message is projected ONCE — printed and/or
+/// broadcast. Most messages have no projection at all.
+struct RunStream {
     stream_ndjson: bool,
-    event_tx: Option<&tokio::sync::broadcast::Sender<RunEvent>>,
-) -> State {
-    /// How long a cancelled run may keep unwinding before the drive loop
-    /// hard-stops. Generous next to the turn scope's own ~2s teardown bound.
-    const CANCEL_GRACE: Duration = Duration::from_secs(15);
-    // Set when the cancel token fires; from then on the loop exits as soon as
-    // the turn is idle (queued messages must not seed another turn) or the
-    // grace deadline passes.
-    let mut cancel_deadline: Option<tokio::time::Instant> = None;
-    loop {
-        let idle = matches!(state.turn, TurnState::Idle);
-        if drive_should_stop(
-            idle,
-            state.ui.queued_messages.is_empty(),
-            cancel_deadline.is_some(),
-        ) {
-            break;
-        }
-        let msg = tokio::select! {
-            m = msg_rx.recv() => match m {
-                Some(m) => m,
-                None => break,
-            },
-            s = lifecycle.next_msg() => match s {
-                Some(s) => s,
-                None => continue,
-            },
-            _ = async {
-                match &cancel {
-                    Some(token) => token.cancelled().await,
-                    None => std::future::pending().await,
-                }
-            }, if cancel.is_some() && cancel_deadline.is_none() => {
-                cancel_deadline = Some(tokio::time::Instant::now() + CANCEL_GRACE);
-                Msg::CancelTurn
-            },
-            // NOTE: select! evaluates every branch expression even when its
-            // `if` guard is false, so the sleep target must not unwrap.
-            _ = tokio::time::sleep_until(
-                cancel_deadline
-                    .unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(86_400)),
-            ), if cancel_deadline.is_some() => {
-                tracing::warn!("cancelled run did not unwind within grace; hard-stopping");
-                break;
-            },
-        };
+    event_tx: Option<tokio::sync::broadcast::Sender<RunEvent>>,
+}
+
+impl StepObserver for RunStream {
+    async fn observe(&mut self, obs: Observation<'_>) {
         // Plumbing notices ("Starting the local Ollama server…") have no
-        // renderer here — mirror them to stderr live so the user isn't
-        // staring at silence during an up-to-15s server start. stderr,
-        // not stdout: the response payload must stay clean for scripts.
-        if let Msg::TransientStatus { text } = &msg {
+        // renderer here — mirror them to stderr live so the user isn't staring
+        // at silence during an up-to-15s server start. stderr, not stdout: the
+        // response payload must stay clean for scripts.
+        if let Msg::TransientStatus { text } = obs.msg {
             eprintln!("{text}");
         }
-        // Project the lifecycle message onto the public stream(s) before
-        // `update` consumes it — projected ONCE, printed and/or broadcast.
-        // Most messages have no projection.
-        if (stream_ndjson || event_tx.is_some())
-            && let Some(event) = RunEvent::from_msg(&msg)
-        {
-            if stream_ndjson {
-                emit_run_event(&event);
-            }
-            if let Some(tx) = event_tx {
-                let _ = tx.send(event);
-            }
+        if !self.stream_ndjson && self.event_tx.is_none() {
+            return;
         }
-        state.now = chrono::Local::now();
-        let (new_state, cmds) = update(state, msg);
-        state = new_state;
-        for cmd in cmds {
-            runner.dispatch(cmd);
+        let Some(event) = RunEvent::from_msg(obs.msg) else {
+            return;
+        };
+        if self.stream_ndjson {
+            emit_run_event(&event);
         }
-        if state.should_exit {
-            break;
+        if let Some(tx) = &self.event_tx {
+            let _ = tx.send(event);
         }
     }
-    state
+}
+
+/// Shut the runner down, then report the timeout.
+///
+/// The deadline is a drive-policy arm rather than a `timeout()` wrapper
+/// precisely so this path can exist: the wrapper returned `Err` through `?`
+/// while the runner was still owned by the caller's stack frame, and dropping a
+/// runner mid-flight leaks its MCP children (#76 — fixed in `drive_child` at
+/// the time, and only there).
+/// Takes the runner rather than the engine: this future is live at two await
+/// points inside the driver's own, and moving the engine in would put a
+/// `State`-sized slot in both — which is how `run_non_interactive_with`'s
+/// future crosses `clippy::large_futures`.
+async fn timed_out(runner: EffectRunner, what: &str, deadline: Duration) -> Result<RunResult> {
+    runner.shutdown().await;
+    Err(anyhow::anyhow!(
+        "{what} exceeded {} seconds",
+        deadline.as_secs()
+    ))
 }
 
 /// The synthetic prompt that drives the `--output-schema` formatting turn.
@@ -423,41 +380,22 @@ conforms to the provided schema. Respond with only the JSON object - no prose, n
 
 /// Run the dedicated `--output-schema` formatting turn: set the schema rider
 /// on state (`build_chat_request` drops all tools + adapters engage native
-/// constrained output), seed the format prompt, and drive to idle.
-#[expect(clippy::too_many_arguments)]
-async fn run_formatting_turn(
-    mut state: State,
+/// constrained output), seed the format prompt, and drive to settled.
+async fn run_formatting_turn<O: StepObserver>(
+    engine: &mut Engine<EffectRunner, O>,
     schema: serde_json::Value,
-    runner: &mut EffectRunner,
-    msg_rx: &mut tokio::sync::mpsc::Receiver<Msg>,
-    lifecycle: &mut RuntimeLifecycle,
-    cancel: Option<&tokio_util::sync::CancellationToken>,
-    stream_ndjson: bool,
-    event_tx: Option<&tokio::sync::broadcast::Sender<RunEvent>>,
-) -> State {
-    state.output_schema = Some(schema);
-    state.now = chrono::Local::now();
-    let (new_state, cmds) = update(
-        state,
+    inbox: &mut Inbox<'_>,
+    policy: &DrivePolicy,
+) -> DriveExit {
+    engine.state_mut().output_schema = Some(schema);
+    engine.reduce(
+        chrono::Local::now(),
         Msg::SubmitPrompt {
             text: FORMAT_PROMPT.to_string(),
             attachment_ids: vec![],
         },
     );
-    state = new_state;
-    for cmd in cmds {
-        runner.dispatch(cmd);
-    }
-    drive_to_idle(
-        state,
-        runner,
-        msg_rx,
-        lifecycle,
-        cancel,
-        stream_ndjson,
-        event_tx,
-    )
-    .await
+    engine.drive(inbox, policy).await
 }
 
 /// Fold the formatting turn's outcome into the run result: the reshaped text
@@ -637,19 +575,9 @@ pub fn format_result(result: &RunResult, format: OutputFormat) -> String {
     }
 }
 
-/// Whether the drive loop should stop this iteration.
-///
-/// A completed run stops once the turn is `idle` and nothing is queued. A
-/// *cancelled* run (its grace deadline armed, so `cancelling` is true) stops as
-/// soon as the turn is idle even if messages are queued — a cancel must never
-/// let the queue seed a fresh turn.
-fn drive_should_stop(idle: bool, queue_empty: bool, cancelling: bool) -> bool {
-    idle && (queue_empty || cancelling)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{build_result, drive_should_stop};
+    use super::build_result;
 
     #[test]
     fn build_result_joins_an_auto_continued_reply() {
@@ -848,31 +776,7 @@ mod tests {
         assert_eq!(rx.try_recv().unwrap(), event);
     }
 
-    #[test]
-    fn drive_keeps_running_until_idle() {
-        // Never stop mid-turn, whatever the queue/cancel state.
-        assert!(!drive_should_stop(false, true, false));
-        assert!(!drive_should_stop(false, true, true));
-        assert!(!drive_should_stop(false, false, true));
-    }
-
-    #[test]
-    fn drive_stops_when_idle_and_drained() {
-        // Normal completion: idle with an empty queue.
-        assert!(drive_should_stop(true, true, false));
-    }
-
-    #[test]
-    fn drive_keeps_draining_queue_when_not_cancelling() {
-        // Idle but messages queued and not cancelling → keep going so the
-        // queued input seeds the next turn.
-        assert!(!drive_should_stop(true, false, false));
-    }
-
-    #[test]
-    fn cancel_stops_at_idle_even_with_queued_messages() {
-        // The load-bearing case: once cancelling, an idle turn stops the loop
-        // even with messages queued — the cancel must not start a new turn.
-        assert!(drive_should_stop(true, false, true));
-    }
+    // When to stop driving now belongs to `StopWhen::Settled` in
+    // `crate::engine`, tested there against the real loop rather than against
+    // a boolean predicate standing in for it.
 }

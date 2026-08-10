@@ -1,20 +1,24 @@
 //! The ~30-line main loop.
 //!
-//! Single entry point that composes crossterm events, the reducer,
-//! and the effect runner:
+//! Single entry point that composes crossterm events with the engine:
 //!
 //! ```text
 //!   crossterm events ──┐
-//!                      ├── tokio::select! ── Msg ── update(State, Msg) ── (State, Vec<Cmd>) ── EffectRunner::dispatch ──┐
-//!   effect results  ──┤                                                                                                   │
-//!                      │                                                                          ▲                         │
-//!   tick              ──┘                                                                          │                         │
-//!                                                                                                  └─────── Msg back ◄──────┘
+//!                      ├── tokio::select! ── Msg ── Engine::step ──┐
+//!   effect results   ──┤                                            │
+//!                      │                            ▲               │
+//!   tick             ──┘                            └─ Msg back ◄───┘
 //! ```
 //!
-//! No parallel event loops, no observer callbacks, no polling. One
-//! select!, one reducer call per message, effects dispatched into
-//! structured concurrency per turn.
+//! No parallel event loops, no observer callbacks, no polling. One select!,
+//! one `step` per message, effects dispatched into structured concurrency per
+//! turn.
+//!
+//! The reduce-and-route half lives in [`crate::engine`], shared with the
+//! headless drivers. What stays here is what is genuinely run-loop-owned: the
+//! terminal event stream (the `$EDITOR` round-trip has to drop and rebuild it
+//! around a suspend), the 16ms render tick, and `Cmd::ComposeInEditor`, which
+//! [`RunLoopSink`] peels out of the command flow for exactly that reason.
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -30,11 +34,12 @@ use crate::app::lifecycle::RuntimeLifecycle;
 use crate::app::recorder::{RECORDING_FORMAT_VERSION, Recorder, SessionHeader};
 use crate::app::terminal::TerminalGuard;
 use crate::effect::EffectRunner;
+use crate::engine::{EffectSink, Engine, Observation, StepObserver};
 use crate::providers::ToolRegistry;
 use crate::render::{RenderCache, render};
 use mermaid_domain::Config;
 use mermaid_domain::ConversationHistory;
-use mermaid_domain::{Cmd, Msg, Paste, RuntimeSignal, State, update};
+use mermaid_domain::{Cmd, Msg, Paste, RuntimeSignal, State};
 
 /// Options for `run_interactive_with`. Added so new flags land without
 /// reshuffling positional args.
@@ -50,6 +55,44 @@ pub struct InteractiveOptions {
     /// `--continue` or `--sessions`). When `Some`, the seeded history
     /// replaces `State::session.conversation` before the first frame.
     pub seed_conversation: Option<ConversationHistory>,
+}
+
+/// The interactive loop's effect sink: everything reaches the runner except
+/// `Cmd::ComposeInEditor`, which is run-loop-owned — it suspends the terminal
+/// and drops the crossterm event stream, and only this loop holds either. At
+/// most one compose lands per reducer step by construction (a single Ctrl+O /
+/// `/editor` arm).
+struct RunLoopSink {
+    runner: EffectRunner,
+    compose: Option<String>,
+}
+
+impl EffectSink for RunLoopSink {
+    fn dispatch(&mut self, cmd: Cmd) {
+        if let Cmd::ComposeInEditor { text } = cmd {
+            self.compose = Some(text);
+        } else {
+            self.runner.dispatch(cmd);
+        }
+    }
+}
+
+/// `--record <file>`: one JSONL line per reducer input.
+///
+/// As an observer it writes *before* the reducer runs, so the log captures even
+/// no-op inputs, and it carries the exact `now` the message was reduced under —
+/// which is what lets `--replay` stamp each entry's `ts` back into `state.now`
+/// and recompute the identical states.
+struct RecorderTap(Option<Recorder>);
+
+impl StepObserver for RecorderTap {
+    async fn observe(&mut self, obs: Observation<'_>) {
+        if let Some(r) = self.0.as_mut()
+            && let Err(err) = r.record_msg(obs.now, obs.msg)
+        {
+            tracing::warn!(error = %err, "recorder: failed to record message; --replay may be non-deterministic");
+        }
+    }
 }
 
 /// Resolve `user@host` for the status bar, once, at startup.
@@ -187,7 +230,6 @@ pub async fn run_interactive_with(
     let mut events = Some(EventStream::new());
     let mut lifecycle = RuntimeLifecycle::new();
     let mut tick = interval(Duration::from_millis(16));
-    let mut recorder = opts.recorder;
 
     // Boot effects: MCP server init (if configured). Instructions/memory are
     // loaded by the config watcher started above (#45), not here.
@@ -202,6 +244,19 @@ pub async fn run_interactive_with(
             state.session.conversation.tasks.clone(),
         ));
     }
+
+    // Everything the reducer needs is in place: hand the state and the runner
+    // to the engine, which owns the reduce-and-route step from here. The
+    // `select!` below stays local — terminal events and the `$EDITOR`
+    // round-trip are genuinely run-loop-owned — but it now feeds one call.
+    let mut engine = Engine::new(
+        state,
+        RunLoopSink {
+            runner,
+            compose: None,
+        },
+    )
+    .with_observer(RecorderTap(opts.recorder));
 
     // Which `select!` arm fired. Terminal events are handled *after* the
     // select! returns so the paste-coalescing drain can borrow `events`
@@ -229,17 +284,17 @@ pub async fn run_interactive_with(
     // finished, Ctrl+L), `Terminal::clear()` resets ratatui's back buffer so
     // the next draw repaints every cell — the only way to overwrite bytes
     // some other process wrote directly to the tty (ghost cells).
-    let mut seen_redraw_seq = state.ui.full_redraw_seq;
+    let mut seen_redraw_seq = engine.state().ui.full_redraw_seq;
     loop {
         // Render the current state. ratatui's draw closure captures
-        // &state, so we don't thread &mut state through the renderer.
+        // &State, so we don't thread &mut State through the renderer.
         {
             let term = terminal
                 .as_mut()
                 .expect("terminal guard is alive while the render loop runs")
                 .inner_mut();
-            if state.ui.full_redraw_seq != seen_redraw_seq {
-                seen_redraw_seq = state.ui.full_redraw_seq;
+            if engine.state().ui.full_redraw_seq != seen_redraw_seq {
+                seen_redraw_seq = engine.state().ui.full_redraw_seq;
                 // NOT `Terminal::clear()`: it snapshots the cursor with an
                 // ESC[6n round-trip, and the reply never arrives — the
                 // `EventStream` reader thread is parked holding crossterm's
@@ -255,7 +310,7 @@ pub async fn run_interactive_with(
                     break;
                 }
             }
-            if let Err(err) = term.draw(|f| render(&state, &mut rstate, f)) {
+            if let Err(err) = term.draw(|f| render(engine.state(), &mut rstate, f)) {
                 exit_result = Err(err.into());
                 break;
             }
@@ -402,36 +457,15 @@ pub async fn run_interactive_with(
         let Some(msg) = msg else { continue };
 
         // Inject the wall clock as data (Cause 3): one stamp per tick, shared
-        // by the recording and the reducer. The recorded `ts` IS the
+        // by the recorder observer and the reducer. The recorded `ts` IS the
         // `state.now` this Msg was reduced under, so `--replay` folds the
         // same log by stamping each entry's `ts` here and recomputes the
         // exact same states.
-        let now = chrono::Local::now();
+        let outcome = engine.step_at(chrono::Local::now(), msg).await;
 
-        // Optional recording: one JSONL line per Msg, before the
-        // reducer runs so the log captures even no-op inputs.
-        if let Some(r) = recorder.as_mut()
-            && let Err(err) = r.record_msg(now, &msg)
-        {
-            tracing::warn!(error = %err, "recorder: failed to record message; --replay may be non-deterministic");
-        }
-
-        state.now = now;
-        let (new_state, cmds) = update(state, msg);
-        state = new_state;
-        // `ComposeInEditor` is run-loop-owned (it suspends the terminal +
-        // event stream, which only this loop holds); everything else goes to
-        // the effect runner. At most one compose per reducer step by
-        // construction (single Ctrl+O / /editor arm).
-        let mut compose_draft: Option<String> = None;
-        for cmd in cmds {
-            if let Cmd::ComposeInEditor { text } = cmd {
-                compose_draft = Some(text);
-            } else {
-                runner.dispatch(cmd);
-            }
-        }
-        if let Some(draft) = compose_draft {
+        // The sink peeled `ComposeInEditor` off on its way past; run it here,
+        // where the terminal and event stream it has to suspend actually live.
+        if let Some(draft) = engine.sink_mut().compose.take() {
             match crate::app::editor::compose_in_editor(&mut terminal, &mut events, draft).await {
                 // Through pending_msgs, so the result flows through the
                 // recorder like any input — --replay never launches an editor.
@@ -443,10 +477,12 @@ pub async fn run_interactive_with(
             }
         }
 
-        if state.should_exit {
+        if outcome.should_exit {
             break;
         }
     }
+
+    let (state, sink, RecorderTap(mut recorder)) = engine.into_parts();
 
     // Seal the recording with a fingerprint of the final session, so a
     // future `--replay` can verify its fold reproduces what this live
@@ -470,7 +506,7 @@ pub async fn run_interactive_with(
 
     // Orderly shutdown — wait for any pending saves / scope cleanup. Runs even
     // when the loop broke on a draw error, so MCP children are reaped cleanly.
-    runner.shutdown().await;
+    sink.runner.shutdown().await;
     exit_result
 }
 
