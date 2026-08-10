@@ -982,6 +982,22 @@ fn run_qa_compact_smoke(
     for message in synthetic_compaction_messages(turns) {
         state.session.append(message, state.now);
     }
+    // Persist the PRE-compaction session the way the live cadence would
+    // (the reducer saves after nearly every message). Without this the log
+    // would be created by the compaction save itself and never hold the
+    // messages the compaction drops — which is exactly what the check at
+    // the end of this smoke is about.
+    let pre_manager = ConversationManager::new(cwd)?;
+    let pre_snapshot = state.session.snapshot_conversation();
+    let pre_events = state.session.drain_events(&pre_snapshot);
+    pre_manager.append_session_events(&pre_snapshot, &pre_events)?;
+    pre_manager.save_conversation(&pre_snapshot)?;
+    let dropped_probe = state
+        .session
+        .messages()
+        .first()
+        .map(|message| message.content.clone())
+        .context("synthetic history is empty")?;
 
     let (state_after_slash, compact_cmds) = update(
         state,
@@ -1071,17 +1087,19 @@ fn run_qa_compact_smoke(
                         .to_string(),
                 );
             },
-            Cmd::SaveCompactionArchive {
-                archive,
+            Cmd::SaveCompaction {
                 conversation,
+                events,
                 ..
             } => {
-                // Archive first, then the stripped conversation (same order
-                // as the live effect path), with `?` so a failed archive
-                // aborts before the conversation is overwritten.
+                // Boundary event first, then the stripped conversation (same
+                // order as the live effect path), with `?` so a failed
+                // append aborts before the conversation is overwritten —
+                // the log is the only record of the dropped messages.
+                manager.append_session_events(&conversation, &events)?;
                 archive_path = Some(
                     manager
-                        .save_compaction_archive(&archive)?
+                        .event_log_path(&conversation.id)
                         .display()
                         .to_string(),
                 );
@@ -1123,9 +1141,29 @@ fn run_qa_compact_smoke(
     checks.push("conversation file saved".to_string());
     anyhow::ensure!(
         std::path::Path::new(&archive_path).exists(),
-        "compaction archive file missing after save"
+        "session event log missing after compaction save"
     );
-    checks.push("archive file saved".to_string());
+    checks.push("session event log saved".to_string());
+    // The claim the archive file used to carry: the dropped messages are
+    // still recoverable. They are not copied anywhere now, so read the log
+    // and require both the boundary marker and a message the compaction
+    // removed from the live transcript.
+    let log = std::fs::read_to_string(&archive_path).context("read the session event log")?;
+    anyhow::ensure!(
+        log.contains("\"type\":\"compaction\""),
+        "event log has no compaction boundary"
+    );
+    anyhow::ensure!(
+        !messages
+            .iter()
+            .any(|message| message.content == dropped_probe),
+        "the probe message was not actually dropped by the compaction"
+    );
+    anyhow::ensure!(
+        log.contains(dropped_probe.trim()),
+        "event log lost a message the compaction dropped"
+    );
+    checks.push("dropped messages survive in the event log".to_string());
     anyhow::ensure!(
         compactions[0].archived_message_count > 0 && compactions[0].preserved_message_count > 0,
         "compaction did not archive and preserve messages"

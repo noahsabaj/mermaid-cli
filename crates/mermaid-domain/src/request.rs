@@ -18,8 +18,8 @@ use mermaid_model::records::TaskStatus;
 use super::action_display::action_display_for;
 use super::cmd::{ChatRequest, Cmd};
 use super::compaction::{
-    CompactionArchive, CompactionRequest, CompactionResult, CompactionTrigger,
-    context_exceeds_hard_limit, format_compact_count, should_auto_compact,
+    CompactionRequest, CompactionResult, CompactionTrigger, context_exceeds_hard_limit,
+    format_compact_count, should_auto_compact,
 };
 use super::msg::{ClipboardRead, KeyCode, KeyMods, Msg, Paste, SlashCmd};
 use super::state::{

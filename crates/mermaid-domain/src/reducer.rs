@@ -36,7 +36,7 @@ use mermaid_model::records::TaskStatus;
 use super::action_display::action_display_for;
 use super::cmd::Cmd;
 use super::compaction::{
-    CompactionArchive, CompactionRequest, CompactionResult, CompactionTrigger, format_compact_count,
+    CompactionRequest, CompactionResult, CompactionTrigger, format_compact_count,
 };
 use super::msg::{ClipboardRead, KeyCode, KeyMods, Msg, Paste, SlashCmd};
 use super::picker::{PickerStep, picker_step};
@@ -3810,16 +3810,11 @@ pub(crate) fn handle_compaction_finished(
 
     let conversation_id = state.session.conversation.id.clone();
     let mut record = result.record;
-    record.archive_path = Some(format!(
-        ".mermaid/compactions/{}/{}.json",
-        conversation_id, record.id
-    ));
-    let archive = CompactionArchive {
-        id: record.id.clone(),
-        conversation_id,
-        created_at: record.created_at,
-        messages: result.archived_messages,
-    };
+    // The dropped messages are not copied to a sidecar file any more: they
+    // are the earlier `message` events of the session log, and the
+    // `compaction` event this turn emits marks the boundary. So the
+    // recorded path points at the log that holds both.
+    record.archive_path = Some(format!(".mermaid/conversations/{conversation_id}.jsonl"));
 
     state
         .session
@@ -3923,11 +3918,11 @@ pub(crate) fn handle_compaction_finished(
 
     // The compaction's replacement message already carries the receipt text, so
     // the old transient banner that repeated it is simply gone.
-    // SaveCompactionArchive persists the stripped conversation.
+    // SaveCompaction appends the boundary event, then persists the stripped
+    // conversation.
     let conversation = state.session.conversation.clone();
     let events = state.session.drain_events(&conversation);
-    cmds.push(Cmd::SaveCompactionArchive {
-        archive,
+    cmds.push(Cmd::SaveCompaction {
         record,
         conversation,
         events,

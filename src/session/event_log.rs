@@ -66,11 +66,17 @@ impl EventLog {
     /// Append `events` for `snapshot`'s session, creating the log on first
     /// touch. The caller validates the session id before this runs.
     ///
-    /// Creation writes the snapshot BACKFILL alone and drops `events`: the
-    /// snapshot already contains those events' effects, so writing both
-    /// would double-count them in a fold. Only an existing log takes the
-    /// granular batch. A message-less session gets no log, mirroring the
-    /// snapshot writer's empty-session guard.
+    /// Creation writes the snapshot BACKFILL, then only the batch's
+    /// IDEMPOTENT events. The distinction matters: an additive event
+    /// (`message`, `action`, …) is already folded into the snapshot, so
+    /// writing it after the backfill would double it — while an assigning
+    /// event (`compaction`, `reset`, `state`, `tasks`) restates what the
+    /// backfill already says and merely carries a fact the snapshot's
+    /// transcript cannot, such as a compaction boundary. Dropping those too
+    /// silently lost the boundary whenever a compaction created the log.
+    ///
+    /// A message-less session gets no log, mirroring the snapshot writer's
+    /// empty-session guard.
     pub(crate) fn append(
         &self,
         snapshot: &ConversationHistory,
@@ -99,12 +105,13 @@ impl EventLog {
         events: &[SessionEvent],
     ) -> Result<()> {
         let creating = !path.exists();
-        let backfill = if creating {
-            backfill_events(snapshot)
+        let batch: Vec<SessionEvent> = if creating {
+            let mut seeded = backfill_events(snapshot);
+            seeded.extend(events.iter().filter(|e| is_idempotent(e)).cloned());
+            seeded
         } else {
-            Vec::new()
+            events.to_vec()
         };
-        let batch: &[SessionEvent] = if creating { &backfill } else { events };
         if batch.is_empty() {
             return Ok(());
         }
@@ -118,7 +125,7 @@ impl EventLog {
         };
         let mut file = open_append(path)?;
         let ts = chrono::Local::now();
-        for event in batch {
+        for event in &batch {
             let Some(event) = sanitize_event(event) else {
                 continue;
             };
@@ -146,6 +153,13 @@ impl EventLog {
 
     /// The next `seq` for `id`: the cached cursor, or a one-time scan of
     /// the existing file (line count) on first touch.
+    ///
+    /// The scan counts line terminators rather than draining
+    /// `BufRead::lines()`, because that iterator does NOT stop at an I/O
+    /// error — it yields `Err` and keeps going, so a path whose every read
+    /// fails spins forever instead of failing. Linux reaches exactly that
+    /// state when the path is a directory: `File::open` succeeds there and
+    /// every subsequent read returns `EISDIR`.
     fn next_seq_for(&self, id: &str, path: &Path) -> Result<u64> {
         if let Some(seq) = self
             .next_seq
@@ -155,12 +169,29 @@ impl EventLog {
         {
             return Ok(*seq);
         }
-        if !path.exists() {
+        let Ok(meta) = std::fs::metadata(path) else {
             return Ok(0);
-        }
+        };
+        anyhow::ensure!(
+            meta.is_file(),
+            "session event log path {} is not a file",
+            path.display()
+        );
         let file = File::open(path)
             .with_context(|| format!("open {} to derive the seq cursor", path.display()))?;
-        Ok(BufReader::new(file).lines().count() as u64)
+        let mut reader = BufReader::new(file);
+        let mut line = Vec::new();
+        let mut seq = 0u64;
+        loop {
+            line.clear();
+            let read = reader
+                .read_until(b'\n', &mut line)
+                .with_context(|| format!("scan {} for the seq cursor", path.display()))?;
+            if read == 0 {
+                return Ok(seq);
+            }
+            seq += 1;
+        }
     }
 
     /// Rebuild the conversation from the log. `Ok(None)` when there is no
@@ -173,6 +204,11 @@ impl EventLog {
         let Ok(meta) = std::fs::metadata(&path) else {
             return Ok(None);
         };
+        // Not a file means there is nothing to fold. Worth stating: on Linux
+        // a directory here would open cleanly and then fail every read.
+        if !meta.is_file() {
+            return Ok(None);
+        }
         if meta.len() > MAX_LOG_BYTES {
             tracing::warn!(path = %path.display(), "session event log over the read cap; not folding");
             return Ok(None);
@@ -234,6 +270,25 @@ fn backfill_events(snapshot: &ConversationHistory) -> Vec<SessionEvent> {
         store: snapshot.tasks.clone(),
     });
     events
+}
+
+/// Does folding this event ASSIGN state (so replaying it after a backfill
+/// of the same snapshot is a no-op) rather than ADD to it? Exhaustive on
+/// purpose: a new event type must state which side it is on, because
+/// getting it wrong either doubles content or loses a fact.
+const fn is_idempotent(event: &SessionEvent) -> bool {
+    match event {
+        SessionEvent::Compaction { .. }
+        | SessionEvent::Reset { .. }
+        | SessionEvent::State(_)
+        | SessionEvent::Tasks { .. } => true,
+        SessionEvent::Started { .. }
+        | SessionEvent::Message { .. }
+        | SessionEvent::InsertedBeforeLast { .. }
+        | SessionEvent::Action { .. }
+        | SessionEvent::Image { .. }
+        | SessionEvent::Input { .. } => false,
+    }
 }
 
 /// Screenshot policy at the disk boundary (#99), matching the snapshot
@@ -453,6 +508,64 @@ mod tests {
     }
 
     #[test]
+    fn creating_a_log_keeps_idempotent_events_and_drops_additive_ones() {
+        // The case that motivated the rule: a compaction is the FIRST thing
+        // to touch a session's log (an earlier append failed, or the file
+        // was removed). Dropping the whole batch lost the boundary, which is
+        // the one fact the stripped snapshot cannot carry.
+        let root = temp_root("idempotent_carry");
+        let manager = ConversationManager::new(&root).unwrap();
+        let mut state = driven_state(&root);
+        let snapshot = state.session.snapshot_conversation();
+        let mut events = state.session.drain_events(&snapshot);
+        events.push(SessionEvent::Compaction {
+            at: fixed_ts(),
+            record: mermaid_domain::CompactionEvent {
+                id: "c-first".to_string(),
+                trigger: mermaid_domain::CompactionTrigger::Manual,
+                created_at: fixed_ts(),
+                before_tokens: 100,
+                after_tokens: 10,
+                archived_message_count: 4,
+                preserved_message_count: 2,
+                preserved_turn_count: 1,
+                summary_tokens: 5,
+                duration_secs: 0.1,
+                review_status: mermaid_domain::CompactionReviewStatus::Reviewed,
+                review_error: None,
+                focus: None,
+                archive_path: None,
+            },
+            replacement: snapshot.messages().to_vec(),
+        });
+        // The batch also carries the additive events for the same messages.
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, SessionEvent::Message { .. })),
+            "the fixture must carry additive events for this to prove anything"
+        );
+
+        manager.append_session_events(&snapshot, &events).unwrap();
+        let folded = manager
+            .fold_conversation_from_log(&snapshot.id)
+            .unwrap()
+            .expect("folds");
+        assert_eq!(
+            folded.messages().len(),
+            snapshot.messages().len(),
+            "additive events must not double the backfilled transcript"
+        );
+        assert_eq!(
+            folded.compactions.len(),
+            1,
+            "the compaction boundary must survive log creation"
+        );
+        assert_eq!(folded.compactions[0].id, "c-first");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn seq_continues_across_manager_instances() {
         let root = temp_root("seq_scan");
         let manager = ConversationManager::new(&root).unwrap();
@@ -538,6 +651,39 @@ mod tests {
             .unwrap()
             .expect("prefix folds");
         assert_eq!(folded.messages().len(), 2, "the pre-tear state survives");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_blocked_log_path_errors_instead_of_spinning() {
+        // A directory where the log file goes. On Linux `File::open`
+        // succeeds on a directory and every read then fails, which made
+        // `BufRead::lines().count()` loop forever rather than error — CI hit
+        // it as a 180s test timeout, not a failure. Both the append and the
+        // fold must reach a verdict here.
+        let root = temp_root("blocked_path");
+        let manager = ConversationManager::new(&root).unwrap();
+        let mut state = driven_state(&root);
+        let snapshot = state.session.snapshot_conversation();
+        let events = state.session.drain_events(&snapshot);
+        std::fs::create_dir_all(
+            manager
+                .conversations_dir()
+                .join(format!("{}.jsonl", snapshot.id)),
+        )
+        .expect("plant a directory in the log's place");
+
+        assert!(
+            manager.append_session_events(&snapshot, &events).is_err(),
+            "append must fail on a blocked path"
+        );
+        assert!(
+            manager
+                .fold_conversation_from_log(&snapshot.id)
+                .expect("fold must not error out")
+                .is_none(),
+            "a non-file path folds to nothing"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
