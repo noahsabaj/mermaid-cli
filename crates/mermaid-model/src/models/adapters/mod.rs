@@ -2,8 +2,12 @@
 //!
 //! Contains implementations of the Model trait for Ollama, the
 //! OpenAI-compatible long tail, Anthropic Claude, and Google Gemini.
+//!
+//! Each owns its wire format and nothing else: [`driver`] holds the read
+//! loop they all used to carry a copy of.
 
 pub mod anthropic;
+pub mod driver;
 pub mod gemini;
 pub mod ollama;
 pub mod ollama_sizing;

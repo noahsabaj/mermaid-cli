@@ -56,25 +56,24 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::StreamExt;
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::constants::MAX_RESPONSE_CHARS;
 use crate::models::ModelCapabilities;
+use crate::models::adapters::driver::{Flow, Framing, StreamProtocol, drive_stream};
 use crate::models::config::ModelConfig;
 use crate::models::error::{BackendError, ModelError, Result};
 use crate::models::reasoning::{
     ReasoningCapability, ReasoningChunk, ReasoningLevel, nearest_effort,
 };
-use crate::models::stream::{StreamEvent, StreamSink, emit_all};
+use crate::models::stream::{StreamEvent, StreamSink};
 use crate::models::tool_call::{FunctionCall, ToolCall};
 use crate::models::traits::Model;
 use crate::models::types::{
     ChatMessage, FinishReason, MessageAudience, MessageRole, ModelResponse, TokenUsage,
 };
-use crate::utils::drain_sse_events;
 
 use super::ModelLimits;
 
@@ -734,39 +733,44 @@ impl GeminiAdapter {
         if !response.status().is_success() {
             return Err(http_error_from_response(response).await);
         }
+        drive_stream(
+            response.bytes_stream(),
+            GeminiStream {
+                state: StreamState::default(),
+                model_name: self.model_name.clone(),
+                hide_reasoning_trace,
+            },
+            sink,
+        )
+        .await
+    }
+}
 
-        let mut stream = response.bytes_stream();
-        let mut buf: Vec<u8> = Vec::new();
-        let mut state = StreamState::default();
+/// Gemini's wire format as a [`StreamProtocol`]: every SSE event is a
+/// partial `GenerateContentResponse`, and the stream ends when the body
+/// does — there is no terminal frame to watch for, only a `finishReason`
+/// that has to have arrived by then.
+struct GeminiStream {
+    state: StreamState,
+    model_name: String,
+    hide_reasoning_trace: bool,
+}
 
-        while let Some(chunk_result) = stream.next().await {
-            let chunk = chunk_result.map_err(|e| ModelError::StreamError(e.to_string()))?;
-            // Bound SSE reassembly: a server that streams bytes but never emits
-            // the `\n\n` event separator would otherwise grow `buf` without
-            // bound. At this point `buf` holds only the un-terminated residue
-            // from the previous drain, so this never trips on legitimately
-            // buffered complete events (#50).
-            if buf.len() > crate::constants::MAX_SSE_BUFFER_BYTES {
-                return Err(ModelError::StreamError(format!(
-                    "SSE stream exceeded {} byte reassembly cap without a complete event",
-                    crate::constants::MAX_SSE_BUFFER_BYTES
-                )));
-            }
-            buf.extend_from_slice(&chunk);
+impl StreamProtocol for GeminiStream {
+    const FRAMING: Framing = Framing::Sse;
 
-            for payload in drain_sse_events(&mut buf) {
-                let mut events: Vec<StreamEvent> = Vec::new();
-                process_chunk_payload(&payload, &mut state, &mut events, hide_reasoning_trace)?;
-                emit_all(sink, events).await?;
-            }
-        }
+    fn on_frame(&mut self, frame: &str, out: &mut Vec<StreamEvent>) -> Result<Flow> {
+        process_chunk_payload(frame, &mut self.state, out, self.hide_reasoning_trace)?;
+        Ok(Flow::Continue)
+    }
 
+    fn finish(self, _out: &mut Vec<StreamEvent>) -> Result<ModelResponse> {
         // F56: a stream that ended before any candidate `finishReason` was
         // dropped mid-response. Surface a stream error instead of a clean `Ok`
         // (with `stop_reason: None`) that would be indistinguishable from a real
         // completion. A `MAX_TOKENS` truncation set a real `finishReason`, so it
         // does NOT trip this and is preserved.
-        if stream_closed_abnormally(state.finish_reason.as_ref()) {
+        if stream_closed_abnormally(self.state.finish_reason.as_ref()) {
             return Err(ModelError::StreamError(
                 "Gemini stream closed before a terminal finishReason; the \
                  connection was likely dropped mid-response"
@@ -774,25 +778,24 @@ impl GeminiAdapter {
             ));
         }
 
-        // F3: wrapper emits the authoritative `Done`. See
+        // F3: the wrapper emits the authoritative `Done`. See
         // adapters/anthropic.rs for rationale.
-
-        let usage = state.usage();
+        let usage = self.state.usage();
 
         Ok(ModelResponse {
-            content: state.text_acc,
+            content: self.state.text_acc,
             usage,
-            model_name: self.model_name.clone(),
-            stop_reason: state.finish_reason,
-            thinking: if state.thinking_acc.is_empty() {
+            model_name: self.model_name,
+            stop_reason: self.state.finish_reason,
+            thinking: if self.state.thinking_acc.is_empty() {
                 None
             } else {
-                Some(state.thinking_acc)
+                Some(self.state.thinking_acc)
             },
-            tool_calls: if state.tool_calls_done.is_empty() {
+            tool_calls: if self.state.tool_calls_done.is_empty() {
                 None
             } else {
-                Some(state.tool_calls_done)
+                Some(self.state.tool_calls_done)
             },
             provider_continuation: None,
         })
