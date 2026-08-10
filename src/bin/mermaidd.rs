@@ -164,8 +164,8 @@ async fn scheduler_drain_loop() {
         // With a permit in hand, wait until a task is claimable. Holding the
         // permit while idle is fine — only executions consume permits.
         let task = loop {
-            let claimed = mermaid_runtime::RuntimeStore::open_default()
-                .and_then(|store| store.tasks().claim_next_queued());
+            let claimed =
+                mermaid_runtime::with_shared_store(|store| store.tasks().claim_next_queued());
             match claimed {
                 Ok(Some(task)) => break task,
                 Ok(None) => {

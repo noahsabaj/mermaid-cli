@@ -69,7 +69,7 @@ pub use storage::{
     OUTCOME_LABEL_FAILURE, OUTCOME_LABEL_SUCCESS, OUTCOME_LABEL_UNKNOWN, OUTCOME_SOURCE_SYSTEM,
     PairingTokenRecord, PluginInstallRecord, ProcessRecord, ProcessStatus, ProviderProbeRecord,
     RuntimeStore, SessionRecord, TaskPriority, TaskRecord, TaskStatus, TaskTimelineEvent,
-    ToolRunRecord, data_dir,
+    ToolRunRecord, data_dir, with_shared_store,
 };
 pub use worktree::{AgentWorktree, MergeOutcome, gc_orphaned_worktrees};
 // Unix-only: backs the `#[cfg(unix)]` daemon singleton via `flock`.

@@ -331,7 +331,7 @@ pub(super) fn record_provider_capabilities(
     caps: &mermaid_model::models::ModelCapabilities,
 ) {
     let (provider, model) = split_model_id(model_id);
-    if let Ok(store) = mermaid_runtime::RuntimeStore::open_default() {
+    let _ = mermaid_runtime::with_shared_store(|store| {
         for (key, value) in [
             ("tools_support", caps.supports_tools.to_string()),
             ("vision_support", caps.supports_vision.to_string()),
@@ -362,7 +362,8 @@ pub(super) fn record_provider_capabilities(
                     error: None,
                 });
         }
-    }
+        Ok(())
+    });
 }
 
 pub(super) fn split_model_id(model_id: &str) -> (String, String) {

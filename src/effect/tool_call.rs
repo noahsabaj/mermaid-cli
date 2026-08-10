@@ -227,19 +227,18 @@ pub(super) async fn start_runtime_tool_run(
     let tool_name = tool_name.to_string();
     let args_json = redacted_json_string(args);
     tokio::task::spawn_blocking(move || {
-        mermaid_runtime::RuntimeStore::open_default()
-            .and_then(|store| {
-                store.tool_runs().start(mermaid_runtime::NewToolRun {
-                    id: None,
-                    task_id,
-                    turn_id: Some(turn.0.to_string()),
-                    call_id: Some(call_id.0.to_string()),
-                    tool_name,
-                    args_json,
-                })
+        mermaid_runtime::with_shared_store(|store| {
+            store.tool_runs().start(mermaid_runtime::NewToolRun {
+                id: None,
+                task_id,
+                turn_id: Some(turn.0.to_string()),
+                call_id: Some(call_id.0.to_string()),
+                tool_name,
+                args_json,
             })
-            .map(|record| record.id)
-            .ok()
+        })
+        .map(|record| record.id)
+        .ok()
     })
     .await
     .ok()
@@ -267,11 +266,11 @@ pub(super) fn finish_runtime_tool_run(
     // Fire-and-forget telemetry write on the blocking pool — don't stall the
     // tool-finish path waiting on rusqlite (#39).
     tokio::task::spawn_blocking(move || {
-        if let Ok(store) = mermaid_runtime::RuntimeStore::open_default() {
-            let _ = store
+        let _ = mermaid_runtime::with_shared_store(|store| {
+            store
                 .tool_runs()
-                .finish(&tool_run_id, &status, output_json.as_deref());
-        }
+                .finish(&tool_run_id, &status, output_json.as_deref())
+        });
     });
 }
 
@@ -310,11 +309,11 @@ pub(super) fn runtime_model_info_text(model: &str) -> String {
                 .unwrap_or_else(|| "unknown".to_string())
         ),
     ];
-    if let Ok(store) = mermaid_runtime::RuntimeStore::open_default()
-        && let Ok(probes) = store
+    if let Ok(probes) = mermaid_runtime::with_shared_store(|store| {
+        store
             .provider_probes()
             .list(Some(&snapshot.provider), Some(&snapshot.model))
-        && !probes.is_empty()
+    }) && !probes.is_empty()
     {
         lines.push(String::new());
         lines.push("Cached provider reality records:".to_string());
