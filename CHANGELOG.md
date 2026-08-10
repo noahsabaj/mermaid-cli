@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Modal precedence is one resolver, and every picker shares one
+  navigation core.** Which surface owned a keystroke used to be a 25-deep
+  chain of early-return guards in `handle_key`; which pane owned the bottom
+  of the screen was TWO hand-maintained ladders in the render layer (one
+  sizing the zone, one drawing it) that had to be edited in lockstep --
+  the family behind the vanished-composer bug. `State::focus()` now names
+  the precedence once (approval > question > confirm > picker > composer),
+  key routing dispatches on it, and the render layer's new single
+  `BottomPane` decision derives from the same resolver -- what draws and
+  what receives keys are one authority, and the slash palette's filtered
+  entries are computed once per frame instead of once per ladder.
+
+  The four `UiMode` pickers (model, conversations, rewind, plan config)
+  each hand-rolled the same Up/Down/Enter/Escape machine -- the
+  duplication family behind the paste-into-the-file-picker bug. The
+  machine now exists once (`picker::picker_step`); each handler keeps only
+  its confirm semantics and extra keys (query typing, value cycling). The
+  approval-modal and confirm-modal key handlers extracted verbatim into
+  named functions on the way. Frame output is pinned unchanged by the
+  snapshot and PTY suites.
+
 - **One store handle per process on the hot paths.** Every runtime-store
   touch used to run its own `RuntimeStore::open_default()` -- the per-call
   open, ACL probe, and migration check repeated on paths that fire per tool

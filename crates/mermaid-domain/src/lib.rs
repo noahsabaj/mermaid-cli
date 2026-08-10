@@ -37,6 +37,7 @@ pub mod conversation;
 pub mod file_mention;
 pub mod image_token;
 pub mod msg;
+pub mod picker;
 pub mod plan;
 pub mod progress;
 pub mod prompts;
@@ -87,6 +88,7 @@ pub use mermaid_model::tool_run::{
 pub use msg::{
     ClipboardRead, ContextCmd, Key, KeyCode, KeyMods, Msg, MsgKind, Paste, SlashCmd, StartupConfig,
 };
+pub use picker::{PickerStep, picker_step};
 pub use progress::{ProgressEvent, SubagentPhase};
 pub use query::{Query, QueryResult};
 pub use reducer::update;
@@ -101,7 +103,7 @@ pub use slash_commands::{
 };
 pub use state::{
     AdvertisedContext, ApprovalChoice, ApprovalKind, Attachment, Confirmation, ConfirmationTarget,
-    ContextUsageSnapshot, ConversationSummary, GenPhase, LiveToolStatus, McpServerEntry,
+    ContextUsageSnapshot, ConversationSummary, Focus, GenPhase, LiveToolStatus, McpServerEntry,
     McpServerStatus, McpState, McpToolSpec, ModelChoice, PendingApproval, PendingToolCall,
     PlanState, PluginCommand, PromptTokenBreakdown, QueuedMessage, RewindCandidate, Session, State,
     StatusKind, TokenUsageTotals, ToolOutcome, TurnState, UiMode, UiState,
