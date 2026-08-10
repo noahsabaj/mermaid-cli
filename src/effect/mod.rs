@@ -525,6 +525,16 @@ impl EffectRunner {
         }
     }
 
+    /// The channel every effect result arrives on.
+    ///
+    /// Cloning it is how the brokers already deliver a user's approval or
+    /// answer back into the reducer; `crate::engine::EngineHandle` uses it to
+    /// give the same reach to something outside the process's own effects.
+    #[must_use]
+    pub fn sender(&self) -> MsgSender {
+        self.msg_tx.clone()
+    }
+
     /// Enable inline approval prompts (interactive TUI only). The gate then
     /// pauses gated tools and routes the user's decision through the
     /// `ApprovalBroker` instead of writing an out-of-band DB approval row.

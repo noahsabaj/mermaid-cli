@@ -93,8 +93,10 @@ pub async fn handle_command(
             show_tasks(*limit)?;
             Ok(true)
         },
-        Commands::Task { id, follow } => {
-            if *follow {
+        Commands::Task { id, follow, send } => {
+            if let Some(text) = send {
+                send_to_task(id, text)?;
+            } else if *follow {
                 follow_task(id)?;
             } else {
                 show_task(id)?;
@@ -1861,6 +1863,26 @@ fn follow_task(id: &str) -> Result<()> {
         anyhow::bail!("stream ended without a result (daemon restarted mid-run?)");
     }
     anyhow::bail!("daemon closed the connection without responding");
+}
+
+/// Put a prompt into a task that is already running.
+///
+/// Daemon-only by nature: it holds the live mailboxes, and a mailbox is the
+/// only way into a reducer that is mid-turn. A finished task has no reducer,
+/// so the error says what to reach for instead.
+fn send_to_task(id: &str, text: &str) -> Result<()> {
+    if text.trim().is_empty() {
+        anyhow::bail!("nothing to send: --send needs a prompt");
+    }
+    mermaid_runtime::request_daemon_json(
+        crate::runtime_client::DaemonRequest::SendToTask {
+            id: id.to_string(),
+            text: text.to_string(),
+        }
+        .to_wire(),
+    )?;
+    println!("Sent to {id}; it answers after the turn it is on.");
+    Ok(())
 }
 
 /// Cancel a daemon task. Cancelling a *running* task must reach the daemon —

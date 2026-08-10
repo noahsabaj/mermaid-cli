@@ -66,6 +66,17 @@ struct Scheduler {
     streams: std::sync::Mutex<
         std::collections::HashMap<String, tokio::sync::broadcast::Sender<mermaid_domain::RunEvent>>,
     >,
+    /// Live mailbox per running task, for `send_to_task`. Registered when the
+    /// run publishes its `EngineHandle` and dropped with its stream. Absent
+    /// means "not running right now", which is exactly what the handler
+    /// reports -- unlike `streams`, there is nothing useful to create on
+    /// demand, because a queued task has no reducer to talk to yet.
+    mailboxes: std::sync::Mutex<
+        std::collections::HashMap<
+            String,
+            mermaid_cli::engine::EngineHandle<mermaid_domain::RunEvent>,
+        >,
+    >,
 }
 
 #[cfg(any(unix, windows))]
@@ -83,6 +94,35 @@ impl Scheduler {
             .entry(task_id.to_string())
             .or_insert_with(|| tokio::sync::broadcast::channel(1024).0)
             .clone()
+    }
+
+    fn register_mailbox(
+        &self,
+        task_id: &str,
+        handle: mermaid_cli::engine::EngineHandle<mermaid_domain::RunEvent>,
+    ) {
+        self.mailboxes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(task_id.to_string(), handle);
+    }
+
+    fn mailbox_for(
+        &self,
+        task_id: &str,
+    ) -> Option<mermaid_cli::engine::EngineHandle<mermaid_domain::RunEvent>> {
+        self.mailboxes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(task_id)
+            .cloned()
+    }
+
+    fn drop_mailbox(&self, task_id: &str) {
+        self.mailboxes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(task_id);
     }
 
     fn drop_stream(&self, task_id: &str) {
@@ -137,6 +177,7 @@ async fn main() -> Result<()> {
         )),
         running: std::sync::Mutex::new(std::collections::HashMap::new()),
         streams: std::sync::Mutex::new(std::collections::HashMap::new()),
+        mailboxes: std::sync::Mutex::new(std::collections::HashMap::new()),
         wake: tokio::sync::Notify::new(),
         task_timeout: daemon_config
             .task_timeout_minutes
@@ -265,6 +306,19 @@ async fn execute_claimed_task(
     // can replay what it missed. The end-of-run stamp below stays as the
     // authority; this is the same value, earlier.
     let _backlink = tokio::spawn(early_backlink(event_tx.subscribe(), task.id.clone()));
+    // The run's mailbox, so a `send_to_task` can reach it while it works. The
+    // handle arrives as soon as the engine exists -- before the first model
+    // call -- and registering it from its own task keeps the executor from
+    // waiting on a run it is about to await anyway.
+    let (handle_tx, mut handle_rx) = tokio::sync::mpsc::channel(1);
+    let _mailbox = tokio::spawn({
+        let task_id = task.id.clone();
+        async move {
+            if let Some(handle) = handle_rx.recv().await {
+                scheduler().register_mailbox(&task_id, handle);
+            }
+        }
+    });
     let result = mermaid_cli::app::run_non_interactive_with(
         config,
         std::path::PathBuf::from(&task.project_path),
@@ -275,6 +329,7 @@ async fn execute_claimed_task(
             cancel: Some(token.clone()),
             deadline: sched.task_timeout,
             event_tx: Some(event_tx),
+            handle_tx: Some(handle_tx),
             ..mermaid_cli::app::RunOptions::default()
         },
     )
@@ -306,6 +361,7 @@ async fn execute_claimed_task(
     persist_terminal_status(&task.id, status, &report).await;
     // AFTER the terminal status persists: late subscribers now read the row
     // and synthesize a terminal event instead of racing the live stream.
+    sched.drop_mailbox(&task.id);
     sched.drop_stream(&task.id);
     record_terminal_outcome(&task, status);
     let _ = mermaid_runtime::run_plugin_hooks(
@@ -1081,7 +1137,7 @@ async fn handle_command(command: &str, require_auth: bool) -> Result<serde_json:
             "ok": false,
             "error": format!("unknown command: {}", other),
             "commands": ["health"],
-            "json_commands": ["create_task", "run", "cancel_task", "update_task", "session_messages", "snapshot", "runtime_snapshot", "runtime_dashboard", "runtime_diagnostics", "runtime_hygiene_preview", "runtime_hygiene_archive", "runtime_task_detail", "runtime_approval_detail", "runtime_checkpoint_detail", "runtime_tasks", "runtime_processes", "runtime_approvals", "runtime_tool_runs", "runtime_checkpoints", "runtime_plugins", "logs", "stop_process", "restart_process", "open_process", "ports", "restore_checkpoint", "approve", "deny", "plugin_preview", "plugin_install", "set_plugin_enabled", "model_info", "set_safety_mode", "pair", "subscribe_task"],
+            "json_commands": ["create_task", "run", "cancel_task", "send_to_task", "update_task", "session_messages", "snapshot", "runtime_snapshot", "runtime_dashboard", "runtime_diagnostics", "runtime_hygiene_preview", "runtime_hygiene_archive", "runtime_task_detail", "runtime_approval_detail", "runtime_checkpoint_detail", "runtime_tasks", "runtime_processes", "runtime_approvals", "runtime_tool_runs", "runtime_checkpoints", "runtime_plugins", "logs", "stop_process", "restart_process", "open_process", "ports", "restore_checkpoint", "approve", "deny", "plugin_preview", "plugin_install", "set_plugin_enabled", "model_info", "set_safety_mode", "pair", "subscribe_task"],
         })),
     }
 }
@@ -1122,6 +1178,7 @@ async fn handle_json_command(
         req @ (DaemonRequest::CreateTask { .. }
         | DaemonRequest::Run { .. }
         | DaemonRequest::CancelTask { .. }
+        | DaemonRequest::SendToTask { .. }
         | DaemonRequest::UpdateTask { .. }) => handle_task_command(req).await,
         req @ (DaemonRequest::SessionMessages { .. }
         | DaemonRequest::Snapshot
@@ -1234,6 +1291,23 @@ async fn handle_task_command(
             )?;
             scheduler().wake.notify_one();
             Ok(serde_json::json!({"ok": true, "task": task}))
+        },
+        DaemonRequest::SendToTask { id, text } => {
+            let Some(mailbox) = scheduler().mailbox_for(&id) else {
+                anyhow::bail!(
+                    "task {id} is not running -- there is no reducer to send to.                      Queue a follow-up with `mermaid run --resume` once it finishes."
+                )
+            };
+            // `try_send`, not `send`: the daemon answers requests on this
+            // thread, and a run that is behind on its own effects must not
+            // block every other client.
+            mailbox
+                .try_send(mermaid_domain::Msg::SubmitPrompt {
+                    text,
+                    attachment_ids: vec![],
+                })
+                .map_err(|gone| anyhow::anyhow!("task {id}: {gone}"))?;
+            Ok(serde_json::json!({"ok": true, "id": id, "delivered": true}))
         },
         DaemonRequest::CancelTask { id } => {
             // Running here? Fire its token — the run injects `Msg::CancelTurn`
@@ -1755,6 +1829,7 @@ mod tests {
             r#"{"command":"create_task","title":"t","project_path":"p","model_id":"m"}"#,
             r#"{"command":"run","prompt":"p"}"#,
             r#"{"command":"cancel_task","id":"t"}"#,
+            r#"{"command":"send_to_task","id":"t","text":"hi"}"#,
             r#"{"command":"update_task","id":"t","status":"completed"}"#,
             r#"{"command":"restore_checkpoint","id":"c"}"#,
             r#"{"command":"approve","id":"a"}"#,
@@ -1808,6 +1883,7 @@ mod tests {
             "create_task",
             "run",
             "cancel_task",
+            "send_to_task",
             "update_task",
             "session_messages",
             "snapshot",
@@ -1847,7 +1923,7 @@ mod tests {
                 "command": name,
                 "title": "t", "project_path": "p", "model_id": "m", "prompt": "p",
                 "id": "x", "status": "completed", "path": "/p", "enabled": true,
-                "mode": "ask", "model": "m", "task_id": "t",
+                "mode": "ask", "model": "m", "task_id": "t", "text": "hi",
             });
             body.as_object_mut().unwrap().retain(|_, v| !v.is_null());
             let parsed = serde_json::from_value::<mermaid_cli::runtime_client::DaemonRequest>(body);
@@ -1858,6 +1934,54 @@ mod tests {
         }
     }
 
+    fn bare_scheduler() -> super::Scheduler {
+        super::Scheduler {
+            permits: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
+            running: std::sync::Mutex::new(std::collections::HashMap::new()),
+            wake: tokio::sync::Notify::new(),
+            task_timeout: None,
+            streams: std::sync::Mutex::new(std::collections::HashMap::new()),
+            mailboxes: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// Unlike `streams`, a mailbox is never created on demand: a queued task
+    /// has no reducer to talk to, and inventing an inbox nobody reads would
+    /// turn "not running" into a message that vanishes.
+    #[tokio::test]
+    async fn a_mailbox_exists_only_while_its_task_runs() {
+        let sched = bare_scheduler();
+        assert!(
+            sched.mailbox_for("t1").is_none(),
+            "no mailbox before the run publishes one"
+        );
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        sched.register_mailbox(
+            "t1",
+            mermaid_cli::engine::EngineHandle::new(tx, sched.stream_for("t1")),
+        );
+
+        sched
+            .mailbox_for("t1")
+            .expect("registered")
+            .try_send(mermaid_domain::Msg::SubmitPrompt {
+                text: "also check the tests".to_string(),
+                attachment_ids: vec![],
+            })
+            .expect("the run is listening");
+        let delivered = rx.try_recv().expect("delivered to the run's own inbox");
+        assert!(
+            matches!(&delivered, mermaid_domain::Msg::SubmitPrompt { text, .. } if text == "also check the tests"),
+            "wrong message: {delivered:?}"
+        );
+
+        // The run ends: the drop guard clears the entry, so a later send is
+        // told the task is not running rather than being silently dropped.
+        sched.drop_mailbox("t1");
+        assert!(sched.mailbox_for("t1").is_none());
+    }
+
     #[test]
     fn stream_registry_is_get_or_create_and_drop() {
         let sched = super::Scheduler {
@@ -1866,6 +1990,7 @@ mod tests {
             wake: tokio::sync::Notify::new(),
             task_timeout: None,
             streams: std::sync::Mutex::new(std::collections::HashMap::new()),
+            mailboxes: std::sync::Mutex::new(std::collections::HashMap::new()),
         };
         // Subscribe BEFORE the executor asks: both get the same sender, so a
         // pre-run subscriber receives the run's events.
@@ -2075,6 +2200,7 @@ mod tests {
             wake: tokio::sync::Notify::new(),
             task_timeout: None,
             streams: std::sync::Mutex::new(std::collections::HashMap::new()),
+            mailboxes: std::sync::Mutex::new(std::collections::HashMap::new()),
         });
 
         let lines = temp_env::async_with_vars(
@@ -2197,6 +2323,7 @@ mod tests {
             wake: tokio::sync::Notify::new(),
             task_timeout: None,
             streams: std::sync::Mutex::new(std::collections::HashMap::new()),
+            mailboxes: std::sync::Mutex::new(std::collections::HashMap::new()),
         });
 
         let lines = temp_env::async_with_vars(
