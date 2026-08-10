@@ -163,10 +163,34 @@ struct PersistedCompaction {
     archive_path: PathBuf,
 }
 
+/// How many appended events may accumulate before the checkpoint is
+/// rewritten.
+///
+/// The quantity being bounded is REPLAY LENGTH — a checkpoint's whole job is
+/// to cap how much log a resume has to fold — so the trigger counts events
+/// rather than turns or seconds. At ~30 events for a tool-heavy turn this is
+/// roughly seven turns of replay in the worst case, against a rewrite that
+/// used to happen after every single message.
+const CHECKPOINT_EVERY_EVENTS: usize = 200;
+
 struct PersistenceState {
     workdir: PathBuf,
     manager: Option<crate::session::ConversationManager>,
     blocked: HashMap<String, VecDeque<PendingCompactionSave>>,
+    /// Per session: events appended since its last checkpoint, and the
+    /// newest snapshot that has not been written as one. Shutdown flushes
+    /// these, so a clean exit always leaves a current checkpoint.
+    dirty: HashMap<String, DirtySession>,
+    /// Events whose append FAILED, kept in order for the next attempt.
+    /// Without this they are simply gone: the reducer drains its buffer at
+    /// emission, so a dropped batch is never re-offered — which stopped
+    /// mattering the moment the log became the truth rather than a copy.
+    unappended: HashMap<String, Vec<mermaid_domain::SessionEvent>>,
+}
+
+struct DirtySession {
+    snapshot: mermaid_domain::ConversationHistory,
+    events_since_checkpoint: usize,
 }
 
 impl PersistenceState {
@@ -175,6 +199,8 @@ impl PersistenceState {
             workdir,
             manager: None,
             blocked: HashMap::new(),
+            dirty: HashMap::new(),
+            unappended: HashMap::new(),
         }
     }
 
@@ -198,17 +224,7 @@ impl PersistenceState {
                 if retried.is_err() {
                     return (persisted, retried);
                 }
-                let saved = self.manager().and_then(|manager| {
-                    // History first, then the snapshot it explains. The append
-                    // is best-effort: a log hiccup must not block the
-                    // authoritative save, and the log self-heals forward.
-                    if let Err(error) = manager.append_session_events(&snapshot, &events) {
-                        tracing::warn!(id = %snapshot.id, %error, "session event append failed; saving the snapshot anyway");
-                    }
-                    manager.save_conversation(&snapshot)?;
-                    upsert_session_index(manager, &snapshot);
-                    Ok(())
-                });
+                let saved = self.save_session(*snapshot, events);
                 (persisted, saved)
             },
             PersistenceJob::Compaction(save) => {
@@ -242,12 +258,13 @@ impl PersistenceState {
         // the queue is drained in place — no per-retry clone of the (large)
         // pending conversation snapshots.
         let manager = self.manager.as_ref().expect("manager initialized");
+        let dirty = &mut self.dirty;
         let queue = self
             .blocked
             .get_mut(conversation_id)
             .expect("checked above");
         while let Some(save) = queue.front_mut() {
-            match Self::persist_compaction(manager, save) {
+            match Self::persist_compaction(manager, dirty, save) {
                 // Pop only after a successful write: `persist_compaction` runs
                 // inside `spawn_blocking`, and a panic there must not lose the
                 // save (the mutex is poison-tolerant, so the state survives).
@@ -260,6 +277,83 @@ impl PersistenceState {
         }
         self.blocked.remove(conversation_id);
         (persisted, Ok(()))
+    }
+
+    /// Append a save's events, then write the checkpoint only when enough
+    /// have accumulated (see [`CHECKPOINT_EVERY_EVENTS`]).
+    ///
+    /// The append is the save now: it is the write that reaches the truth,
+    /// so a failure keeps the batch for the next attempt rather than
+    /// dropping it, and leaves the checkpoint alone — advancing a cache past
+    /// a log that did not take the events is how a "successful" save loses
+    /// them.
+    fn save_session(
+        &mut self,
+        snapshot: mermaid_domain::ConversationHistory,
+        events: Vec<mermaid_domain::SessionEvent>,
+    ) -> anyhow::Result<()> {
+        let id = snapshot.id.clone();
+        // Anything a previous attempt could not land goes first, in order.
+        let mut batch = self.unappended.remove(&id).unwrap_or_default();
+        batch.extend(events);
+
+        let manager = self.manager()?;
+        if let Err(error) = manager.append_session_events(&snapshot, &batch) {
+            tracing::warn!(
+                id = %id,
+                pending = batch.len(),
+                %error,
+                "session event append failed; holding the events for the next save"
+            );
+            self.unappended.insert(id, batch);
+            return Err(error);
+        }
+        upsert_session_index(manager, &snapshot);
+
+        let entry = self
+            .dirty
+            .entry(id.clone())
+            .or_insert_with(|| DirtySession {
+                snapshot: snapshot.clone(),
+                events_since_checkpoint: 0,
+            });
+        entry.snapshot = snapshot;
+        entry.events_since_checkpoint += batch.len();
+        if entry.events_since_checkpoint >= CHECKPOINT_EVERY_EVENTS {
+            return self.write_checkpoint(&id);
+        }
+        Ok(())
+    }
+
+    /// Materialize a session's checkpoint and clear its dirty counter. A
+    /// session with nothing outstanding is a no-op.
+    fn write_checkpoint(&mut self, id: &str) -> anyhow::Result<()> {
+        let Some(dirty) = self.dirty.remove(id) else {
+            return Ok(());
+        };
+        let manager = self.manager()?;
+        if let Err(error) = manager.save_conversation(&dirty.snapshot) {
+            // Put it back: the events are durable in the log either way, so
+            // this costs a longer replay, not data — but the next save
+            // should still try.
+            self.dirty.insert(id.to_string(), dirty);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Write every outstanding checkpoint. Called at shutdown so a clean
+    /// exit always leaves a current one, which is what keeps the common
+    /// resume path short.
+    fn flush_checkpoints(&mut self) -> anyhow::Result<()> {
+        let ids: Vec<String> = self.dirty.keys().cloned().collect();
+        let mut first_error = None;
+        for id in ids {
+            if let Err(error) = self.write_checkpoint(&id) {
+                first_error.get_or_insert(error);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
     }
 
     fn retry_all_blocked(&mut self) -> (Vec<PersistedCompaction>, anyhow::Result<()>) {
@@ -283,6 +377,7 @@ impl PersistenceState {
 
     fn persist_compaction(
         manager: &crate::session::ConversationManager,
+        dirty: &mut HashMap<String, DirtySession>,
         save: &mut PendingCompactionSave,
     ) -> anyhow::Result<PersistedCompaction> {
         // Order is the whole guarantee. A compaction drops messages from the
@@ -299,6 +394,10 @@ impl PersistenceState {
         }
         manager.save_conversation(&save.conversation)?;
         upsert_session_index(manager, &save.conversation);
+        // A compaction always checkpoints: it is a structural boundary, it
+        // is rare, and the transcript it leaves behind is the one a resume
+        // should start from rather than replay its way to.
+        dirty.remove(&save.conversation.id);
 
         let log_path = manager.event_log_path(&save.conversation.id);
         let _ = mermaid_runtime::with_shared_store(|store| {
@@ -1733,10 +1832,21 @@ impl EffectRunner {
                 tracing::warn!(error = %error, "shutdown: persistence chain panicked");
             }
             match tokio::task::spawn_blocking(move || {
-                persistence_state
+                let mut state = persistence_state
                     .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .retry_all_blocked()
+                    .unwrap_or_else(|error| error.into_inner());
+                let drained = state.retry_all_blocked();
+                // Then materialize whatever the ~200-event throttle has been
+                // holding back, so a clean exit always leaves a current
+                // checkpoint and the next resume replays nothing.
+                if let Err(error) = state.flush_checkpoints() {
+                    tracing::warn!(
+                        error = %error,
+                        "shutdown: could not flush a session checkpoint; the log still has everything, so the next resume just folds further"
+                    );
+                }
+                drop(state);
+                drained
             })
             .await
             {
@@ -2460,6 +2570,173 @@ mod tests {
         std::fs::create_dir_all(dir.join(format!("{id}.jsonl"))).expect("plant a blocker");
     }
 
+    /// One `Message` event plus the snapshot that now contains it.
+    fn one_message_save(
+        conversation: &mut mermaid_domain::ConversationHistory,
+        text: &str,
+    ) -> PersistenceJob {
+        let message = mermaid_model::models::ChatMessage::user(text);
+        conversation.add_messages(std::slice::from_ref(&message), chrono::Local::now());
+        PersistenceJob::Conversation {
+            snapshot: Box::new(conversation.clone()),
+            events: vec![mermaid_domain::SessionEvent::Message { message }],
+        }
+    }
+
+    #[test]
+    fn the_checkpoint_stops_being_written_on_every_save() {
+        // The point of the throttle: appends stay O(1) per message while
+        // the whole-transcript rewrite happens on a coarse cadence. What
+        // must NOT change is what a resume sees.
+        let root = std::env::temp_dir().join(format!(
+            "mermaid-throttle-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let manager = crate::session::ConversationManager::new(&root).unwrap();
+        let mut conversation = mermaid_domain::ConversationHistory::new(
+            root.display().to_string(),
+            "test/model".to_string(),
+            chrono::Local::now(),
+        );
+        let mut state = PersistenceState::new(root.clone());
+
+        // The first save creates the log (and its backfill) but no
+        // checkpoint: nowhere near the threshold.
+        state
+            .process(one_message_save(&mut conversation, "first"))
+            .1
+            .unwrap();
+        let checkpoint = manager
+            .conversations_dir()
+            .join(format!("{}.json", conversation.id));
+        assert!(
+            !checkpoint.exists(),
+            "a single save must not rewrite the transcript"
+        );
+
+        // ...and resume still sees it, because the log is the truth.
+        let resumed = manager.load_conversation(&conversation.id).unwrap();
+        assert_eq!(resumed.messages().len(), 1);
+        assert_eq!(resumed.messages()[0].content, "first");
+
+        // Crossing the threshold materializes one.
+        for i in 0..CHECKPOINT_EVERY_EVENTS {
+            state
+                .process(one_message_save(&mut conversation, &format!("m{i}")))
+                .1
+                .unwrap();
+        }
+        assert!(
+            checkpoint.exists(),
+            "crossing {CHECKPOINT_EVERY_EVENTS} events must materialize a checkpoint"
+        );
+        let resumed = manager.load_conversation(&conversation.id).unwrap();
+        assert_eq!(resumed.messages().len(), CHECKPOINT_EVERY_EVENTS + 1);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn shutdown_flushes_the_checkpoint_it_was_holding() {
+        let root = std::env::temp_dir().join(format!(
+            "mermaid-flush-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let manager = crate::session::ConversationManager::new(&root).unwrap();
+        let mut conversation = mermaid_domain::ConversationHistory::new(
+            root.display().to_string(),
+            "test/model".to_string(),
+            chrono::Local::now(),
+        );
+        let mut state = PersistenceState::new(root.clone());
+        state
+            .process(one_message_save(&mut conversation, "only message"))
+            .1
+            .unwrap();
+
+        let checkpoint = manager
+            .conversations_dir()
+            .join(format!("{}.json", conversation.id));
+        assert!(!checkpoint.exists());
+        state.flush_checkpoints().unwrap();
+        assert!(
+            checkpoint.exists(),
+            "a clean exit must leave a current checkpoint"
+        );
+        // And it carries the watermark, so the next resume replays nothing.
+        let raw = std::fs::read_to_string(&checkpoint).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert!(
+            value.get("checkpoint_seq").is_some(),
+            "a flushed checkpoint must be placeable in its log: {raw}"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_failed_append_keeps_its_events_for_the_next_save() {
+        // The append is the save now, so a dropped batch is lost data --
+        // the reducer drains its buffer at emission and never re-offers it.
+        let root = std::env::temp_dir().join(format!(
+            "mermaid-unappended-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let manager = crate::session::ConversationManager::new(&root).unwrap();
+        let mut conversation = mermaid_domain::ConversationHistory::new(
+            root.display().to_string(),
+            "test/model".to_string(),
+            chrono::Local::now(),
+        );
+        let mut state = PersistenceState::new(root.clone());
+
+        // Block the log: a directory where its file goes.
+        std::fs::create_dir_all(
+            manager
+                .conversations_dir()
+                .join(format!("{}.jsonl", conversation.id)),
+        )
+        .expect("plant a blocker");
+        let job = one_message_save(&mut conversation, "must survive");
+        assert!(state.process(job).1.is_err(), "the append must fail");
+        assert_eq!(
+            state.unappended.get(&conversation.id).map(Vec::len),
+            Some(1),
+            "the batch must be held, not dropped"
+        );
+
+        // Unblock, save again: the held event goes first and both land.
+        std::fs::remove_dir_all(
+            manager
+                .conversations_dir()
+                .join(format!("{}.jsonl", conversation.id)),
+        )
+        .expect("unblock");
+        state
+            .process(one_message_save(&mut conversation, "and this one"))
+            .1
+            .unwrap();
+        assert!(state.unappended.is_empty(), "the hold must clear");
+        state.flush_checkpoints().unwrap();
+
+        let resumed = manager.load_conversation(&conversation.id).unwrap();
+        let texts: Vec<&str> = resumed
+            .messages()
+            .iter()
+            .map(|m| m.content.as_str())
+            .collect();
+        assert!(
+            texts.contains(&"must survive"),
+            "the event held over a failed append must reach the log: {texts:?}"
+        );
+        assert!(texts.contains(&"and this one"), "{texts:?}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn persistence_orders_compaction_before_newer_conversation_save() {
         let root = std::env::temp_dir().join(format!(
@@ -2478,15 +2755,15 @@ mod tests {
         outcome.unwrap();
         assert_eq!(events.len(), 1);
         let mut newer = compaction.conversation;
-        newer.add_messages(
-            &[mermaid_model::models::ChatMessage::assistant(
-                "new assistant reply",
-            )],
-            chrono::Local::now(),
-        );
+        let reply = mermaid_model::models::ChatMessage::assistant("new assistant reply");
+        newer.add_messages(std::slice::from_ref(&reply), chrono::Local::now());
+        // The event, not just the snapshot: the log is the truth now, and a
+        // save below the checkpoint threshold writes nothing else. A fixture
+        // that passed an empty batch would be asserting against a file this
+        // save no longer touches.
         let (_, outcome) = state.process(PersistenceJob::Conversation {
             snapshot: Box::new(newer),
-            events: Vec::new(),
+            events: vec![mermaid_domain::SessionEvent::Message { message: reply }],
         });
         outcome.unwrap();
 
