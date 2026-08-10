@@ -162,10 +162,12 @@ fn drain_burst_into(
 /// lone keystroke, Enter included, never waits.
 const PASTE_CHUNK_BRIDGE: std::time::Duration = std::time::Duration::from_millis(25);
 
-/// Extend a just-coalesced paste across chunk gaps: wait up to
-/// [`PASTE_CHUNK_BRIDGE`] for more input, folding further coalescible chunks
-/// into `text`, until the quiet outlasts the window or deliberate input
-/// arrives (returned, to be processed after the merged paste).
+/// Extend a just-coalesced paste across chunk gaps.
+///
+/// Waits up to [`PASTE_CHUNK_BRIDGE`] for more input, folding further
+/// coalescible chunks into `text`, until the quiet outlasts the window or
+/// deliberate input arrives (returned, to be processed after the merged
+/// paste).
 ///
 /// This is the second half of [`coalesce_key_burst`]: its drain sees only
 /// *immediately available* events, so a chunk gap ends the burst — and a
@@ -214,7 +216,7 @@ where
         // content here; the single-keystroke rule belongs to burst STARTS,
         // not to continuations inside the window.
         let breaker = drain_burst_into(text, &mut last_was_cr, evt, || {
-            events.next().now_or_never().flatten().and_then(|r| r.ok())
+            events.next().now_or_never().flatten().and_then(Result::ok)
         });
         if let Some(b) = breaker {
             // The continuation stopped on deliberate input: the paste is over.
