@@ -35,7 +35,7 @@ use crate::models::error::{BackendError, ModelError, Result};
 use crate::models::reasoning::{
     ReasoningCapability, ReasoningChunk, ReasoningLevel, nearest_effort,
 };
-use crate::models::stream::{StreamCallback, StreamEvent};
+use crate::models::stream::{StreamEvent, StreamSink, emit_all};
 use crate::models::tool_call::{FunctionCall, ToolCall};
 use crate::models::traits::Model;
 
@@ -116,13 +116,17 @@ fn stream_closed_abnormally(saw_message_stop: bool, stop_reason: Option<&FinishR
 /// accumulators. Shared by the `content_block_stop` handler and the post-loop
 /// drain, so a block that never received its stop event (a mid-message cutoff)
 /// is recovered identically — including a fully-streamed `tool_use`.
+///
+/// Events are pushed onto `out` rather than sent: this stays synchronous so
+/// the caller owns every `await`, which is what keeps the emission order the
+/// production order.
 fn finalize_block(
     acc: BlockAccumulator,
     text_acc: &mut String,
     thinking_acc: &mut String,
     signature_acc: &mut Option<String>,
     tool_calls_done: &mut Vec<ToolCall>,
-    callback: &StreamCallback,
+    out: &mut Vec<StreamEvent>,
 ) {
     match acc {
         BlockAccumulator::Text(s) => text_acc.push_str(&s),
@@ -149,7 +153,7 @@ fn finalize_block(
                 id: if id.is_empty() { None } else { Some(id) },
                 function: FunctionCall { name, arguments },
             };
-            callback(StreamEvent::ToolCall(tc.clone()));
+            out.push(StreamEvent::ToolCall(tc.clone()));
             tool_calls_done.push(tc);
         },
         BlockAccumulator::Other => {},
@@ -946,7 +950,7 @@ impl AnthropicAdapter {
     async fn handle_stream(
         &self,
         response: reqwest::Response,
-        callback: StreamCallback,
+        sink: Option<&StreamSink>,
         hide_reasoning_trace: bool,
     ) -> Result<ModelResponse> {
         if !response.status().is_success() {
@@ -991,6 +995,10 @@ impl AnthropicAdapter {
             buf.extend_from_slice(&chunk);
 
             for payload in drain_sse_events(&mut buf) {
+                // Events this frame produced. Collected synchronously and
+                // drained onto the sink at the bottom of the frame, so the
+                // emission order is the production order by construction.
+                let mut events: Vec<StreamEvent> = Vec::new();
                 let parsed: Value = match serde_json::from_str(&payload) {
                     Ok(v) => v,
                     Err(e) => {
@@ -1078,7 +1086,7 @@ impl AnthropicAdapter {
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("");
                                 if !text.is_empty() && !truncated {
-                                    callback(StreamEvent::Text(text.to_string()));
+                                    events.push(StreamEvent::Text(text.to_string()));
                                     push_capped(buf_s, text, &mut truncated, MAX_RESPONSE_CHARS);
                                 }
                             },
@@ -1100,7 +1108,7 @@ impl AnthropicAdapter {
                                         // (captured at block stop) is correct and
                                         // is what round-trips; streamed chunks are
                                         // display-only.
-                                        callback(StreamEvent::Reasoning(ReasoningChunk {
+                                        events.push(StreamEvent::Reasoning(ReasoningChunk {
                                             text: text.to_string(),
                                             signature: signature.clone(),
                                         }));
@@ -1140,7 +1148,7 @@ impl AnthropicAdapter {
                                 &mut thinking_acc,
                                 &mut signature_acc,
                                 &mut tool_calls_done,
-                                &callback,
+                                &mut events,
                             );
                         }
                     },
@@ -1161,14 +1169,14 @@ impl AnthropicAdapter {
                         }
                     },
                     "message_stop" => {
-                        // Stream complete — record the terminal frame (F56)
-                        // before breaking. Break the OUTER stream loop, not just
-                        // this SSE-event `for` — otherwise the adapter keeps
-                        // awaiting `stream.next()` until the connection actually
-                        // closes, which can stall on a kept-alive/proxied body
-                        // (#138). The `Done` event is emitted below after the loop.
+                        // Stream complete — record the terminal frame (F56).
+                        // The break below leaves the OUTER stream loop, not
+                        // just this SSE-event `for`: otherwise the adapter
+                        // keeps awaiting `stream.next()` until the connection
+                        // actually closes, which can stall on a kept-alive /
+                        // proxied body (#138). The `Done` event is emitted by
+                        // the wrapper, after this returns.
                         saw_message_stop = true;
-                        break 'stream;
                     },
                     "error" => {
                         let err_type = parsed
@@ -1193,6 +1201,11 @@ impl AnthropicAdapter {
                         // Unknown event type — log via debug, ignore.
                         tracing::debug!("Anthropic: unknown event type: {}", event_type);
                     },
+                }
+
+                emit_all(sink, events).await?;
+                if saw_message_stop {
+                    break 'stream;
                 }
             }
         }
@@ -1226,6 +1239,7 @@ impl AnthropicAdapter {
             );
             let mut remaining: Vec<(usize, BlockAccumulator)> = blocks.into_iter().collect();
             remaining.sort_by_key(|(idx, _)| *idx);
+            let mut events: Vec<StreamEvent> = Vec::new();
             for (_idx, acc) in remaining {
                 finalize_block(
                     acc,
@@ -1233,9 +1247,10 @@ impl AnthropicAdapter {
                     &mut thinking_acc,
                     &mut signature_acc,
                     &mut tool_calls_done,
-                    &callback,
+                    &mut events,
                 );
             }
+            emit_all(sink, events).await?;
         }
 
         // F3: `Done` is emitted by the v0.7 wrapper from the returned
@@ -1306,16 +1321,15 @@ impl Model for AnthropicAdapter {
         &self,
         messages: &[ChatMessage],
         config: &ModelConfig,
-        callback: Option<StreamCallback>,
+        sink: Option<StreamSink>,
     ) -> Result<ModelResponse> {
         let mut body = self.build_request_body(messages, config);
-        let stream = callback.is_some();
-        if !stream {
+        if sink.is_none() {
             body["stream"] = json!(false);
         }
         let response = self.send_chat(&body).await?;
-        if let Some(cb) = callback {
-            self.handle_stream(response, cb, config.hide_reasoning_trace)
+        if let Some(sink) = sink {
+            self.handle_stream(response, Some(&sink), config.hide_reasoning_trace)
                 .await
         } else {
             self.decode_non_streaming(response).await
@@ -1542,14 +1556,11 @@ mod tests {
     fn finalize_block_recovers_tool_use() {
         // #4: a fully-streamed tool_use block must be recovered even when it's
         // drained outside `content_block_stop` (the mid-cutoff path).
-        let events: std::sync::Arc<std::sync::Mutex<Vec<StreamEvent>>> =
-            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let ev = events.clone();
-        let cb: StreamCallback = std::sync::Arc::new(move |e| ev.lock().unwrap().push(e));
         let mut text = String::new();
         let mut thinking = String::new();
         let mut sig = None;
         let mut tools = Vec::new();
+        let mut events = Vec::new();
         finalize_block(
             BlockAccumulator::ToolUse {
                 id: "tu_1".to_string(),
@@ -1560,11 +1571,11 @@ mod tests {
             &mut thinking,
             &mut sig,
             &mut tools,
-            &cb,
+            &mut events,
         );
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].function.name, "read_file");
-        assert_eq!(events.lock().unwrap().len(), 1);
+        assert!(matches!(events.as_slice(), [StreamEvent::ToolCall(_)]));
     }
 
     #[test]

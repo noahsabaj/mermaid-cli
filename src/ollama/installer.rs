@@ -21,10 +21,8 @@ async fn list_installed_models(config: &Config) -> Vec<String> {
         // straight to stderr — otherwise a cold-boot `mermaid` sits silent
         // for the whole server start.
         Ok(adapter) => {
-            let adapter = adapter.with_status_notify(Arc::new(|ev| {
-                if let mermaid_model::models::StreamEvent::Status(text) = ev {
-                    eprintln!("{text}");
-                }
+            let adapter = adapter.with_status_notify(Arc::new(|text: &str| {
+                eprintln!("{text}");
             }));
             // The startup preflight is an intent path, not a diagnostic one:
             // it exists to get a model ready, so it keeps the ability to heal

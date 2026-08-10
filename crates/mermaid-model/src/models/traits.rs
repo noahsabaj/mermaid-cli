@@ -7,26 +7,29 @@ use async_trait::async_trait;
 use super::capabilities::ModelCapabilities;
 use super::config::ModelConfig;
 use super::error::{ModelError, Result};
-use super::stream::StreamCallback;
+use super::stream::StreamSink;
 use super::types::{ChatMessage, ModelResponse};
 
 /// Core trait that all model adapters implement.
 ///
-/// `chat()` streams typed `StreamEvent`s (text, reasoning, tool calls,
-/// completion) through the optional callback and returns a final
-/// `ModelResponse`. Adapters own the translation between provider-native
-/// stream shapes and the typed event surface — see
-/// `OllamaAdapter::chat` for the reference impl.
+/// `chat()` streams typed `StreamEvent`s (text, reasoning, tool calls) onto
+/// the optional sink and returns a final `ModelResponse`. Adapters own the
+/// translation between provider-native stream shapes and the typed event
+/// surface — see `OllamaAdapter::chat` for the reference impl.
 #[async_trait]
 pub trait Model: Send + Sync {
-    /// Send a chat conversation to the model. If a callback is supplied
-    /// the adapter streams typed events; otherwise it does a single
+    /// Send a chat conversation to the model. If a sink is supplied the
+    /// adapter streams typed events onto it; otherwise it does a single
     /// blocking request and returns the response.
+    ///
+    /// Cancellation is the caller's: dropping this future drops the response
+    /// stream with it, which is what the provider wrappers' `select!` on the
+    /// turn's token relies on.
     async fn chat(
         &self,
         messages: &[ChatMessage],
         config: &ModelConfig,
-        callback: Option<StreamCallback>,
+        sink: Option<StreamSink>,
     ) -> Result<ModelResponse>;
 
     /// Capabilities advertised by this model — does it support tools,

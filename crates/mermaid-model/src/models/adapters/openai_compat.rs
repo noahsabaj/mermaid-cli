@@ -56,7 +56,7 @@ use crate::models::providers::{
 use crate::models::reasoning::{
     ReasoningCapability, ReasoningChunk, ReasoningLevel, nearest_effort,
 };
-use crate::models::stream::{StreamCallback, StreamEvent};
+use crate::models::stream::{StreamEvent, StreamSink, emit_all};
 use crate::models::tool_call::{FunctionCall, ToolCall};
 use crate::models::traits::Model;
 use crate::models::types::{ChatMessage, FinishReason, MessageRole, ModelResponse, TokenUsage};
@@ -538,7 +538,7 @@ impl OpenAICompatAdapter {
         })
     }
 
-    /// Stream the response, emit typed events through the callback,
+    /// Stream the response, emit typed events onto the sink,
     /// return the final accumulated `ModelResponse`.
     #[expect(
         clippy::too_many_lines,
@@ -547,7 +547,7 @@ impl OpenAICompatAdapter {
     async fn handle_stream(
         &self,
         response: reqwest::Response,
-        callback: StreamCallback,
+        sink: Option<&StreamSink>,
         hide_reasoning_trace: bool,
     ) -> Result<ModelResponse> {
         if !response.status().is_success() {
@@ -604,6 +604,10 @@ impl OpenAICompatAdapter {
             buf.extend_from_slice(&chunk);
 
             for payload in drain_sse_events(&mut buf) {
+                // Events this frame produced. Collected synchronously and
+                // drained onto the sink at the bottom of the frame, so the
+                // emission order is the production order by construction.
+                let mut events: Vec<StreamEvent> = Vec::new();
                 // A mid-stream error frame (common on OpenRouter) is an
                 // `{"error": ...}` object, not a chat chunk. Surface it as a
                 // typed provider error instead of the confusing "missing field
@@ -684,7 +688,7 @@ impl OpenAICompatAdapter {
                 };
                 if let Some(chunk) = reasoning_chunk {
                     if !hide_reasoning_trace {
-                        callback(StreamEvent::Reasoning(chunk.clone()));
+                        events.push(StreamEvent::Reasoning(chunk.clone()));
                     }
                     push_capped(
                         &mut thinking_acc,
@@ -704,7 +708,7 @@ impl OpenAICompatAdapter {
                     if inline_tags {
                         let (text_part, reasoning_part) = think_state.feed(text);
                         if !text_part.is_empty() {
-                            callback(StreamEvent::Text(text_part.clone()));
+                            events.push(StreamEvent::Text(text_part.clone()));
                             push_capped(
                                 &mut content_acc,
                                 &text_part,
@@ -714,7 +718,7 @@ impl OpenAICompatAdapter {
                         }
                         if !reasoning_part.is_empty() {
                             if !hide_reasoning_trace {
-                                callback(StreamEvent::Reasoning(ReasoningChunk {
+                                events.push(StreamEvent::Reasoning(ReasoningChunk {
                                     text: reasoning_part.clone(),
                                     signature: None,
                                 }));
@@ -727,7 +731,7 @@ impl OpenAICompatAdapter {
                             );
                         }
                     } else {
-                        callback(StreamEvent::Text(text.clone()));
+                        events.push(StreamEvent::Text(text.clone()));
                         push_capped(&mut content_acc, text, &mut truncated, MAX_RESPONSE_CHARS);
                     }
                 }
@@ -738,6 +742,8 @@ impl OpenAICompatAdapter {
                         accumulate_tool_call(&mut tool_calls_partial, tc_delta);
                     }
                 }
+
+                emit_all(sink, events).await?;
             }
         }
 
@@ -758,9 +764,10 @@ impl OpenAICompatAdapter {
         // Flush any pending tag-state bytes (incomplete trailing tags
         // get emitted to the text channel; see ThinkTagState::flush).
         if inline_tags {
+            let mut events: Vec<StreamEvent> = Vec::new();
             let (text_tail, reasoning_tail) = think_state.flush();
             if !text_tail.is_empty() && !truncated {
-                callback(StreamEvent::Text(text_tail.clone()));
+                events.push(StreamEvent::Text(text_tail.clone()));
                 push_capped(
                     &mut content_acc,
                     &text_tail,
@@ -770,7 +777,7 @@ impl OpenAICompatAdapter {
             }
             if !reasoning_tail.is_empty() && !truncated {
                 if !hide_reasoning_trace {
-                    callback(StreamEvent::Reasoning(ReasoningChunk {
+                    events.push(StreamEvent::Reasoning(ReasoningChunk {
                         text: reasoning_tail.clone(),
                         signature: None,
                     }));
@@ -782,17 +789,20 @@ impl OpenAICompatAdapter {
                     MAX_RESPONSE_CHARS,
                 );
             }
+            emit_all(sink, events).await?;
         }
 
         // Finalize accumulated tool calls — parse arguments JSON, emit
         // ToolCall events, build the response field.
         let mut final_tool_calls: Vec<ToolCall> = Vec::new();
+        let mut events: Vec<StreamEvent> = Vec::new();
         for partial in tool_calls_partial {
             if let Some(tc) = partial.into_tool_call() {
-                callback(StreamEvent::ToolCall(tc.clone()));
+                events.push(StreamEvent::ToolCall(tc.clone()));
                 final_tool_calls.push(tc);
             }
         }
+        emit_all(sink, events).await?;
 
         // F3: wrapper emits the authoritative `Done` from the returned
         // `ModelResponse`. See adapters/anthropic.rs for rationale.
@@ -1061,14 +1071,14 @@ impl Model for OpenAICompatAdapter {
         &self,
         messages: &[ChatMessage],
         config: &ModelConfig,
-        callback: Option<StreamCallback>,
+        sink: Option<StreamSink>,
     ) -> Result<ModelResponse> {
-        let stream = callback.is_some();
+        let stream = sink.is_some();
         let body = self.build_request_body(messages, config, stream);
         let response = self.send_chat(&body).await?;
 
-        if let Some(cb) = callback {
-            self.handle_stream(response, cb, config.hide_reasoning_trace)
+        if let Some(sink) = sink {
+            self.handle_stream(response, Some(&sink), config.hide_reasoning_trace)
                 .await
         } else {
             self.decode_non_streaming(response).await

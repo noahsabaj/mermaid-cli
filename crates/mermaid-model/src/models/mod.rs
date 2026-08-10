@@ -27,7 +27,7 @@ pub use providers::{
     ReasoningExtraction, ReasoningStrategy, lookup_provider,
 };
 pub use reasoning::{ReasoningCapability, ReasoningChunk, ReasoningLevel, nearest_effort};
-pub use stream::{StreamCallback, StreamEvent};
+pub use stream::{StatusNotify, StreamEvent, StreamSink, emit, emit_all};
 pub use tool_call::{FunctionCall, ToolCall};
 
 pub use traits::Model;
