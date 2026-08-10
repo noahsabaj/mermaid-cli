@@ -10,11 +10,11 @@
 use super::shell::{
     self, basename, contains_destructive_pattern, extract_substitutions, split_command, tokenize,
 };
-use super::types::{
+use crate::policy::plan_gate::READ_ONLY_DENIAL_MARKER;
+use mermaid_model::safety::{
     ActionRequest, FloorLevel, HostShell, PolicyDecision, PolicyOverride, PolicyOverrideDecision,
     RiskClass, SafetyMode, ToolCategory,
 };
-use crate::policy::plan_gate::READ_ONLY_DENIAL_MARKER;
 
 #[derive(Debug, Clone)]
 pub struct PolicyEngine {

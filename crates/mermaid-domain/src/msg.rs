@@ -27,7 +27,7 @@ use mermaid_model::models::tool_call::ToolCall as ModelToolCall;
 use mermaid_model::models::{
     FinishReason, ProviderContinuation, ReasoningChunk, ReasoningLevel, TokenUsage, UserFacingError,
 };
-use mermaid_runtime::SafetyMode;
+use mermaid_model::safety::SafetyMode;
 
 use super::runtime::RuntimeSignal;
 use super::state::ContextUsageSnapshot;

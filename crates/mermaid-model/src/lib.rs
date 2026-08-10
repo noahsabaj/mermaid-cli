@@ -29,5 +29,7 @@ pub mod diff;
 pub mod ids;
 pub mod models;
 pub mod question;
+pub mod records;
+pub mod safety;
 pub mod tool_run;
 pub mod utils;

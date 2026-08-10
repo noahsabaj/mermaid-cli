@@ -1,7 +1,6 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use directories::ProjectDirs;
 use rusqlite::{Connection, params};
 
 // Bumped to 5 for the additive `tasks.prompt` column (the daemon scheduler
@@ -16,13 +15,25 @@ use rusqlite::{Connection, params};
 // History: v2 added the additive `tasks.owner_kind` column (F18/RC-E); v3 added
 // the F75 covering indexes; v4 added the `outcomes` table.
 
-pub mod records;
 pub mod repos;
 pub mod rows;
 
-pub use records::*;
+pub use mermaid_model::records::*;
 pub use repos::*;
 pub use rows::*;
+
+// Bumped to 5 for the additive `tasks.prompt` column (the daemon scheduler
+// executes queued tasks later, so the full prompt must be persisted at enqueue
+// time — `title` is truncated at 80 chars). Additive, but the bump lets a DB
+// already at v4 re-run the migration once to pick it up. The bump is
+// load-bearing alongside the F17 early-return in `init_schema`: a DB at an
+// older version still runs the migration (the idempotent baseline plus any
+// per-version step dispatched by `migrate_within_txn`) exactly once, while an
+// already-current DB skips the write lock entirely.
+//
+// History: v2 added the additive `tasks.owner_kind` column (F18/RC-E); v3 added
+// the F75 covering indexes; v4 added the `outcomes` table.
+pub(crate) const SCHEMA_VERSION: i32 = 6;
 
 /// Windows ACL hardening for the data directory, and the repair path for
 /// machines an earlier version locked out of their own database.

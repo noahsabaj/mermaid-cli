@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The pure MVU core no longer depends on `mermaid-runtime` -- the crate
+  stack points one way.** `mermaid-domain`'s manifest-omission enforcement
+  ("a reducer that wants to await cannot, because the runtime is not a
+  dependency") was true for direct use but not transitively: the crate
+  depended on `mermaid-runtime` for shared vocabulary, pulling rusqlite and
+  the OS surface underneath the "pure" core. The vocabulary moved to the
+  bottom crate instead: the safety-policy types (`SafetyMode`, `RiskClass`,
+  `ActionRequest`, `PolicyDecision`, the floors, `HostShell`, the denial
+  markers) now live in `mermaid_model::safety`, and the durable-store row
+  DTOs in `mermaid_model::records`. Doing that flipped one edge the other
+  way -- `mermaid-model` itself depended on `mermaid-runtime` for redaction
+  and `data_dir` -- so those moved down too (`mermaid_model::utils::redact`,
+  `mermaid_model::utils::dirs`), completing the inversion:
+  model < runtime < domain < cli, acyclic, with `mermaid-runtime`
+  re-exporting every name its own API surfaces so no caller path changed.
+
+  Two enforcement artifacts record the new shape. The layering guard's
+  `may_use` for `mermaid-domain` and `src/render` drops `runtime` entirely
+  -- naming `mermaid_runtime` from the pure layers is now a guard failure,
+  not just a taste violation. And the release pipeline publishes in the new
+  dependency order (model, runtime, domain, cli).
+
 - **The read-only lookup family is one request/response envelope.** Eleven
   `Cmd` variants (`ListConversations`, `LoadConversation`,
   `ListAvailableModels`, `ListProjectFiles`, and the seven

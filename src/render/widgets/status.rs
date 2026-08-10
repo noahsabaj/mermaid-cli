@@ -10,7 +10,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::render::theme::Theme;
 use mermaid_domain::{ContextUsageSnapshot, format_compact_count};
 use mermaid_model::models::{ReasoningLevel, TokenUsageSource};
-use mermaid_runtime::SafetyMode;
+use mermaid_model::safety::SafetyMode;
 
 /// Props for `StatusWidget` (stateless widget)
 pub struct StatusWidget<'a> {

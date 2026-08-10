@@ -1,11 +1,28 @@
-//! The policy vocabulary: modes, risk classes, requests, decisions.
+//! The safety-policy vocabulary: modes, risk classes, requests, decisions.
 //!
-//! Pure data and its immediate logic -- no classification, no engine. The
-//! engine that folds these into a verdict lives in `engine.rs`; the shell
-//! classifier that feeds it lives in `shell/`.
+//! Pure data and its immediate logic -- no classification, no engine. It
+//! lives in this bottom crate so the pure MVU core (`mermaid-domain`) can
+//! speak safety modes and floors without depending on `mermaid-runtime`
+//! (whose manifest carries rusqlite and the OS surface). The engine that
+//! folds this vocabulary into a verdict is `mermaid-runtime`'s
+//! `policy::engine`; the shell classifier that feeds it lives beside it,
+//! and `mermaid-runtime` re-exports these names for its own API surface.
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+
+/// Marker embedded verbatim in every read-only policy-denial `reason` (see
+/// the runtime engine's `PolicyEngine::decide`). Exposed so the
+/// message-history layer can detect a denial that a since-loosened safety
+/// mode has superseded, without re-hardcoding the wording in a second place.
+pub const READ_ONLY_DENIAL_MARKER: &str = "read-only safety mode";
+
+/// Marker embedded verbatim in every plan-mode policy-denial `reason` (the
+/// policy gate rewrites the read-only mode-default deny to a plan-flavored one
+/// while a plan is being drafted). Sibling of [`READ_ONLY_DENIAL_MARKER`]: the
+/// message-history layer matches `"blocked by policy: "` + this marker to
+/// neutralize denials once plan mode ends.
+pub const PLAN_DENIAL_MARKER: &str = "plan mode";
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

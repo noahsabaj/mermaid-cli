@@ -26,7 +26,8 @@ use crate::McpServerConfig;
 use mermaid_model::models::ChatMessage;
 use mermaid_model::models::ReasoningLevel;
 use mermaid_model::models::tool_call::ToolCall as ModelToolCall;
-use mermaid_runtime::{SafetyMode, TaskStatus};
+use mermaid_model::records::TaskStatus;
+use mermaid_model::safety::SafetyMode;
 
 use super::state::ApprovalChoice;
 use mermaid_model::question::QuestionResolution;

@@ -24,7 +24,7 @@ pub fn private_temp_dir() -> std::io::Result<PathBuf> {
     // is a re-export facade, and routing through it made `utils` look like it
     // depended on a sibling module when the real dependency is the external
     // crate. Naming the crate keeps `utils` a leaf.
-    let base = mermaid_runtime::data_dir()
+    let base = crate::utils::dirs::data_dir()
         .map_err(|e| std::io::Error::other(e.to_string()))?
         .join("tmp");
     std::fs::create_dir_all(&base)?;
