@@ -241,10 +241,12 @@ impl State {
         }
         // Restore planning-in-progress (None for sessions saved before the
         // field existed, and for sessions that weren't planning).
-        self.session.plan = history.plan.clone();
+        self.session.plan.clone_from(&history.plan);
         self.session.last_token_usage = history.last_token_usage;
         self.session.cumulative_token_usage = history.cumulative_token_usage;
-        self.session.context_usage = history.context_usage.clone();
+        self.session
+            .context_usage
+            .clone_from(&history.context_usage);
         self.session.replace_conversation(history);
         // A session persisted mid-tool (an assistant `tool_use` with no committed
         // result, or a result whose call was archived out) would otherwise resume

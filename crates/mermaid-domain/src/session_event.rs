@@ -207,25 +207,27 @@ impl SessionScalars {
 #[must_use]
 pub fn fold_session(events: impl IntoIterator<Item = SessionEvent>) -> Option<ConversationHistory> {
     let mut events = events.into_iter();
-    let mut conversation = match events.next()? {
-        SessionEvent::Started {
-            session_id,
-            project_path,
-            model_id,
-            created_at,
-            forked_from,
-            parent_session,
-        } => {
-            let mut conversation = ConversationHistory::new(project_path, model_id, created_at);
-            // The explicit id wins over the clock-derived one — a fork's
-            // collision-bumped id must round-trip exactly.
-            conversation.id = session_id;
-            conversation.forked_from = forked_from;
-            conversation.parent_session = parent_session;
-            conversation
-        },
-        _ => return None,
+    // `if let` rather than a match with a catch-all: every non-`Started`
+    // first event means the same thing (no identity to build on), and a
+    // wildcard arm here would be one more place a new variant could go
+    // unnoticed.
+    let SessionEvent::Started {
+        session_id,
+        project_path,
+        model_id,
+        created_at,
+        forked_from,
+        parent_session,
+    } = events.next()?
+    else {
+        return None;
     };
+    let mut conversation = ConversationHistory::new(project_path, model_id, created_at);
+    // The explicit id wins over the clock-derived one — a fork's
+    // collision-bumped id must round-trip exactly.
+    conversation.id = session_id;
+    conversation.forked_from = forked_from;
+    conversation.parent_session = parent_session;
     for event in events {
         apply(&mut conversation, event);
     }
