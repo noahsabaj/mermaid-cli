@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`wrap.rs`'s tests moved home.** The wrap extraction left its ~15 tests
+  behind in `chat.rs`'s test module — `wrap.rs` itself showed zero tests while
+  the suite that pins its CJK widths, phantom-space, hard-break, and
+  style-preservation behavior lived in a different widget's file. The tests
+  (and their `first_segment_text` helper) now sit in `render::wrap::tests`,
+  byte-identical; `chat.rs`'s module keeps only chat-owned coverage. Same
+  cleanup `transition.rs` got, applied to the remaining instance.
+
 - **`transition.rs` is the turn-state machine its doc says it is.** The
   module opens with "helpers that enforce invariants during turn-state
   transitions" — and then ~600 of its ~790 code lines were presentation:
