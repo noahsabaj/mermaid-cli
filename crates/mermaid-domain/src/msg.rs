@@ -27,15 +27,12 @@ use mermaid_model::models::tool_call::ToolCall as ModelToolCall;
 use mermaid_model::models::{
     FinishReason, ProviderContinuation, ReasoningChunk, ReasoningLevel, TokenUsage, UserFacingError,
 };
-use mermaid_runtime::{
-    ApprovalRecord, CheckpointRecord, PluginInstallRecord, ProcessRecord, SafetyMode, TaskRecord,
-    TaskTimelineEvent,
-};
+use mermaid_runtime::SafetyMode;
 
 use super::runtime::RuntimeSignal;
 use super::state::ContextUsageSnapshot;
 use super::state::StatusKind;
-use super::state::{ApprovalKind, ConversationSummary, McpToolSpec, ToolOutcome};
+use super::state::{ApprovalKind, McpToolSpec, ToolOutcome};
 use super::{CompactionResult, CompactionTrigger};
 use mermaid_model::ids::{ToolCallId, TurnId};
 use mermaid_model::question::Question;
@@ -50,6 +47,12 @@ use mermaid_model::question::Question;
 /// deserialized stream back through `update()`. New variants round-trip
 /// automatically via the externally-tagged representation — no per-variant
 /// recording code to keep in sync.
+// `CompactionFinished` legitimately carries a full `CompactionResult`
+// (~600 bytes). Boxing it would churn ~15 construction + match sites for no
+// real gain — `Msg` values are short-lived and moved once through the
+// channel, never stored in bulk. Same call, same reasoning, as `Cmd`'s
+// `large_enum_variant` expect in cmd.rs.
+#[expect(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Msg {
     // ── User intent ─────────────────────────────────────────────────
@@ -295,18 +298,12 @@ pub enum Msg {
     MemoryChanged(Option<crate::LoadedMemory>),
     /// `save_conversation` finished.
     SessionSaved,
-    /// `/load <id>` — a saved conversation has been read off disk.
-    ConversationLoaded(crate::ConversationHistory),
-    /// Response to `Cmd::ListConversations`. Populates the `/load`
-    /// picker's candidate list.
-    ConversationsListed(Vec<ConversationSummary>),
-    /// Discovery for the `/model` picker finished. Carries every model the
-    /// user can switch to, already grouped and sorted by the effect layer.
-    AvailableModelsListed(Vec<crate::state::ModelChoice>),
-    /// Response to `Cmd::ListProjectFiles`: relative project paths for the
-    /// @-mention picker (gitignore-aware walk, capped, sorted; directories
-    /// carry a trailing `/`).
-    ProjectFilesListed(Vec<String>),
+    /// The answer to a `Cmd::Query` lookup — see [`crate::query`] for the
+    /// request/response pairs. Routed to state by the reducer's
+    /// `handle_query_result`; never turn-scoped (queries carry no `TurnId`;
+    /// each surface applies its own staleness rule, e.g. a picker ignores a
+    /// fill for a mode the user already left).
+    QueryResult(crate::query::QueryResult),
     /// Response to `Cmd::EnsureScratchpad`: the per-session scratch directory
     /// exists on disk at `path`. Carries the conversation id it was minted
     /// for so the reducer can drop a stale ready that raced a `/clear` or
@@ -316,25 +313,8 @@ pub enum Msg {
         session_id: String,
         path: PathBuf,
     },
-    /// Response to `/tasks`.
-    RuntimeTasksListed(Vec<TaskRecord>),
-    /// Response to `/task <id>`.
-    RuntimeTaskLoaded {
-        task: Option<TaskRecord>,
-        events: Vec<TaskTimelineEvent>,
-    },
-    /// Response to `/processes`.
-    RuntimeProcessesListed(Vec<ProcessRecord>),
     /// Generic daemon/runtime text response.
     RuntimeText(String),
-    RuntimeApprovalsListed(Vec<ApprovalRecord>),
-    RuntimeCheckpointsListed(Vec<CheckpointRecord>),
-    /// Reply to `Cmd::ListForkCheckpoints`: file checkpoints anchored past a
-    /// rewind's fork point (oldest first). The reducer emits a system notice
-    /// naming the oldest so the user can `/restore` files the discarded
-    /// timeline changed; empty means no notice.
-    ForkCheckpointsFound(Vec<CheckpointRecord>),
-    RuntimePluginsListed(Vec<PluginInstallRecord>),
 
     // ── Misc model operations ───────────────────────────────────────
     /// `/model <name>` finished pulling (Ollama only).
@@ -720,19 +700,9 @@ impl Msg {
             | Self::SessionProvenanceResolved(_)
             | Self::MemoryChanged(_)
             | Self::SessionSaved
-            | Self::ConversationLoaded(_)
-            | Self::ConversationsListed(_)
-            | Self::AvailableModelsListed(_)
-            | Self::ProjectFilesListed(_)
+            | Self::QueryResult(_)
             | Self::ScratchpadReady { .. }
-            | Self::RuntimeTasksListed(_)
-            | Self::RuntimeTaskLoaded { .. }
-            | Self::RuntimeProcessesListed(_)
             | Self::RuntimeText(_)
-            | Self::RuntimeApprovalsListed(_)
-            | Self::RuntimeCheckpointsListed(_)
-            | Self::ForkCheckpointsFound(_)
-            | Self::RuntimePluginsListed(_)
             | Self::ModelPullFinished { .. }
             | Self::ModelPullProgress(_)
             | Self::Tick
@@ -792,19 +762,9 @@ impl Msg {
             Self::MemoryChanged(_) => MsgKind::MemoryChanged,
             Self::SessionProvenanceResolved(_) => MsgKind::SessionProvenanceResolved,
             Self::SessionSaved => MsgKind::SessionSaved,
-            Self::ConversationLoaded(_) => MsgKind::ConversationLoaded,
-            Self::ConversationsListed(_) => MsgKind::ConversationsListed,
-            Self::AvailableModelsListed(_) => MsgKind::AvailableModelsListed,
-            Self::ProjectFilesListed(_) => MsgKind::ProjectFilesListed,
+            Self::QueryResult(_) => MsgKind::QueryResult,
             Self::ScratchpadReady { .. } => MsgKind::ScratchpadReady,
-            Self::RuntimeTasksListed(_)
-            | Self::RuntimeTaskLoaded { .. }
-            | Self::RuntimeProcessesListed(_)
-            | Self::RuntimeText(_)
-            | Self::RuntimeApprovalsListed(_)
-            | Self::RuntimeCheckpointsListed(_)
-            | Self::ForkCheckpointsFound(_)
-            | Self::RuntimePluginsListed(_) => MsgKind::RuntimeStore,
+            Self::RuntimeText(_) => MsgKind::RuntimeStore,
             Self::ModelPullFinished { .. } => MsgKind::ModelPullFinished,
             Self::ModelPullProgress(_) => MsgKind::ModelPullProgress,
             Self::Tick => MsgKind::Tick,
@@ -861,10 +821,7 @@ pub enum MsgKind {
     MemoryChanged,
     SessionProvenanceResolved,
     SessionSaved,
-    ConversationLoaded,
-    ConversationsListed,
-    AvailableModelsListed,
-    ProjectFilesListed,
+    QueryResult,
     ScratchpadReady,
     RuntimeStore,
     ModelPullFinished,

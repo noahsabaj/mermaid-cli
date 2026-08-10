@@ -39,6 +39,7 @@ use super::compaction::{
     CompactionArchive, CompactionRequest, CompactionResult, CompactionTrigger, format_compact_count,
 };
 use super::msg::{ClipboardRead, KeyCode, KeyMods, Msg, Paste, SlashCmd};
+use super::query::{Query, QueryResult};
 use super::state::{
     GenPhase, McpServerEntry, McpServerStatus, State, StatusKind, TokenUsageTotals, ToolOutcome,
     TurnState, UiMode,
@@ -599,133 +600,11 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
                 state.session.scratchpad = Some(path);
             }
         },
-        Msg::ConversationLoaded(history) => {
-            // If a turn was in flight when the user loaded another conversation
-            // (`/load` mid-generation), cancel its scope first. Otherwise we
-            // overwrite `state.turn` to `Idle` below and lose the only handle —
-            // the turn's CancellationToken + JoinSet — that could stop the
-            // running model call and tool tasks, orphaning them uncancellable;
-            // their parked approval requests could never be answered either (#2).
-            if let Some(id) = state.turn.id() {
-                cmds.push(Cmd::CancelScope(id));
-                // Drop the cancelled turn's parked approval/question modals and
-                // its stale running-tool indicators — the tasks behind them are
-                // being torn down.
-                clear_parked_tool_requests(&mut state);
-                state.ui.live_tool_status.clear();
-            }
-            // Messages queued against the *previous* conversation must not
-            // auto-submit into the one being loaded — drop them (mirrors the
-            // clears above).
-            state.ui.queued_messages.clear();
-            state.session.conversation = history;
-            state.turn = TurnState::Idle;
-            // The abandoned run's summary counters die with it: a leaked
-            // `run_started` would otherwise let a later `finish_run` (quit)
-            // stamp the OLD run's summary into the conversation loaded here.
-            reset_run_counters(&mut state);
-            state.ui.mode = UiMode::EditingInput;
-            // The pause belonged to the previous conversation's failing
-            // compaction; the loaded one starts fresh.
-            state.runtime.auto_compact_suppressed = false;
-            // The loaded conversation has its own id — the previous session's
-            // scratch dir no longer applies. Recompute (same as `/clear`).
-            refresh_scratchpad(&mut state, &mut cmds);
-            emit_title_if_changed(&mut state, &mut cmds);
-        },
-        Msg::AvailableModelsListed(candidates) => {
-            // Only fill a picker that is still open — Esc before discovery
-            // landed drops the event, exactly like `ConversationsListed`.
-            if let UiMode::ModelPicker { query, cursor, .. } = &state.ui.mode {
-                let (query, cursor) = (query.clone(), *cursor);
-                let matches = filter_model_choices(&candidates, &query).len();
-                state.ui.mode = UiMode::ModelPicker {
-                    candidates,
-                    query,
-                    // Keep the cursor if the user already moved it, but never
-                    // leave it past the end of the freshly-arrived list.
-                    cursor: cursor.min(matches.saturating_sub(1)),
-                    loading: false,
-                };
-            }
-        },
-        Msg::ConversationsListed(candidates) => {
-            if let UiMode::ConversationList { .. } = state.ui.mode {
-                state.ui.mode = UiMode::ConversationList {
-                    candidates,
-                    cursor: 0,
-                };
-            }
-            // If the user already navigated away (Esc before the
-            // list landed), the event silently drops.
-        },
-        Msg::ProjectFilesListed(files) => {
-            state.ui.project_files_loading = false;
-            state.ui.project_files = Some(files);
-            // Stale-while-revalidate: the user has been filtering the old
-            // cache; swap the fresh list in and re-rank the open picker.
-            recompute_file_matches(&mut state);
-        },
-        Msg::RuntimeTasksListed(tasks) => {
-            state
-                .session
-                .append(ChatMessage::system(tasks_text(&tasks)), state.now);
-            cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
-        },
-        Msg::RuntimeTaskLoaded { task, events } => {
-            state.session.append(
-                ChatMessage::system(task_detail_text(task.as_ref(), &events)),
-                state.now,
-            );
-            cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
-        },
-        Msg::RuntimeProcessesListed(processes) => {
-            state
-                .session
-                .append(ChatMessage::system(processes_text(&processes)), state.now);
-            cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
+        Msg::QueryResult(result) => {
+            handle_query_result(&mut state, &mut cmds, result);
         },
         Msg::RuntimeText(text) => {
-            state.session.append(ChatMessage::system(text), state.now);
-            cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
-        },
-        Msg::RuntimeApprovalsListed(approvals) => {
-            state
-                .session
-                .append(ChatMessage::system(approvals_text(&approvals)), state.now);
-            cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
-        },
-        Msg::RuntimeCheckpointsListed(checkpoints) => {
-            state.session.append(
-                ChatMessage::system(checkpoints_text(&checkpoints)),
-                state.now,
-            );
-            cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
-        },
-        Msg::ForkCheckpointsFound(checkpoints) => {
-            // Reply to the rewind/fork lookup. Files were NOT rewound —
-            // point the user at the oldest checkpoint past the cut (each is
-            // a PRE-mutation snapshot, so the oldest holds file state
-            // closest to the fork point). Empty = nothing to say.
-            if let Some(oldest) = checkpoints.first() {
-                push_system(
-                    &mut state,
-                    &mut cmds,
-                    format!(
-                        "{} file checkpoint(s) were created after this point. Files were \
-                         not rewound. /restore {} restores the files changed by the first \
-                         mutation after the fork; /checkpoints lists the rest.",
-                        checkpoints.len(),
-                        oldest.id
-                    ),
-                );
-            }
-        },
-        Msg::RuntimePluginsListed(plugins) => {
-            state
-                .session
-                .append(ChatMessage::system(plugins_text(&plugins)), state.now);
-            cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
+            append_runtime_note(&mut state, &mut cmds, text);
         },
         Msg::ModelPullFinished { model } => {
             push_system(&mut state, &mut cmds, format!("Pulled {model}"));
@@ -2129,10 +2008,10 @@ pub(crate) fn fork_conversation_at(state: &mut State, cmds: &mut Vec<Cmd>, messa
     // discarded; ask the runtime store which exist (async — the reply arm
     // emits a /restore hint). Uses the ORIGINAL id: the fork's history is a
     // strict prefix, so anchors always reference the original session.
-    cmds.push(Cmd::ListForkCheckpoints {
+    cmds.push(Cmd::Query(Query::ListForkCheckpoints {
         session_id: state.session.conversation.id.clone(),
         message_index,
-    });
+    }));
 
     let original = &state.session.conversation;
     let original_id = original.id.clone();
@@ -2387,9 +2266,11 @@ pub(crate) fn handle_conversation_list_key(state: &mut State, cmds: &mut Vec<Cmd
         },
         KeyCode::Enter => {
             if let Some(summary) = candidates.get(*cursor) {
-                cmds.push(Cmd::LoadConversation(summary.id.clone()));
+                cmds.push(Cmd::Query(Query::LoadConversation {
+                    id: summary.id.clone(),
+                }));
             }
-            // Mode flips on `Msg::ConversationLoaded` — leave as-is
+            // Mode flips on `QueryResult::ConversationLoaded` — leave as-is
             // until then so the user sees the list until the load
             // completes.
         },
@@ -2424,7 +2305,7 @@ pub(crate) fn recompute_file_matches(state: &mut State) {
 /// Token re-evaluation after a text mutation or cursor move: rank matches,
 /// and on the CLOSED → OPEN transition fire a fresh project walk
 /// (stale-while-revalidate — the user filters the cached list instantly and
-/// the fresh list swaps in via `Msg::ProjectFilesListed`). The in-flight
+/// the fresh list swaps in via `QueryResult::ProjectFilesListed`). The in-flight
 /// flag dedupes: reopening while a walk runs never spawns a second one.
 pub(crate) fn refresh_file_picker(state: &mut State, cmds: &mut Vec<Cmd>) {
     let was_open = state.ui.file_picker_cursor.is_some();
@@ -2432,7 +2313,7 @@ pub(crate) fn refresh_file_picker(state: &mut State, cmds: &mut Vec<Cmd>) {
     let is_open = state.ui.file_picker_cursor.is_some();
     if is_open && !was_open && !state.ui.project_files_loading {
         state.ui.project_files_loading = true;
-        cmds.push(Cmd::ListProjectFiles);
+        cmds.push(Cmd::Query(Query::ListProjectFiles));
     }
 }
 
@@ -2836,6 +2717,128 @@ pub(crate) fn handle_submit_prompt(
     push_call_model(state, cmds, turn);
 }
 
+/// Route a completed `Cmd::Query` lookup into state — one arm per
+/// [`QueryResult`] variant, bodies moved verbatim from the former
+/// per-`Msg` arms. None of these are turn-scoped; each surface applies
+/// its own staleness rule (a picker only fills while it is still open,
+/// transcript listings always append).
+pub(crate) fn handle_query_result(state: &mut State, cmds: &mut Vec<Cmd>, result: QueryResult) {
+    match result {
+        QueryResult::ConversationLoaded(history) => {
+            // If a turn was in flight when the user loaded another conversation
+            // (`/load` mid-generation), cancel its scope first. Otherwise we
+            // overwrite `state.turn` to `Idle` below and lose the only handle —
+            // the turn's CancellationToken + JoinSet — that could stop the
+            // running model call and tool tasks, orphaning them uncancellable;
+            // their parked approval requests could never be answered either (#2).
+            if let Some(id) = state.turn.id() {
+                cmds.push(Cmd::CancelScope(id));
+                // Drop the cancelled turn's parked approval/question modals and
+                // its stale running-tool indicators — the tasks behind them are
+                // being torn down.
+                clear_parked_tool_requests(state);
+                state.ui.live_tool_status.clear();
+            }
+            // Messages queued against the *previous* conversation must not
+            // auto-submit into the one being loaded — drop them (mirrors the
+            // clears above).
+            state.ui.queued_messages.clear();
+            state.session.conversation = *history;
+            state.turn = TurnState::Idle;
+            // The abandoned run's summary counters die with it: a leaked
+            // `run_started` would otherwise let a later `finish_run` (quit)
+            // stamp the OLD run's summary into the conversation loaded here.
+            reset_run_counters(state);
+            state.ui.mode = UiMode::EditingInput;
+            // The pause belonged to the previous conversation's failing
+            // compaction; the loaded one starts fresh.
+            state.runtime.auto_compact_suppressed = false;
+            // The loaded conversation has its own id — the previous session's
+            // scratch dir no longer applies. Recompute (same as `/clear`).
+            refresh_scratchpad(state, cmds);
+            emit_title_if_changed(state, cmds);
+        },
+        QueryResult::AvailableModelsListed(candidates) => {
+            // Only fill a picker that is still open — Esc before discovery
+            // landed drops the event, exactly like `ConversationsListed`.
+            if let UiMode::ModelPicker { query, cursor, .. } = &state.ui.mode {
+                let (query, cursor) = (query.clone(), *cursor);
+                let matches = filter_model_choices(&candidates, &query).len();
+                state.ui.mode = UiMode::ModelPicker {
+                    candidates,
+                    query,
+                    // Keep the cursor if the user already moved it, but never
+                    // leave it past the end of the freshly-arrived list.
+                    cursor: cursor.min(matches.saturating_sub(1)),
+                    loading: false,
+                };
+            }
+        },
+        QueryResult::ConversationsListed(candidates) => {
+            if let UiMode::ConversationList { .. } = state.ui.mode {
+                state.ui.mode = UiMode::ConversationList {
+                    candidates,
+                    cursor: 0,
+                };
+            }
+            // If the user already navigated away (Esc before the
+            // list landed), the event silently drops.
+        },
+        QueryResult::ProjectFilesListed(files) => {
+            state.ui.project_files_loading = false;
+            state.ui.project_files = Some(files);
+            // Stale-while-revalidate: the user has been filtering the old
+            // cache; swap the fresh list in and re-rank the open picker.
+            recompute_file_matches(state);
+        },
+        QueryResult::RuntimeTasksListed(tasks) => {
+            append_runtime_note(state, cmds, tasks_text(&tasks));
+        },
+        QueryResult::RuntimeTaskLoaded { task, events } => {
+            append_runtime_note(state, cmds, task_detail_text(task.as_deref(), &events));
+        },
+        QueryResult::RuntimeProcessesListed(processes) => {
+            append_runtime_note(state, cmds, processes_text(&processes));
+        },
+        QueryResult::RuntimeApprovalsListed(approvals) => {
+            append_runtime_note(state, cmds, approvals_text(&approvals));
+        },
+        QueryResult::RuntimeCheckpointsListed(checkpoints) => {
+            append_runtime_note(state, cmds, checkpoints_text(&checkpoints));
+        },
+        QueryResult::ForkCheckpointsFound(checkpoints) => {
+            // Reply to the rewind/fork lookup. Files were NOT rewound —
+            // point the user at the oldest checkpoint past the cut (each is
+            // a PRE-mutation snapshot, so the oldest holds file state
+            // closest to the fork point). Empty = nothing to say.
+            if let Some(oldest) = checkpoints.first() {
+                push_system(
+                    state,
+                    cmds,
+                    format!(
+                        "{} file checkpoint(s) were created after this point. Files were \
+                         not rewound. /restore {} restores the files changed by the first \
+                         mutation after the fork; /checkpoints lists the rest.",
+                        checkpoints.len(),
+                        oldest.id
+                    ),
+                );
+            }
+        },
+        QueryResult::RuntimePluginsListed(plugins) => {
+            append_runtime_note(state, cmds, plugins_text(&plugins));
+        },
+    }
+}
+
+/// Append a runtime listing (or generic runtime text) to the transcript as a
+/// system note and persist — the shared tail of every `/runtime`-family
+/// answer and of `Msg::RuntimeText`.
+fn append_runtime_note(state: &mut State, cmds: &mut Vec<Cmd>, text: String) {
+    state.session.append(ChatMessage::system(text), state.now);
+    cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "predates the lint; see .github/baselines/expect_budget.txt"
@@ -2851,7 +2854,7 @@ pub(crate) fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd
                 cursor: 0,
                 loading: true,
             };
-            cmds.push(Cmd::ListAvailableModels);
+            cmds.push(Cmd::Query(Query::ListAvailableModels));
         },
         SlashCmd::Model(Some(new_model)) => {
             switch_model(state, cmds, new_model);
@@ -2940,17 +2943,17 @@ pub(crate) fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd
             cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
         },
         SlashCmd::Load(Some(id)) => {
-            cmds.push(Cmd::LoadConversation(id));
+            cmds.push(Cmd::Query(Query::LoadConversation { id }));
         },
         SlashCmd::Load(None) | SlashCmd::List => {
             // Transition to the picker. Effect handler scans the
             // conversations directory; the reducer fills in
-            // candidates when `Msg::ConversationsListed` arrives.
+            // candidates when `QueryResult::ConversationsListed` arrives.
             state.ui.mode = UiMode::ConversationList {
                 candidates: Vec::new(),
                 cursor: 0,
             };
-            cmds.push(Cmd::ListConversations);
+            cmds.push(Cmd::Query(Query::ListConversations));
         },
         SlashCmd::Usage => {
             state
@@ -3106,10 +3109,10 @@ pub(crate) fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd
             cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
         },
         SlashCmd::Tasks => {
-            cmds.push(Cmd::ListRuntimeTasks { limit: 10 });
+            cmds.push(Cmd::Query(Query::ListRuntimeTasks { limit: 10 }));
         },
         SlashCmd::Task(id) => {
-            cmds.push(Cmd::LoadRuntimeTask { id });
+            cmds.push(Cmd::Query(Query::LoadRuntimeTask { id }));
         },
         SlashCmd::Pause(id) => {
             cmds.push(Cmd::UpdateRuntimeTaskStatus {
@@ -3140,7 +3143,7 @@ pub(crate) fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd
             }
         },
         SlashCmd::Handoff(Some(id)) | SlashCmd::Report(Some(id)) => {
-            cmds.push(Cmd::LoadRuntimeTask { id });
+            cmds.push(Cmd::Query(Query::LoadRuntimeTask { id }));
         },
         SlashCmd::Handoff(None) => {
             let text = format!(
@@ -3161,7 +3164,7 @@ pub(crate) fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd
             cmds.push(Cmd::SaveConversation(state.session.snapshot_conversation()));
         },
         SlashCmd::Processes => {
-            cmds.push(Cmd::ListRuntimeProcesses { limit: 10 });
+            cmds.push(Cmd::Query(Query::ListRuntimeProcesses { limit: 10 }));
         },
         SlashCmd::Agents(arg) => {
             handle_slash_agents(state, cmds, arg.as_deref());
@@ -3182,7 +3185,7 @@ pub(crate) fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd
             cmds.push(Cmd::ShowRuntimePorts);
         },
         SlashCmd::Approvals => {
-            cmds.push(Cmd::ListRuntimeApprovals);
+            cmds.push(Cmd::Query(Query::ListRuntimeApprovals));
         },
         SlashCmd::Approve(id) => {
             cmds.push(Cmd::DecideRuntimeApproval {
@@ -3204,13 +3207,13 @@ pub(crate) fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd
             cmds.push(Cmd::CreateRuntimeCheckpoint { paths });
         },
         SlashCmd::Checkpoints => {
-            cmds.push(Cmd::ListRuntimeCheckpoints { limit: 10 });
+            cmds.push(Cmd::Query(Query::ListRuntimeCheckpoints { limit: 10 }));
         },
         SlashCmd::Restore(id) => {
             cmds.push(Cmd::RestoreRuntimeCheckpoint { id });
         },
         SlashCmd::Plugins => {
-            cmds.push(Cmd::ListRuntimePlugins);
+            cmds.push(Cmd::Query(Query::ListRuntimePlugins));
         },
         SlashCmd::ModelInfo(model) => {
             cmds.push(Cmd::ShowRuntimeModelInfo { model });
@@ -3650,7 +3653,7 @@ pub(crate) fn handle_confirm_accepted(state: &mut State, cmds: &mut Vec<Cmd>) {
     match confirm.accept_msg_token {
         super::state::ConfirmationTarget::ClearConversation => {
             // If a turn was still in flight when the user cleared, cancel its
-            // scope first and reset to `Idle` — mirroring `Msg::ConversationLoaded`
+            // scope first and reset to `Idle` — mirroring `QueryResult::ConversationLoaded`
             // (#2, F34). Without this the orphaned model/tool tasks keep running
             // (tools keep mutating files after a "clear"), and the still-active
             // turn's same-id `StreamDone`/`ToolFinished` would pass the stale
@@ -6138,14 +6141,16 @@ mod tests {
         assert!(state.ui.project_files_loading);
         let walks = cmds
             .iter()
-            .filter(|c| matches!(c, Cmd::ListProjectFiles))
+            .filter(|c| matches!(c, Cmd::Query(Query::ListProjectFiles)))
             .count();
         assert_eq!(walks, 1, "open fires exactly one walk");
         // Further filtering while the walk is in flight never re-fires.
         let (state, cmds) = type_text(state, "src");
         assert!(state.ui.file_picker_open());
         assert!(
-            !cmds.iter().any(|c| matches!(c, Cmd::ListProjectFiles)),
+            !cmds
+                .iter()
+                .any(|c| matches!(c, Cmd::Query(Query::ListProjectFiles))),
             "in-flight walk dedupes"
         );
         let _ = state;
@@ -6156,7 +6161,10 @@ mod tests {
         let (state, _) = type_text(fresh_state(), "@ma");
         let (state, _) = update(
             state,
-            Msg::ProjectFilesListed(vec!["docs/notes.md".to_string(), "src/main.rs".to_string()]),
+            Msg::QueryResult(QueryResult::ProjectFilesListed(vec![
+                "docs/notes.md".to_string(),
+                "src/main.rs".to_string(),
+            ])),
         );
         assert_eq!(state.ui.file_picker_matches, vec!["src/main.rs"]);
         let (state, _) = update(state, plain_key(KeyCode::Tab));
@@ -6178,7 +6186,10 @@ mod tests {
         let (state, _) = type_text(fresh_state(), "@");
         let (state, _) = update(
             state,
-            Msg::ProjectFilesListed(vec!["docs/notes.md".to_string(), "src/main.rs".to_string()]),
+            Msg::QueryResult(QueryResult::ProjectFilesListed(vec![
+                "docs/notes.md".to_string(),
+                "src/main.rs".to_string(),
+            ])),
         );
         assert_eq!(
             state.ui.file_picker_matches.len(),
@@ -6212,7 +6223,7 @@ mod tests {
         );
         assert_eq!(
             cmds.iter()
-                .filter(|c| matches!(c, Cmd::ListProjectFiles))
+                .filter(|c| matches!(c, Cmd::Query(Query::ListProjectFiles)))
                 .count(),
             1,
             "the open fires exactly one walk"
@@ -6227,7 +6238,10 @@ mod tests {
         let (state, _) = type_text(fresh_state(), "@");
         let (state, _) = update(
             state,
-            Msg::ProjectFilesListed(vec!["docs/notes.md".to_string(), "src/main.rs".to_string()]),
+            Msg::QueryResult(QueryResult::ProjectFilesListed(vec![
+                "docs/notes.md".to_string(),
+                "src/main.rs".to_string(),
+            ])),
         );
         let (state, _) = update(
             state,
@@ -6318,7 +6332,9 @@ mod tests {
         let (state, _) = type_text(fresh_state(), "@ma");
         let (state, _) = update(
             state,
-            Msg::ProjectFilesListed(vec!["src/main.rs".to_string()]),
+            Msg::QueryResult(QueryResult::ProjectFilesListed(vec![
+                "src/main.rs".to_string(),
+            ])),
         );
         let (state, _) = update(state, plain_key(KeyCode::Enter));
         assert_eq!(
@@ -6336,7 +6352,9 @@ mod tests {
         let (state, _) = type_text(fresh_state(), "@ma");
         let (state, _) = update(
             state,
-            Msg::ProjectFilesListed(vec!["src/main.rs".to_string()]),
+            Msg::QueryResult(QueryResult::ProjectFilesListed(vec![
+                "src/main.rs".to_string(),
+            ])),
         );
         let buffer_before = state.ui.input_buffer.clone();
         let (state, _) = update(state, plain_key(KeyCode::Escape));
@@ -6353,10 +6371,18 @@ mod tests {
     fn file_picker_never_opens_on_slash_commands_or_emails() {
         let (state, cmds) = type_text(fresh_state(), "/load @x");
         assert!(!state.ui.file_picker_open(), "slash palette owns `/` input");
-        assert!(!cmds.iter().any(|c| matches!(c, Cmd::ListProjectFiles)));
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, Cmd::Query(Query::ListProjectFiles)))
+        );
         let (state, cmds) = type_text(fresh_state(), "mail user@host");
         assert!(!state.ui.file_picker_open(), "user@host is not a mention");
-        assert!(!cmds.iter().any(|c| matches!(c, Cmd::ListProjectFiles)));
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, Cmd::Query(Query::ListProjectFiles)))
+        );
         let _ = state;
     }
 
@@ -6365,11 +6391,11 @@ mod tests {
         let (state, _) = type_text(fresh_state(), "@s");
         let (state, _) = update(
             state,
-            Msg::ProjectFilesListed(vec![
+            Msg::QueryResult(QueryResult::ProjectFilesListed(vec![
                 "src/a.rs".to_string(),
                 "src/b.rs".to_string(),
                 "src/c.rs".to_string(),
-            ]),
+            ])),
         );
         let (state, _) = update(state, plain_key(KeyCode::Down));
         assert_eq!(state.ui.file_picker_cursor, Some(1));
@@ -7551,7 +7577,10 @@ mod tests {
 
         // `/load` a conversation mid-turn.
         let history = fresh_state().session.conversation.clone();
-        let (state, _) = update(parked(), Msg::ConversationLoaded(history));
+        let (state, _) = update(
+            parked(),
+            Msg::QueryResult(QueryResult::ConversationLoaded(Box::new(history))),
+        );
         assert!(
             state.pending_question.is_empty(),
             "ConversationLoaded must clear the parked question"
@@ -7577,7 +7606,10 @@ mod tests {
         let mut state = fresh_state();
         state.turn = start_generating(TurnId(5), std::time::SystemTime::now());
         let history = fresh_state().session.conversation.clone();
-        let (state, cmds) = update(state, Msg::ConversationLoaded(history));
+        let (state, cmds) = update(
+            state,
+            Msg::QueryResult(QueryResult::ConversationLoaded(Box::new(history))),
+        );
         assert!(
             cmds.iter()
                 .any(|c| matches!(c, Cmd::CancelScope(TurnId(5)))),
@@ -7591,7 +7623,10 @@ mod tests {
         // No in-flight turn → nothing to cancel; `/load` just swaps state.
         let state = fresh_state();
         let history = fresh_state().session.conversation.clone();
-        let (state, cmds) = update(state, Msg::ConversationLoaded(history));
+        let (state, cmds) = update(
+            state,
+            Msg::QueryResult(QueryResult::ConversationLoaded(Box::new(history))),
+        );
         assert!(!cmds.iter().any(|c| matches!(c, Cmd::CancelScope(_))));
         assert!(matches!(state.turn, TurnState::Idle));
     }
@@ -7698,7 +7733,10 @@ mod tests {
         state.session.scratchpad = Some(std::path::PathBuf::from("/data/tmp/scratchpad/-proj/old"));
         let mut history = fresh_state().session.conversation.clone();
         history.id = "loaded_session".to_string();
-        let (state, cmds) = update(state, Msg::ConversationLoaded(history));
+        let (state, cmds) = update(
+            state,
+            Msg::QueryResult(QueryResult::ConversationLoaded(Box::new(history))),
+        );
         assert_eq!(state.session.scratchpad, None);
         assert!(cmds.iter().any(|c| matches!(
             c,
@@ -7862,7 +7900,10 @@ mod tests {
                 attachment_ids: Vec::new(),
             });
         let history = fresh_state().session.conversation.clone();
-        let (state, _cmds) = update(state, Msg::ConversationLoaded(history));
+        let (state, _cmds) = update(
+            state,
+            Msg::QueryResult(QueryResult::ConversationLoaded(Box::new(history))),
+        );
         assert!(
             state.ui.queued_messages.is_empty(),
             "queued messages must be dropped on /load"
@@ -8691,7 +8732,10 @@ mod tests {
         state.runtime.run_tokens.add_provider(500);
         state.turn = start_generating(TurnId(5), std::time::SystemTime::now());
         let history = fresh_state().session.conversation;
-        let (mut state, _) = update(state, Msg::ConversationLoaded(history));
+        let (mut state, _) = update(
+            state,
+            Msg::QueryResult(QueryResult::ConversationLoaded(Box::new(history))),
+        );
         let mut cmds = Vec::new();
         super::request_exit(&mut state, &mut cmds);
         assert!(
@@ -11123,7 +11167,8 @@ mod tests {
             state.ui.mode
         );
         assert!(
-            cmds.iter().any(|c| matches!(c, Cmd::ListAvailableModels)),
+            cmds.iter()
+                .any(|c| matches!(c, Cmd::Query(Query::ListAvailableModels))),
             "the picker must ask for discovery"
         );
         assert!(
@@ -11139,11 +11184,11 @@ mod tests {
         let (state, _) = update(fresh_state(), Msg::Slash(SlashCmd::Model(None)));
         let (state, _) = update(
             state,
-            Msg::AvailableModelsListed(vec![
+            Msg::QueryResult(QueryResult::AvailableModelsListed(vec![
                 model_choice("ollama/llama3.2", "Local (Ollama)"),
                 model_choice("anthropic/claude-opus-4-5", "anthropic"),
                 model_choice("anthropic/claude-haiku-4-5", "anthropic"),
-            ]),
+            ])),
         );
         assert!(matches!(
             state.ui.mode,
@@ -11202,10 +11247,10 @@ mod tests {
         let (state, _) = update(fresh_state(), Msg::Slash(SlashCmd::Model(None)));
         let (state, _) = update(
             state,
-            Msg::AvailableModelsListed(vec![
+            Msg::QueryResult(QueryResult::AvailableModelsListed(vec![
                 model_choice("ollama/llama3.2", "Local (Ollama)"),
                 model_choice("anthropic/claude-opus-4-5", "anthropic"),
-            ]),
+            ])),
         );
         // A burst (what the coalescer produces from fast typing).
         let (state, _) = update(
@@ -11258,7 +11303,10 @@ mod tests {
         let (state, _) = update(state, pick_key(KeyCode::Escape));
         let (state, _) = update(
             state,
-            Msg::AvailableModelsListed(vec![model_choice("ollama/x", "Local (Ollama)")]),
+            Msg::QueryResult(QueryResult::AvailableModelsListed(vec![model_choice(
+                "ollama/x",
+                "Local (Ollama)",
+            )])),
         );
         assert!(matches!(state.ui.mode, UiMode::EditingInput));
     }
@@ -13903,10 +13951,10 @@ mod tests {
         let found = cmds
             .iter()
             .find_map(|c| match c {
-                Cmd::ListForkCheckpoints {
+                Cmd::Query(Query::ListForkCheckpoints {
                     session_id,
                     message_index,
-                } => Some((session_id.clone(), *message_index)),
+                }) => Some((session_id.clone(), *message_index)),
                 _ => None,
             })
             .expect("fork queries anchored checkpoints");
@@ -13938,17 +13986,20 @@ mod tests {
         let before = state.session.messages().len();
         let (state, _) = update(
             state,
-            Msg::ForkCheckpointsFound(vec![
+            Msg::QueryResult(QueryResult::ForkCheckpointsFound(vec![
                 anchored_checkpoint("cp-old", 4),
                 anchored_checkpoint("cp-new", 8),
-            ]),
+            ])),
         );
         let notice = state.session.messages().last().expect("notice appended");
         assert!(notice.content.contains("cp-old"), "{}", notice.content);
         assert!(notice.content.contains("Files were not rewound"));
         assert!(notice.content.contains("2 file checkpoint(s)"));
 
-        let (state, _) = update(state, Msg::ForkCheckpointsFound(Vec::new()));
+        let (state, _) = update(
+            state,
+            Msg::QueryResult(QueryResult::ForkCheckpointsFound(Vec::new())),
+        );
         assert_eq!(
             state.session.messages().len(),
             before + 1,

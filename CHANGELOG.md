@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The read-only lookup family is one request/response envelope.** Eleven
+  `Cmd` variants (`ListConversations`, `LoadConversation`,
+  `ListAvailableModels`, `ListProjectFiles`, and the seven
+  `/runtime`-family listings) paired 1:1 with eleven `Msg` variants, each
+  pair carrying its own reducer arm and its own spawn-and-wrap block in the
+  effect dispatcher -- identical shape everywhere: ask for a listing, get a
+  value back, no turn scoping, no side effects. They are now one
+  `Cmd::Query(Query)` answered by one `Msg::QueryResult(QueryResult)`, with
+  the request/response pairs written down once in the new `query` module.
+  The reducer routes results through a single `handle_query_result`; the
+  effect dispatcher runs them through a single `dispatch_query` (bodies
+  unchanged -- conversation reads and provider discovery stay async, store
+  reads and the project walk stay on the blocking pool). `Cmd::tag()` and
+  `Cmd::summary()` delegate to the query, so traces and `--record` files
+  carry the exact strings they always did, and `QueryResult`'s variants
+  keep the old `Msg` names so a recording reads the same one level deeper.
+
+  Replay compatibility: recordings made before this change replay their
+  query-result lines as skipped entries (the same shape any newer-build
+  recording takes); everything else replays unchanged. `MsgKind` folds the
+  four listing kinds and the runtime-store collapse into one `QueryResult`
+  kind, with `RuntimeStore` kept for the generic text response.
+
 - **The three capability sources have their precedence written down, and
   the static baseline is one constructor.** Model capabilities come from
   three places -- live probes (provider `/models`, Ollama `/api/show`,
