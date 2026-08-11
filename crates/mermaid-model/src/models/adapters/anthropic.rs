@@ -23,19 +23,19 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::StreamExt;
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::constants::MAX_RESPONSE_CHARS;
 use crate::models::ModelCapabilities;
+use crate::models::adapters::driver::{Flow, Framing, StreamProtocol, drive_stream};
 use crate::models::config::ModelConfig;
 use crate::models::error::{BackendError, ModelError, Result};
 use crate::models::reasoning::{
     ReasoningCapability, ReasoningChunk, ReasoningLevel, nearest_effort,
 };
-use crate::models::stream::{StreamEvent, StreamSink, emit_all};
+use crate::models::stream::{StreamEvent, StreamSink};
 use crate::models::tool_call::{FunctionCall, ToolCall};
 use crate::models::traits::Model;
 
@@ -45,7 +45,6 @@ use crate::models::types::{
     ChatMessage, FinishReason, MessageAudience, MessageRole, ModelResponse, ProviderContinuation,
     TokenUsage,
 };
-use crate::utils::drain_sse_events;
 
 const TRUNCATION_MARKER: &str = "\n\n[TRUNCATED: response exceeded size limit]";
 /// API version pin per Anthropic stability guarantee. Bump when a feature
@@ -942,11 +941,7 @@ impl AnthropicAdapter {
     }
 
     /// Stream the response, emit typed events, return the final
-    /// `ModelResponse`. Wave 3 implementation.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "predates the lint; see .github/baselines/expect_budget.txt"
-    )]
+    /// `ModelResponse`.
     async fn handle_stream(
         &self,
         response: reqwest::Response,
@@ -956,260 +951,270 @@ impl AnthropicAdapter {
         if !response.status().is_success() {
             return Err(http_error_from_response(response).await);
         }
+        drive_stream(
+            response.bytes_stream(),
+            AnthropicStream::new(self.model_name.clone(), hide_reasoning_trace),
+            sink,
+        )
+        .await
+    }
+}
 
-        let mut stream = response.bytes_stream();
-        let mut buf: Vec<u8> = Vec::new();
+/// Anthropic's wire format as a [`StreamProtocol`].
+///
+/// The only one of the four with per-block state: `content_block_*` frames
+/// carry an `index`, and text / thinking / `tool_use` blocks interleave, so
+/// each is accumulated under its own key until its stop frame closes it.
+struct AnthropicStream {
+    model_name: String,
+    hide_reasoning_trace: bool,
+    text_acc: String,
+    thinking_acc: String,
+    signature_acc: Option<String>,
+    tool_calls_done: Vec<ToolCall>,
+    truncated: bool,
+    prompt_tokens: usize,
+    completion_tokens: usize,
+    cache_creation_tokens: usize,
+    cache_read_tokens: usize,
+    stop_reason: Option<FinishReason>,
+    /// F56: set when the terminal `message_stop` frame is observed, so an
+    /// abnormal close (connection dropped before any terminal frame) can be
+    /// told apart from a clean completion.
+    saw_message_stop: bool,
+    blocks: HashMap<usize, BlockAccumulator>,
+}
 
-        let mut text_acc = String::new();
-        let mut thinking_acc = String::new();
-        let mut signature_acc: Option<String> = None;
-        let mut tool_calls_done: Vec<ToolCall> = Vec::new();
-        let mut truncated = false;
-        let mut prompt_tokens: usize = 0;
-        let mut completion_tokens: usize = 0;
-        let mut cache_creation_tokens: usize = 0;
-        let mut cache_read_tokens: usize = 0;
-        let mut stop_reason: Option<FinishReason> = None;
-        // F56: set when the terminal `message_stop` frame is observed, so an
-        // abnormal close (connection dropped before any terminal frame) can be
-        // told apart from a clean completion after the loop.
-        let mut saw_message_stop = false;
-        // Per-block-index accumulators. Anthropic emits content_block_*
-        // events tagged with an `index` field; multiple blocks (text +
-        // thinking + tool_use) interleave, so we track each by index.
-        let mut blocks: HashMap<usize, BlockAccumulator> = HashMap::new();
+impl AnthropicStream {
+    fn new(model_name: String, hide_reasoning_trace: bool) -> Self {
+        Self {
+            model_name,
+            hide_reasoning_trace,
+            text_acc: String::new(),
+            thinking_acc: String::new(),
+            signature_acc: None,
+            tool_calls_done: Vec::new(),
+            truncated: false,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            stop_reason: None,
+            saw_message_stop: false,
+            blocks: HashMap::new(),
+        }
+    }
+}
 
-        'stream: while let Some(chunk_result) = stream.next().await {
-            let chunk = chunk_result.map_err(|e| ModelError::StreamError(e.to_string()))?;
-            // Bound SSE reassembly: a server that streams bytes but never emits
-            // the `\n\n` event separator would otherwise grow `buf` without
-            // bound. At this point `buf` holds only the un-terminated residue
-            // from the previous drain, so this never trips on legitimately
-            // buffered complete events (#50).
-            if buf.len() > crate::constants::MAX_SSE_BUFFER_BYTES {
-                return Err(ModelError::StreamError(format!(
-                    "SSE stream exceeded {} byte reassembly cap without a complete event",
-                    crate::constants::MAX_SSE_BUFFER_BYTES
-                )));
-            }
-            buf.extend_from_slice(&chunk);
+impl StreamProtocol for AnthropicStream {
+    const FRAMING: Framing = Framing::Sse;
 
-            for payload in drain_sse_events(&mut buf) {
-                // Events this frame produced. Collected synchronously and
-                // drained onto the sink at the bottom of the frame, so the
-                // emission order is the production order by construction.
-                let mut events: Vec<StreamEvent> = Vec::new();
-                let parsed: Value = match serde_json::from_str(&payload) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        return Err(ModelError::ParseError {
-                            message: format!("Failed to parse Anthropic stream chunk: {e}"),
-                            raw: Some(payload),
-                        });
+    #[expect(
+        clippy::too_many_lines,
+        reason = "predates the lint; see .github/baselines/expect_budget.txt"
+    )]
+    fn on_frame(&mut self, frame: &str, out: &mut Vec<StreamEvent>) -> Result<Flow> {
+        let hide_reasoning_trace = self.hide_reasoning_trace;
+        let parsed: Value = match serde_json::from_str(frame) {
+            Ok(v) => v,
+            Err(e) => {
+                return Err(ModelError::ParseError {
+                    message: format!("Failed to parse Anthropic stream chunk: {e}"),
+                    raw: Some(frame.to_string()),
+                });
+            },
+        };
+        let event_type = parsed.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+        match event_type {
+            "message_start" => {
+                if let Some(input) = parsed
+                    .pointer("/message/usage/input_tokens")
+                    .and_then(|v| v.as_u64())
+                {
+                    self.prompt_tokens = input as usize;
+                }
+                if let Some(cache_creation) = parsed
+                    .pointer("/message/usage/cache_creation_input_tokens")
+                    .and_then(|v| v.as_u64())
+                {
+                    self.cache_creation_tokens = cache_creation as usize;
+                }
+                if let Some(cache_read) = parsed
+                    .pointer("/message/usage/cache_read_input_tokens")
+                    .and_then(|v| v.as_u64())
+                {
+                    self.cache_read_tokens = cache_read as usize;
+                }
+            },
+            "content_block_start" => {
+                let index = parsed.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                let block = parsed.get("content_block");
+                let block_type = block
+                    .and_then(|b| b.get("type"))
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("");
+                let acc = match block_type {
+                    "text" => BlockAccumulator::Text(String::new()),
+                    "thinking" => BlockAccumulator::Thinking {
+                        content: String::new(),
+                        signature: None,
                     },
+                    "tool_use" => {
+                        let id = block
+                            .and_then(|b| b.get("id"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let name = block
+                            .and_then(|b| b.get("name"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        BlockAccumulator::ToolUse {
+                            id,
+                            name,
+                            input_buf: String::new(),
+                        }
+                    },
+                    // Unknown block types (e.g., server-tool
+                    // results we don't request) — track as inert.
+                    _ => BlockAccumulator::Other,
                 };
-                let event_type = parsed.get("type").and_then(|v| v.as_str()).unwrap_or("");
-
-                match event_type {
-                    "message_start" => {
-                        if let Some(input) = parsed
-                            .pointer("/message/usage/input_tokens")
-                            .and_then(|v| v.as_u64())
-                        {
-                            prompt_tokens = input as usize;
-                        }
-                        if let Some(cache_creation) = parsed
-                            .pointer("/message/usage/cache_creation_input_tokens")
-                            .and_then(|v| v.as_u64())
-                        {
-                            cache_creation_tokens = cache_creation as usize;
-                        }
-                        if let Some(cache_read) = parsed
-                            .pointer("/message/usage/cache_read_input_tokens")
-                            .and_then(|v| v.as_u64())
-                        {
-                            cache_read_tokens = cache_read as usize;
-                        }
-                    },
-                    "content_block_start" => {
-                        let index =
-                            parsed.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                        let block = parsed.get("content_block");
-                        let block_type = block
-                            .and_then(|b| b.get("type"))
-                            .and_then(|t| t.as_str())
+                self.blocks.insert(index, acc);
+            },
+            "content_block_delta" => {
+                let index = parsed.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                let delta = parsed.get("delta");
+                let delta_type = delta
+                    .and_then(|d| d.get("type"))
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("");
+                let Some(acc) = self.blocks.get_mut(&index) else {
+                    return Ok(Flow::Continue);
+                };
+                match (acc, delta_type) {
+                    (BlockAccumulator::Text(buf_s), "text_delta") => {
+                        let text = delta
+                            .and_then(|d| d.get("text"))
+                            .and_then(|v| v.as_str())
                             .unwrap_or("");
-                        let acc = match block_type {
-                            "text" => BlockAccumulator::Text(String::new()),
-                            "thinking" => BlockAccumulator::Thinking {
-                                content: String::new(),
-                                signature: None,
-                            },
-                            "tool_use" => {
-                                let id = block
-                                    .and_then(|b| b.get("id"))
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
-                                let name = block
-                                    .and_then(|b| b.get("name"))
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
-                                BlockAccumulator::ToolUse {
-                                    id,
-                                    name,
-                                    input_buf: String::new(),
-                                }
-                            },
-                            // Unknown block types (e.g., server-tool
-                            // results we don't request) — track as inert.
-                            _ => BlockAccumulator::Other,
-                        };
-                        blocks.insert(index, acc);
+                        if !text.is_empty() && !self.truncated {
+                            out.push(StreamEvent::Text(text.to_string()));
+                            push_capped(buf_s, text, &mut self.truncated, MAX_RESPONSE_CHARS);
+                        }
                     },
-                    "content_block_delta" => {
-                        let index =
-                            parsed.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                        let delta = parsed.get("delta");
-                        let delta_type = delta
-                            .and_then(|d| d.get("type"))
-                            .and_then(|t| t.as_str())
+                    (BlockAccumulator::Thinking { content, signature }, "thinking_delta") => {
+                        let text = delta
+                            .and_then(|d| d.get("thinking"))
+                            .and_then(|v| v.as_str())
                             .unwrap_or("");
-                        let Some(acc) = blocks.get_mut(&index) else {
-                            continue;
-                        };
-                        match (acc, delta_type) {
-                            (BlockAccumulator::Text(buf_s), "text_delta") => {
-                                let text = delta
-                                    .and_then(|d| d.get("text"))
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("");
-                                if !text.is_empty() && !truncated {
-                                    events.push(StreamEvent::Text(text.to_string()));
-                                    push_capped(buf_s, text, &mut truncated, MAX_RESPONSE_CHARS);
-                                }
-                            },
-                            (
-                                BlockAccumulator::Thinking { content, signature },
-                                "thinking_delta",
-                            ) => {
-                                let text = delta
-                                    .and_then(|d| d.get("thinking"))
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("");
-                                if !text.is_empty() && !truncated {
-                                    if !hide_reasoning_trace {
-                                        // #9: this is intentionally `None` here —
-                                        // `signature_delta` arrives AFTER the
-                                        // thinking deltas, so streamed reasoning
-                                        // chunks can't carry it. The final
-                                        // `ModelResponse.provider_continuation`
-                                        // (captured at block stop) is correct and
-                                        // is what round-trips; streamed chunks are
-                                        // display-only.
-                                        events.push(StreamEvent::Reasoning(ReasoningChunk {
-                                            text: text.to_string(),
-                                            signature: signature.clone(),
-                                        }));
-                                    }
-                                    push_capped(content, text, &mut truncated, MAX_RESPONSE_CHARS);
-                                }
-                            },
-                            (BlockAccumulator::Thinking { signature, .. }, "signature_delta") => {
-                                let sig = delta
-                                    .and_then(|d| d.get("signature"))
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("");
-                                if !sig.is_empty() {
-                                    *signature = Some(sig.to_string());
-                                }
-                            },
-                            (BlockAccumulator::ToolUse { input_buf, .. }, "input_json_delta") => {
-                                let frag = delta
-                                    .and_then(|d| d.get("partial_json"))
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("");
-                                push_tool_arg(input_buf, frag);
-                            },
-                            _ => {
-                                // delta type doesn't match block type
-                                // (shouldn't happen per spec). Ignore.
-                            },
+                        if !text.is_empty() && !self.truncated {
+                            if !hide_reasoning_trace {
+                                // #9: this is intentionally `None` here —
+                                // `signature_delta` arrives AFTER the
+                                // thinking deltas, so streamed reasoning
+                                // chunks can't carry it. The final
+                                // `ModelResponse.provider_continuation`
+                                // (captured at block stop) is correct and
+                                // is what round-trips; streamed chunks are
+                                // display-only.
+                                out.push(StreamEvent::Reasoning(ReasoningChunk {
+                                    text: text.to_string(),
+                                    signature: signature.clone(),
+                                }));
+                            }
+                            push_capped(content, text, &mut self.truncated, MAX_RESPONSE_CHARS);
                         }
                     },
-                    "content_block_stop" => {
-                        let index =
-                            parsed.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                        if let Some(acc) = blocks.remove(&index) {
-                            finalize_block(
-                                acc,
-                                &mut text_acc,
-                                &mut thinking_acc,
-                                &mut signature_acc,
-                                &mut tool_calls_done,
-                                &mut events,
-                            );
-                        }
-                    },
-                    "message_delta" => {
-                        // Cumulative output tokens — overwrite each time.
-                        if let Some(out) = parsed
-                            .pointer("/usage/output_tokens")
-                            .and_then(|v| v.as_u64())
-                        {
-                            completion_tokens = out as usize;
-                        }
-                        // The terminal stop_reason rides on `message_delta`.
-                        if let Some(sr) = parsed
-                            .pointer("/delta/stop_reason")
+                    (BlockAccumulator::Thinking { signature, .. }, "signature_delta") => {
+                        let sig = delta
+                            .and_then(|d| d.get("signature"))
                             .and_then(|v| v.as_str())
-                        {
-                            stop_reason = Some(map_anthropic_stop_reason(sr));
+                            .unwrap_or("");
+                        if !sig.is_empty() {
+                            *signature = Some(sig.to_string());
                         }
                     },
-                    "message_stop" => {
-                        // Stream complete — record the terminal frame (F56).
-                        // The break below leaves the OUTER stream loop, not
-                        // just this SSE-event `for`: otherwise the adapter
-                        // keeps awaiting `stream.next()` until the connection
-                        // actually closes, which can stall on a kept-alive /
-                        // proxied body (#138). The `Done` event is emitted by
-                        // the wrapper, after this returns.
-                        saw_message_stop = true;
-                    },
-                    "error" => {
-                        let err_type = parsed
-                            .pointer("/error/type")
+                    (BlockAccumulator::ToolUse { input_buf, .. }, "input_json_delta") => {
+                        let frag = delta
+                            .and_then(|d| d.get("partial_json"))
                             .and_then(|v| v.as_str())
-                            .unwrap_or("api_error");
-                        let err_msg = parsed
-                            .pointer("/error/message")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("Anthropic stream error");
-                        return Err(ModelError::Backend(BackendError::ProviderError {
-                            provider: "anthropic".to_string(),
-                            code: Some(err_type.to_string()),
-                            message: err_msg.to_string(),
-                            debug: crate::models::error::ResponseDebugContext::default(),
-                        }));
-                    },
-                    "ping" | "" => {
-                        // Heartbeats and untyped events — ignore.
+                            .unwrap_or("");
+                        push_tool_arg(input_buf, frag);
                     },
                     _ => {
-                        // Unknown event type — log via debug, ignore.
-                        tracing::debug!("Anthropic: unknown event type: {}", event_type);
+                        // delta type doesn't match block type
+                        // (shouldn't happen per spec). Ignore.
                     },
                 }
-
-                emit_all(sink, events).await?;
-                if saw_message_stop {
-                    break 'stream;
+            },
+            "content_block_stop" => {
+                let index = parsed.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                if let Some(acc) = self.blocks.remove(&index) {
+                    finalize_block(
+                        acc,
+                        &mut self.text_acc,
+                        &mut self.thinking_acc,
+                        &mut self.signature_acc,
+                        &mut self.tool_calls_done,
+                        out,
+                    );
                 }
-            }
+            },
+            "message_delta" => {
+                // Cumulative output tokens — overwrite each time.
+                if let Some(tokens) = parsed
+                    .pointer("/usage/output_tokens")
+                    .and_then(|v| v.as_u64())
+                {
+                    self.completion_tokens = tokens as usize;
+                }
+                // The terminal stop_reason rides on `message_delta`.
+                if let Some(sr) = parsed
+                    .pointer("/delta/stop_reason")
+                    .and_then(|v| v.as_str())
+                {
+                    self.stop_reason = Some(map_anthropic_stop_reason(sr));
+                }
+            },
+            "message_stop" => {
+                // Stream complete — record the terminal frame (F56) and stop
+                // reading. Waiting for the body to close instead can stall on
+                // a kept-alive / proxied connection (#138). The `Done` event
+                // comes from the wrapper, after `finish`.
+                self.saw_message_stop = true;
+                return Ok(Flow::Stop);
+            },
+            "error" => {
+                let err_type = parsed
+                    .pointer("/error/type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("api_error");
+                let err_msg = parsed
+                    .pointer("/error/message")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Anthropic stream error");
+                return Err(ModelError::Backend(BackendError::ProviderError {
+                    provider: "anthropic".to_string(),
+                    code: Some(err_type.to_string()),
+                    message: err_msg.to_string(),
+                    debug: crate::models::error::ResponseDebugContext::default(),
+                }));
+            },
+            "ping" | "" => {
+                // Heartbeats and untyped events — ignore.
+            },
+            _ => {
+                // Unknown event type — log via debug, ignore.
+                tracing::debug!("Anthropic: unknown event type: {}", event_type);
+            },
         }
 
+        Ok(Flow::Continue)
+    }
+
+    fn finish(mut self, out: &mut Vec<StreamEvent>) -> Result<ModelResponse> {
         // F56: tell a genuinely abnormal close (the connection dropped before
         // ANY terminal frame) apart from a clean completion. If we saw neither
         // `message_stop` nor a `message_delta` `stop_reason`, the turn is
@@ -1218,7 +1223,7 @@ impl AnthropicAdapter {
         // below would even hand back partial content as if finished. Surface a
         // stream error instead. A `max_tokens` truncation set a real
         // `stop_reason`, so it does NOT trip this and is preserved.
-        if stream_closed_abnormally(saw_message_stop, stop_reason.as_ref()) {
+        if stream_closed_abnormally(self.saw_message_stop, self.stop_reason.as_ref()) {
             return Err(ModelError::StreamError(
                 "Anthropic stream closed before any terminal frame (message_stop / \
                  message_delta stop_reason); the connection was likely dropped \
@@ -1232,37 +1237,36 @@ impl AnthropicAdapter {
         // delta). That's a complete turn missing only its framing event, so
         // finalize any blocks still open — a fully-streamed `tool_use` or text
         // block isn't silently dropped, and the agent doesn't "forget" the call.
-        if !blocks.is_empty() {
+        if !self.blocks.is_empty() {
             tracing::warn!(
-                open_blocks = blocks.len(),
+                open_blocks = self.blocks.len(),
                 "Anthropic stream ended without message_stop; draining open blocks"
             );
-            let mut remaining: Vec<(usize, BlockAccumulator)> = blocks.into_iter().collect();
+            let mut remaining: Vec<(usize, BlockAccumulator)> =
+                std::mem::take(&mut self.blocks).into_iter().collect();
             remaining.sort_by_key(|(idx, _)| *idx);
-            let mut events: Vec<StreamEvent> = Vec::new();
             for (_idx, acc) in remaining {
                 finalize_block(
                     acc,
-                    &mut text_acc,
-                    &mut thinking_acc,
-                    &mut signature_acc,
-                    &mut tool_calls_done,
-                    &mut events,
+                    &mut self.text_acc,
+                    &mut self.thinking_acc,
+                    &mut self.signature_acc,
+                    &mut self.tool_calls_done,
+                    out,
                 );
             }
-            emit_all(sink, events).await?;
         }
 
-        // F3: `Done` is emitted by the v0.7 wrapper from the returned
+        // F3: `Done` is emitted by the provider wrapper from the returned
         // `ModelResponse` so the `provider_continuation` round-trips. If we
-        // emitted it here, the reducer would commit the assistant
-        // message on our signature-less Done and drop the real one.
+        // emitted it here, the reducer would commit the assistant message on
+        // our signature-less Done and drop the real one.
 
         // A refusal / content block that produced no usable output is an
         // error, not an empty success (matches the non-streaming path).
-        if text_acc.is_empty()
-            && tool_calls_done.is_empty()
-            && stop_reason == Some(FinishReason::ContentFilter)
+        if self.text_acc.is_empty()
+            && self.tool_calls_done.is_empty()
+            && self.stop_reason == Some(FinishReason::ContentFilter)
         {
             return Err(ModelError::Backend(BackendError::ProviderError {
                 provider: "anthropic".to_string(),
@@ -1273,25 +1277,26 @@ impl AnthropicAdapter {
         }
 
         Ok(ModelResponse {
-            content: text_acc,
+            content: self.text_acc,
             usage: Some(
-                TokenUsage::provider(prompt_tokens, completion_tokens)
-                    .with_cache_creation(cache_creation_tokens)
-                    .with_cached_input(cache_read_tokens),
+                TokenUsage::provider(self.prompt_tokens, self.completion_tokens)
+                    .with_cache_creation(self.cache_creation_tokens)
+                    .with_cached_input(self.cache_read_tokens),
             ),
-            model_name: self.model_name.clone(),
-            stop_reason,
-            thinking: if thinking_acc.is_empty() {
+            model_name: self.model_name,
+            stop_reason: self.stop_reason,
+            thinking: if self.thinking_acc.is_empty() {
                 None
             } else {
-                Some(thinking_acc)
+                Some(self.thinking_acc)
             },
-            tool_calls: if tool_calls_done.is_empty() {
+            tool_calls: if self.tool_calls_done.is_empty() {
                 None
             } else {
-                Some(tool_calls_done)
+                Some(self.tool_calls_done)
             },
-            provider_continuation: signature_acc
+            provider_continuation: self
+                .signature_acc
                 .map(|signature| ProviderContinuation::Anthropic { signature }),
         })
     }

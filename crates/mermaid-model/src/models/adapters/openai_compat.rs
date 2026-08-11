@@ -41,13 +41,15 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::constants::MAX_RESPONSE_CHARS;
 use crate::models::ModelCapabilities;
+use crate::models::adapters::driver::{
+    Flow, Framing, StreamProtocol, drive_stream, plain_http_error,
+};
 use crate::models::config::ModelConfig;
 use crate::models::error::{BackendError, ModelError, Result};
 use crate::models::providers::{
@@ -56,11 +58,10 @@ use crate::models::providers::{
 use crate::models::reasoning::{
     ReasoningCapability, ReasoningChunk, ReasoningLevel, nearest_effort,
 };
-use crate::models::stream::{StreamEvent, StreamSink, emit_all};
+use crate::models::stream::{StreamEvent, StreamSink};
 use crate::models::tool_call::{FunctionCall, ToolCall};
 use crate::models::traits::Model;
 use crate::models::types::{ChatMessage, FinishReason, MessageRole, ModelResponse, TokenUsage};
-use crate::utils::drain_sse_events;
 
 const TRUNCATION_MARKER: &str = "\n\n[TRUNCATED: response exceeded size limit]";
 
@@ -540,10 +541,6 @@ impl OpenAICompatAdapter {
 
     /// Stream the response, emit typed events onto the sink,
     /// return the final accumulated `ModelResponse`.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "predates the lint; see .github/baselines/expect_budget.txt"
-    )]
     async fn handle_stream(
         &self,
         response: reqwest::Response,
@@ -551,209 +548,224 @@ impl OpenAICompatAdapter {
         hide_reasoning_trace: bool,
     ) -> Result<ModelResponse> {
         if !response.status().is_success() {
-            let status = response.status().as_u16();
-            let debug =
-                crate::models::error::ResponseDebugContext::from_headers(response.headers());
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
-            return Err(ModelError::Backend(BackendError::HttpError {
-                status,
-                message: body,
-                debug,
+            return Err(plain_http_error(response).await);
+        }
+        drive_stream(
+            response.bytes_stream(),
+            OpenAICompatStream::new(self.profile, self.model_name.clone(), hide_reasoning_trace),
+            sink,
+        )
+        .await
+    }
+}
+
+/// The OpenAI Chat Completions wire format as a [`StreamProtocol`], covering
+/// every conformant clone the registry knows about.
+///
+/// Two things make it the awkward one. Tool calls arrive as argument
+/// FRAGMENTS keyed by index, so a call is only whole once the stream ends —
+/// which is why `finish` emits events and not just a response. And some
+/// providers put reasoning in `delta.content` wrapped in `<think>` tags
+/// instead of a field of its own, so the content channel runs through a
+/// state machine with its own tail to flush.
+struct OpenAICompatStream {
+    profile: &'static ProviderProfile,
+    model_name: String,
+    hide_reasoning_trace: bool,
+    content_acc: String,
+    thinking_acc: String,
+    tool_calls_partial: Vec<PartialToolCall>,
+    truncated: bool,
+    stop_reason: Option<FinishReason>,
+    /// The full token breakdown (cached-input + reasoning) from the last usage
+    /// frame. Stays `None` until a usage frame arrives, so a stream that never
+    /// reports usage returns `None` (the reducer then keeps its estimate)
+    /// rather than a misleading zero (#125).
+    usage_acc: Option<TokenUsage>,
+    /// Whether this provider emits `<think>...</think>` inline in
+    /// `delta.content`, so the content channel has to be split.
+    inline_tags: bool,
+    think_state: ThinkTagState,
+}
+
+impl OpenAICompatStream {
+    fn new(
+        profile: &'static ProviderProfile,
+        model_name: String,
+        hide_reasoning_trace: bool,
+    ) -> Self {
+        Self {
+            profile,
+            model_name,
+            hide_reasoning_trace,
+            content_acc: String::new(),
+            thinking_acc: String::new(),
+            tool_calls_partial: Vec::new(),
+            truncated: false,
+            stop_reason: None,
+            usage_acc: None,
+            inline_tags: matches!(
+                profile.reasoning_extraction,
+                ReasoningExtraction::InlineThinkTags
+            ),
+            think_state: ThinkTagState::new(),
+        }
+    }
+}
+
+impl StreamProtocol for OpenAICompatStream {
+    const FRAMING: Framing = Framing::Sse;
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "predates the lint; see .github/baselines/expect_budget.txt"
+    )]
+    fn on_frame(&mut self, frame: &str, out: &mut Vec<StreamEvent>) -> Result<Flow> {
+        // A mid-stream error frame (common on OpenRouter) is an
+        // `{"error": ...}` object, not a chat chunk. Surface it as a
+        // typed provider error instead of the confusing "missing field
+        // choices" parse failure (#123) — mirrors the Gemini path.
+        let value: serde_json::Value = match serde_json::from_str(frame) {
+            Ok(v) => v,
+            Err(e) => {
+                return Err(ModelError::ParseError {
+                    message: format!("Failed to parse {} stream chunk: {}", self.profile.name, e),
+                    raw: Some(frame.to_string()),
+                });
+            },
+        };
+        if let Some(err) = value.get("error") {
+            let code = err.get("code").and_then(|v| {
+                v.as_str()
+                    .map(str::to_string)
+                    .or_else(|| v.as_i64().map(|n| n.to_string()))
+            });
+            let message = err
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("stream error")
+                .to_string();
+            return Err(ModelError::Backend(BackendError::ProviderError {
+                provider: self.profile.name.to_string(),
+                code,
+                message,
+                debug: crate::models::error::ResponseDebugContext::default(),
             }));
         }
+        let parsed: ChatCompletionChunk = match serde_json::from_value(value) {
+            Ok(v) => v,
+            Err(e) => {
+                return Err(ModelError::ParseError {
+                    message: format!("Failed to parse {} stream chunk: {}", self.profile.name, e),
+                    raw: Some(frame.to_string()),
+                });
+            },
+        };
 
-        let mut stream = response.bytes_stream();
-        let mut buf: Vec<u8> = Vec::new();
+        if let Some(usage) = parsed.usage {
+            // #12: capture the cached-input + reasoning breakdown via the
+            // same converter the non-stream path uses. The last usage
+            // frame wins.
+            self.usage_acc = Some(token_usage_from_wire(usage));
+        }
 
-        let mut content_acc = String::new();
-        let mut thinking_acc = String::new();
-        let mut tool_calls_partial: Vec<PartialToolCall> = Vec::new();
-        let mut truncated = false;
-        let mut stop_reason: Option<FinishReason> = None;
-        // The full token breakdown (cached-input + reasoning) from the last usage
-        // frame. Stays `None` until a usage frame arrives, so a stream that never
-        // reports usage returns `None` (the reducer then keeps its estimate)
-        // rather than a misleading zero (#125).
-        let mut usage_acc: Option<TokenUsage> = None;
-        // For providers that emit `<think>...</think>` inline in
-        // `delta.content`, route the content channel through this state
-        // machine so reasoning gets split out into its own
-        // `StreamEvent::Reasoning` events.
-        let inline_tags = matches!(
-            self.profile.reasoning_extraction,
-            ReasoningExtraction::InlineThinkTags
-        );
-        let mut think_state = ThinkTagState::new();
+        let Some(choice) = parsed.choices.into_iter().next() else {
+            return Ok(Flow::Continue);
+        };
 
-        while let Some(chunk_result) = stream.next().await {
-            let chunk = chunk_result.map_err(|e| ModelError::StreamError(e.to_string()))?;
-            // Bound SSE reassembly: a server that streams bytes but never emits
-            // the `\n\n` event separator would otherwise grow `buf` without
-            // bound. At this point `buf` holds only the un-terminated residue
-            // from the previous drain, so this never trips on legitimately
-            // buffered complete events (#50).
-            if buf.len() > crate::constants::MAX_SSE_BUFFER_BYTES {
-                return Err(ModelError::StreamError(format!(
-                    "SSE stream exceeded {} byte reassembly cap without a complete event",
-                    crate::constants::MAX_SSE_BUFFER_BYTES
-                )));
+        if let Some(fr) = &choice.finish_reason {
+            self.stop_reason = Some(map_openai_finish_reason(fr));
+        }
+        let delta = choice.delta;
+
+        // Reasoning extraction (separate field). InlineThinkTags
+        // is handled at the byte-stream level via the state machine
+        // below; it returns None here.
+        let reasoning_chunk = match self.profile.reasoning_extraction {
+            ReasoningExtraction::DeltaContentField(field) => delta
+                .extra
+                .get(field)
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| ReasoningChunk {
+                    text: s.to_string(),
+                    signature: None,
+                }),
+            _ => None,
+        };
+        if let Some(chunk) = reasoning_chunk {
+            if !self.hide_reasoning_trace {
+                out.push(StreamEvent::Reasoning(chunk.clone()));
             }
-            buf.extend_from_slice(&chunk);
+            push_capped(
+                &mut self.thinking_acc,
+                &chunk.text,
+                &mut self.truncated,
+                MAX_RESPONSE_CHARS,
+            );
+        }
 
-            for payload in drain_sse_events(&mut buf) {
-                // Events this frame produced. Collected synchronously and
-                // drained onto the sink at the bottom of the frame, so the
-                // emission order is the production order by construction.
-                let mut events: Vec<StreamEvent> = Vec::new();
-                // A mid-stream error frame (common on OpenRouter) is an
-                // `{"error": ...}` object, not a chat chunk. Surface it as a
-                // typed provider error instead of the confusing "missing field
-                // choices" parse failure (#123) — mirrors the Gemini path.
-                let value: serde_json::Value = match serde_json::from_str(&payload) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        return Err(ModelError::ParseError {
-                            message: format!(
-                                "Failed to parse {} stream chunk: {}",
-                                self.profile.name, e
-                            ),
-                            raw: Some(payload),
-                        });
-                    },
-                };
-                if let Some(err) = value.get("error") {
-                    let code = err.get("code").and_then(|v| {
-                        v.as_str()
-                            .map(str::to_string)
-                            .or_else(|| v.as_i64().map(|n| n.to_string()))
-                    });
-                    let message = err
-                        .get("message")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("stream error")
-                        .to_string();
-                    return Err(ModelError::Backend(BackendError::ProviderError {
-                        provider: self.profile.name.to_string(),
-                        code,
-                        message,
-                        debug: crate::models::error::ResponseDebugContext::default(),
-                    }));
-                }
-                let parsed: ChatCompletionChunk = match serde_json::from_value(value) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        return Err(ModelError::ParseError {
-                            message: format!(
-                                "Failed to parse {} stream chunk: {}",
-                                self.profile.name, e
-                            ),
-                            raw: Some(payload),
-                        });
-                    },
-                };
-
-                if let Some(usage) = parsed.usage {
-                    // #12: capture the cached-input + reasoning breakdown via the
-                    // same converter the non-stream path uses. The last usage
-                    // frame wins.
-                    usage_acc = Some(token_usage_from_wire(usage));
-                }
-
-                let Some(choice) = parsed.choices.into_iter().next() else {
-                    continue;
-                };
-
-                if let Some(fr) = &choice.finish_reason {
-                    stop_reason = Some(map_openai_finish_reason(fr));
-                }
-                let delta = choice.delta;
-
-                // Reasoning extraction (separate field). InlineThinkTags
-                // is handled at the byte-stream level via Wave 6's state
-                // machine; it returns None here.
-                let reasoning_chunk = match self.profile.reasoning_extraction {
-                    ReasoningExtraction::DeltaContentField(field) => delta
-                        .extra
-                        .get(field)
-                        .and_then(|v| v.as_str())
-                        .filter(|s| !s.is_empty())
-                        .map(|s| ReasoningChunk {
-                            text: s.to_string(),
-                            signature: None,
-                        }),
-                    _ => None,
-                };
-                if let Some(chunk) = reasoning_chunk {
-                    if !hide_reasoning_trace {
-                        events.push(StreamEvent::Reasoning(chunk.clone()));
-                    }
+        // Text content. For inline-tags providers, route through
+        // the ThinkTagState machine which splits out reasoning
+        // into its own channel; otherwise emit as plain text.
+        if let Some(text) = delta.content.as_ref()
+            && !text.is_empty()
+            && !self.truncated
+        {
+            if self.inline_tags {
+                let (text_part, reasoning_part) = self.think_state.feed(text);
+                if !text_part.is_empty() {
+                    out.push(StreamEvent::Text(text_part.clone()));
                     push_capped(
-                        &mut thinking_acc,
-                        &chunk.text,
-                        &mut truncated,
+                        &mut self.content_acc,
+                        &text_part,
+                        &mut self.truncated,
                         MAX_RESPONSE_CHARS,
                     );
                 }
-
-                // Text content. For inline-tags providers, route through
-                // the ThinkTagState machine which splits out reasoning
-                // into its own channel; otherwise emit as plain text.
-                if let Some(text) = delta.content.as_ref()
-                    && !text.is_empty()
-                    && !truncated
-                {
-                    if inline_tags {
-                        let (text_part, reasoning_part) = think_state.feed(text);
-                        if !text_part.is_empty() {
-                            events.push(StreamEvent::Text(text_part.clone()));
-                            push_capped(
-                                &mut content_acc,
-                                &text_part,
-                                &mut truncated,
-                                MAX_RESPONSE_CHARS,
-                            );
-                        }
-                        if !reasoning_part.is_empty() {
-                            if !hide_reasoning_trace {
-                                events.push(StreamEvent::Reasoning(ReasoningChunk {
-                                    text: reasoning_part.clone(),
-                                    signature: None,
-                                }));
-                            }
-                            push_capped(
-                                &mut thinking_acc,
-                                &reasoning_part,
-                                &mut truncated,
-                                MAX_RESPONSE_CHARS,
-                            );
-                        }
-                    } else {
-                        events.push(StreamEvent::Text(text.clone()));
-                        push_capped(&mut content_acc, text, &mut truncated, MAX_RESPONSE_CHARS);
+                if !reasoning_part.is_empty() {
+                    if !self.hide_reasoning_trace {
+                        out.push(StreamEvent::Reasoning(ReasoningChunk {
+                            text: reasoning_part.clone(),
+                            signature: None,
+                        }));
                     }
+                    push_capped(
+                        &mut self.thinking_acc,
+                        &reasoning_part,
+                        &mut self.truncated,
+                        MAX_RESPONSE_CHARS,
+                    );
                 }
-
-                // Tool-call deltas — accumulate into partials.
-                if let Some(deltas) = delta.tool_calls {
-                    for tc_delta in deltas {
-                        accumulate_tool_call(&mut tool_calls_partial, tc_delta);
-                    }
-                }
-
-                emit_all(sink, events).await?;
+            } else {
+                out.push(StreamEvent::Text(text.clone()));
+                push_capped(
+                    &mut self.content_acc,
+                    text,
+                    &mut self.truncated,
+                    MAX_RESPONSE_CHARS,
+                );
             }
         }
 
+        // Tool-call deltas — accumulate into partials.
+        if let Some(deltas) = delta.tool_calls {
+            for tc_delta in deltas {
+                accumulate_tool_call(&mut self.tool_calls_partial, tc_delta);
+            }
+        }
+
+        Ok(Flow::Continue)
+    }
+
+    fn finish(mut self, out: &mut Vec<StreamEvent>) -> Result<ModelResponse> {
         // F56: a stream that ended before any `finish_reason` was dropped
         // mid-response. Surface a stream error rather than a clean `Ok` (with
         // `stop_reason: None`) that's indistinguishable from a real completion —
         // checked before finalizing/emitting tool calls so a dropped connection
         // doesn't hand back a half-built turn. A `length` truncation set a real
         // `finish_reason`, so it does NOT trip this and is preserved.
-        if stream_closed_abnormally(stop_reason.as_ref()) {
+        if stream_closed_abnormally(self.stop_reason.as_ref()) {
             return Err(ModelError::StreamError(format!(
                 "{} stream closed before a terminal finish_reason; the connection \
                  was likely dropped mid-response",
@@ -763,54 +775,50 @@ impl OpenAICompatAdapter {
 
         // Flush any pending tag-state bytes (incomplete trailing tags
         // get emitted to the text channel; see ThinkTagState::flush).
-        if inline_tags {
-            let mut events: Vec<StreamEvent> = Vec::new();
-            let (text_tail, reasoning_tail) = think_state.flush();
-            if !text_tail.is_empty() && !truncated {
-                events.push(StreamEvent::Text(text_tail.clone()));
+        if self.inline_tags {
+            let (text_tail, reasoning_tail) = self.think_state.flush();
+            if !text_tail.is_empty() && !self.truncated {
+                out.push(StreamEvent::Text(text_tail.clone()));
                 push_capped(
-                    &mut content_acc,
+                    &mut self.content_acc,
                     &text_tail,
-                    &mut truncated,
+                    &mut self.truncated,
                     MAX_RESPONSE_CHARS,
                 );
             }
-            if !reasoning_tail.is_empty() && !truncated {
-                if !hide_reasoning_trace {
-                    events.push(StreamEvent::Reasoning(ReasoningChunk {
+            if !reasoning_tail.is_empty() && !self.truncated {
+                if !self.hide_reasoning_trace {
+                    out.push(StreamEvent::Reasoning(ReasoningChunk {
                         text: reasoning_tail.clone(),
                         signature: None,
                     }));
                 }
                 push_capped(
-                    &mut thinking_acc,
+                    &mut self.thinking_acc,
                     &reasoning_tail,
-                    &mut truncated,
+                    &mut self.truncated,
                     MAX_RESPONSE_CHARS,
                 );
             }
-            emit_all(sink, events).await?;
         }
 
         // Finalize accumulated tool calls — parse arguments JSON, emit
         // ToolCall events, build the response field.
         let mut final_tool_calls: Vec<ToolCall> = Vec::new();
-        let mut events: Vec<StreamEvent> = Vec::new();
-        for partial in tool_calls_partial {
+        for partial in self.tool_calls_partial {
             if let Some(tc) = partial.into_tool_call() {
-                events.push(StreamEvent::ToolCall(tc.clone()));
+                out.push(StreamEvent::ToolCall(tc.clone()));
                 final_tool_calls.push(tc);
             }
         }
-        emit_all(sink, events).await?;
 
         // F3: wrapper emits the authoritative `Done` from the returned
         // `ModelResponse`. See adapters/anthropic.rs for rationale.
 
-        let thinking = if thinking_acc.is_empty() {
+        let thinking = if self.thinking_acc.is_empty() {
             None
         } else {
-            Some(thinking_acc)
+            Some(self.thinking_acc)
         };
         let tool_calls = if final_tool_calls.is_empty() {
             None
@@ -820,9 +828,9 @@ impl OpenAICompatAdapter {
 
         // A content-filter refusal that produced no usable output is an error,
         // not an empty success.
-        if content_acc.is_empty()
+        if self.content_acc.is_empty()
             && tool_calls.is_none()
-            && stop_reason == Some(FinishReason::ContentFilter)
+            && self.stop_reason == Some(FinishReason::ContentFilter)
         {
             return Err(ModelError::Backend(BackendError::ProviderError {
                 provider: self.profile.name.to_string(),
@@ -833,12 +841,12 @@ impl OpenAICompatAdapter {
         }
 
         Ok(ModelResponse {
-            content: content_acc,
+            content: self.content_acc,
             // `None` when the stream never reported usage, so the reducer keeps
             // its char/4 estimate instead of resetting the gauge to zero (#125).
-            usage: usage_acc,
-            model_name: self.model_name.clone(),
-            stop_reason,
+            usage: self.usage_acc,
+            model_name: self.model_name,
+            stop_reason: self.stop_reason,
             thinking,
             tool_calls,
             provider_continuation: None,

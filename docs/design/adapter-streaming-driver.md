@@ -78,8 +78,10 @@ pub trait StreamProtocol {
     /// Consume one frame. Push events for the driver to forward, in order.
     fn on_frame(&mut self, frame: &str, out: &mut Vec<StreamEvent>) -> Result<Flow>;
 
-    /// The stream ended (body closed, or `Flow::Stop`). Build the response.
-    fn finish(self) -> Result<ModelResponse>;
+    /// The stream ended (body closed, or `Flow::Stop`). Build the response —
+    /// and emit anything only the ending makes whole, which for the
+    /// OpenAI-compatible shape is every tool call.
+    fn finish(self, out: &mut Vec<StreamEvent>) -> Result<ModelResponse>;
 }
 
 pub enum Framing { Sse, Ndjson }
@@ -89,16 +91,32 @@ pub enum Flow { Continue, Stop }
 and one driver:
 
 ```rust
-pub async fn drive_stream<P: StreamProtocol>(
-    response: reqwest::Response,
+pub async fn drive_stream<P, S, B, E>(
+    body: S,
     protocol: P,
     sink: Option<&mpsc::Sender<StreamEvent>>,
 ) -> Result<ModelResponse>
 ```
 
-which owns, once: the status check, `bytes_stream()`, the reassembly cap, the
-framing split, the residue policy, the drain-and-`await` of each frame's
-events, and `Flow::Stop`.
+which owns, once: `bytes_stream()`, the reassembly cap, the framing split, the
+residue policy, the drain-and-`await` of each frame's events, and `Flow::Stop`.
+
+**Correction, after PR C landed.** The status check does *not* move into the
+driver, and the table above overstated it as one of the five. Anthropic tags a
+400 that mentions thinking as a signature round-trip bug, and Gemini turns
+`PERMISSION_DENIED` into "check that `GOOGLE_API_KEY` is valid and the
+Generative Language API is enabled" — those are the messages users actually
+read, and a shared handler would have to grow a provider switch to keep them.
+So each adapter checks its own status before calling `drive_stream`, and the
+two whose shape really is the plain one (`openai_compat`, `ollama` — the
+identical status/headers/body/`HttpError` sequence, open-coded twice) share
+`plain_http_error` instead. Four of the five questions moved; the fifth was
+never shared to begin with.
+
+`drive_stream` also takes the body, not the `reqwest::Response`: nothing below
+that line is about HTTP, and a driver whose input is a stream of byte chunks
+is one a test can feed recorded chunks — which is what makes the split-chunk
+scenario below assertable at all.
 
 Three consequences fall out of the split, and they are the reason for it:
 

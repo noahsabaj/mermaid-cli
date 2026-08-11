@@ -4,7 +4,6 @@
 //! health monitoring, and zero-unwrap error handling.
 
 use async_trait::async_trait;
-use futures::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -13,14 +12,16 @@ use std::time::Duration;
 
 use crate::constants::MAX_RESPONSE_CHARS;
 use crate::models::ModelCapabilities;
+use crate::models::adapters::driver::{
+    Flow, Framing, StreamProtocol, drive_stream, plain_http_error,
+};
 use crate::models::adapters::ollama_sizing::ModelDims;
 use crate::models::config::{BackendConfig, ModelConfig};
 use crate::models::error::{BackendError, ModelError, Result};
 use crate::models::reasoning::{ReasoningChunk, ReasoningLevel};
-use crate::models::stream::{StatusNotify, StreamEvent, StreamSink, emit_all};
+use crate::models::stream::{StatusNotify, StreamEvent, StreamSink};
 use crate::models::traits::Model;
 use crate::models::types::{ChatMessage, FinishReason, MessageRole, ModelResponse, TokenUsage};
-use crate::utils::drain_complete_lines;
 
 /// Marker appended to `content` and `thinking` once the per-stream size cap
 /// is hit. Subsequent chunks are silently dropped so a runaway model can't
@@ -435,132 +436,32 @@ impl OllamaAdapter {
         hide_reasoning_trace: bool,
     ) -> Result<ModelResponse> {
         if !response.status().is_success() {
-            let status = response.status().as_u16();
-            let debug =
-                crate::models::error::ResponseDebugContext::from_headers(response.headers());
-            let error_text = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
-            return Err(ModelError::Backend(BackendError::HttpError {
-                status,
-                message: error_text,
-                debug,
-            }));
+            return Err(plain_http_error(response).await);
         }
-
-        let mut stream = response.bytes_stream();
-        let mut acc = StreamAccumulator {
-            content: String::new(),
-            thinking: String::new(),
-            tool_calls: Vec::new(),
-            hide_reasoning_trace,
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            saw_usage: false,
-            done_reason: None,
-            saw_done: false,
-            truncated: false,
-        };
-
-        // Buffer for incomplete JSON lines split across TCP chunks. Ollama
-        // sends newline-delimited JSON, but bytes_stream() chunks don't
-        // align with line boundaries — a JSON object can split across two
-        // or more TCP packets. We also buffer raw bytes (Vec<u8>) rather
-        // than a String because TCP chunks don't align with UTF-8
-        // codepoint boundaries either; see `drain_complete_lines` for the
-        // full rationale.
-        let mut line_buffer: Vec<u8> = Vec::new();
-
-        while let Some(chunk_result) = stream.next().await {
-            let chunk = chunk_result.map_err(|e| ModelError::StreamError(e.to_string()))?;
-            // A stream that never sends a newline would otherwise grow
-            // `line_buffer` without bound. At this point it holds only the
-            // un-terminated residue from the previous drain, so this never trips
-            // on legitimately buffered complete lines — mirrors the SSE cap (R5).
-            if line_buffer.len() > crate::constants::MAX_SSE_BUFFER_BYTES {
-                return Err(ModelError::StreamError(format!(
-                    "NDJSON stream exceeded {} byte reassembly cap without a complete line",
-                    crate::constants::MAX_SSE_BUFFER_BYTES
-                )));
-            }
-            line_buffer.extend_from_slice(&chunk);
-
-            for line in drain_complete_lines(&mut line_buffer) {
-                if line.trim().is_empty() {
-                    continue;
-                }
-
-                let json_chunk = parse_ollama_stream_frame(&line)?;
-
-                let mut events: Vec<StreamEvent> = Vec::new();
-                Self::process_stream_chunk(&json_chunk, &mut events, &mut acc);
-                emit_all(sink, events).await?;
-            }
-        }
-
-        // Process any remaining buffered content after the stream ends
-        // (the final JSON line may not have a trailing newline).
-        if !line_buffer.is_empty() {
-            let trailing = String::from_utf8_lossy(&line_buffer).into_owned();
-            if !trailing.trim().is_empty() {
-                let json_chunk = parse_ollama_stream_frame(trailing.trim())?;
-
-                let mut events: Vec<StreamEvent> = Vec::new();
-                Self::process_stream_chunk(&json_chunk, &mut events, &mut acc);
-                emit_all(sink, events).await?;
-            }
-        }
-
-        // F56: a stream that ended before Ollama's terminal `done` chunk was
-        // dropped mid-response. Surface it as a stream error instead of a clean
-        // `Ok` that's indistinguishable from a real completion. Keyed off the
-        // `done` frame (not `done_reason`), so a context-full truncation — a
-        // real `done` with `done_reason: "length"`, recovered via
-        // compact-and-continue — is preserved, not misclassified.
-        if acc.closed_abnormally() {
-            return Err(ModelError::StreamError(
-                "Ollama stream closed before the terminal `done` chunk; the \
-                 connection was likely dropped mid-response"
-                    .to_string(),
-            ));
-        }
-
-        // `None` when the stream never reported eval counts, so the reducer keeps
-        // its estimate instead of resetting the context gauge to zero (F54).
-        // Computed before the field moves below so `usage()` can borrow `acc`.
-        let usage = acc.usage();
-        let stop_reason = acc.done_reason.as_deref().map(map_ollama_done_reason);
-        let thinking = if acc.thinking.is_empty() {
-            None
-        } else {
-            Some(acc.thinking)
-        };
-        let tool_calls = if acc.tool_calls.is_empty() {
-            None
-        } else {
-            Some(acc.tool_calls)
-        };
-
-        // F3: the adapter never emits a terminal `Done`. The provider
-        // wrapper (`providers::model::*`) emits the authoritative
-        // `StreamEvent::Done { usage, provider_continuation, stop_reason }`
-        // from the returned `ModelResponse`; emitting one here would race it
-        // and drop the provider_continuation for Anthropic.
-
-        Ok(ModelResponse {
-            content: acc.content,
-            usage,
-            model_name: self.model_name.clone(),
-            stop_reason,
-            thinking,
-            tool_calls,
-            provider_continuation: None,
-        })
+        drive_stream(
+            response.bytes_stream(),
+            OllamaStream {
+                model_name: self.model_name.clone(),
+                acc: StreamAccumulator {
+                    content: String::new(),
+                    thinking: String::new(),
+                    tool_calls: Vec::new(),
+                    hide_reasoning_trace,
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                    saw_usage: false,
+                    done_reason: None,
+                    saw_done: false,
+                    truncated: false,
+                },
+            },
+            sink,
+        )
+        .await
     }
 
     /// Process a single parsed stream chunk, updating accumulators and
-    /// emitting typed events.
+    /// producing typed events.
     ///
     /// Event ordering within a chunk: reasoning (if any) → tool calls (if
     /// any) → text (if any). Events are pushed onto `out` rather than sent,
@@ -976,6 +877,76 @@ impl Model for OllamaAdapter {
         } else {
             self.decode_non_streaming(response).await
         }
+    }
+}
+
+/// Ollama's wire format as a [`StreamProtocol`].
+///
+/// The only NDJSON one: frames are newline-delimited JSON objects rather
+/// than SSE events, which is also why it is the only one whose framing
+/// flushes an un-terminated tail — Ollama can close the body directly on
+/// its final object. That used to be a special case written out here and
+/// missing from the other three; it is [`Framing::Ndjson`] now.
+struct OllamaStream {
+    model_name: String,
+    acc: StreamAccumulator,
+}
+
+impl StreamProtocol for OllamaStream {
+    const FRAMING: Framing = Framing::Ndjson;
+
+    fn on_frame(&mut self, frame: &str, out: &mut Vec<StreamEvent>) -> Result<Flow> {
+        let json_chunk = parse_ollama_stream_frame(frame)?;
+        OllamaAdapter::process_stream_chunk(&json_chunk, out, &mut self.acc);
+        Ok(Flow::Continue)
+    }
+
+    fn finish(self, _out: &mut Vec<StreamEvent>) -> Result<ModelResponse> {
+        // F56: a stream that ended before Ollama's terminal `done` chunk was
+        // dropped mid-response. Surface it as a stream error instead of a clean
+        // `Ok` that's indistinguishable from a real completion. Keyed off the
+        // `done` frame (not `done_reason`), so a context-full truncation — a
+        // real `done` with `done_reason: "length"`, recovered via
+        // compact-and-continue — is preserved, not misclassified.
+        if self.acc.closed_abnormally() {
+            return Err(ModelError::StreamError(
+                "Ollama stream closed before the terminal `done` chunk; the \
+                 connection was likely dropped mid-response"
+                    .to_string(),
+            ));
+        }
+
+        // `None` when the stream never reported eval counts, so the reducer keeps
+        // its estimate instead of resetting the context gauge to zero (F54).
+        // Computed before the fields move below so `usage()` can borrow `acc`.
+        let usage = self.acc.usage();
+        let stop_reason = self.acc.done_reason.as_deref().map(map_ollama_done_reason);
+        let thinking = if self.acc.thinking.is_empty() {
+            None
+        } else {
+            Some(self.acc.thinking)
+        };
+        let tool_calls = if self.acc.tool_calls.is_empty() {
+            None
+        } else {
+            Some(self.acc.tool_calls)
+        };
+
+        // F3: the adapter never emits a terminal `Done`. The provider
+        // wrapper (`providers::model::*`) emits the authoritative
+        // `StreamEvent::Done { usage, provider_continuation, stop_reason }`
+        // from the returned `ModelResponse`; emitting one here would race it
+        // and drop the provider_continuation for Anthropic.
+
+        Ok(ModelResponse {
+            content: self.acc.content,
+            usage,
+            model_name: self.model_name,
+            stop_reason,
+            thinking,
+            tool_calls,
+            provider_continuation: None,
+        })
     }
 }
 
