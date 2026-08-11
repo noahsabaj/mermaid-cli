@@ -220,10 +220,12 @@ fn the_picker_lists_a_bespoke_providers_models() {
     );
 
     // Filter to the provider so its rows survive the pane's window regardless
-    // of how many local models sit above them.
+    // of how many local models sit above them. The row itself reads
+    // `muse-spark-…`, not `meta/muse-spark-…`: the provider is stated once, by
+    // the group heading above it.
     term.type_text("meta/");
     assert!(
-        term.wait_for_text("meta/muse-spark", Duration::from_secs(30)),
+        term.wait_for_text("muse-spark", Duration::from_secs(30)),
         "the picker never listed a meta model. Screen:\n{}",
         term.frame_text()
     );

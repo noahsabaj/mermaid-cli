@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The `/model` picker stops repeating the provider on every row, and a
+  scrolled window still names the one it is showing.** Every row spelled out
+  the full id under a heading that already said it, so NVIDIA's own catalog
+  read `nvidia/nvidia/nemotron-3-super-120b-a12b` -- one prefix from Mermaid,
+  one from NIM, whose ids carry their publisher. Rows now drop the segment the
+  heading states and keep the vendor namespace, which is part of the id the
+  provider actually takes: `mistralai/mistral-large-2-instruct` under
+  `nvidia`, `muse-spark-1.2` under `meta`, `gemma4:e4b-it-qat` under
+  `Local (Ollama)`. The footer spells the highlighted row out in full, so what
+  to pass to `--model` is always on screen.
+
+  That elision needed the heading to be reliable, and it was not. A window
+  scrolled into the middle of a provider's block drew no heading at all -- the
+  old rule skipped it as context "the user just scrolled past" -- which was
+  survivable only while every row repeated its provider. The heading is now
+  sticky: the first visible row always gets one.
+
+  Two bugs fell out of the same arithmetic. The scroll window was sized in
+  rows while headings share those lines, so a group boundary inside the window
+  pushed the highlighted row past the last line and the truncate ate it: the
+  picker rendered with no visible cursor. And when a boundary landed on the
+  final line, the row was drawn under the heading above it -- an NVIDIA model
+  filed under `meta`, which a prefix-less row has no way to contradict. The
+  window now pays for headings as it walks up from the cursor, and a group
+  that cannot fit its heading and its first row is not started.
+
 ## [0.25.0] - 2026-08-10
 
 ### Added
