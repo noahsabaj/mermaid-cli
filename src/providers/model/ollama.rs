@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use mermaid_domain::ChatRequest;
+use mermaid_domain::{ChatRequest, ToolDefinition};
 use mermaid_model::models::adapters::ollama::{OllamaAdapter, OllamaModelInfo};
 use mermaid_model::models::adapters::ollama_sizing::{
     NumCtxInputs, converge_num_ctx, default_ollama_num_predict, kv_bytes_per_token,
@@ -333,7 +333,11 @@ fn build_model_config(
         reasoning: request.reasoning,
         system_prompt: Some(request.system_prompt.clone()),
         dynamic_system_suffix: request.instructions.clone(),
-        tools: request.tools.iter().map(|t| t.to_openai_json()).collect(),
+        tools: request
+            .tools
+            .iter()
+            .map(ToolDefinition::to_openai_json)
+            .collect(),
         output_schema: request.output_schema.clone(),
         ..Default::default()
     };

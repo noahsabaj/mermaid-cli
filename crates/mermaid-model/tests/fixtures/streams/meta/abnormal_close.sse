@@ -1,0 +1,4 @@
+data: {"type":"response.created","response":{"id":"resp_6"}}
+
+data: {"type":"response.output_text.delta","delta":"half a th"}
+

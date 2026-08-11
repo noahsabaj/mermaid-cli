@@ -1,4 +1,4 @@
-//! One test suite, four wire formats.
+//! One test suite, five wire formats.
 //!
 //! Every adapter is asked the same questions against a recorded response
 //! body, and the answers are compared in NORMALIZED terms — the streamed
@@ -178,6 +178,7 @@ fn fixture(provider: &str, name: &str) -> String {
 mod protocols {
     use super::super::anthropic::AnthropicStream;
     use super::super::gemini::GeminiStream;
+    use super::super::meta::MetaStream;
     use super::super::ollama::OllamaStream;
     use super::super::openai_compat::OpenAICompatStream;
 
@@ -191,6 +192,14 @@ mod protocols {
 
     pub(super) fn ollama(hide_reasoning: bool) -> OllamaStream {
         OllamaStream::new("ollama-test".to_string(), hide_reasoning)
+    }
+
+    /// Meta is the one protocol with no reasoning-trace switch: the
+    /// Responses API sends summaries, and mermaid asks for them
+    /// unconditionally. The flag is accepted and ignored so the shared
+    /// harness keeps one shape.
+    pub(super) fn meta(_hide_reasoning: bool) -> MetaStream {
+        MetaStream::new("muse-spark-test".to_string())
     }
 
     /// `deepinfra` carries `ReasoningExtraction::DeltaContentField
@@ -217,13 +226,14 @@ macro_rules! scenario {
     }};
 }
 
-/// The four scenarios that every provider records, in provider order.
+/// One scenario across every provider that records it, in provider order.
 macro_rules! all_providers {
-    ($text:literal, $ndjson:literal) => {
+    ($sse:literal, $ndjson:literal) => {
         vec![
-            scenario!(protocols::anthropic, "anthropic", $text),
-            scenario!(protocols::gemini, "gemini", $text),
-            scenario!(protocols::openai_compat, "openai_compat", $text),
+            scenario!(protocols::anthropic, "anthropic", $sse),
+            scenario!(protocols::gemini, "gemini", $sse),
+            scenario!(protocols::openai_compat, "openai_compat", $sse),
+            scenario!(protocols::meta, "meta", $sse),
             scenario!(protocols::ollama, "ollama", $ndjson),
         ]
     };

@@ -12,7 +12,7 @@
 
 use async_trait::async_trait;
 
-use mermaid_domain::ChatRequest;
+use mermaid_domain::{ChatRequest, ToolDefinition};
 use mermaid_model::models::adapters::anthropic::AnthropicAdapter;
 use mermaid_model::models::{Model, ModelConfig, ModelError, Result};
 
@@ -124,7 +124,11 @@ fn build_model_config(request: &ChatRequest) -> ModelConfig {
         reasoning: request.reasoning,
         system_prompt: Some(request.system_prompt.clone()),
         dynamic_system_suffix: request.instructions.clone(),
-        tools: request.tools.iter().map(|t| t.to_openai_json()).collect(),
+        tools: request
+            .tools
+            .iter()
+            .map(ToolDefinition::to_openai_json)
+            .collect(),
         resolved_context_window: request.resolved_context_window,
         resolved_max_output: request.resolved_max_output,
         // The adapter maps this to `output_config.format` (native

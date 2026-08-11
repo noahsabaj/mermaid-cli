@@ -12,7 +12,7 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 
-use mermaid_domain::ChatRequest;
+use mermaid_domain::{ChatRequest, ToolDefinition};
 use mermaid_model::models::adapters::ModelLimits;
 use mermaid_model::models::adapters::openai_compat::OpenAICompatAdapter;
 use mermaid_model::models::{Model, ModelConfig, ModelError, ProviderProfile, Result};
@@ -173,7 +173,11 @@ fn build_model_config(request: &ChatRequest) -> ModelConfig {
         reasoning: request.reasoning,
         system_prompt: Some(request.system_prompt.clone()),
         dynamic_system_suffix: request.instructions.clone(),
-        tools: request.tools.iter().map(|t| t.to_openai_json()).collect(),
+        tools: request
+            .tools
+            .iter()
+            .map(ToolDefinition::to_openai_json)
+            .collect(),
         output_schema: request.output_schema.clone(),
         ..Default::default()
     }

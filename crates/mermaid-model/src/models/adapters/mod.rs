@@ -14,6 +14,7 @@ pub mod anthropic;
 mod conformance;
 pub mod driver;
 pub mod gemini;
+pub mod meta;
 pub mod ollama;
 pub mod ollama_sizing;
 pub mod openai_compat;
