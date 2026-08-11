@@ -2,10 +2,10 @@
 //!
 //! The adapter owns the wire format (NDJSON framing, gpt-oss
 //! reasoning dispatch, truncation marker, retry). The wrapper
-//! translates `ChatRequest` ↔ `ModelConfig` and bridges the
-//! adapter's legacy `StreamCallback` to the typed `StreamEvent`
-//! sink. Adapter-internals stay where they are; the architecture
-//! boundary is at `ModelProvider::chat`.
+//! translates `ChatRequest` ↔ `ModelConfig`, hands over the turn's
+//! event sink, and emits the terminal `Done`. Adapter-internals stay
+//! where they are; the architecture boundary is at
+//! `ModelProvider::chat`.
 
 use std::sync::Arc;
 

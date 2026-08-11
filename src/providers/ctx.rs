@@ -117,11 +117,11 @@ impl StreamContext {
 /// re-exported rather than redefined.
 ///
 /// This was a second enum with the same five variants, and the only thing it
-/// added was a richer `Done`; `stream_bridge::forward_callback` spent a match
-/// arm per variant translating one into the other, and could only fill the
-/// extra `Done` fields with `None` because the adapter-side `Done` it mapped
-/// from carried a bare token count. `mermaid_model`'s `Done` carries the whole
-/// terminal payload now, so there is nothing left for a second type to add.
+/// added was a richer `Done` — which cost a translation layer that could only
+/// fill those extra fields with `None`, because the adapter-side `Done` it
+/// mapped from carried a bare token count. `mermaid_model`'s `Done` carries
+/// the whole terminal payload now, so there is nothing left for a second type
+/// to add.
 pub use mermaid_model::models::StreamEvent;
 
 /// Final response returned by `ModelProvider::chat()` after the
