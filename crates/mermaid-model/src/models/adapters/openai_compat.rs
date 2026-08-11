@@ -568,7 +568,7 @@ impl OpenAICompatAdapter {
 /// providers put reasoning in `delta.content` wrapped in `<think>` tags
 /// instead of a field of its own, so the content channel runs through a
 /// state machine with its own tail to flush.
-struct OpenAICompatStream {
+pub(crate) struct OpenAICompatStream {
     profile: &'static ProviderProfile,
     model_name: String,
     hide_reasoning_trace: bool,
@@ -589,7 +589,7 @@ struct OpenAICompatStream {
 }
 
 impl OpenAICompatStream {
-    fn new(
+    pub(crate) fn new(
         profile: &'static ProviderProfile,
         model_name: String,
         hide_reasoning_trace: bool,

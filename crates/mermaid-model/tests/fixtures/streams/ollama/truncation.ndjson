@@ -1,0 +1,2 @@
+{"message":{"role":"assistant","content":"cut off"},"done":false}
+{"message":{"role":"assistant","content":""},"done":true,"done_reason":"length","prompt_eval_count":9,"eval_count":4}

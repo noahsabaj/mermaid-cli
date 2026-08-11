@@ -1,0 +1,4 @@
+data: {"type":"message_start","message":{"id":"msg_05","usage":{"input_tokens":5}}}
+
+data: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}
+

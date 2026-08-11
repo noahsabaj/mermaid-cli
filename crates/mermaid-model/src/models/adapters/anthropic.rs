@@ -965,7 +965,7 @@ impl AnthropicAdapter {
 /// The only one of the four with per-block state: `content_block_*` frames
 /// carry an `index`, and text / thinking / `tool_use` blocks interleave, so
 /// each is accumulated under its own key until its stop frame closes it.
-struct AnthropicStream {
+pub(crate) struct AnthropicStream {
     model_name: String,
     hide_reasoning_trace: bool,
     text_acc: String,
@@ -986,7 +986,7 @@ struct AnthropicStream {
 }
 
 impl AnthropicStream {
-    fn new(model_name: String, hide_reasoning_trace: bool) -> Self {
+    pub(crate) fn new(model_name: String, hide_reasoning_trace: bool) -> Self {
         Self {
             model_name,
             hide_reasoning_trace,

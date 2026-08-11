@@ -1,0 +1,4 @@
+data: {"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]}
+
+data: {"error":{"code":"rate_limit_exceeded","message":"Rate limit reached"}}
+

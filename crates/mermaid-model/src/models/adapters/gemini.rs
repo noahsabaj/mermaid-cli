@@ -735,11 +735,7 @@ impl GeminiAdapter {
         }
         drive_stream(
             response.bytes_stream(),
-            GeminiStream {
-                state: StreamState::default(),
-                model_name: self.model_name.clone(),
-                hide_reasoning_trace,
-            },
+            GeminiStream::new(self.model_name.clone(), hide_reasoning_trace),
             sink,
         )
         .await
@@ -750,10 +746,20 @@ impl GeminiAdapter {
 /// partial `GenerateContentResponse`, and the stream ends when the body
 /// does — there is no terminal frame to watch for, only a `finishReason`
 /// that has to have arrived by then.
-struct GeminiStream {
+pub(crate) struct GeminiStream {
     state: StreamState,
     model_name: String,
     hide_reasoning_trace: bool,
+}
+
+impl GeminiStream {
+    pub(crate) fn new(model_name: String, hide_reasoning_trace: bool) -> Self {
+        Self {
+            state: StreamState::default(),
+            model_name,
+            hide_reasoning_trace,
+        }
+    }
 }
 
 impl StreamProtocol for GeminiStream {
