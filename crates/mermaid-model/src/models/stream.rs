@@ -7,11 +7,13 @@
 //! both validated this pattern as the way out of per-provider stream-shape
 //! sniffing.
 //!
-//! This is the ONE stream event type. `providers::ctx` re-exports it: the
-//! CLI used to define a structurally-identical twin whose only difference
-//! was a richer `Done`, and `stream_bridge::forward_callback` existed to
-//! map one onto the other variant by variant. The `Done` here is that
-//! richer one, so there is nothing left to map.
+//! This is the ONE stream event type, and `providers::ctx` re-exports it
+//! rather than defining a second. A twin with a poorer `Done` needs a
+//! translation layer to reach the effect layer, and a translation layer
+//! cannot invent what its input never carried — which is how an opaque
+//! provider continuation ends up as `None` and extended thinking stops
+//! continuing across turns. `Done` here carries the whole terminal
+//! payload, so there is nothing to translate.
 //!
 //! Events reach the turn through [`StreamSink`] — the effect layer's own
 //! bounded `mpsc::Sender`, handed to the adapter as-is. There is no callback
