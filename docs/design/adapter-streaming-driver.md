@@ -182,7 +182,6 @@ same scenarios:
 | `text` | plain deltas concatenate; `Text` events in order |
 | `reasoning` | reasoning splits from content; `hide_reasoning_trace` suppresses the event but not the accumulator |
 | `tool_call` | fragmented arguments reassemble; `ToolCall` arrives before the response |
-| `usage` | a stream that reports usage yields `Some`; one that never does yields `None` (#125) |
 | `truncation` | a real `length`/`MAX_TOKENS` stop survives as `FinishReason::Length` |
 | `error_frame` | a mid-stream error payload becomes a typed `ProviderError`, not a parse failure (#123) |
 | `abnormal_close` | a body cut before any terminal frame is a `StreamError`, not a clean empty `Ok` (F56) |
@@ -191,6 +190,20 @@ same scenarios:
 The last one is the payment for the reassembly cap and the framing split
 living in one place: it can be asserted generically, for every protocol, by
 re-driving the same fixture through a chunker. Today no adapter has that test.
+
+**Two adjustments, after PR D landed.** `usage` did not need a scenario of its
+own — every other fixture already carries a usage frame, so the token totals
+are asserted alongside the thing they accompany, and `None`-when-never-reported
+stays covered by each adapter's own unit tests where it belongs. And
+`split_chunks` is not a scenario either: it is how *every* scenario runs, twice,
+which is strictly stronger than one fixture testing it once.
+
+One scenario is deliberately not shared. Ollama's NDJSON body can close on a
+whole frame with no trailing newline; an SSE event without its blank-line
+separator is incomplete by definition, so there is nothing for the other four
+to record. `ollama_keeps_the_frame_its_body_closed_on` stands alone, which is
+the corpus saying out loud what used to be an accident of which drainer grew a
+residue branch.
 
 ## Sequence
 
@@ -213,3 +226,9 @@ Each PR is independently green and mergeable.
 - **E — `meta` folds in.** `adapters/meta.rs` implements `Model` +
   `StreamProtocol`; `providers/model/meta.rs` becomes a wrapper; meta joins the
   corpus.
+
+**Done**, PRs #381-386. The count that summarizes it: five copies of the
+reassembly cap became one, `providers/model/meta.rs` went from 873 lines to
+156, `stream_bridge.rs` and its spawned relay task per turn are gone, and the
+seven scenarios each run against five wire formats — twice, once a byte at a
+time.

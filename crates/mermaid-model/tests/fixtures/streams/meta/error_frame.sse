@@ -1,0 +1,6 @@
+data: {"type":"response.created","response":{"id":"resp_5"}}
+
+data: {"type":"response.output_text.delta","delta":"partial"}
+
+data: {"type":"response.failed","response":{"error":{"code":"rate_limit_exceeded","message":"Rate limit reached"}}}
+

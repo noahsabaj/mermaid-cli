@@ -8,7 +8,7 @@
 
 pub mod anthropic;
 pub mod gemini;
-pub(crate) mod meta;
+pub mod meta;
 pub mod ollama;
 pub mod openai_compat;
 
