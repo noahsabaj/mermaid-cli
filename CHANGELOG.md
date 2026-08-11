@@ -37,6 +37,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Every provider streams through one read loop, and a slow reader now
+  reaches the socket instead of a queue.** Five adapters each carried their
+  own copy of the same loop -- read a chunk, cap the reassembly buffer, split
+  frames, dispatch, decide whether the stream ended or was cut -- and only the
+  dispatch step was ever about the provider. The copies had drifted: Ollama
+  flushed the un-terminated frame left when a body closes mid-frame and the
+  four SSE adapters dropped theirs, so a server that ends its body directly
+  after `data: {...}` without the blank line loses its final frame on four
+  providers out of five. Nobody chose that; it is a `Framing` decision written
+  down in one place now, with the reason next to it.
+
+  What you can observe. Between the adapters and the screen sat an unbounded
+  staging channel and a relay task spawned per turn, there to stop a `Done`
+  event from overtaking a tool call the model had asked for -- which would
+  make the agent silently skip running it. The adapters' read loops were
+  already async, so they now await the send directly and the ordering holds by
+  construction, with no second channel to reorder anything. The bounded
+  channel that was always documented as the backpressure finally is it: a turn
+  whose consumer falls behind stalls the read and fills the provider's TCP
+  window, rather than growing a queue in memory. A turn also no longer leaks a
+  spawned task if it is cancelled at the wrong moment, because there is no
+  longer a task to leak.
+
+  Meta joins the other four as a real adapter rather than a provider that
+  hand-rolled one, which is what removes the fifth copy of the loop. The wire
+  formats are now covered by one conformance suite: recorded response bodies
+  per provider, asserted in shared terms, so that Anthropic's `max_tokens`,
+  Gemini's `MAX_TOKENS`, OpenAI's `length` and Ollama's `done_reason:
+  "length"` are provably the same fact to everything above them. Each scenario
+  runs twice, the second time one byte at a time, which is the first coverage
+  any adapter has had for a network chunk boundary landing inside a frame.
+
 - **The driving loop is a value now, and a timed-out headless run stops
   leaking its MCP children.** `update(State, Msg) -> (State, Vec<Cmd>)` is the
   whole product; driving it is five lines -- stamp the clock, reduce, route the
