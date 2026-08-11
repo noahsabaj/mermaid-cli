@@ -1,0 +1,2 @@
+{"message":{"role":"assistant","content":"partial"},"done":false}
+{"error":"model requires more system memory than is available"}

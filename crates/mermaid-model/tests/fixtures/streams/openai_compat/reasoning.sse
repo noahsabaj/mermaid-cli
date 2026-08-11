@@ -1,0 +1,10 @@
+data: {"choices":[{"index":0,"delta":{"reasoning_content":"weighing "},"finish_reason":null}]}
+
+data: {"choices":[{"index":0,"delta":{"reasoning_content":"options"},"finish_reason":null}]}
+
+data: {"choices":[{"index":0,"delta":{"content":"the answer"},"finish_reason":null}]}
+
+data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":20,"completion_tokens":11}}
+
+data: [DONE]
+

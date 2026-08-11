@@ -7,6 +7,11 @@
 //! loop they all used to carry a copy of.
 
 pub mod anthropic;
+/// One test suite driven over recorded response bodies, one per provider.
+/// In-crate rather than under `tests/` so it can reach the protocol
+/// structs, which are wire-format detail and not public API.
+#[cfg(test)]
+mod conformance;
 pub mod driver;
 pub mod gemini;
 pub mod ollama;

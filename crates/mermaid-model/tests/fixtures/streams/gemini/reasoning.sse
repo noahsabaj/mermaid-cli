@@ -1,0 +1,8 @@
+data: {"candidates":[{"content":{"parts":[{"text":"weighing ","thought":true}]}}]}
+
+data: {"candidates":[{"content":{"parts":[{"text":"options","thought":true}]}}]}
+
+data: {"candidates":[{"content":{"parts":[{"text":"the answer"}]}}]}
+
+data: {"candidates":[{"content":{"parts":[]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":20,"candidatesTokenCount":11}}
+

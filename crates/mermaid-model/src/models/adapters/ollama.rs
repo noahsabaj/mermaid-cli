@@ -440,21 +440,7 @@ impl OllamaAdapter {
         }
         drive_stream(
             response.bytes_stream(),
-            OllamaStream {
-                model_name: self.model_name.clone(),
-                acc: StreamAccumulator {
-                    content: String::new(),
-                    thinking: String::new(),
-                    tool_calls: Vec::new(),
-                    hide_reasoning_trace,
-                    prompt_tokens: 0,
-                    completion_tokens: 0,
-                    saw_usage: false,
-                    done_reason: None,
-                    saw_done: false,
-                    truncated: false,
-                },
-            },
+            OllamaStream::new(self.model_name.clone(), hide_reasoning_trace),
             sink,
         )
         .await
@@ -887,9 +873,29 @@ impl Model for OllamaAdapter {
 /// flushes an un-terminated tail — Ollama can close the body directly on
 /// its final object. That used to be a special case written out here and
 /// missing from the other three; it is [`Framing::Ndjson`] now.
-struct OllamaStream {
+pub(crate) struct OllamaStream {
     model_name: String,
     acc: StreamAccumulator,
+}
+
+impl OllamaStream {
+    pub(crate) const fn new(model_name: String, hide_reasoning_trace: bool) -> Self {
+        Self {
+            model_name,
+            acc: StreamAccumulator {
+                content: String::new(),
+                thinking: String::new(),
+                tool_calls: Vec::new(),
+                hide_reasoning_trace,
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                saw_usage: false,
+                done_reason: None,
+                saw_done: false,
+                truncated: false,
+            },
+        }
+    }
 }
 
 impl StreamProtocol for OllamaStream {
