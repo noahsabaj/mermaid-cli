@@ -112,7 +112,7 @@ Everyday:
 
 Model and context:
 
-- `/model` — open the model picker: every model this machine can reach, local Ollama models grouped first, the active one marked, type to filter (↑↓ navigate · Enter switch · Esc cancel). `/model <name>` switches directly; either way an Ollama model auto-pulls if needed
+- `/model` — open the model picker: every model this machine can reach, local Ollama models grouped first, the active one marked, type to filter (↑↓ navigate · Enter switch · Esc cancel). Rows drop the provider their group heading already names — `mistralai/mistral-large-2-instruct` under `nvidia` — and the footer shows the highlighted row's full id, the string `/model <name>` and `--model` take. `/model <name>` switches directly; either way an Ollama model auto-pulls if needed
 - `/reasoning <level>` — set reasoning: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`
 - `/visible-reasoning [on|off|toggle]` — show or hide reasoning blocks in the transcript
 - `/usage`, `/context`, `/compact [instructions]`

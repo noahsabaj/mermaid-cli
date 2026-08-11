@@ -7,6 +7,12 @@
 //!   * **Group headings.** Local Ollama models and each remote provider are
 //!     visually separated, so "what runs on my machine" is answerable at a
 //!     glance — the distinction a sovereignty-focused tool most owes its user.
+//!     The heading is sticky: a window scrolled into the middle of a hundred-row
+//!     provider block still names that provider on its first line.
+//!   * **Rows without the provider prefix.** The heading already says `nvidia`,
+//!     so the row says `mistralai/mistral-large-2-instruct` — and NVIDIA's own
+//!     models stop reading `nvidia/nvidia/…`. Nothing is lost: the footer
+//!     spells the highlighted row out as the full id `/model` takes.
 //!   * **A filter line.** A provider's `/models` endpoint routinely returns
 //!     100+ ids. A fixed list of four would be a lie about what is available,
 //!     and an unfiltered list of two hundred is unusable; typing narrows it.
@@ -56,6 +62,10 @@ impl<'a> Widget for ModelPickerWidget<'a> {
         let visible = inner_height
             .saturating_sub(1)
             .min(MODEL_PICKER_VISIBLE_ROWS);
+        let width = area.width.saturating_sub(2) as usize;
+        // A cursor past the end would only come from a stale frame; clamp
+        // rather than panic on the index.
+        let cursor = self.cursor.min(self.matches.len().saturating_sub(1));
 
         let mut lines: Vec<Line<'static>> = Vec::new();
         if self.matches.is_empty() {
@@ -71,17 +81,28 @@ impl<'a> Widget for ModelPickerWidget<'a> {
                 dim,
             )));
         } else {
-            // Scroll the window to keep the cursor in view.
-            let start = self.cursor.saturating_sub(visible.saturating_sub(1));
-            let width = area.width.saturating_sub(2) as usize;
+            let start = window_start(self.matches, cursor, visible);
             let mut last_group: Option<&str> = None;
-            for (i, choice) in self.matches.iter().enumerate().skip(start).take(visible) {
-                // A heading only when the group changes AND it is not the very
-                // first visible row of a scrolled window (where it would eat a
-                // row to restate context the user just scrolled past).
+            for (i, choice) in self.matches.iter().enumerate().skip(start) {
+                if lines.len() >= visible {
+                    break;
+                }
                 if last_group != Some(choice.group.as_str()) {
                     last_group = Some(choice.group.as_str());
-                    if i > start || start == 0 {
+                    // A heading on every group change — and on the first
+                    // visible row even mid-group, because the rows no longer
+                    // carry the provider themselves.
+                    if lines.len() + 2 > visible {
+                        // No room for the heading AND its row. Stop rather
+                        // than draw the row under the heading above it: an
+                        // nvidia model tucked under `meta` is a worse lie
+                        // than a blank last line. The one exception is a pane
+                        // so short nothing has been drawn yet, where the
+                        // cursor's own row still has to appear.
+                        if !lines.is_empty() {
+                            break;
+                        }
+                    } else {
                         lines.push(Line::from(Span::styled(
                             format!(" {}", choice.group),
                             Style::default()
@@ -90,19 +111,12 @@ impl<'a> Widget for ModelPickerWidget<'a> {
                         )));
                     }
                 }
-                lines.push(row(
-                    choice,
-                    i == self.cursor,
-                    self.current,
-                    width,
-                    self.theme,
-                ));
+                lines.push(row(choice, i == cursor, self.current, width, self.theme));
             }
-            lines.truncate(visible);
         }
 
         // Filter / status footer.
-        let footer = if self.query.is_empty() {
+        let status = if self.query.is_empty() {
             let shown = self.matches.len();
             if self.loading {
                 " filter: (type to narrow) · still searching…".to_string()
@@ -117,9 +131,80 @@ impl<'a> Widget for ModelPickerWidget<'a> {
                 if self.matches.len() == 1 { "" } else { "es" }
             )
         };
+        // The highlighted row's id, spelled out in full — the exact string
+        // `/model` and `--model` take, which the rows themselves no longer
+        // show. When the pane is too narrow for both, the id wins: the count
+        // is a nicety, the id is the thing this line exists for.
+        let footer = match self.matches.get(cursor) {
+            Some(choice) => {
+                let both = format!("{status} · {}", choice.id);
+                if both.width() <= width {
+                    both
+                } else {
+                    super::truncate_to_cells(&format!(" {}", choice.id), width)
+                }
+            },
+            None => status,
+        };
         lines.push(Line::from(Span::styled(footer, dim)));
 
         Paragraph::new(lines).block(block).render(area, buf);
+    }
+}
+
+/// First row of the scroll window.
+///
+/// Not `cursor + 1 - visible`: headings share the pane with rows, so a group
+/// boundary inside the window costs a line, and row-only arithmetic pushed the
+/// highlighted row past `visible` — where the truncate silently ate it and the
+/// picker showed no cursor at all. Walk up from the cursor instead, paying for
+/// every row and every heading, and stop when the budget runs out.
+fn window_start(matches: &[&ModelChoice], cursor: usize, visible: usize) -> usize {
+    let mut start = cursor;
+    // The cursor's own row, plus the heading that always sits above it.
+    let mut cost = 2usize;
+    while start > 0 {
+        // Extending upward always adds a row. It adds a heading too only when
+        // the row above belongs to another group; within one group the heading
+        // already paid for simply moves up.
+        let extra = if matches[start - 1].group == matches[start].group {
+            1
+        } else {
+            2
+        };
+        if cost + extra > visible {
+            break;
+        }
+        cost += extra;
+        start -= 1;
+    }
+    start
+}
+
+/// Row text: the id minus the provider segment its heading already states, so
+/// `nvidia/mistralai/mistral-large-2-instruct` under the `nvidia` heading reads
+/// `mistralai/mistral-large-2-instruct` and NVIDIA's own models stop stuttering
+/// `nvidia/nvidia/…`.
+///
+/// The vendor namespace stays. It is part of the id NIM, OpenRouter, Together
+/// and DeepInfra actually take, and it is what tells `mistralai/…` apart from
+/// `moonshotai/…`. Only a prefix the heading names is dropped — anything else
+/// renders whole rather than hiding a mismatch the user has no way to see.
+fn display_id(choice: &ModelChoice) -> &str {
+    let Some((prefix, rest)) = choice.id.split_once('/') else {
+        return &choice.id;
+    };
+    if rest.is_empty() {
+        return &choice.id;
+    }
+    let group = choice.group.to_ascii_lowercase();
+    let prefix = prefix.to_ascii_lowercase();
+    // A remote group IS the provider name; the local group spells it out as
+    // `Local (Ollama)`.
+    if group == prefix || group.contains(&format!("({prefix})")) {
+        rest
+    } else {
+        &choice.id
     }
 }
 
@@ -155,7 +240,7 @@ fn row(
     };
     let pull_mark = if choice.ready { "" } else { " (not pulled)" };
     let reserved = prefix.width() + current_mark.width() + pull_mark.width();
-    let id = super::truncate_to_cells(&choice.id, width.saturating_sub(reserved));
+    let id = super::truncate_to_cells(display_id(choice), width.saturating_sub(reserved));
 
     let mut spans = vec![
         Span::styled(prefix, Style::default().fg(c.brand.to_color())),
@@ -200,6 +285,16 @@ mod tests {
             detail: String::new(),
             ready: true,
         }
+    }
+
+    /// The frame minus its filter/status line — what the *rows* say, which is
+    /// the only place the provider prefix is supposed to be gone.
+    fn without_footer(frame: &str) -> String {
+        frame
+            .lines()
+            .filter(|l| !l.contains("filter:"))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     fn render_to_string(widget: ModelPickerWidget<'_>, width: u16, height: u16) -> String {
@@ -247,6 +342,183 @@ mod tests {
             "the active model must be marked:\n{out}"
         );
         assert!(out.contains("2 models"), "count missing:\n{out}");
+    }
+
+    /// The heading names the provider, so the row must not repeat it — the
+    /// shape that made NVIDIA's own models render `nvidia/nvidia/…`.
+    #[test]
+    fn rows_drop_the_provider_the_heading_already_names() {
+        let theme = Theme::dark();
+        let local = choice("ollama/gemma4:e4b-it-qat", "Local (Ollama)");
+        let own = choice("nvidia/nvidia/nemotron-3-super-120b-a12b", "nvidia");
+        let vendor = choice("nvidia/mistralai/mistral-large-2-instruct", "nvidia");
+        let matches = [&local, &own, &vendor];
+        let out = render_to_string(
+            ModelPickerWidget {
+                theme: &theme,
+                matches: &matches,
+                query: "",
+                cursor: 0,
+                loading: false,
+                current: "",
+            },
+            90,
+            MODEL_PICKER_HEIGHT,
+        );
+        // Rows only: the footer carries the highlighted id in full by design.
+        let rows = without_footer(&out);
+        assert!(
+            !rows.contains("nvidia/nvidia/"),
+            "the stutter is back:\n{out}"
+        );
+        assert!(
+            !rows.contains("ollama/gemma4"),
+            "local rows repeat too:\n{out}"
+        );
+        assert!(out.contains("gemma4:e4b-it-qat"), "{out}");
+        // The vendor namespace is part of the upstream id and stays put.
+        assert!(out.contains("mistralai/mistral-large-2-instruct"), "{out}");
+        assert!(out.contains("nvidia/nemotron-3-super-120b-a12b"), "{out}");
+    }
+
+    /// Eliding is only safe when the heading really does name the prefix;
+    /// otherwise the row would hide a provider the user cannot see anywhere.
+    #[test]
+    fn a_prefix_the_heading_does_not_name_is_kept() {
+        let mismatched = choice("openrouter/z-ai/glm-5.2", "nvidia");
+        assert_eq!(display_id(&mismatched), "openrouter/z-ai/glm-5.2");
+        let bare = choice("llama3.2", "Local (Ollama)");
+        assert_eq!(display_id(&bare), "llama3.2");
+        let local = choice("ollama/llama3.2", "Local (Ollama)");
+        assert_eq!(display_id(&local), "llama3.2");
+    }
+
+    /// The footer is where the full `provider/vendor/model` string lives now,
+    /// so what to type into `--model` is never more than a glance away.
+    #[test]
+    fn the_footer_spells_out_the_highlighted_id_in_full() {
+        let theme = Theme::dark();
+        let own = choice("nvidia/nvidia/nemotron-3-super-120b-a12b", "nvidia");
+        let matches = [&own];
+        for width in [90u16, 44] {
+            let out = render_to_string(
+                ModelPickerWidget {
+                    theme: &theme,
+                    matches: &matches,
+                    query: "",
+                    cursor: 0,
+                    loading: false,
+                    current: "",
+                },
+                width,
+                MODEL_PICKER_HEIGHT,
+            );
+            // Rows elide the prefix, so a full id on screen can only be the
+            // footer's. The narrow pane drops the count to keep it.
+            assert!(
+                out.contains("nvidia/nvidia/nemotron"),
+                "the full id is not on screen at width {width}:\n{out}"
+            );
+        }
+    }
+
+    /// A window scrolled into the middle of a hundred-row provider block must
+    /// still name the provider: the rows no longer carry it themselves.
+    #[test]
+    fn a_scrolled_window_still_names_its_provider() {
+        let theme = Theme::dark();
+        let owned: Vec<ModelChoice> = (0..40)
+            .map(|i| choice(&format!("nvidia/mistralai/model-{i:02}"), "nvidia"))
+            .collect();
+        let matches: Vec<&ModelChoice> = owned.iter().collect();
+        let out = render_to_string(
+            ModelPickerWidget {
+                theme: &theme,
+                matches: &matches,
+                query: "",
+                cursor: 30,
+                loading: false,
+                current: "",
+            },
+            90,
+            MODEL_PICKER_HEIGHT,
+        );
+        assert!(
+            out.lines()
+                .any(|l| l.trim_matches(|ch| ch == '│' || ch == ' ') == "nvidia"),
+            "no heading line names the provider:\n{out}"
+        );
+        assert!(out.contains("> mistralai/model-30"), "{out}");
+    }
+
+    /// A row may never sit under another group's heading. When the boundary
+    /// falls on the last visible line there is no room for the new heading,
+    /// and drawing the row anyway filed NVIDIA's catalog under `meta` — which
+    /// a stripped row has no way to contradict.
+    #[test]
+    fn no_row_is_filed_under_another_groups_heading() {
+        let theme = Theme::dark();
+        let mut owned: Vec<ModelChoice> = (0..8)
+            .map(|i| choice(&format!("ollama/local-{i}"), "Local (Ollama)"))
+            .collect();
+        owned.push(choice("nvidia/mistralai/remote-0", "nvidia"));
+        let matches: Vec<&ModelChoice> = owned.iter().collect();
+        let out = render_to_string(
+            ModelPickerWidget {
+                theme: &theme,
+                matches: &matches,
+                query: "",
+                cursor: 0,
+                loading: false,
+                current: "",
+            },
+            90,
+            MODEL_PICKER_HEIGHT,
+        );
+        let rows = without_footer(&out);
+        assert!(
+            rows.contains("local-7"),
+            "the local block is cut short:\n{out}"
+        );
+        // The row's own text no longer names its provider, so the heading is
+        // the only thing that can: either both are on screen, or neither is.
+        assert!(
+            !rows.contains("remote-0") || rows.contains("nvidia"),
+            "an nvidia row is on screen with no nvidia heading:\n{out}"
+        );
+    }
+
+    /// A group boundary inside the window costs a line. Sizing the window in
+    /// rows alone pushed the highlighted row past the last one, and the
+    /// truncate ate it — the picker rendered with no visible cursor.
+    #[test]
+    fn the_highlighted_row_survives_a_group_boundary() {
+        let theme = Theme::dark();
+        let mut owned: Vec<ModelChoice> = (0..8)
+            .map(|i| choice(&format!("ollama/local-{i}"), "Local (Ollama)"))
+            .collect();
+        owned.extend((0..8).map(|i| choice(&format!("nvidia/mistralai/remote-{i}"), "nvidia")));
+        let matches: Vec<&ModelChoice> = owned.iter().collect();
+        for cursor in 0..matches.len() {
+            let out = render_to_string(
+                ModelPickerWidget {
+                    theme: &theme,
+                    matches: &matches,
+                    query: "",
+                    cursor,
+                    loading: false,
+                    current: "",
+                },
+                90,
+                MODEL_PICKER_HEIGHT,
+            );
+            // The marker, not the bare id: the footer also carries the id.
+            let marked = format!("> {}", display_id(matches[cursor]));
+            assert!(
+                out.contains(&marked),
+                "row {cursor} is not on screen as {marked:?}:\n{out}"
+            );
+        }
     }
 
     /// A still-running discovery must not read as "there are no models".
