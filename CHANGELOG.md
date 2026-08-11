@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-08-10
+
 ### Added
 
 - **`mermaid task <id> --send "<text>"` -- you can talk to a task that is
@@ -4652,7 +4654,8 @@ MERMAID.md project instructions, MCP spec bump, and a security update.
 - rustfmt and clippy configuration
 - Docker compose setup for LiteLLM proxy
 
-[Unreleased]: https://github.com/noahsabaj/mermaid-cli/compare/v0.24.0...HEAD
+[Unreleased]: https://github.com/noahsabaj/mermaid-cli/compare/v0.25.0...HEAD
+[0.25.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.24.0...v0.25.0
 [0.24.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.23.0...v0.24.0
 [0.23.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.22.0...v0.23.0
 [0.22.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.21.1...v0.22.0
