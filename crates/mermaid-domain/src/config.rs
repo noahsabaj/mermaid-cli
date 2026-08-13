@@ -1135,6 +1135,10 @@ pub struct WebConfig {
     /// (`search.formats` includes `json`). The `auto` managed instance ignores
     /// this and picks its own port.
     pub searxng_url: String,
+    /// Trusted domains/hosts allowed for `web_fetch` without interactive
+    /// approval prompts (e.g. `["docs.x.ai", "localhost:8080"]`).
+    #[serde(default)]
+    pub allowed_domains: Vec<String>,
 }
 
 impl Default for WebConfig {
@@ -1144,6 +1148,7 @@ impl Default for WebConfig {
             search_backend: SearchBackend::Auto,
             allow_ollama_search_fallback: false,
             searxng_url: String::from("http://localhost:8080"),
+            allowed_domains: Vec::new(),
         }
     }
 }

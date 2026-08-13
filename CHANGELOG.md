@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Domain-level and config-based allowlisting for web tools.** Interactive approval modals for `web_fetch` now offer host-level "don't ask again" allowlisting (e.g. `web_fetch:docs.x.ai` or `web_fetch:localhost:8080`), permitting subsequent requests to the approved host for the duration of the session without reprompting. `web_search` similarly supports session-wide allowlisting. Persistent domain trust can also be configured declaratively via `[web] allowed_domains = ["docs.x.ai", "localhost:8080"]` in `config.toml`.
+
 - **Task checklist inline Markdown rendering and multi-line wrapping.** Task subjects in the live checklist band, collapsed "Next:" line, and the spinner status headline now parse inline Markdown formatting (`**bold**`, `` `code` ``, `*italics*`, `~~strikethrough~~`, `[links](url)`). In the expanded checklist, tasks now wrap cleanly across multiple lines with hanging indentation aligned under the task text column, and windowing dynamically respects a visual line budget around the in-progress task. Completed tasks preserve their bold/code weights while applying dimming and strikethrough styling across all spans.
 
 - **Grok (xAI) is now a built-in provider.** Reach xAI's Grok models through their OpenAI-compatible endpoint with `mermaid --model grok/<model>` (alias `xai/<model>`) — for example `grok/grok-4.6` is the flagship (500k context, vision). Set `XAI_API_KEY` (create one at https://console.x.ai). Uses the shared Chat Completions adapter; vision and tool calling work as with any built-in provider. Both `grok/` and `xai/` prefixes resolve to `https://api.x.ai/v1`.

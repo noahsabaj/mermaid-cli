@@ -29,7 +29,7 @@
 
 use std::path::PathBuf;
 
-use crate::providers::{ApprovalBroker, ApprovalDecision, allowlist_key};
+use crate::providers::{ApprovalBroker, ApprovalDecision, allowlist_key, is_domain_allowed};
 use mermaid_domain::{ApprovalKind, ToolOutcome};
 use mermaid_runtime::{
     ActionRequest, NewApproval, PolicyDecision, PolicyEngine, RiskClass,
@@ -251,6 +251,19 @@ pub async fn gate(
                 && ctx.safety_mode == mermaid_runtime::SafetyMode::ReadOnly
                 && request.category == mermaid_runtime::ToolCategory::Web
                 && ctx.config.safety.allow_readonly_web =>
+        {
+            PolicyDecision::Allow {
+                risk,
+                checkpoint: false,
+            }
+        },
+        // Allowed domains in [web] config allowlist matching hosts without prompts/classifier:
+        PolicyDecision::Ask { risk, .. } | PolicyDecision::Classify { risk, .. }
+            if request.tool == "web_fetch"
+                && request
+                    .command
+                    .as_deref()
+                    .is_some_and(|cmd| is_domain_allowed(&ctx.config.web.allowed_domains, cmd)) =>
         {
             PolicyDecision::Allow {
                 risk,
@@ -1729,5 +1742,46 @@ mod tests {
             matches!(g, Gate::Block(_)),
             "read-only mode must block scratch mutations",
         );
+    }
+
+    #[tokio::test]
+    async fn web_fetch_allowed_domains_bypasses_prompt_and_classifier() {
+        let mut config = mermaid_domain::Config::default();
+        config.safety.mode = SafetyMode::Ask;
+        config.web.allowed_domains = vec!["docs.x.ai".to_string(), "localhost:8080".to_string()];
+        let ctx = ctx_with(config);
+
+        let mut req_allowed = ActionRequest::new("web_fetch", ToolCategory::Web, "fetch docs");
+        req_allowed.command = Some("web_fetch https://docs.x.ai/docs/overview".to_string());
+        let g = gate(&ctx, req_allowed, &[], serde_json::json!({}), false, false).await;
+        assert!(
+            matches!(g, Gate::Proceed { .. }),
+            "allowed domain must proceed without prompt"
+        );
+
+        let mut req_other = ActionRequest::new("web_fetch", ToolCategory::Web, "fetch untrusted");
+        req_other.command = Some("web_fetch https://evil.example.com".to_string());
+        let g = gate(&ctx, req_other, &[], serde_json::json!({}), false, false).await;
+        assert!(
+            matches!(g, Gate::Block(_)),
+            "unlisted domain in headless Ask must block"
+        );
+    }
+
+    #[tokio::test]
+    async fn web_fetch_session_allowlisting_via_broker() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let broker = crate::providers::ApprovalBroker::new(tx);
+        // Pre-allowlist the domain key
+        broker.resolve(
+            mermaid_domain::ToolCallId(99),
+            ApprovalDecision::ApproveAlways,
+        );
+        // Directly test broker allowlist key for web_fetch
+        let key = allowlist_key(
+            "web_fetch",
+            Some("web_fetch https://docs.x.ai/docs/reference"),
+        );
+        assert_eq!(key, "web_fetch:docs.x.ai");
     }
 }

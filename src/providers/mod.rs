@@ -20,7 +20,7 @@ pub mod questions;
 pub mod tasks;
 pub mod tool;
 
-pub use approval::{ApprovalBroker, ApprovalDecision, allowlist_key};
+pub use approval::{ApprovalBroker, ApprovalDecision, allowlist_key, is_domain_allowed};
 pub use auto_classifier::{AutoClassifier, ModelAutoClassifier, VetRequest, VetVerdict};
 pub use ctx::{
     ExecContext, FinalResponse, StreamContext, StreamEvent, clone_messages, test_exec_context,

@@ -479,7 +479,14 @@ fn resolve_restore_root(id: &str, manifest: &CheckpointManifest) -> Result<PathB
     };
     let root = PathBuf::from(&root_str);
     anyhow::ensure!(
-        root.is_absolute() && root.components().any(|c| matches!(c, Component::Normal(_))),
+        root.is_absolute()
+            && root.components().any(|c| match c {
+                Component::Normal(_) => true,
+                Component::Prefix(_)
+                | Component::RootDir
+                | Component::CurDir
+                | Component::ParentDir => false,
+            }),
         "unsafe checkpoint project root: {}",
         root.display()
     );
@@ -627,8 +634,7 @@ pub fn gc_old_checkpoint_dirs(retention_days: i64) -> Result<usize> {
         let too_old = entry
             .metadata()
             .and_then(|m| m.modified())
-            .map(|mtime| mtime < cutoff)
-            .unwrap_or(false);
+            .is_ok_and(|mtime| mtime < cutoff);
         if too_old && std::fs::remove_dir_all(&path).is_ok() {
             removed += 1;
             // The directory name IS the checkpoint id — drop the matching DB row

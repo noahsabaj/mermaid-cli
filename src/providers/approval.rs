@@ -161,14 +161,12 @@ impl ApprovalBroker {
 }
 
 /// External tools whose risk depends on live runtime context (which window has
-/// focus, what page is loaded, which untrusted server answers), not just their
+/// focus, what desktop state exists, which untrusted server answers), not just their
 /// arguments. A blanket "don't ask again" for these is unsafe — it would mean
-/// "always send any URL/query", "always type anything", or "always run any MCP
-/// tool" — so they are non-allowlistable: an empty key, which the gate and
-/// modal treat as "no approve-always" (#6, #31).
+/// "always type anything" or "always run any MCP tool" — so they are
+/// non-allowlistable: an empty key, which the gate and modal treat as "no
+/// approve-always" (#6, #31).
 const NON_ALLOWLISTABLE_TOOLS: &[&str] = &[
-    "web_fetch",
-    "web_search",
     "type_text",
     "press_key",
     "click",
@@ -177,15 +175,67 @@ const NON_ALLOWLISTABLE_TOOLS: &[&str] = &[
     "mcp_proxy",
 ];
 
+/// Extract the normalized lowercase authority (`host` or `host:port` when port
+/// is non-default) from a raw URL or command string (e.g. `web_fetch https://docs.x.ai/path`
+/// or `https://localhost:8080/api`).
+#[must_use]
+pub fn extract_url_authority(raw: &str) -> Option<String> {
+    let input = raw.strip_prefix("web_fetch ").unwrap_or(raw).trim();
+    if input.is_empty() {
+        return None;
+    }
+    // Try parsing as a full URL
+    if let Ok(url) = reqwest::Url::parse(input)
+        && let Some(host) = url.host_str()
+    {
+        let host_lower = host.to_ascii_lowercase();
+        if let Some(port) = url.port() {
+            return Some(format!("{host_lower}:{port}"));
+        }
+        return Some(host_lower);
+    }
+    // If no scheme was provided (e.g. "docs.x.ai/path" or "localhost:8080"), try with "https://"
+    if let Ok(url) = reqwest::Url::parse(&format!("https://{input}"))
+        && let Some(host) = url.host_str()
+    {
+        let host_lower = host.to_ascii_lowercase();
+        if let Some(port) = url.port() {
+            return Some(format!("{host_lower}:{port}"));
+        }
+        return Some(host_lower);
+    }
+    None
+}
+
+/// Check if a URL or command matches any entry in `allowed_domains`.
+#[must_use]
+pub fn is_domain_allowed(allowed_domains: &[String], url_or_command: &str) -> bool {
+    if allowed_domains.is_empty() {
+        return false;
+    }
+    let Some(target_auth) = extract_url_authority(url_or_command) else {
+        return false;
+    };
+    allowed_domains.iter().any(|allowed| {
+        extract_url_authority(allowed)
+            .as_deref()
+            .is_some_and(|a| a.eq_ignore_ascii_case(&target_auth))
+            || allowed.trim().eq_ignore_ascii_case(&target_auth)
+    })
+}
+
 /// Compute the session "don't ask again" allowlist key.
 ///
-/// - Content-bearing external tools ([`NON_ALLOWLISTABLE_TOOLS`]) return an
+/// - Content-bearing external desktop/MCP tools ([`NON_ALLOWLISTABLE_TOOLS`]) return an
 ///   **empty** key, meaning non-allowlistable: the modal hides the
 ///   approve-always option and the broker never persists an entry.
 /// - `execute_command` keys on the **full normalized command** (whitespace
 ///   collapsed), so approving `curl https://safe.example` does NOT also clear
 ///   `curl https://evil.example` — argv0 keying was too coarse for a tool whose
 ///   danger lives entirely in its arguments (#6).
+/// - `web_fetch` keys on the normalized authority (`web_fetch:<host>` or `web_fetch:<host>:<port>`),
+///   so approving one URL on a domain clears subsequent fetches to that domain.
+/// - `web_search` keys on `"web_search"`.
 /// - Everything else keys per-tool.
 #[must_use]
 pub fn allowlist_key(tool: &str, command: Option<&str>) -> String {
@@ -200,6 +250,17 @@ pub fn allowlist_key(tool: &str, command: Option<&str>) -> String {
             }
         }
         return "execute_command".to_string();
+    }
+    if tool == "web_fetch" {
+        if let Some(cmd) = command
+            && let Some(auth) = extract_url_authority(cmd)
+        {
+            return format!("web_fetch:{auth}");
+        }
+        return "web_fetch".to_string();
+    }
+    if tool == "web_search" {
+        return "web_search".to_string();
     }
     tool.to_string()
 }
@@ -244,12 +305,52 @@ mod tests {
     }
 
     #[test]
+    fn web_fetch_and_search_allowlist_keys() {
+        assert_eq!(
+            allowlist_key(
+                "web_fetch",
+                Some("web_fetch https://docs.x.ai/docs/overview")
+            ),
+            "web_fetch:docs.x.ai"
+        );
+        assert_eq!(
+            allowlist_key("web_fetch", Some("https://DOCS.X.AI/api")),
+            "web_fetch:docs.x.ai"
+        );
+        assert_eq!(
+            allowlist_key("web_fetch", Some("web_fetch http://localhost:8080/query")),
+            "web_fetch:localhost:8080"
+        );
+        assert_eq!(allowlist_key("web_fetch", None), "web_fetch");
+        assert_eq!(
+            allowlist_key("web_search", Some("web_search rust documentation")),
+            "web_search"
+        );
+        assert_eq!(allowlist_key("web_search", None), "web_search");
+    }
+
+    #[test]
+    fn domain_allowlist_matching() {
+        let allowed = vec!["docs.x.ai".to_string(), "localhost:8080".to_string()];
+        assert!(is_domain_allowed(&allowed, "https://docs.x.ai/overview"));
+        assert!(is_domain_allowed(
+            &allowed,
+            "web_fetch https://DOCS.X.AI/api"
+        ));
+        assert!(is_domain_allowed(&allowed, "http://localhost:8080/metrics"));
+        assert!(!is_domain_allowed(&allowed, "https://api.x.ai/v1"));
+        assert!(!is_domain_allowed(
+            &allowed,
+            "http://localhost:3000/metrics"
+        ));
+        assert!(!is_domain_allowed(&[], "https://docs.x.ai/overview"));
+    }
+
+    #[test]
     fn content_bearing_tools_are_non_allowlistable() {
         // #6/#31: a blanket "approve always" for these is unsafe (their risk is
         // context-dependent), so the key is empty ⇒ non-allowlistable.
         for tool in [
-            "web_fetch",
-            "web_search",
             "type_text",
             "press_key",
             "click",
