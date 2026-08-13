@@ -1084,7 +1084,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn readonly_web_uses_non_allowlistable_one_shot_approval() {
+    async fn readonly_web_uses_domain_allowlist_approval() {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<mermaid_domain::Msg>(8);
         let broker = crate::providers::ApprovalBroker::new(tx);
         let context = ctx_with_broker_mode(SafetyMode::ReadOnly, broker.clone());
@@ -1107,16 +1107,16 @@ mod tests {
             } => (call_id, allowlist_scope),
             other => panic!("expected ApprovalRequested, got {other:?}"),
         };
-        assert!(
-            allowlist_scope.is_empty(),
-            "web approval must never expose approve-always"
+        assert_eq!(
+            allowlist_scope, "web_fetch:example.com",
+            "web approval must expose domain-level approve-always"
         );
         broker.resolve(call_id, crate::providers::ApprovalDecision::ApproveAlways);
         assert!(
             handle.await.unwrap().is_none(),
             "one approved request should proceed"
         );
-        assert!(!broker.is_allowlisted("web_fetch"));
+        assert!(broker.is_allowlisted("web_fetch:example.com"));
     }
 
     #[test]
