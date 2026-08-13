@@ -5046,7 +5046,7 @@ const PLAN_THRASH_CALLS: u32 = 3;
 /// caught the plan profile's capability denials — `[plan] web = deny` or
 /// `memory = deny` — so a purely read-only Ground phase could trip the
 /// "STOP attempting other mutations" corrective and cut research short.
-const PLAN_MUTATING_TOOLS: &[&str] = &["write_file", "apply_patch", "execute_command"];
+const PLAN_MUTATING_TOOLS: &[&str] = &["write_file", "edit_file", "apply_patch", "execute_command"];
 
 /// Plan doom-loop bookkeeping at the tool boundary: the FIRST denied MUTATION
 /// arms the breaker (a read-heavy Ground phase alone must never trip it — the

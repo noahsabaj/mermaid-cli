@@ -17,6 +17,7 @@ fn advertised_tools_exist_in_the_registry() {
     for name in [
         "read_file",
         "write_file",
+        "edit_file",
         "apply_patch",
         "delete_file",
         "create_directory",

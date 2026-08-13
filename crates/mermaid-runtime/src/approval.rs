@@ -200,30 +200,8 @@ fn replay_pending_action(action: &serde_json::Value) -> Result<String> {
     // it relative to `workdir`, which the helpers resolve beneath a `workdir` fd.
     match tool {
         "execute_command" => replay_execute_command(args, &workdir),
-        "write_file" => {
-            let path = string_arg(args, "path")?;
-            let content = string_arg(args, "content")?;
-            let p = Path::new(path);
-            if p.is_absolute() {
-                if let Some(parent) = p.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                crate::write_atomic(p, content.as_bytes())?;
-                Ok(format!("replayed write_file {}", p.display()))
-            } else {
-                let rel = crate::pathguard::relative_within(&workdir, path)?;
-                if let Some(parent) = rel.parent()
-                    && !parent.as_os_str().is_empty()
-                {
-                    crate::pathguard::create_dir_all_beneath(&workdir, parent)?;
-                }
-                crate::pathguard::write_atomic_beneath(&workdir, &rel, content.as_bytes())?;
-                Ok(format!(
-                    "replayed write_file {}",
-                    workdir.join(&rel).display()
-                ))
-            }
-        },
+        "write_file" => replay_write_file(args, &workdir),
+        "edit_file" => replay_edit_file(args, &workdir),
         "apply_patch" => {
             let patch = string_arg(args, "patch")?;
             let hunks = crate::apply_patch::parse_patch(patch)
@@ -294,6 +272,65 @@ fn scrub_secret_env(cmd: &mut Command) {
         if is_secret_env_name(&name) {
             cmd.env_remove(&name);
         }
+    }
+}
+
+fn replay_write_file(args: &serde_json::Value, workdir: &Path) -> Result<String> {
+    let path = string_arg(args, "path")?;
+    let content = string_arg(args, "content")?;
+    let p = Path::new(path);
+    if p.is_absolute() {
+        if let Some(parent) = p.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        crate::write_atomic(p, content.as_bytes())?;
+        Ok(format!("replayed write_file {}", p.display()))
+    } else {
+        let rel = crate::pathguard::relative_within(workdir, path)?;
+        if let Some(parent) = rel.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            crate::pathguard::create_dir_all_beneath(workdir, parent)?;
+        }
+        crate::pathguard::write_atomic_beneath(workdir, &rel, content.as_bytes())?;
+        Ok(format!(
+            "replayed write_file {}",
+            workdir.join(&rel).display()
+        ))
+    }
+}
+
+fn replay_edit_file(args: &serde_json::Value, workdir: &Path) -> Result<String> {
+    let path = string_arg(args, "path")?;
+    let target = string_arg(args, "target_content")?;
+    let replacement = string_arg(args, "replacement_content")?;
+    let allow_multiple = args
+        .get("allow_multiple")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let p = Path::new(path);
+    if p.is_absolute() {
+        let original = std::fs::read_to_string(p)?;
+        let applied = crate::edit::replace_content(&original, target, replacement, allow_multiple)
+            .map_err(|e| anyhow::anyhow!("edit_file replay for {}: {e}", p.display()))?;
+        crate::write_atomic(p, applied.new_contents.as_bytes())?;
+        Ok(format!("replayed edit_file {}", p.display()))
+    } else {
+        let rel = crate::pathguard::relative_within(workdir, path)?;
+        let original = {
+            let mut file =
+                crate::pathguard::open_beneath(workdir, &rel, crate::pathguard::OpenIntent::Read)?;
+            let mut buf = String::new();
+            std::io::Read::read_to_string(&mut file, &mut buf)?;
+            buf
+        };
+        let applied = crate::edit::replace_content(&original, target, replacement, allow_multiple)
+            .map_err(|e| anyhow::anyhow!("edit_file replay for {}: {e}", rel.display()))?;
+        crate::pathguard::write_atomic_beneath(workdir, &rel, applied.new_contents.as_bytes())?;
+        Ok(format!(
+            "replayed edit_file {}",
+            workdir.join(&rel).display()
+        ))
     }
 }
 

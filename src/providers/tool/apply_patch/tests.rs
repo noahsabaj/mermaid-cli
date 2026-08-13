@@ -241,3 +241,37 @@ async fn absolute_path_outside_project_succeeds() {
     let _ = fs::remove_dir_all(&outside_dir);
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// A patch containing standard unified diff headers `@@ -l,c +l,c @@` applies cleanly
+/// end-to-end through the tool without failing to find context lines.
+#[tokio::test]
+async fn unified_diff_range_headers_apply_successfully() {
+    let dir = tmp("unified_diff");
+    let file = dir.join("providers.rs");
+    fs::write(
+        &file,
+        "// line 1\nProviderProfile {\n    name: \"nvidia\",\n    reasoning_strategy: ReasoningStrategy::None,\n}\nProviderProfile {\n    name: \"cloudflare\",\n    reasoning_strategy: ReasoningStrategy::Effort,\n}\n",
+    )
+    .unwrap();
+
+    let patch = format!(
+        "*** Begin Patch\n*** Update File: {}\n@@ -294,28 +294,56 @@\n ProviderProfile {{\n     name: \"nvidia\",\n-    reasoning_strategy: ReasoningStrategy::None,\n+    reasoning_strategy: ReasoningStrategy::Effort,\n }}\n@@ -325,8 +325,36 @@\n ProviderProfile {{\n     name: \"cloudflare\",\n-    reasoning_strategy: ReasoningStrategy::Effort,\n+    reasoning_strategy: ReasoningStrategy::None,\n }}\n*** End Patch",
+        file.display()
+    );
+
+    let out = run(&dir, &patch).await;
+    assert!(
+        out.is_success(),
+        "unified diff patch should succeed: {out:?}"
+    );
+    let content = fs::read_to_string(&file).unwrap();
+    assert!(
+        content.contains("name: \"nvidia\",\n    reasoning_strategy: ReasoningStrategy::Effort,"),
+        "content: {content}"
+    );
+    assert!(
+        content.contains("name: \"cloudflare\",\n    reasoning_strategy: ReasoningStrategy::None,"),
+        "content: {content}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}

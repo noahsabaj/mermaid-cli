@@ -623,6 +623,180 @@ impl ToolExecutor for WriteFileTool {
     }
 }
 
+/// `edit_file` — precise search-and-replace editing on a single file.
+pub struct EditFileTool;
+
+#[async_trait]
+impl ToolExecutor for EditFileTool {
+    fn name(&self) -> &'static str {
+        "edit_file"
+    }
+
+    fn schema(&self) -> ToolDefinition {
+        defn(
+            "edit_file",
+            "Perform a precise search-and-replace edit on an existing file. Replaces `target_content` with `replacement_content`. Fails if `target_content` is not found or matches multiple locations (unless `allow_multiple` is true). Matching tolerates minor whitespace and quotation drift. Paths may be relative to the project directory or absolute.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to the file to edit."
+                    },
+                    "target_content": {
+                        "type": "string",
+                        "description": "The exact or near-exact block of text to replace. Must match uniquely in the file unless allow_multiple is true."
+                    },
+                    "replacement_content": {
+                        "type": "string",
+                        "description": "The new replacement text."
+                    },
+                    "allow_multiple": {
+                        "type": "boolean",
+                        "description": "If true, replace all occurrences of target_content instead of requiring uniqueness. Defaults to false."
+                    }
+                },
+                "required": ["path", "target_content", "replacement_content"]
+            }),
+        )
+    }
+
+    async fn execute(&self, args: serde_json::Value, ctx: ExecContext) -> ToolOutcome {
+        let start = std::time::Instant::now();
+        let Some(path) = args.get("path").and_then(|v| v.as_str()) else {
+            return ToolOutcome::error("edit_file requires 'path' (string)", 0.0);
+        };
+        let Some(target) = args.get("target_content").and_then(|v| v.as_str()) else {
+            return ToolOutcome::error("edit_file requires 'target_content' (string)", 0.0);
+        };
+        let Some(replacement) = args.get("replacement_content").and_then(|v| v.as_str()) else {
+            return ToolOutcome::error("edit_file requires 'replacement_content' (string)", 0.0);
+        };
+        let allow_multiple = args
+            .get("allow_multiple")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+
+        let roots = AllowedRoots::new(&ctx.workdir, ctx.scratchpad.as_deref());
+        let ResolvedInRoot {
+            abs: abs_path,
+            rel,
+            root,
+            in_scratchpad,
+        } = match resolve_in_roots(&roots, path) {
+            Ok(r) => r,
+            Err(e) => return ToolOutcome::error(format!("edit_file: {e}"), 0.0),
+        };
+
+        let pending_action = serde_json::json!({
+            "tool": "edit_file",
+            "args": {
+                "path": path,
+                "target_content": target,
+                "replacement_content": replacement,
+                "allow_multiple": allow_multiple,
+            },
+            "workdir": ctx.workdir.display().to_string(),
+            "turn_id": ctx.turn.0,
+            "call_id": ctx.call_id.0,
+            "task_id": ctx.task_id.clone(),
+        });
+        let plan_write = match mutation_policy_outcome(
+            &ctx,
+            "edit_file",
+            path,
+            std::slice::from_ref(&abs_path),
+            pending_action,
+            in_scratchpad,
+        )
+        .await
+        {
+            MutationGate::Blocked(outcome) => return *outcome,
+            MutationGate::Proceed { plan_write } => plan_write,
+        };
+
+        let _write_guard = tokio::select! {
+            biased;
+            _ = ctx.token.cancelled() => return ToolOutcome::cancelled(),
+            g = super::path_lock::lock_path(&abs_path) => g,
+        };
+
+        if ctx.config.safety.checkpoint_on_mutation
+            && !in_scratchpad
+            && let Err(e) = mermaid_runtime::create_checkpoint_for_task(
+                &ctx.workdir,
+                std::slice::from_ref(&abs_path),
+                Some(serde_json::json!({
+                    "tool": "edit_file",
+                    "path": path,
+                })),
+                ctx.checkpoint_origin(),
+            )
+        {
+            return ToolOutcome::error(format!("edit_file checkpoint failed: {e}"), 0.0);
+        }
+
+        let display_path = path.to_string();
+        let target = target.to_string();
+        let replacement = replacement.to_string();
+
+        tokio::select! {
+            biased;
+            _ = ctx.token.cancelled() => ToolOutcome::cancelled(),
+            result = tokio::task::spawn_blocking(move || edit_file_blocking(&root, &rel, &target, &replacement, allow_multiple)) => {
+                match result {
+                    Ok(Ok(edit)) => {
+                        let duration_secs = start.elapsed().as_secs_f64();
+                        after_file_mutation(&ctx, "edit_file", &display_path);
+                        edit_success_outcome(&display_path, edit, plan_write, duration_secs)
+                    },
+                    Ok(Err(e)) => ToolOutcome::error(
+                        format!("edit_file({display_path}): {e}"),
+                        start.elapsed().as_secs_f64(),
+                    ),
+                    Err(e) => ToolOutcome::error(
+                        format!("edit_file join error: {e}"),
+                        start.elapsed().as_secs_f64(),
+                    ),
+                }
+            }
+        }
+    }
+}
+
+fn edit_success_outcome(
+    display_path: &str,
+    edit: EditResult,
+    plan_write: bool,
+    duration_secs: f64,
+) -> ToolOutcome {
+    let fuzzy_note = if edit.fuzzy {
+        "\nnote: matched with fuzzy (whitespace/Unicode) context; verify the result."
+    } else {
+        ""
+    };
+    ToolOutcome::success(
+        format!("Edited {display_path}{fuzzy_note}"),
+        diff_summary(edit.diff.added, edit.diff.removed, duration_secs),
+        duration_secs,
+    )
+    .with_metadata(ToolRunMetadata {
+        detail: ToolMetadata::ApplyPatch {
+            added: Vec::new(),
+            modified: vec![display_path.to_string()],
+            deleted: Vec::new(),
+            renamed: Vec::new(),
+            fuzzy: edit.fuzzy,
+        },
+        display_diff: Some(edit.diff.display_diff),
+        diff_truncated: edit.diff.truncated,
+        lines_added: edit.diff.added,
+        lines_removed: edit.diff.removed,
+        plan_file_written: plan_write,
+        ..ToolRunMetadata::default()
+    })
+}
+
 // ─── helpers ────────────────────────────────────────────────────────
 
 fn extract_paths(args: &serde_json::Value) -> Result<Vec<String>, String> {
@@ -799,6 +973,41 @@ fn write_with_diff_blocking(
         line_count,
         created,
         diff,
+    })
+}
+
+struct EditResult {
+    diff: mermaid_model::diff::DisplayDiff,
+    fuzzy: bool,
+}
+
+fn edit_file_blocking(
+    root: &Path,
+    rel: &Path,
+    target: &str,
+    replacement: &str,
+    allow_multiple: bool,
+) -> Result<EditResult, String> {
+    let file = mermaid_runtime::open_beneath(root, rel, mermaid_runtime::OpenIntent::Read)
+        .map_err(|e| format!("cannot open file: {e}"))?;
+    let (data, truncated) = mermaid_model::utils::read_capped(file, MAX_FILE_READ_BYTES)
+        .map_err(|e| format!("cannot read file: {e}"))?;
+    if truncated {
+        return Err(format!(
+            "file exceeds maximum size limit ({MAX_FILE_READ_BYTES} bytes)"
+        ));
+    }
+    let original = String::from_utf8_lossy(&data).into_owned();
+    let applied = mermaid_runtime::replace_content(&original, target, replacement, allow_multiple)
+        .map_err(|e| e.to_string())?;
+
+    write_one_blocking(root, rel, &applied.new_contents)
+        .map_err(|e| format!("cannot write file: {e}"))?;
+
+    let diff = mermaid_model::diff::generate_display_diff(&original, &applied.new_contents);
+    Ok(EditResult {
+        diff,
+        fuzzy: applied.fuzzy,
     })
 }
 
@@ -1636,6 +1845,145 @@ mod tests {
             .await;
         assert!(outcome.is_success(), "scratch read: {outcome:?}");
         assert_eq!(outcome.output(), "stashed");
+        let _ = fs::remove_dir_all(project.parent().unwrap());
+    }
+
+    #[tokio::test]
+    async fn edit_file_replaces_target_content_successfully() {
+        let (project, _scratch) = scratch_fixture("edit_success");
+        let file = project.join("src").join("main.rs");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, "fn main() {\n    println!(\"old\");\n}\n").unwrap();
+
+        let (ctx, _rx) = scratch_ctx(
+            mermaid_runtime::SafetyMode::FullAccess,
+            project.clone(),
+            None,
+        );
+        let outcome = EditFileTool
+            .execute(
+                serde_json::json!({
+                    "path": "src/main.rs",
+                    "target_content": "    println!(\"old\");",
+                    "replacement_content": "    println!(\"new\");",
+                }),
+                ctx,
+            )
+            .await;
+
+        assert!(outcome.is_success(), "edit outcome: {outcome:?}");
+        let new_content = fs::read_to_string(&file).unwrap();
+        assert_eq!(new_content, "fn main() {\n    println!(\"new\");\n}\n");
+        let diff = outcome
+            .metadata
+            .display_diff
+            .as_deref()
+            .expect("display diff");
+        assert!(diff.contains("-     println!(\"old\");"));
+        assert!(diff.contains("+     println!(\"new\");"));
+        let _ = fs::remove_dir_all(project.parent().unwrap());
+    }
+
+    #[tokio::test]
+    async fn edit_file_target_not_found_returns_error() {
+        let (project, _scratch) = scratch_fixture("edit_not_found");
+        let file = project.join("hello.txt");
+        fs::write(&file, "line 1\nline 2\n").unwrap();
+
+        let (ctx, _rx) = scratch_ctx(
+            mermaid_runtime::SafetyMode::FullAccess,
+            project.clone(),
+            None,
+        );
+        let outcome = EditFileTool
+            .execute(
+                serde_json::json!({
+                    "path": "hello.txt",
+                    "target_content": "nonexistent text",
+                    "replacement_content": "replacement",
+                }),
+                ctx,
+            )
+            .await;
+
+        assert!(!outcome.is_success());
+        let err = outcome.error_message().unwrap();
+        assert!(err.contains("could not find target_content"), "{err}");
+        let _ = fs::remove_dir_all(project.parent().unwrap());
+    }
+
+    #[tokio::test]
+    async fn edit_file_ambiguous_target_errors_unless_allow_multiple() {
+        let (project, _scratch) = scratch_fixture("edit_ambig");
+        let file = project.join("dup.txt");
+        fs::write(&file, "foo\nbar\nfoo\n").unwrap();
+
+        let (ctx, _rx) = scratch_ctx(
+            mermaid_runtime::SafetyMode::FullAccess,
+            project.clone(),
+            None,
+        );
+        let outcome_ambig = EditFileTool
+            .execute(
+                serde_json::json!({
+                    "path": "dup.txt",
+                    "target_content": "foo",
+                    "replacement_content": "baz",
+                }),
+                ctx,
+            )
+            .await;
+        assert!(!outcome_ambig.is_success());
+        let err = outcome_ambig.error_message().unwrap();
+        assert!(err.contains("found 2 times"), "{err}");
+
+        let (ctx2, _rx2) = scratch_ctx(
+            mermaid_runtime::SafetyMode::FullAccess,
+            project.clone(),
+            None,
+        );
+        let outcome_allow = EditFileTool
+            .execute(
+                serde_json::json!({
+                    "path": "dup.txt",
+                    "target_content": "foo",
+                    "replacement_content": "baz",
+                    "allow_multiple": true,
+                }),
+                ctx2,
+            )
+            .await;
+        assert!(outcome_allow.is_success());
+        let new_content = fs::read_to_string(&file).unwrap();
+        assert_eq!(new_content, "baz\nbar\nbaz\n");
+        let _ = fs::remove_dir_all(project.parent().unwrap());
+    }
+
+    #[tokio::test]
+    async fn edit_file_fuzzy_whitespace_matching_succeeds() {
+        let (project, _scratch) = scratch_fixture("edit_fuzzy");
+        let file = project.join("fuzzy.txt");
+        fs::write(&file, "start\n    loose_whitespace();   \nend\n").unwrap();
+
+        let (ctx, _rx) = scratch_ctx(
+            mermaid_runtime::SafetyMode::FullAccess,
+            project.clone(),
+            None,
+        );
+        let outcome = EditFileTool
+            .execute(
+                serde_json::json!({
+                    "path": "fuzzy.txt",
+                    "target_content": "loose_whitespace();",
+                    "replacement_content": "    tight_whitespace();",
+                }),
+                ctx,
+            )
+            .await;
+        assert!(outcome.is_success());
+        assert!(outcome.output().contains("fuzzy"));
+        let new_content = fs::read_to_string(&file).unwrap();
+        assert_eq!(new_content, "start\n    tight_whitespace();\nend\n");
         let _ = fs::remove_dir_all(project.parent().unwrap());
     }
 }

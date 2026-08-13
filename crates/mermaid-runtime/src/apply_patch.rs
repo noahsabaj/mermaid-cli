@@ -18,8 +18,6 @@ const DELETE_FILE: &str = "*** Delete File: ";
 const UPDATE_FILE: &str = "*** Update File: ";
 const MOVE_TO: &str = "*** Move to: ";
 const EOF_MARKER: &str = "*** End of File";
-const CHANGE_CONTEXT: &str = "@@ ";
-const EMPTY_CHANGE_CONTEXT: &str = "@@";
 
 // ─── parser ─────────────────────────────────────────────────────────
 
@@ -74,6 +72,29 @@ pub struct UpdateFileChunk {
 
 fn is_file_marker(line: &str) -> bool {
     line.starts_with(ADD_FILE) || line.starts_with(DELETE_FILE) || line.starts_with(UPDATE_FILE)
+}
+
+/// Parse an update hunk's header line (`@@ ...`) into an optional anchor context string.
+///
+/// Supports:
+/// - Unified diff range headers: `@@ -start[,count] +start[,count] @@ [context]`
+///   strips the coordinate metadata between `@@ ... @@` and returns any trailing
+///   anchor text (e.g. `fn lookup_provider`), or `None` if empty.
+/// - Codex-style anchor lines: `@@ <context>` (e.g. `@@ fn main()`) -> `Some("fn main()")`
+/// - Empty context headers: `@@` or `@@ ` -> `None`
+fn parse_change_context(line: &str) -> Option<String> {
+    let rest = line.strip_prefix("@@")?.trim();
+    if rest.is_empty() {
+        return None;
+    }
+    // If there is a closing "@@", this is a unified diff header (e.g. `@@ -294,28 +294,56 @@ [context]`).
+    if let Some(closing_idx) = rest.find("@@") {
+        let after = rest[closing_idx + 2..].trim();
+        (!after.is_empty()).then(|| after.to_string())
+    } else {
+        // Codex-style header without closing @@
+        Some(rest.to_string())
+    }
 }
 
 /// Parse a complete patch into its hunks. Strict: requires the Begin/End markers
@@ -163,12 +184,12 @@ fn parse_update_chunks(body: &[&str], i: &mut usize) -> Result<Vec<UpdateFileChu
     let mut current: Option<UpdateFileChunk> = None;
     while *i < body.len() && !is_file_marker(body[*i]) {
         let l = body[*i];
-        if l == EMPTY_CHANGE_CONTEXT || l.starts_with(CHANGE_CONTEXT) {
+        if l.starts_with("@@") {
             if let Some(c) = current.take() {
                 chunks.push(c);
             }
             current = Some(UpdateFileChunk {
-                change_context: l.strip_prefix(CHANGE_CONTEXT).map(str::to_string),
+                change_context: parse_change_context(l),
                 ..Default::default()
             });
         } else if l == EOF_MARKER {
@@ -214,15 +235,20 @@ fn parse_update_chunks(body: &[&str], i: &mut usize) -> Result<Vec<UpdateFileChu
 // ─── matcher ────────────────────────────────────────────────────────
 
 /// A located match: the starting line index, and whether it was byte-exact.
-struct SeekHit {
-    index: usize,
-    exact: bool,
+pub(crate) struct SeekHit {
+    pub(crate) index: usize,
+    pub(crate) exact: bool,
 }
 
 /// Find `pattern` within `lines` at or after `start`, in decreasing strictness:
 /// exact, trailing-whitespace-insensitive, full-trim, then Unicode-normalized.
 /// When `eof` is set, the search anchors at the end of the file first.
-fn seek_sequence(lines: &[String], pattern: &[String], start: usize, eof: bool) -> Option<SeekHit> {
+pub(crate) fn seek_sequence(
+    lines: &[String],
+    pattern: &[String],
+    start: usize,
+    eof: bool,
+) -> Option<SeekHit> {
     if pattern.is_empty() {
         return Some(SeekHit {
             index: start,
@@ -286,8 +312,32 @@ fn seek_sequence(lines: &[String], pattern: &[String], start: usize, eof: bool) 
     None
 }
 
+/// Locate a `@@` anchor context line in `lines` starting at or after `start`.
+/// First attempts strict sequence matching against whole lines, then falls back
+/// to substring containment against normalized lines (e.g. for function signatures
+/// truncated in unified diff headers like `@@ ... @@ fn lookup_provider`).
+fn seek_context(lines: &[String], ctx: &str, start: usize) -> Option<SeekHit> {
+    let pat = [ctx.to_string()];
+    if let Some(hit) = seek_sequence(lines, &pat, start, false) {
+        return Some(hit);
+    }
+    let norm_ctx = normalise(ctx);
+    if norm_ctx.is_empty() {
+        return None;
+    }
+    for (i, line) in lines.iter().enumerate().skip(start) {
+        if normalise(line).contains(&norm_ctx) {
+            return Some(SeekHit {
+                index: i,
+                exact: false,
+            });
+        }
+    }
+    None
+}
+
 /// Normalize typographic punctuation and spaces to their ASCII equivalents.
-fn normalise(s: &str) -> String {
+pub(crate) fn normalise(s: &str) -> String {
     s.trim()
         .chars()
         .map(|c| match c {
@@ -325,6 +375,7 @@ impl std::fmt::Display for ApplyError {
 
 /// The result of applying chunks: the new file text and whether any chunk had to
 /// be located fuzzily (whitespace/Unicode-normalized rather than byte-exact).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppliedFile {
     pub new_contents: String,
     pub fuzzy: bool,
@@ -371,7 +422,7 @@ fn compute_replacements(
 
     for chunk in chunks {
         if let Some(ctx) = &chunk.change_context {
-            match seek_sequence(original_lines, std::slice::from_ref(ctx), line_index, false) {
+            match seek_context(original_lines, ctx, line_index) {
                 Some(hit) => {
                     fuzzy |= !hit.exact;
                     line_index = hit.index + 1;
@@ -565,5 +616,70 @@ mod tests {
             derive_new_contents("a\n", &[chunk(None, &["zzz"], &["b"], false)]),
             Err(ApplyError::LinesNotFound(_))
         ));
+    }
+
+    #[test]
+    fn parses_and_applies_unified_diff_range_headers() {
+        // Range header with no trailing context: change_context should be None
+        let patch_no_context = "*** Begin Patch\n*** Update File: src/lib.rs\n@@ -10,5 +10,6 @@\n-old_line\n+new_line\n*** End Patch\n";
+        let hunks = parse_patch(patch_no_context).unwrap();
+        assert_eq!(
+            hunks,
+            vec![Hunk::UpdateFile {
+                path: PathBuf::from("src/lib.rs"),
+                move_path: None,
+                chunks: vec![chunk(None, &["old_line"], &["new_line"], false)],
+            }]
+        );
+
+        // Range header with trailing function context: change_context should be the trailing text
+        let patch_with_context = "*** Begin Patch\n*** Update File: src/lib.rs\n@@ -294,28 +294,56 @@ fn lookup_provider()\n-    old_provider\n+    new_provider\n*** End Patch\n";
+        let hunks_ctx = parse_patch(patch_with_context).unwrap();
+        assert_eq!(
+            hunks_ctx,
+            vec![Hunk::UpdateFile {
+                path: PathBuf::from("src/lib.rs"),
+                move_path: None,
+                chunks: vec![chunk(
+                    Some("fn lookup_provider()"),
+                    &["    old_provider"],
+                    &["    new_provider"],
+                    false
+                )],
+            }]
+        );
+
+        // Range header without space after initial @@
+        let patch_compact =
+            "*** Begin Patch\n*** Update File: src/lib.rs\n@@-1,2 +1,2@@\n-a\n+b\n*** End Patch\n";
+        let hunks_compact = parse_patch(patch_compact).unwrap();
+        assert_eq!(
+            hunks_compact,
+            vec![Hunk::UpdateFile {
+                path: PathBuf::from("src/lib.rs"),
+                move_path: None,
+                chunks: vec![chunk(None, &["a"], &["b"], false)],
+            }]
+        );
+
+        // Applying update with range header succeeds and replaces contents correctly
+        let original = "prefix\nold_line\nsuffix\n";
+        if let Hunk::UpdateFile { chunks, .. } = &hunks_ctx[0] {
+            let res = derive_new_contents("fn lookup_provider() {\n    old_provider\n}\n", chunks)
+                .unwrap();
+            assert_eq!(
+                res.new_contents,
+                "fn lookup_provider() {\n    new_provider\n}\n"
+            );
+        } else {
+            panic!("expected UpdateFile hunk");
+        }
+
+        if let Hunk::UpdateFile { chunks, .. } = &hunks[0] {
+            let res = derive_new_contents(original, chunks).unwrap();
+            assert_eq!(res.new_contents, "prefix\nnew_line\nsuffix\n");
+        } else {
+            panic!("expected UpdateFile hunk");
+        }
     }
 }

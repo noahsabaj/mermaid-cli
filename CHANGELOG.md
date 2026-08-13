@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **First-class `edit_file` search-and-replace editing tool.** Models can now perform surgical, single-location edits via `edit_file` (`path`, `target_content`, `replacement_content`, optional `allow_multiple`), eliminating diff syntax envelope friction for targeted changes. The replacement engine features graduated fuzzy matching (exact, trailing whitespace, full trim, Unicode normalization), uniqueness validation, atomic writes beneath root, checkpoint snapshotting, and approval replay.
+
 - **Domain-level and config-based allowlisting for web tools.** Interactive approval modals for `web_fetch` now offer host-level "don't ask again" allowlisting (e.g. `web_fetch:docs.x.ai` or `web_fetch:localhost:8080`), permitting subsequent requests to the approved host for the duration of the session without reprompting. `web_search` similarly supports session-wide allowlisting. Persistent domain trust can also be configured declaratively via `[web] allowed_domains = ["docs.x.ai", "localhost:8080"]` in `config.toml`.
 
 - **Task checklist inline Markdown rendering and multi-line wrapping.** Task subjects in the live checklist band, collapsed "Next:" line, and the spinner status headline now parse inline Markdown formatting (`**bold**`, `` `code` ``, `*italics*`, `~~strikethrough~~`, `[links](url)`). In the expanded checklist, tasks now wrap cleanly across multiple lines with hanging indentation aligned under the task text column, and windowing dynamically respects a visual line budget around the in-progress task. Completed tasks preserve their bold/code weights while applying dimming and strikethrough styling across all spans.
@@ -16,6 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Grok (xAI) is now a built-in provider.** Reach xAI's Grok models through their OpenAI-compatible endpoint with `mermaid --model grok/<model>` (alias `xai/<model>`) — for example `grok/grok-4.6` is the flagship (500k context, vision). Set `XAI_API_KEY` (create one at https://console.x.ai). Uses the shared Chat Completions adapter; vision and tool calling work as with any built-in provider. Both `grok/` and `xai/` prefixes resolve to `https://api.x.ai/v1`.
 
 ### Fixed
+
+- **`apply_patch` supports unified diff range headers (`@@ -start,count +start,count @@`).**
+  When models generate standard unified diff hunk headers rather than Codex-style anchor lines,
+  `apply_patch` now parses and strips coordinate range metadata, extracting any trailing function
+  context as the anchor line (or `None` if empty) instead of searching for coordinate strings like
+  `-294,28 +294,56 @@` in the target file.
 
 - **Auto-mode safety classifier handles reasoning models without failing on empty responses.** Models with mandatory or internal reasoning (e.g. Gemini 3.7 Flash, DeepSeek R1, Claude thinking, and OpenAI o-series) could exhaust the classifier's prior 150-token output limit before emitting plain text, surfacing as `Auto-review flagged this: classifier returned an empty response`. The classifier now uses 2048 tokens of headroom, supports fallback extraction of verdicts from reasoning traces when plain text is empty, and reports actionable diagnostics (e.g. token limits exceeded) on stream truncation.
 

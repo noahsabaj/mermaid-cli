@@ -187,6 +187,7 @@ impl Default for ToolRegistry {
         let mut r = Self::new();
         r.register(Arc::new(filesystem::ReadFileTool));
         r.register(Arc::new(filesystem::WriteFileTool));
+        r.register(Arc::new(filesystem::EditFileTool));
         r.register(Arc::new(apply_patch::ApplyPatchTool));
         r.register(Arc::new(filesystem::DeleteFileTool));
         r.register(Arc::new(filesystem::CreateDirectoryTool));

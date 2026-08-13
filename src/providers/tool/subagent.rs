@@ -1486,6 +1486,9 @@ fn build_child_registry(
     if allowed("write_file") {
         r.register(Arc::new(filesystem::WriteFileTool));
     }
+    if allowed("edit_file") {
+        r.register(Arc::new(filesystem::EditFileTool));
+    }
     if allowed("apply_patch") {
         r.register(Arc::new(apply_patch::ApplyPatchTool));
     }
@@ -2472,6 +2475,7 @@ mod tests {
         assert!(r.get("execute_command").is_some());
         for tool in [
             "write_file",
+            "edit_file",
             "apply_patch",
             "delete_file",
             "create_directory",

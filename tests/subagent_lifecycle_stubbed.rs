@@ -92,7 +92,13 @@ async fn an_explore_child_is_advertised_only_read_only_tools() {
         advertised.iter().any(|t| t == "read_file"),
         "explore still needs to read: {advertised:?}"
     );
-    for forbidden in ["write_file", "delete_file", "apply_patch", "agent"] {
+    for forbidden in [
+        "write_file",
+        "edit_file",
+        "delete_file",
+        "apply_patch",
+        "agent",
+    ] {
         assert!(
             !advertised.iter().any(|t| t == forbidden),
             "an explore child must not be offered {forbidden}: {advertised:?}"

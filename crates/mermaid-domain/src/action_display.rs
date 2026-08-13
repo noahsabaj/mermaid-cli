@@ -138,6 +138,19 @@ fn action_details_for(
                 }
             }
         },
+        "edit_file" => {
+            if let Some(diff) = outcome.metadata.display_diff.clone() {
+                ActionDetails::Diff {
+                    summary: diff_success_summary(&diff, duration),
+                    diff,
+                }
+            } else {
+                ActionDetails::Preview {
+                    text: success_summary("Edited file".to_string(), duration),
+                    line_count: None,
+                }
+            }
+        },
         "web_search" => {
             let result_count = outcome
                 .metadata
@@ -522,6 +535,7 @@ pub fn display_info_for_shell(
             ("Read".to_string(), target)
         },
         "write_file" => ("Write".to_string(), string_arg("path").unwrap_or_default()),
+        "edit_file" => ("Edit".to_string(), string_arg("path").unwrap_or_default()),
         // `apply_patch` can touch several files in one call, so the bare call has
         // no single target here — the per-file A/M/D/R summary rides in the diff
         // detail (`action_details_for`).
