@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Filesystem tools can now view, edit, patch, and delete files outside the project directory.**
+  `read_file`, `write_file`, `apply_patch`, `delete_file`, and `create_directory` previously rejected
+  paths that resolved outside the project root directory or the session scratchpad. Absolute paths
+  (and traversing relative paths) now resolve to their actual locations on disk, allowing Mermaid
+  to interact with external files while retaining safety gating, Linux kernel-enforced sandboxed
+  writes, checkpoint snapshotting, and `/undo` restore capabilities.
+
 - **The `/model` picker stops repeating the provider on every row, and a
   scrolled window still names the one it is showing.** Every row spelled out
   the full id under a heading that already said it, so NVIDIA's own catalog

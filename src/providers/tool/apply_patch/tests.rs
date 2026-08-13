@@ -162,15 +162,22 @@ async fn missing_context_is_an_error() {
 }
 
 #[tokio::test]
-async fn path_escape_is_rejected() {
-    let dir = tmp("escape");
+async fn parent_relative_path_succeeds() {
+    let dir = tmp("parent_rel");
+    let evil = dir.parent().unwrap().join("evil.txt");
+    let _ = fs::remove_file(&evil);
     let out = run(
         &dir,
         "*** Begin Patch\n*** Add File: ../evil.txt\n+pwned\n*** End Patch",
     )
     .await;
-    assert!(!out.is_success(), "path escape must be rejected");
-    assert!(!dir.parent().unwrap().join("evil.txt").exists());
+    assert!(
+        out.is_success(),
+        "parent relative path should succeed: {out:?}"
+    );
+    assert!(evil.exists());
+    assert_eq!(fs::read_to_string(&evil).unwrap(), "pwned\n");
+    let _ = fs::remove_file(&evil);
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -216,17 +223,21 @@ async fn all_scratch_patch_is_ungated() {
     let _ = fs::remove_dir_all(&base);
 }
 
-/// Without a scratchpad, an absolute scratch-shaped path stays rejected.
+/// Absolute paths outside the project directory succeed and apply patches.
 #[tokio::test]
-async fn absolute_path_without_scratchpad_is_rejected() {
-    let dir = tmp("noscratch");
-    let outside = std::env::temp_dir().join("mermaid_applypatch_not_a_root/x.txt");
+async fn absolute_path_outside_project_succeeds() {
+    let dir = tmp("outside_patch");
+    let outside_dir = std::env::temp_dir().join("mermaid_applypatch_outside_root");
+    let outside = outside_dir.join("x.txt");
+    let _ = fs::remove_dir_all(&outside_dir);
     let patch = format!(
-        "*** Begin Patch\n*** Add File: {}\n+pwned\n*** End Patch",
+        "*** Begin Patch\n*** Add File: {}\n+created outside\n*** End Patch",
         outside.display()
     );
     let out = run(&dir, &patch).await;
-    assert!(!out.is_success(), "outside-root add must be rejected");
-    assert!(!outside.exists());
+    assert!(out.is_success(), "outside-root add should succeed: {out:?}");
+    assert!(outside.exists());
+    assert_eq!(fs::read_to_string(&outside).unwrap(), "created outside\n");
+    let _ = fs::remove_dir_all(&outside_dir);
     let _ = fs::remove_dir_all(&dir);
 }

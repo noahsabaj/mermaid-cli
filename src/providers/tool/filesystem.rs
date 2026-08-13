@@ -141,7 +141,7 @@ impl ToolExecutor for ReadFileTool {
     fn schema(&self) -> ToolDefinition {
         defn(
             "read_file",
-            "Read the contents of one or more files from disk. Prefer relative paths; absolute paths must resolve inside the project directory, the session scratchpad, or the memory directories, or the call is rejected.",
+            "Read the contents of one or more files from disk. Relative paths resolve relative to the project directory; absolute paths may resolve anywhere on disk.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -270,7 +270,7 @@ impl ToolExecutor for DeleteFileTool {
     fn schema(&self) -> ToolDefinition {
         defn(
             "delete_file",
-            "Remove a file from disk. Paths must resolve inside the project directory or the session scratchpad. Fails on directories — use `execute_command rm -rf` for those.",
+            "Remove a file from disk. Paths may be relative to the project directory or absolute paths on disk. Fails on directories — use `execute_command rm -rf` for those.",
             serde_json::json!({
                 "type": "object",
                 "properties": { "path": { "type": "string" } },
@@ -381,7 +381,7 @@ impl ToolExecutor for CreateDirectoryTool {
     fn schema(&self) -> ToolDefinition {
         defn(
             "create_directory",
-            "Create a directory (and any missing parents) at the given path, inside the project directory or the session scratchpad.",
+            "Create a directory (and any missing parents) at the given path. Paths may be relative to the project directory or absolute paths on disk.",
             serde_json::json!({
                 "type": "object",
                 "properties": { "path": { "type": "string" } },
@@ -493,7 +493,7 @@ impl ToolExecutor for WriteFileTool {
     fn schema(&self) -> ToolDefinition {
         defn(
             "write_file",
-            "Write (overwrite) a file at `path` with `content`. Creates parent directories automatically. Paths must resolve inside the project directory or the session scratchpad. Prefer `apply_patch` for small targeted changes.",
+            "Write (overwrite) a file at `path` with `content`. Creates parent directories automatically. Paths may be relative to the project directory or absolute. Prefer `apply_patch` for small targeted changes.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -935,11 +935,13 @@ mod tests {
         assert!(!truncated);
         assert_eq!(content, "the fact body");
 
-        // Still confined: an outside path that is NOT under a memory root
-        // rejects exactly as before.
+        // Outside path is also readable.
         let stray = base.join("stray.txt");
         fs::write(&stray, "nope").unwrap();
-        assert!(read_one(&roots, stray.to_str().unwrap()).await.is_err());
+        assert_eq!(
+            read_one(&roots, stray.to_str().unwrap()).await.unwrap().0,
+            "nope"
+        );
 
         let _ = fs::remove_dir_all(&base);
     }
@@ -957,11 +959,11 @@ mod tests {
         let canon_root = fs::canonicalize(&root).unwrap();
         assert!(resolved.abs.starts_with(&canon_root));
 
-        // `..` escape and absolute outside are rejected.
-        assert!(resolve_in_roots(&roots, "../escape.txt").is_err());
-        assert!(resolve_in_roots(&roots, "../../etc/passwd").is_err());
+        // External paths and relative .. escapes resolve successfully.
+        assert!(resolve_in_roots(&roots, "../escape.txt").is_ok());
         let outside = std::env::temp_dir().join("definitely_outside.txt");
-        assert!(resolve_in_roots(&roots, &outside.display().to_string()).is_err());
+        let r = resolve_in_roots(&roots, &outside.display().to_string()).unwrap();
+        assert!(r.abs.ends_with(Path::new("definitely_outside.txt")));
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -1364,20 +1366,24 @@ mod tests {
     /// Reading `/etc/passwd` (or any absolute path outside workdir)
     /// must fail with a clear "outside the project" error. The tool
     /// schema advertises this contract; before F10 it was a lie.
+    /// Reading an absolute path outside workdir succeeds.
     #[tokio::test]
-    async fn read_file_rejects_absolute_path_outside_workdir() {
+    async fn read_file_allows_absolute_path_outside_workdir() {
         let dir = temp_root("read_abs_escape");
+        let external_dir = temp_root("read_abs_external");
+        let external_file = external_dir.join("ext.txt");
+        fs::write(&external_file, "external content").unwrap();
         let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), dir.clone());
-        // Pick a path that's definitely outside a fresh /tmp/* workdir.
         let outcome = ReadFileTool
-            .execute(serde_json::json!({"path": "/etc/passwd"}), ctx)
+            .execute(
+                serde_json::json!({"path": external_file.to_string_lossy().to_string()}),
+                ctx,
+            )
             .await;
-        let error = outcome.error_message().expect("expected error");
-        assert!(
-            error.contains("outside the project"),
-            "expected security reject, got: {error}"
-        );
+        assert!(outcome.is_success(), "expected success: {outcome:?}");
+        assert_eq!(outcome.output(), "external content");
         let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&external_dir);
     }
 
     /// Absolute path that lives INSIDE the workdir is allowed.
@@ -1397,48 +1403,51 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// Relative `..`-escape must also be blocked — they resolve against
-    /// the workdir and land outside it, so the lexical normalization
-    /// in `resolve_in_roots` catches them.
+    /// Relative `..`-escape and external paths are supported.
     #[tokio::test]
-    async fn write_file_rejects_relative_parent_escape() {
-        let dir = temp_root("write_dotdot_escape");
+    async fn write_file_allows_relative_parent_and_external_path() {
+        let base = temp_root("write_dotdot_escape");
+        let dir = base.join("project");
+        fs::create_dir_all(&dir).unwrap();
         let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), dir.clone());
         let outcome = WriteFileTool
             .execute(
                 serde_json::json!({
                     "path": "../escape.txt",
-                    "content": "should not write",
+                    "content": "written outside",
                 }),
                 ctx,
             )
             .await;
-        let error = outcome.error_message().expect("expected error");
         assert!(
-            error.contains("outside the project"),
-            "expected security reject, got: {error}"
+            outcome.is_success(),
+            "expected success for write to ../escape.txt"
         );
-        let _ = fs::remove_dir_all(&dir);
+        let written = base.join("escape.txt");
+        assert!(written.exists());
+        assert_eq!(fs::read_to_string(&written).unwrap(), "written outside");
+        let _ = fs::remove_dir_all(&base);
     }
 
     /// `create_directory` needs the lexical-normalization fallback
     /// because the target doesn't exist yet (can't canonicalize).
     /// Verify the escape check still fires for non-existent targets.
+    /// `create_directory` creates directories outside workdir when called.
     #[tokio::test]
-    async fn create_directory_rejects_absolute_path_outside_workdir() {
-        let dir = temp_root("mkdir_abs_escape");
+    async fn create_directory_allows_absolute_path_outside_workdir() {
+        let dir = temp_root("mkdir_abs_proj");
+        let target = std::env::temp_dir().join(format!("mermaid_fs_target_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&target);
         let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), dir.clone());
         let outcome = CreateDirectoryTool
             .execute(
-                serde_json::json!({"path": "/tmp/mermaid_fs_escape_target"}),
+                serde_json::json!({"path": target.to_string_lossy().to_string()}),
                 ctx,
             )
             .await;
-        let error = outcome.error_message().expect("expected error");
-        assert!(
-            error.contains("outside the project"),
-            "expected security reject, got: {error}"
-        );
+        assert!(outcome.is_success(), "expected success: {outcome:?}");
+        assert!(target.exists());
+        let _ = fs::remove_dir_all(&target);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1583,11 +1592,11 @@ mod tests {
         let _ = fs::remove_dir_all(project.parent().unwrap());
     }
 
-    /// A path outside BOTH roots is rejected at resolution — before the gate.
+    /// A path outside scratchpad in Ask mode requires approval.
     #[tokio::test]
-    async fn write_outside_both_roots_is_rejected() {
+    async fn write_outside_both_roots_requires_approval_in_ask_mode() {
         let (project, scratch) = scratch_fixture("outside");
-        let outside = project.parent().unwrap().join("elsewhere/out.txt");
+        let outside = project.parent().unwrap().join("elsewhere").join("out.txt");
         let (ctx, _rx) = scratch_ctx(
             mermaid_runtime::SafetyMode::Ask,
             project.clone(),
@@ -1597,15 +1606,15 @@ mod tests {
             .execute(
                 serde_json::json!({
                     "path": outside.to_str().unwrap(),
-                    "content": "should not write",
+                    "content": "should require approval",
                 }),
                 ctx,
             )
             .await;
-        let error = outcome.error_message().expect("expected error");
+        let error = outcome.error_message().expect("expected approval required");
         assert!(
-            error.contains("outside the project"),
-            "expected containment reject, got: {error}"
+            error.contains("Approval required"),
+            "expected approval block, got: {error}"
         );
         assert!(!outside.exists());
         let _ = fs::remove_dir_all(project.parent().unwrap());

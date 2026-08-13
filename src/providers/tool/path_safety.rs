@@ -85,13 +85,10 @@ pub(crate) struct ResolvedInRoot {
     pub in_scratchpad: bool,
 }
 
-/// The canonical containment gate for the filesystem tools: resolve `raw`
-/// into the project workdir or, failing that, the session scratchpad.
-/// Relative paths always join onto the workdir, so the scratchpad only ever
-/// matches absolute paths — a relative name can't silently retarget from the
-/// project to the scratch dir. Rejects paths contained by neither root,
-/// enforcing the "absolute paths outside the project (or scratchpad) are
-/// blocked" contract advertised in the tool schemas.
+/// The canonical path resolver for the filesystem tools: resolve `raw`
+/// into the project workdir, the session scratchpad, or an external filesystem
+/// path. Relative paths resolve relative to `workdir`; absolute paths resolve
+/// to their target location.
 pub(crate) fn resolve_in_roots(
     roots: &AllowedRoots<'_>,
     raw: &str,
@@ -117,23 +114,19 @@ pub(crate) fn resolve_in_roots(
             in_scratchpad: true,
         });
     }
-    // Contained by neither root: surface the workdir resolution failure when
-    // resolution itself failed, else a containment rejection naming every
-    // root the caller was allowed to hit.
-    match (project, roots.scratchpad) {
-        (Err(e), _) => Err(e),
-        (Ok(_), None) => Err(format!(
-            "path '{}' is outside the project directory '{}'",
-            raw,
-            roots.workdir.display()
-        )),
-        (Ok(_), Some(scratch)) => Err(format!(
-            "path '{}' is outside the project directory '{}' and the session scratchpad '{}'",
-            raw,
-            roots.workdir.display(),
-            scratch.display()
-        )),
-    }
+    let p = PathBuf::from(raw);
+    let candidate = if p.is_absolute() {
+        p
+    } else {
+        roots.workdir.join(&p)
+    };
+    let (root, rel, abs) = resolve_external_target(&candidate)?;
+    Ok(ResolvedInRoot {
+        abs,
+        rel,
+        root,
+        in_scratchpad: false,
+    })
 }
 
 /// Compute the workdir-relative, lexically-normalized form of `raw`, erroring if
@@ -159,21 +152,16 @@ pub(crate) fn relative_within(workdir: &Path, raw: &str) -> Result<PathBuf, Stri
     }
 }
 
-/// Resolve a not-yet-existing target by canonicalizing its nearest existing
-/// ancestor (resolving any symlinked parent directory) and re-joining the
-/// remaining path components lexically. Rejects paths with no canonicalizable
-/// ancestor.
-fn resolve_via_existing_ancestor(candidate: &Path) -> Result<PathBuf, String> {
+/// Resolve an external target candidate into `(root, rel, abs)`.
+/// `root` is the nearest existing directory ancestor (or parent directory for an existing file),
+/// and `rel` is the path relative to that `root`.
+fn resolve_external_target(candidate: &Path) -> Result<(PathBuf, PathBuf, PathBuf), String> {
     let normalized = lexical_normalize(candidate);
     let mut ancestor = normalized.as_path();
     let mut tail: Vec<std::ffi::OsString> = Vec::new();
-    loop {
+    let (real_root, tail) = loop {
         if let Ok(real) = std::fs::canonicalize(ancestor) {
-            let mut out = real;
-            for comp in tail.iter().rev() {
-                out.push(comp);
-            }
-            return Ok(out);
+            break (real, tail);
         }
         let Some(file) = ancestor.file_name() else {
             return Err(format!(
@@ -191,7 +179,35 @@ fn resolve_via_existing_ancestor(candidate: &Path) -> Result<PathBuf, String> {
                 ));
             },
         }
+    };
+    let mut abs = real_root.clone();
+    let mut rel = PathBuf::new();
+    for comp in tail.iter().rev() {
+        abs.push(comp);
+        rel.push(comp);
     }
+    let (root, rel) = if rel.as_os_str().is_empty() {
+        if let Some(parent) = real_root.parent() {
+            let file = real_root
+                .file_name()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."));
+            (parent.to_path_buf(), file)
+        } else {
+            (real_root, PathBuf::from("."))
+        }
+    } else {
+        (real_root, rel)
+    };
+    Ok((root, rel, abs))
+}
+
+/// Resolve a not-yet-existing target by canonicalizing its nearest existing
+/// ancestor (resolving any symlinked parent directory) and re-joining the
+/// remaining path components lexically. Rejects paths with no canonicalizable
+/// ancestor.
+fn resolve_via_existing_ancestor(candidate: &Path) -> Result<PathBuf, String> {
+    resolve_external_target(candidate).map(|(_, _, abs)| abs)
 }
 
 /// Normalize a path lexically (no filesystem access), collapsing `.` and
@@ -236,9 +252,9 @@ mod tests {
         let (_p, within) = resolve_path_within(&root, "..").unwrap();
         assert!(!within, "parent dir should be outside the project");
 
-        // resolve_in_roots rejects the escape, accepts the subdir.
+        // resolve_in_roots resolves both in-project subdir and parent dir.
         let roots = AllowedRoots::new(&root, None);
-        assert!(resolve_in_roots(&roots, "..").is_err());
+        assert!(resolve_in_roots(&roots, "..").is_ok());
         assert!(resolve_in_roots(&roots, "sub").is_ok());
 
         let _ = std::fs::remove_dir_all(&root);
@@ -267,21 +283,16 @@ mod tests {
         assert_eq!(r.rel, PathBuf::from("nested/notes.txt"));
         assert_eq!(r.root, scratch);
 
-        // Outside both roots -> rejected, naming both.
+        // Outside both roots -> resolves successfully as an external path (not in scratchpad).
         let outside = base.join("elsewhere/file.txt");
-        let err = resolve_in_roots(&roots, outside.to_str().unwrap()).unwrap_err();
-        assert!(err.contains("outside the project"), "got: {err}");
-        assert!(err.contains("scratchpad"), "got: {err}");
+        let r = resolve_in_roots(&roots, outside.to_str().unwrap()).unwrap();
+        assert!(!r.in_scratchpad);
+        assert!(r.abs.ends_with(Path::new("elsewhere").join("file.txt")));
 
         // A `..` escape from the project must not fall into the scratchpad —
         // relative paths never match the scratch root.
-        assert!(resolve_in_roots(&roots, "../scratch/sneaky.txt").is_err());
-
-        // Without a scratchpad the rejection keeps the plain project shape.
-        let no_scratch = AllowedRoots::new(&project, None);
-        let err = resolve_in_roots(&no_scratch, raw.to_str().unwrap()).unwrap_err();
-        assert!(err.contains("outside the project directory"), "got: {err}");
-        assert!(!err.contains("scratchpad"), "got: {err}");
+        let r = resolve_in_roots(&roots, "../scratch/sneaky.txt").unwrap();
+        assert!(!r.in_scratchpad);
 
         let _ = std::fs::remove_dir_all(&base);
     }

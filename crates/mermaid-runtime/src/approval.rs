@@ -204,17 +204,26 @@ fn replay_pending_action(action: &serde_json::Value) -> Result<String> {
         "write_file" => {
             let path = string_arg(args, "path")?;
             let content = string_arg(args, "content")?;
-            let rel = crate::pathguard::relative_within(&workdir, path)?;
-            if let Some(parent) = rel.parent()
-                && !parent.as_os_str().is_empty()
-            {
-                crate::pathguard::create_dir_all_beneath(&workdir, parent)?;
+            let p = Path::new(path);
+            if p.is_absolute() {
+                if let Some(parent) = p.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                crate::write_atomic(p, content.as_bytes())?;
+                Ok(format!("replayed write_file {}", p.display()))
+            } else {
+                let rel = crate::pathguard::relative_within(&workdir, path)?;
+                if let Some(parent) = rel.parent()
+                    && !parent.as_os_str().is_empty()
+                {
+                    crate::pathguard::create_dir_all_beneath(&workdir, parent)?;
+                }
+                crate::pathguard::write_atomic_beneath(&workdir, &rel, content.as_bytes())?;
+                Ok(format!(
+                    "replayed write_file {}",
+                    workdir.join(&rel).display()
+                ))
             }
-            crate::pathguard::write_atomic_beneath(&workdir, &rel, content.as_bytes())?;
-            Ok(format!(
-                "replayed write_file {}",
-                workdir.join(&rel).display()
-            ))
         },
         "apply_patch" => {
             let patch = string_arg(args, "patch")?;
@@ -227,21 +236,35 @@ fn replay_pending_action(action: &serde_json::Value) -> Result<String> {
         },
         "delete_file" => {
             let path = string_arg(args, "path")?;
-            let rel = crate::pathguard::relative_within(&workdir, path)?;
-            crate::pathguard::remove_file_beneath(&workdir, &rel)?;
-            Ok(format!(
-                "replayed delete_file {}",
-                workdir.join(&rel).display()
-            ))
+            let p = Path::new(path);
+            if p.is_absolute() {
+                if p.exists() {
+                    std::fs::remove_file(p)?;
+                }
+                Ok(format!("replayed delete_file {}", p.display()))
+            } else {
+                let rel = crate::pathguard::relative_within(&workdir, path)?;
+                crate::pathguard::remove_file_beneath(&workdir, &rel)?;
+                Ok(format!(
+                    "replayed delete_file {}",
+                    workdir.join(&rel).display()
+                ))
+            }
         },
         "create_directory" => {
             let path = string_arg(args, "path")?;
-            let rel = crate::pathguard::relative_within(&workdir, path)?;
-            crate::pathguard::create_dir_all_beneath(&workdir, &rel)?;
-            Ok(format!(
-                "replayed create_directory {}",
-                workdir.join(&rel).display()
-            ))
+            let p = Path::new(path);
+            if p.is_absolute() {
+                std::fs::create_dir_all(p)?;
+                Ok(format!("replayed create_directory {}", p.display()))
+            } else {
+                let rel = crate::pathguard::relative_within(&workdir, path)?;
+                crate::pathguard::create_dir_all_beneath(&workdir, &rel)?;
+                Ok(format!(
+                    "replayed create_directory {}",
+                    workdir.join(&rel).display()
+                ))
+            }
         },
         other => anyhow::bail!("approval replay does not support tool `{other}`"),
     }
@@ -341,35 +364,66 @@ fn replay_apply_hunk(root: &Path, hunk: &crate::apply_patch::Hunk) -> Result<()>
     use crate::apply_patch::Hunk;
     match hunk {
         Hunk::AddFile { path, contents } => {
-            let rel = crate::pathguard::relative_within(root, &path.to_string_lossy())?;
-            replay_ensure_parent(root, &rel)?;
-            crate::pathguard::write_atomic_beneath(root, &rel, contents.as_bytes())?;
+            if path.is_absolute() {
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                crate::write_atomic(path, contents.as_bytes())?;
+            } else {
+                let rel = crate::pathguard::relative_within(root, &path.to_string_lossy())?;
+                replay_ensure_parent(root, &rel)?;
+                crate::pathguard::write_atomic_beneath(root, &rel, contents.as_bytes())?;
+            }
         },
         Hunk::DeleteFile { path } => {
-            let rel = crate::pathguard::relative_within(root, &path.to_string_lossy())?;
-            crate::pathguard::remove_file_beneath(root, &rel)?;
+            if path.is_absolute() {
+                if path.exists() {
+                    std::fs::remove_file(path)?;
+                }
+            } else {
+                let rel = crate::pathguard::relative_within(root, &path.to_string_lossy())?;
+                crate::pathguard::remove_file_beneath(root, &rel)?;
+            }
         },
         Hunk::UpdateFile {
             path,
             move_path,
             chunks,
         } => {
-            let src_rel = crate::pathguard::relative_within(root, &path.to_string_lossy())?;
-            let original = replay_read_beneath(root, &src_rel)?;
-            let applied = crate::apply_patch::derive_new_contents(&original, chunks)
-                .map_err(|e| anyhow::anyhow!("apply_patch replay for {}: {e}", path.display()))?;
-            let dst_rel = match move_path {
-                Some(mv) => crate::pathguard::relative_within(root, &mv.to_string_lossy())?,
-                None => src_rel.clone(),
-            };
-            replay_ensure_parent(root, &dst_rel)?;
-            crate::pathguard::write_atomic_beneath(
-                root,
-                &dst_rel,
-                applied.new_contents.as_bytes(),
-            )?;
-            if src_rel != dst_rel {
-                crate::pathguard::remove_file_beneath(root, &src_rel)?;
+            if path.is_absolute() {
+                let original = std::fs::read_to_string(path)?;
+                let applied =
+                    crate::apply_patch::derive_new_contents(&original, chunks).map_err(|e| {
+                        anyhow::anyhow!("apply_patch replay for {}: {e}", path.display())
+                    })?;
+                let dst = move_path.as_deref().unwrap_or(path);
+                if let Some(parent) = dst.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                crate::write_atomic(dst, applied.new_contents.as_bytes())?;
+                if dst != path && path.exists() {
+                    std::fs::remove_file(path)?;
+                }
+            } else {
+                let src_rel = crate::pathguard::relative_within(root, &path.to_string_lossy())?;
+                let original = replay_read_beneath(root, &src_rel)?;
+                let applied =
+                    crate::apply_patch::derive_new_contents(&original, chunks).map_err(|e| {
+                        anyhow::anyhow!("apply_patch replay for {}: {e}", path.display())
+                    })?;
+                let dst_rel = match move_path {
+                    Some(mv) => crate::pathguard::relative_within(root, &mv.to_string_lossy())?,
+                    None => src_rel.clone(),
+                };
+                replay_ensure_parent(root, &dst_rel)?;
+                crate::pathguard::write_atomic_beneath(
+                    root,
+                    &dst_rel,
+                    applied.new_contents.as_bytes(),
+                )?;
+                if src_rel != dst_rel {
+                    crate::pathguard::remove_file_beneath(root, &src_rel)?;
+                }
             }
         },
     }

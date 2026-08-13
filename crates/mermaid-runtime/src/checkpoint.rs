@@ -228,20 +228,23 @@ pub fn restore_checkpoint(id: &str) -> Result<CheckpointManifest> {
     let mut deletes: Vec<RestoreOp> = Vec::new();
     for file in &manifest.files {
         // The manifest is on-disk state a tampered or shared checkpoint could
-        // have rewritten. Confine every restore target to the recorded project
-        // root — rejecting absolute paths, `..` escapes, AND symlinks planted
-        // inside the root. Anything that doesn't resolve inside the root is
-        // skipped, not run.
-        let target = match contain_within_canonical(&project_root, &file.path) {
-            Ok(target) => target,
-            Err(err) => {
-                tracing::warn!(
-                    path = %file.path,
-                    error = %err,
-                    "skipping checkpoint entry that escapes the project root"
-                );
-                continue;
-            },
+        // have rewritten. Confine relative restore targets to the recorded project
+        // root (rejecting `..` escapes and symlinks planted inside the root).
+        // Absolute paths name external files and are restored directly.
+        let target = if Path::new(&file.path).is_absolute() {
+            PathBuf::from(&file.path)
+        } else {
+            match contain_within_canonical(&project_root, &file.path) {
+                Ok(target) => target,
+                Err(err) => {
+                    tracing::warn!(
+                        path = %file.path,
+                        error = %err,
+                        "skipping checkpoint entry that escapes the project root"
+                    );
+                    continue;
+                },
+            }
         };
         if file.existed {
             let rel = file
@@ -351,8 +354,24 @@ fn stage_prior(target: &Path, staging: &Path, counter: &mut usize) -> Result<Opt
     }
     let dest = staging.join(counter.to_string());
     *counter += 1;
-    std::fs::rename(target, &dest)
-        .with_context(|| format!("failed to stage prior state of {}", target.display()))?;
+    if let Err(rename_err) = std::fs::rename(target, &dest) {
+        if target.is_file() {
+            std::fs::copy(target, &dest).with_context(|| {
+                format!(
+                    "failed to stage prior state of {} (rename failed with {rename_err})",
+                    target.display()
+                )
+            })?;
+            let _ = std::fs::remove_file(target);
+        } else if target.is_dir() {
+            return Err(rename_err).with_context(|| {
+                format!(
+                    "failed to stage prior directory state of {}",
+                    target.display()
+                )
+            });
+        }
+    }
     Ok(Some(dest))
 }
 
@@ -430,7 +449,11 @@ fn rollback_restore(applied: &[PriorState]) {
             if let Some(parent) = prior.target.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
-            let _ = std::fs::rename(staged, &prior.target);
+            if std::fs::rename(staged, &prior.target).is_err()
+                && std::fs::copy(staged, &prior.target).is_ok()
+            {
+                let _ = std::fs::remove_file(staged);
+            }
         }
     }
 }
@@ -466,8 +489,16 @@ fn resolve_restore_root(id: &str, manifest: &CheckpointManifest) -> Result<PathB
 }
 
 fn sanitize_relpath(path: &str) -> String {
-    path.split(std::path::MAIN_SEPARATOR)
-        .flat_map(|part| part.split('/'))
+    let cleaned: String = path
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' => std::path::MAIN_SEPARATOR,
+            ':' | '?' | '*' | '"' | '<' | '>' | '|' => '_',
+            other => other,
+        })
+        .collect();
+    cleaned
+        .split(std::path::MAIN_SEPARATOR)
         .filter(|part| !part.is_empty() && *part != "." && *part != "..")
         .collect::<Vec<_>>()
         .join("__")
@@ -650,8 +681,8 @@ mod tests {
     #[test]
     fn restore_rejects_paths_escaping_project_root() {
         // Build a real checkpoint, then tamper its on-disk manifest to add
-        // entries whose paths escape the project root (one `..`-relative, one
-        // absolute), and confirm restore refuses to touch the outside target.
+        // an entry whose path escapes the project root via `..`-relative traversal,
+        // and confirm restore refuses to touch the outside target.
         let pid = std::process::id();
         let root = std::env::temp_dir().join(format!("mermaid_ckpt_escape_{pid}"));
         let _ = std::fs::remove_dir_all(&root);
@@ -672,14 +703,9 @@ mod tests {
             .join("manifest.json");
         let mut tampered: CheckpointManifest =
             serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
-        // existed=false ⇒ restore would try to remove the resolved target.
+        // existed=false ⇒ restore would try to remove the resolved target if not rejected.
         tampered.files.push(CheckpointFile {
             path: format!("../{outside_name}"),
-            existed: false,
-            snapshot_relpath: None,
-        });
-        tampered.files.push(CheckpointFile {
-            path: outside.display().to_string(),
             existed: false,
             snapshot_relpath: None,
         });
@@ -843,5 +869,43 @@ mod tests {
             "shadow-git sync must not truncate a real out-of-tree file",
         );
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn restore_restores_external_absolute_files() {
+        let pid = std::process::id();
+        let root = std::env::temp_dir().join(format!("mermaid_ckpt_ext_root_{pid}"));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let outside = std::env::temp_dir().join(format!("mermaid_ckpt_ext_outside_{pid}.txt"));
+        std::fs::write(&outside, "original external content").unwrap();
+
+        let manifest = create_checkpoint_for_task(
+            &root,
+            std::slice::from_ref(&outside),
+            None,
+            CheckpointOrigin::default(),
+        )
+        .unwrap();
+
+        // Mutate the external file
+        std::fs::write(&outside, "modified external content").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&outside).unwrap(),
+            "modified external content"
+        );
+
+        // Restore checkpoint
+        let _ = restore_checkpoint(&manifest.id).unwrap();
+
+        // The external file must be restored
+        assert_eq!(
+            std::fs::read_to_string(&outside).unwrap(),
+            "original external content"
+        );
+
+        let _ = std::fs::remove_file(&outside);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
