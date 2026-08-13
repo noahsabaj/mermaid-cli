@@ -69,8 +69,8 @@ pub fn parse_markdown_inline(input: &str, theme: &Theme, base_style: Style) -> L
     options.insert(Options::ENABLE_STRIKETHROUGH);
 
     let c = &theme.colors;
-    let code_bg = c.code_background.to_color();
-    let code_fg = c.code_foreground.to_color();
+    let code_background = c.code_background.to_color();
+    let code_foreground = c.code_foreground.to_color();
     let link_style = Style::new()
         .fg(c.info.to_color())
         .add_modifier(Modifier::UNDERLINED);
@@ -101,7 +101,7 @@ pub fn parse_markdown_inline(input: &str, theme: &Theme, base_style: Style) -> L
             },
             Event::Code(code) => {
                 let current = style_stack.last().copied().unwrap_or(base_style);
-                let mut style = Style::default().fg(code_fg).bg(code_bg);
+                let mut style = Style::default().fg(code_foreground).bg(code_background);
                 if current.add_modifier.contains(Modifier::CROSSED_OUT) {
                     style = style.crossed_out();
                 }
