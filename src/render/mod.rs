@@ -309,7 +309,15 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         state.ui.tasks_collapsed,
         tasks_attached,
     ) {
-        widgets::tasks_height(tasks_store, state.ui.tasks_collapsed).min(
+        let tasks_area_width = frame.area().width.saturating_sub(2);
+        widgets::tasks_height(
+            tasks_store,
+            state.ui.tasks_collapsed,
+            tasks_attached,
+            tasks_area_width,
+            &rstate.theme,
+        )
+        .min(
             frame
                 .area()
                 .height

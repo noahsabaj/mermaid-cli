@@ -3,7 +3,8 @@ use ratatui::text::{Line, Span};
 use std::collections::VecDeque;
 use unicode_width::UnicodeWidthStr;
 
-use super::{GenerationStatus, truncate_to_cells};
+use super::{GenerationStatus, truncate_line_to_cells, truncate_to_cells};
+use crate::render::markdown::parse_markdown_inline;
 use crate::render::theme::Theme;
 use mermaid_domain::QueuedMessage;
 
@@ -112,7 +113,10 @@ pub fn build_status_lines(
         ""
     };
 
-    let head = format!("{status_text}... ");
+    let head_text = format!("{status_text}...");
+    let parsed_head = parse_markdown_inline(&head_text, theme, info_style);
+    let head_w: usize = parsed_head.spans.iter().map(|s| s.content.width()).sum();
+
     let meta = format!(
         "({exit_hint}esc to interrupt{bg_hint} • {}s • {} {}{} tokens)",
         elapsed_secs,
@@ -129,26 +133,26 @@ pub fn build_status_lines(
     );
 
     let arrow_w = arrow.width();
-    let single_w = arrow_w + head.width() + meta.width();
+    let single_w = arrow_w + head_w + 1 + meta.width();
 
     let mut lines: Vec<Line<'static>> = Vec::new();
     if status == GenerationStatus::Idle {
         // Idle-with-background-agents: rows only, no spinner head.
     } else if single_w <= width {
         // Fits on one row — keep it compact (the common case).
-        lines.push(Line::from(vec![
-            Span::styled(arrow, info_style),
-            Span::styled(head, info_style),
-            Span::styled(meta, meta_style),
-        ]));
+        let mut row_spans = vec![Span::styled(arrow, info_style)];
+        row_spans.extend(parsed_head.spans);
+        row_spans.push(Span::styled(" ", info_style));
+        row_spans.push(Span::styled(meta, meta_style));
+        lines.push(Line::from(row_spans));
     } else {
         // Too wide: status text on row 1, metadata on row 2 (indented under the
         // text). Truncate each so a long command or path can't bleed off-screen.
         let head_budget = width.saturating_sub(arrow_w);
-        lines.push(Line::from(vec![
-            Span::styled(arrow, info_style),
-            Span::styled(truncate_to_cells(head.trim_end(), head_budget), info_style),
-        ]));
+        let truncated_head = truncate_line_to_cells(parsed_head, head_budget);
+        let mut head_row_spans = vec![Span::styled(arrow, info_style)];
+        head_row_spans.extend(truncated_head.spans);
+        lines.push(Line::from(head_row_spans));
         lines.push(Line::from(vec![
             Span::raw("  "),
             Span::styled(

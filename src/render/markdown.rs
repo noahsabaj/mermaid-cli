@@ -58,6 +58,75 @@ pub fn line_hanging_indent(line: &Line, theme: &Theme) -> usize {
     indent
 }
 
+/// Parse a single-line or inline markdown string into a styled [`Line`].
+///
+/// Handles inline styling: `**bold**`, `*italic*`, `` `code` ``, `~~strikethrough~~`,
+/// and `[link](url)`. Soft/hard breaks and block tags are collapsed to spaces so
+/// the output is a single logical line ready for word wrapping or truncating.
+#[must_use]
+pub fn parse_markdown_inline(input: &str, theme: &Theme, base_style: Style) -> Line<'static> {
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_STRIKETHROUGH);
+
+    let c = &theme.colors;
+    let code_bg = c.code_background.to_color();
+    let code_fg = c.code_foreground.to_color();
+    let link_style = Style::new()
+        .fg(c.info.to_color())
+        .add_modifier(Modifier::UNDERLINED);
+
+    let parser = Parser::new_ext(input, options);
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut style_stack = vec![base_style];
+
+    for event in parser {
+        match event {
+            Event::Start(tag) => {
+                let current = style_stack.last().copied().unwrap_or(base_style);
+                let new_style = match tag {
+                    Tag::Emphasis => current.italic(),
+                    Tag::Strong => current.bold(),
+                    Tag::Strikethrough => current.crossed_out(),
+                    Tag::Link { .. } => link_style.patch(current),
+                    _ => current,
+                };
+                style_stack.push(new_style);
+            },
+            Event::End(_) if style_stack.len() > 1 => {
+                style_stack.pop();
+            },
+            Event::Text(text) => {
+                let style = style_stack.last().copied().unwrap_or(base_style);
+                spans.push(Span::styled(text.to_string(), style));
+            },
+            Event::Code(code) => {
+                let current = style_stack.last().copied().unwrap_or(base_style);
+                let mut style = Style::default().fg(code_fg).bg(code_bg);
+                if current.add_modifier.contains(Modifier::CROSSED_OUT) {
+                    style = style.crossed_out();
+                }
+                if current.add_modifier.contains(Modifier::DIM) {
+                    style = style.dim();
+                }
+                if current.add_modifier.contains(Modifier::BOLD) {
+                    style = style.bold();
+                }
+                if current.add_modifier.contains(Modifier::ITALIC) {
+                    style = style.italic();
+                }
+                spans.push(Span::styled(code.to_string(), style));
+            },
+            Event::SoftBreak | Event::HardBreak => {
+                let style = style_stack.last().copied().unwrap_or(base_style);
+                spans.push(Span::styled(" ".to_string(), style));
+            },
+            _ => {},
+        }
+    }
+
+    Line::from(spans)
+}
+
 /// Parse markdown into theme-styled lines, each flagged [`MarkdownLine::preformatted`]
 /// when it must not be word-wrapped — code blocks and tables, whose exact spacing
 /// carries meaning (indentation, column alignment). `width` is the available
@@ -1163,5 +1232,38 @@ mod tests {
         for word in ["very", "long", "cell", "cannot", "single", "width"] {
             assert!(all.contains(word), "wrapped table lost the word {word:?}");
         }
+    }
+
+    #[test]
+    fn inline_markdown_parsing() {
+        let theme = Theme::dark();
+        let base = Style::default();
+        let line = parse_markdown_inline(
+            "**Add registry entries** - edit `crates/mermaid-model` & *test*",
+            &theme,
+            base,
+        );
+        let plain: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(
+            plain,
+            "Add registry entries - edit crates/mermaid-model & test"
+        );
+        // Verify bold span
+        let bold_span = line
+            .spans
+            .iter()
+            .find(|s| s.content == "Add registry entries")
+            .expect("bold span");
+        assert!(bold_span.style.add_modifier.contains(Modifier::BOLD));
+        // Verify code span
+        let code_span = line
+            .spans
+            .iter()
+            .find(|s| s.content == "crates/mermaid-model")
+            .expect("code span");
+        assert_eq!(
+            code_span.style.bg,
+            Some(theme.colors.code_background.to_color())
+        );
     }
 }

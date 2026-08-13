@@ -2,11 +2,11 @@
 //! (Claude Code visual parity — the spinner row reads as the checklist
 //! header, these rows hang beneath it behind a `⎿` gutter).
 //!
-//! Expanded (default): one row per task, windowed around the in-progress
-//! task when the list outgrows the cap, with a dim overflow footer
-//! ("… +4 pending, 2 completed"). Collapsed (Ctrl+T): a single "Next:" row
-//! naming the upcoming pending task (the ACTIVE task already lives on the
-//! spinner line above).
+//! Expanded (default): wrapped rows per task with inline Markdown support,
+//! windowed around the in-progress task when the list outgrows the visual line
+//! cap, with a dim overflow footer ("… +4 pending, 2 completed"). Collapsed
+//! (Ctrl+T): a single "Next:" row naming the upcoming pending task (the ACTIVE
+//! task already lives on the spinner line above).
 //!
 //! The `⎿` gutter is subordinate to the status widget: it only renders when
 //! the status zone above is actually showing (`attached`). Detached (idle,
@@ -20,14 +20,17 @@
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
+use unicode_width::UnicodeWidthStr;
 
+use crate::render::markdown::parse_markdown_inline;
 use crate::render::theme::Theme;
+use crate::render::wrap::wrap_styled_line;
 use mermaid_domain::checklist::{ChecklistItem, ChecklistStatus, ChecklistStore};
 use mermaid_domain::{ChecklistOrigin, TurnState};
 
-use super::truncate_to_cells;
+use super::{truncate_line_to_cells, truncate_to_cells};
 
-/// Maximum task rows shown expanded (excluding the overflow footer).
+/// Maximum visual lines shown expanded (including task rows and overflow footer).
 const MAX_ROWS: usize = 8;
 
 /// Whether the checklist band renders at all: there must be something to
@@ -76,11 +79,12 @@ pub fn build_task_lines(
     }
 
     let visible: Vec<&ChecklistItem> = store.visible().collect();
-    let (window, hidden_completed, hidden_pending, hidden_blocked) = window_rows(&visible);
+    let (start, end, hidden_completed, hidden_pending, hidden_blocked) =
+        window_tasks(&visible, attached, width, theme, meta_style);
 
-    let mut lines = Vec::with_capacity(window.len() + 1);
-    for (i, task) in window.iter().enumerate() {
-        lines.push(task_row(task, i == 0, attached, width, theme, meta_style));
+    let mut lines = Vec::new();
+    for (i, task) in visible[start..end].iter().enumerate() {
+        lines.extend(task_rows(task, i == 0, attached, width, theme, meta_style));
     }
     if hidden_completed + hidden_pending + hidden_blocked > 0 {
         let mut bits = Vec::new();
@@ -105,61 +109,87 @@ pub fn build_task_lines(
 
 /// Height the layout should reserve for the checklist zone.
 #[must_use]
-pub fn tasks_height(store: &ChecklistStore, collapsed: bool) -> u16 {
+pub fn tasks_height(
+    store: &ChecklistStore,
+    collapsed: bool,
+    attached: bool,
+    width: u16,
+    theme: &Theme,
+) -> u16 {
     if collapsed {
         return 1;
     }
-    let visible = store.visible().count();
-    if visible <= MAX_ROWS {
-        visible as u16
-    } else {
-        // Windowed rows + overflow footer.
-        (MAX_ROWS as u16) + 1
-    }
+    build_task_lines(store, collapsed, attached, width, theme).len() as u16
 }
 
-/// Pick the rows to show: everything when it fits; otherwise start at the
-/// first non-completed task (completed rows scroll away first, matching the
-/// screenshots) and summarize the rest in the footer.
-fn window_rows<'a>(visible: &[&'a ChecklistItem]) -> (Vec<&'a ChecklistItem>, usize, usize, usize) {
-    if visible.len() <= MAX_ROWS {
-        return (visible.to_vec(), 0, 0, 0);
+/// Window tasks so total visual lines fit within [`MAX_ROWS`], centering on the
+/// in-progress task and summarizing hidden items.
+fn window_tasks(
+    visible: &[&ChecklistItem],
+    attached: bool,
+    width: usize,
+    theme: &Theme,
+    meta_style: Style,
+) -> (usize, usize, usize, usize, usize) {
+    if visible.is_empty() {
+        return (0, 0, 0, 0, 0);
     }
-    let start = visible
+    let per_task_lines: Vec<usize> = visible
+        .iter()
+        .enumerate()
+        .map(|(i, t)| task_rows(t, i == 0, attached, width, theme, meta_style).len())
+        .collect();
+    let total_lines: usize = per_task_lines.iter().sum();
+
+    if total_lines <= MAX_ROWS {
+        return (0, visible.len(), 0, 0, 0);
+    }
+
+    let budget = MAX_ROWS.saturating_sub(1).max(1);
+    let active = visible
         .iter()
         .position(|t| t.status != ChecklistStatus::Completed)
         .unwrap_or(0);
-    // Keep the window from overshooting the tail: back it up so MAX_ROWS
-    // always fill when enough tasks exist.
-    let start = start.min(visible.len() - MAX_ROWS);
-    let window: Vec<&ChecklistItem> = visible[start..start + MAX_ROWS].to_vec();
-    let hidden = |slice: &[&ChecklistItem], status: ChecklistStatus| {
+
+    let mut start = active;
+    let mut end = (active + 1).min(visible.len());
+    let mut used = per_task_lines[active];
+
+    while end < visible.len() && used + per_task_lines[end] <= budget {
+        used += per_task_lines[end];
+        end += 1;
+    }
+    while start > 0 && used + per_task_lines[start - 1] <= budget {
+        start -= 1;
+        used += per_task_lines[start];
+    }
+
+    let before = &visible[..start];
+    let after = &visible[end..];
+    let count = |slice: &[&ChecklistItem], status: ChecklistStatus| {
         slice.iter().filter(|t| t.status == status).count()
     };
-    let before = &visible[..start];
-    let after = &visible[start + MAX_ROWS..];
     (
-        window,
-        hidden(before, ChecklistStatus::Completed) + hidden(after, ChecklistStatus::Completed),
-        hidden(before, ChecklistStatus::Pending)
-            + hidden(after, ChecklistStatus::Pending)
-            + hidden(before, ChecklistStatus::InProgress)
-            + hidden(after, ChecklistStatus::InProgress),
-        hidden(before, ChecklistStatus::Blocked) + hidden(after, ChecklistStatus::Blocked),
+        start,
+        end,
+        count(before, ChecklistStatus::Completed) + count(after, ChecklistStatus::Completed),
+        count(before, ChecklistStatus::Pending)
+            + count(after, ChecklistStatus::Pending)
+            + count(before, ChecklistStatus::InProgress)
+            + count(after, ChecklistStatus::InProgress),
+        count(before, ChecklistStatus::Blocked) + count(after, ChecklistStatus::Blocked),
     )
 }
 
-/// One checklist row. Attached, the first row carries the `⎿` gutter that
-/// visually connects the list to the spinner line above and the rest indent
-/// to align; detached there is nothing to hang from, so rows sit flush-left.
-fn task_row(
+/// One checklist row wrapped across lines with inline Markdown and hanging indent.
+fn task_rows(
     task: &ChecklistItem,
     first: bool,
     attached: bool,
     width: usize,
     theme: &Theme,
     meta_style: Style,
-) -> Line<'static> {
+) -> Vec<Line<'static>> {
     let gutter = match (attached, first) {
         (true, true) => " ⎿ ",
         (true, false) => "   ",
@@ -169,62 +199,48 @@ fn task_row(
     let warning = Style::new().fg(theme.colors.warning.to_color());
     let text = Style::new().fg(theme.colors.text_primary.to_color());
 
-    // Completed rows earn a dim cost suffix when stamps exist: "(2m 10s · 8.4k tok)".
-    let suffix = if task.status == ChecklistStatus::Completed {
-        cost_suffix(task)
-    } else {
-        String::new()
-    };
-    let user_marker = if task.origin == ChecklistOrigin::User {
-        " (you)"
-    } else {
-        ""
+    let (glyph, glyph_style, base_style) = match task.status {
+        ChecklistStatus::Completed => ("√ ", brand, meta_style.crossed_out()),
+        ChecklistStatus::InProgress => ("■ ", warning, brand.bold()),
+        ChecklistStatus::Pending => ("□ ", meta_style, text),
+        ChecklistStatus::Blocked => ("⊘ ", warning, text),
+        ChecklistStatus::Deleted => ("x ", meta_style, meta_style),
     };
 
-    let budget = width
-        .saturating_sub(gutter.len() + 2) // glyph + space
-        .saturating_sub(suffix.len())
-        .saturating_sub(user_marker.len());
-    let subject = truncate_to_cells(&task.subject, budget.max(4));
+    let continuation_indent = gutter.width() + glyph.width();
+    let gutter_span = Span::styled(gutter.to_string(), meta_style);
+    let glyph_span = Span::styled(glyph.to_string(), glyph_style);
 
-    let mut spans = vec![Span::styled(gutter.to_string(), meta_style)];
-    match task.status {
-        ChecklistStatus::Completed => {
-            spans.push(Span::styled("√ ", brand));
-            spans.push(Span::styled(subject, meta_style.crossed_out()));
-        },
-        ChecklistStatus::InProgress => {
-            spans.push(Span::styled("■ ", warning));
-            spans.push(Span::styled(subject, brand.bold()));
-        },
-        ChecklistStatus::Pending => {
-            spans.push(Span::styled("□ ", meta_style));
-            spans.push(Span::styled(subject, text));
-        },
-        // ⊘ (U+2298, Mathematical Operators) stays outside the banned emoji
-        // ranges like the other glyphs.
-        ChecklistStatus::Blocked => {
-            spans.push(Span::styled("⊘ ", warning));
-            spans.push(Span::styled(subject, text));
-        },
-        // Deleted never reaches here (filtered by `visible()`), but the
-        // match stays exhaustive per house rule.
-        ChecklistStatus::Deleted => {
-            spans.push(Span::styled("x ", meta_style));
-            spans.push(Span::styled(subject, meta_style));
-        },
+    let mut parsed = parse_markdown_inline(&task.subject, theme, base_style);
+    if task.status == ChecklistStatus::Completed {
+        for span in &mut parsed.spans {
+            span.style = span.style.crossed_out().dim();
+        }
     }
-    if !user_marker.is_empty() {
-        spans.push(Span::styled(user_marker.to_string(), meta_style));
+
+    let mut spans = vec![gutter_span, glyph_span];
+    spans.extend(parsed.spans);
+
+    if task.origin == ChecklistOrigin::User {
+        let user_style = if task.status == ChecklistStatus::Completed {
+            meta_style.crossed_out()
+        } else {
+            meta_style
+        };
+        spans.push(Span::styled(" (you)".to_string(), user_style));
     }
-    if !suffix.is_empty() {
-        spans.push(Span::styled(suffix, meta_style));
+
+    if task.status == ChecklistStatus::Completed {
+        let suffix = cost_suffix(task);
+        if !suffix.is_empty() {
+            spans.push(Span::styled(suffix, meta_style.crossed_out()));
+        }
     }
-    Line::from(spans)
+
+    wrap_styled_line(Line::from(spans), width, continuation_indent)
 }
 
-/// The collapsed one-liner: what's up next (the active task already shows on
-/// the spinner line). All done → the plain progress count.
+/// The collapsed one-liner: what's up next with inline Markdown parsing.
 fn collapsed_line(
     store: &ChecklistStore,
     width: usize,
@@ -235,11 +251,11 @@ fn collapsed_line(
     match store.next_pending() {
         Some(next) => {
             let head = " ⎿ Next: ";
-            let budget = (width).saturating_sub(head.len()).max(4);
-            Line::from(vec![
-                Span::styled(head.to_string(), meta_style),
-                Span::styled(truncate_to_cells(&next.subject, budget), text_style),
-            ])
+            let head_span = Span::styled(head.to_string(), meta_style);
+            let parsed = parse_markdown_inline(&next.subject, theme, text_style);
+            let mut full_spans = vec![head_span];
+            full_spans.extend(parsed.spans);
+            truncate_line_to_cells(Line::from(full_spans), width)
         },
         None => Line::from(Span::styled(
             format!(" ⎿ {}", store.progress_string()),
@@ -286,6 +302,7 @@ mod tests {
     use super::*;
     use mermaid_domain::ChecklistEdit;
     use mermaid_domain::checklist::{ChecklistSpec, Stamp};
+    use ratatui::style::Modifier;
 
     fn store_of(statuses: &[ChecklistStatus]) -> ChecklistStore {
         let mut store = ChecklistStore::default();
@@ -385,19 +402,20 @@ mod tests {
             .chain(std::iter::repeat_n(Pending, 9))
             .collect();
         let store = store_of(&statuses);
-        let lines = build_task_lines(&store, false, true, 80, &Theme::dark());
+        let theme = Theme::dark();
+        let lines = build_task_lines(&store, false, true, 80, &theme);
         let rows = rendered(&lines);
         // 8 windowed rows + footer.
-        assert_eq!(rows.len(), 9);
+        assert_eq!(rows.len(), 8);
         assert!(
             rows[0].contains("■"),
             "window starts at in_progress: {:?}",
             rows[0]
         );
         let footer = rows.last().unwrap();
-        assert!(footer.contains("+2 pending"), "{footer:?}");
+        assert!(footer.contains("+3 pending"), "{footer:?}");
         assert!(footer.contains("2 completed"), "{footer:?}");
-        assert_eq!(tasks_height(&store, false), 9);
+        assert_eq!(tasks_height(&store, false, true, 80, &theme), 8);
     }
 
     #[test]
@@ -419,27 +437,22 @@ mod tests {
         let lines = build_task_lines(&store, false, true, 80, &Theme::dark());
         let footer = rendered(&lines).last().unwrap().clone();
         assert!(footer.contains("+1 blocked"), "{footer:?}");
-        assert!(footer.contains("+2 pending"), "{footer:?}");
+        assert!(footer.contains("+3 pending"), "{footer:?}");
     }
 
     #[test]
     fn collapsed_shows_next_pending() {
         use ChecklistStatus::*;
         let store = store_of(&[Completed, InProgress, Pending]);
-        let lines = build_task_lines(&store, true, true, 80, &Theme::dark());
+        let theme = Theme::dark();
+        let lines = build_task_lines(&store, true, true, 80, &theme);
         let rows = rendered(&lines);
         assert_eq!(rows.len(), 1);
         assert!(rows[0].contains("Next: task number 2"), "{:?}", rows[0]);
-        assert_eq!(tasks_height(&store, true), 1);
+        assert_eq!(tasks_height(&store, true, true, 80, &theme), 1);
 
         let no_pending = store_of(&[Completed, InProgress]);
-        let rows = rendered(&build_task_lines(
-            &no_pending,
-            true,
-            true,
-            80,
-            &Theme::dark(),
-        ));
+        let rows = rendered(&build_task_lines(&no_pending, true, true, 80, &theme));
         assert!(rows[0].contains("Tasks 1/2"), "{:?}", rows[0]);
     }
 
@@ -470,10 +483,50 @@ mod tests {
                 run_tokens: 9_400,
             },
         );
-        // A single completed task while a run is still busy stays visible.
         let lines = build_task_lines(&store, false, true, 100, &Theme::dark());
         let row = &rendered(&lines)[0];
         assert!(row.contains("(2m 10s · 8.4k tok)"), "{row:?}");
         assert!(row.contains("(you)"), "{row:?}");
+    }
+
+    #[test]
+    fn task_rows_parse_markdown_and_wrap_with_hanging_indent() {
+        let mut store = ChecklistStore::default();
+        store.create(
+            vec![ChecklistSpec {
+                subject: "**Add registry entries** - edit `crates/mermaid-model/src/models/providers.rs:205-333`".into(),
+                active_form: "Adding registry entries".into(),
+                description: None,
+                in_progress: true,
+            }],
+            ChecklistOrigin::Model,
+            Stamp::default(),
+        );
+        let theme = Theme::dark();
+        // Width 40 will force wrapping
+        let lines = build_task_lines(&store, false, true, 40, &theme);
+        assert!(
+            lines.len() >= 2,
+            "should wrap into multiple lines: {lines:?}"
+        );
+        let rows = rendered(&lines);
+        assert!(
+            rows[0].starts_with(" ⎿ ■ Add registry entries"),
+            "{:?}",
+            rows[0]
+        );
+        // Continuation line should have hanging indent (5 spaces: 3 gutter + 2 glyph)
+        assert!(
+            rows[1].starts_with("     "),
+            "continuation indent missing: {:?}",
+            rows[1]
+        );
+        // Check that bold and code styling is present
+        let bold_span = lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content == "Add")
+            .expect("bold span present");
+        assert!(bold_span.style.add_modifier.contains(Modifier::BOLD));
     }
 }

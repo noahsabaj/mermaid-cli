@@ -60,6 +60,48 @@ pub(super) fn truncate_to_cells(s: &str, width: usize) -> String {
     out
 }
 
+use ratatui::style::Style;
+use ratatui::text::{Line, Span};
+
+/// Truncate a styled [`Line`] to `width` display cells, appending `…` when it overflows.
+pub(super) fn truncate_line_to_cells(line: Line<'static>, width: usize) -> Line<'static> {
+    let total_w: usize = line
+        .spans
+        .iter()
+        .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+        .sum();
+    if total_w <= width {
+        return line;
+    }
+    if width == 0 {
+        return Line::from(Vec::new());
+    }
+    let budget = width.saturating_sub(1);
+    let mut out_spans = Vec::new();
+    let mut current_w = 0usize;
+    let mut last_style = Style::default();
+    for span in line.spans {
+        last_style = span.style;
+        let mut buf = String::new();
+        for ch in span.content.chars() {
+            let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if current_w + cw > budget {
+                break;
+            }
+            buf.push(ch);
+            current_w += cw;
+        }
+        if !buf.is_empty() {
+            out_spans.push(Span::styled(buf, span.style));
+        }
+        if current_w >= budget {
+            break;
+        }
+    }
+    out_spans.push(Span::styled("…", last_style));
+    Line::from(out_spans)
+}
+
 /// Local-to-render-layer generation phase enum. The compose function
 /// converts from `domain::TurnState` + `domain::GenPhase` into one of
 /// these four states; widgets render off this local view so they
