@@ -102,17 +102,24 @@ pub(crate) fn resolve_in_roots(
             in_scratchpad: false,
         });
     }
-    if Path::new(raw).is_absolute()
-        && let Some(scratch) = roots.scratchpad
-        && let Ok((abs, true)) = resolve_path_within(scratch, raw)
-        && let Ok(rel) = relative_within(scratch, raw)
+    if let Some(scratch) = roots.scratchpad
+        && Path::new(raw).is_absolute()
+        && relative_within(scratch, raw).is_ok()
     {
-        return Ok(ResolvedInRoot {
-            abs,
-            rel,
-            root: scratch.to_path_buf(),
-            in_scratchpad: true,
-        });
+        let (abs, within) = resolve_path_within(scratch, raw)?;
+        if within {
+            return Ok(ResolvedInRoot {
+                abs,
+                rel: relative_within(scratch, raw)?,
+                root: scratch.to_path_buf(),
+                in_scratchpad: true,
+            });
+        }
+        // A symlink planted inside the scratchpad escapes the scratch root:
+        // refuse rather than allowing an ungated/redirected write.
+        return Err(format!(
+            "path '{raw}' is inside scratchpad but symlinks outside it"
+        ));
     }
     let p = PathBuf::from(raw);
     let candidate = if p.is_absolute() {
