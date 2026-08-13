@@ -218,6 +218,10 @@ fast = "ollama/qwen3-coder:14b"
 [providers.groq]
 # api_key_env = "MY_GROQ_KEY"    # default: GROQ_API_KEY
 # base_url = "https://api.groq.com/openai/v1"
+
+[providers.grok]
+# api_key_env = "MY_XAI_KEY"  # default: XAI_API_KEY
+# base_url = "https://api.x.ai/v1"
 # extra_headers = { "X-Custom-Header" = "value" }
 
 # Custom OpenAI-compatible provider (e.g., self-hosted vLLM)
@@ -278,6 +282,8 @@ mermaid --model meta/muse-spark-1.1 --reasoning high
 ```
 
 Cloudflare Workers AI needs both `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` (the account id is spliced into the account-scoped endpoint URL); alternatively set `[providers.cloudflare].base_url` to a full account-scoped URL or an AI Gateway endpoint. Example model: `cloudflare/@cf/zai-org/glm-5.2`.
+
+Grok (xAI) uses `XAI_API_KEY` (create one at https://console.x.ai) at `https://api.x.ai/v1` — OpenAI-compatible Chat Completions. Models like `grok-4.6`/`grok-4` support vision (`jpg/jpeg`/`png`, 20MiB per image, unlimited images) and tool calling. Both `grok/<model>` and `xai/<model>` prefixes work and resolve to the same endpoint. Example: `mermaid --model grok/grok-4.6`.
 
 Ollama Cloud models authenticate via `OLLAMA_API_KEY`. Native `web_fetch` and managed/self-hosted SearXNG do not require it. Cloud web routing is never inferred from the key: set `fetch_backend = "ollama"` or `search_backend = "ollama"` explicitly, or opt into `allow_ollama_search_fallback` for platforms without a managed bundle (see [Web tool backends](#web-tool-backends)). Use `mermaid cloud-setup` from your shell to set the key for cloud models; `/cloud-setup` in the TUI points back to that shell command.
 

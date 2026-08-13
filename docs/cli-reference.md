@@ -11,6 +11,7 @@ mermaid --model anthropic/<model>               # Anthropic (requires ANTHROPIC_
 mermaid --model gemini/<model>                  # Gemini (requires GOOGLE_API_KEY)
 mermaid --model openai/<model>                  # OpenAI (requires OPENAI_API_KEY)
 mermaid --model groq/<model>                    # Groq (requires GROQ_API_KEY)
+mermaid --model grok/grok-4.6                   # Grok (xAI) (requires XAI_API_KEY; alias xai/<model>)
 mermaid --model nvidia/z-ai/glm-5.2             # NVIDIA NIM (requires NVIDIA_API_KEY)
 mermaid --model cloudflare/@cf/zai-org/glm-5.2  # Cloudflare Workers AI (CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID)
 mermaid --reasoning high                        # Override default reasoning depth

@@ -187,6 +187,7 @@ Set the appropriate environment variable, or override it with `[providers.<name>
 | Together | `TOGETHER_API_KEY` | `together/<vendor>/<model>` |
 | NVIDIA NIM | `NVIDIA_API_KEY` | `nvidia/<vendor>/<model>` |
 | Cloudflare Workers AI | `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID` | `cloudflare/@cf/<vendor>/<model>` |
+| Grok (xAI) | `XAI_API_KEY` | `grok/<model>` (`xai/<model>` alias) |
 | Ollama Cloud | `OLLAMA_API_KEY` | `ollama/<model>:cloud` |
 
 Environment variables always win; the OS keyring fills the gap when none is set. Store a key with `mermaid login <provider>` and remove it with `mermaid logout <provider>`. Keys are reported as `env`, `keyring`, or `none` — never by value. Per-provider details are in [docs/configuration.md](docs/configuration.md#provider-notes).

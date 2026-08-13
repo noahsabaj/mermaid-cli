@@ -353,6 +353,20 @@ pub const CATALOG: &[ModelCapEntry] = &[
         thinking: T::OllamaEffortString,
         ..UNKNOWN_MODEL
     },
+    // --- xAI Grok (prefix rows must stay above the generic grok marker) ---
+    ModelCapEntry {
+        rule: Prefix("grok-4.6"),
+        vision: true,
+        context_window: Some(500_000),
+        ..UNKNOWN_MODEL
+    },
+    ModelCapEntry {
+        rule: Substring("grok-4.6"),
+        vision: true,
+        context_window: Some(500_000),
+        ..UNKNOWN_MODEL
+    },
+    vision_marker("grok"),
     // --- Generic multimodal families / vision markers ---
     vision_marker("-vision"),
     vision_marker("-vl"),
@@ -474,6 +488,27 @@ mod tests {
         assert_eq!(gateway.context_window, Some(1_500_000));
         // Plain gpt-5 still lands on the 400k rows.
         assert_eq!(lookup("gpt-5-mini").context_window, Some(400_000));
+    }
+
+    #[test]
+    fn ordering_grok_4_6_before_generic_grok() {
+        // grok-4.6 rows sit above the generic grok marker (shared substring, first match
+        // wins): 500k window, vision true. The Prefix row covers bare names; the
+        // Substring row covers gateway-nested ids.
+        let bare = lookup("grok-4.6");
+        assert!(bare.vision);
+        assert_eq!(bare.context_window, Some(500_000));
+        let bare_suffixed = lookup("grok-4.6-mini");
+        assert_eq!(bare_suffixed.context_window, Some(500_000));
+        // A gateway id hits the Substring row: same window, vision true.
+        let gateway = lookup("openai/some-grok-4.6-variant");
+        assert!(gateway.vision);
+        assert_eq!(gateway.context_window, Some(500_000));
+        // Generic grok still gets vision but no static window (live discovery).
+        let generic = lookup("grok-3");
+        assert!(generic.vision);
+        assert_eq!(generic.context_window, None);
+        assert!(lookup("xai/grok-4").vision);
     }
 
     #[test]

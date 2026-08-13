@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Grok (xAI) is now a built-in provider.** Reach xAI's Grok models through their OpenAI-compatible endpoint with `mermaid --model grok/<model>` (alias `xai/<model>`) — for example `grok/grok-4.6` is the flagship (500k context, vision). Set `XAI_API_KEY` (create one at https://console.x.ai). Uses the shared Chat Completions adapter; vision and tool calling work as with any built-in provider. Both `grok/` and `xai/` prefixes resolve to `https://api.x.ai/v1`.
+
 ### Changed
 
 - **The `/model` picker stops repeating the provider on every row, and a

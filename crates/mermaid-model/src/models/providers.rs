@@ -328,6 +328,30 @@ pub const REGISTRY: &[ProviderProfile] = &[
         max_tokens_param: MaxTokensParam::MaxTokens,
         disable_parallel_tool_calls_for: &[],
     },
+    ProviderProfile {
+        name: "grok",
+        base_url: "https://api.x.ai/v1",
+        api_key_env: "XAI_API_KEY",
+        key_hint: Some("create one at https://console.x.ai"),
+        extra_headers: &[],
+        // xAI Chat Completions is OpenAI-compatible; no documented
+        // `reasoning_effort` param — keep None to avoid spurious 400s.
+        reasoning_strategy: ReasoningStrategy::None,
+        reasoning_extraction: ReasoningExtraction::None,
+        max_tokens_param: MaxTokensParam::MaxTokens,
+        disable_parallel_tool_calls_for: &[],
+    },
+    ProviderProfile {
+        name: "xai",
+        base_url: "https://api.x.ai/v1",
+        api_key_env: "XAI_API_KEY",
+        key_hint: Some("create one at https://console.x.ai"),
+        extra_headers: &[],
+        reasoning_strategy: ReasoningStrategy::None,
+        reasoning_extraction: ReasoningExtraction::None,
+        max_tokens_param: MaxTokensParam::MaxTokens,
+        disable_parallel_tool_calls_for: &[],
+    },
 ];
 
 /// Look up a built-in provider by name. Case-insensitive.
@@ -380,6 +404,33 @@ mod tests {
     }
 
     #[test]
+    fn lookup_grok_provider() {
+        let p = lookup_provider("grok").expect("grok is in the registry");
+        assert_eq!(p.name, "grok");
+        assert_eq!(p.base_url, "https://api.x.ai/v1");
+        assert_eq!(p.api_key_env, "XAI_API_KEY");
+        assert_eq!(p.reasoning_strategy, ReasoningStrategy::None);
+        assert_eq!(p.reasoning_extraction, ReasoningExtraction::None);
+    }
+
+    #[test]
+    fn lookup_xai_alias() {
+        // `xai` is an alias for the same endpoint so both `grok/<model>`
+        // and `xai/<model>` work.
+        let p = lookup_provider("xai").expect("xai is in the registry");
+        assert_eq!(p.name, "xai");
+        assert_eq!(p.base_url, "https://api.x.ai/v1");
+        assert_eq!(p.api_key_env, "XAI_API_KEY");
+    }
+
+    #[test]
+    fn lookup_grok_is_case_insensitive() {
+        assert!(lookup_provider("GROK").is_some());
+        assert!(lookup_provider("XAI").is_some());
+        assert!(lookup_provider("Grok").is_some());
+    }
+
+    #[test]
     fn lookup_is_case_insensitive() {
         assert!(lookup_provider("OpenAI").is_some());
         assert!(lookup_provider("OPENROUTER").is_some());
@@ -391,8 +442,8 @@ mod tests {
     }
 
     #[test]
-    fn registry_has_eight_providers() {
-        assert_eq!(REGISTRY.len(), 8);
+    fn registry_has_ten_providers() {
+        assert_eq!(REGISTRY.len(), 10);
     }
 
     #[test]
