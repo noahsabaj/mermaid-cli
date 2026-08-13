@@ -54,9 +54,11 @@ pub fn with_shared_store<T>(op: impl FnOnce(&RuntimeStore) -> Result<T>) -> Resu
     result
 }
 
+pub mod coordinator;
 pub mod repos;
 pub mod rows;
 
+pub use coordinator::*;
 pub use mermaid_model::records::*;
 pub use repos::*;
 pub use rows::*;
@@ -352,6 +354,10 @@ impl RuntimeStore {
 
     pub fn outcomes(&self) -> OutcomesRepo<'_> {
         OutcomesRepo { conn: &self.conn }
+    }
+
+    pub fn coordinator(&self) -> coordinator::StorageCoordinator<'_> {
+        coordinator::StorageCoordinator::new(self)
     }
 
     /// Recover state stranded by a previous daemon's crash/stop (#120, #118).

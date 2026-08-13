@@ -20,7 +20,10 @@ use crate::{
     session::ConversationManager,
 };
 
-use super::{Commands, GitHost, OutputFormat, PairCommand, PluginCommand, PrCommand, QaCommand};
+use super::{
+    Commands, GitHost, OutputFormat, PairCommand, PluginCommand, PrCommand, QaCommand,
+    StorageCommand,
+};
 
 /// Handle CLI subcommands
 /// Returns Ok(true) if the command was handled and we should exit
@@ -227,6 +230,7 @@ pub async fn handle_command(
             let _ = crate::ollama::setup_cloud_interactive();
             Ok(true)
         },
+        Commands::Storage { command } => handle_storage(command, cwd),
         Commands::Chat => Ok(false),       // Continue to chat interface
         Commands::Run { .. } => Ok(false), // Handled by main.rs
     }
@@ -242,6 +246,61 @@ fn handle_qa(command: &QaCommand, config: &Config, cwd: &Path) -> Result<()> {
             print_qa_compact_report(&report, *format)?;
             anyhow::ensure!(report.ok, "qa compact smoke failed");
             Ok(())
+        },
+    }
+}
+
+fn handle_storage(command: &StorageCommand, cwd: &Path) -> Result<bool> {
+    match command {
+        StorageCommand::Gc {
+            retention_days,
+            outcomes_retention_days,
+            path,
+        } => {
+            let target_path = path.as_deref().unwrap_or(cwd);
+            let report = mermaid_runtime::with_shared_store(|store| {
+                store.coordinator().gc_cross_store(
+                    Some(target_path),
+                    *retention_days,
+                    *outcomes_retention_days,
+                )
+            })?;
+            println!(
+                "Storage garbage collection complete:\n  SQLite rows removed: {}\n  Conversation files removed: {}\n  Compaction archives removed: {}",
+                report.db_rows_removed,
+                report.conversation_files_removed,
+                report.compactions_removed
+            );
+            Ok(true)
+        },
+        StorageCommand::Reconcile { path } => {
+            let target_path = path.as_deref().unwrap_or(cwd);
+            let report = mermaid_runtime::with_shared_store(|store| {
+                store.coordinator().reconcile_project(target_path)
+            })?;
+            println!(
+                "Storage reconciliation report for {}:\n  Valid matching sessions: {}\n  Backfilled SQLite sessions: {}\n  Missing on-disk session files: {}\n  Orphaned tasks without conversation files: {}",
+                target_path.display(),
+                report.valid_sessions,
+                report.backfilled_sessions,
+                report.missing_session_files,
+                report.orphaned_tasks.len()
+            );
+            if !report.orphaned_tasks.is_empty() {
+                println!("Orphaned task IDs:");
+                for id in &report.orphaned_tasks {
+                    println!("  - {id}");
+                }
+            }
+            Ok(true)
+        },
+        StorageCommand::Delete { id, path } => {
+            let target_path = path.as_deref().unwrap_or(cwd);
+            mermaid_runtime::with_shared_store(|store| {
+                store.coordinator().delete_session_cascade(target_path, id)
+            })?;
+            println!("Deleted session {id} across SQLite and filesystem stores.");
+            Ok(true)
         },
     }
 }

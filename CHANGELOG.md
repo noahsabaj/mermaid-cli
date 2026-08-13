@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Unified storage coordinator and `mermaid storage` CLI commands.** Introduced `StorageCoordinator` in `mermaid-runtime` to resolve dual-storage tension between SQLite (`runtime.sqlite3`) and append-only JSONL files (`.mermaid/conversations/`). Automatically backfills task-to-session linkages on completion/start, provides atomic cascade deletion across both databases and filesystem logs, and adds `mermaid storage reconcile`, `mermaid storage gc`, and `mermaid storage delete <id>` subcommands.
+
 - **First-class `edit_file` search-and-replace editing tool.** Models can now perform surgical, single-location edits via `edit_file` (`path`, `target_content`, `replacement_content`, optional `allow_multiple`), eliminating diff syntax envelope friction for targeted changes. The replacement engine features graduated fuzzy matching (exact, trailing whitespace, full trim, Unicode normalization), uniqueness validation, atomic writes beneath root, checkpoint snapshotting, and approval replay.
 
 - **Domain-level and config-based allowlisting for web tools.** Interactive approval modals for `web_fetch` now offer host-level "don't ask again" allowlisting (e.g. `web_fetch:docs.x.ai` or `web_fetch:localhost:8080`), permitting subsequent requests to the approved host for the duration of the session without reprompting. `web_search` similarly supports session-wide allowlisting. Persistent domain trust can also be configured declaratively via `[web] allowed_domains = ["docs.x.ai", "localhost:8080"]` in `config.toml`.

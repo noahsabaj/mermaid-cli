@@ -618,6 +618,11 @@ impl ConversationManager {
     /// fail the delete.
     pub fn delete_conversation(&self, id: &str) -> Result<()> {
         validate_conversation_id(id)?;
+        let _ = mermaid_runtime::with_shared_store(|store| {
+            store
+                .coordinator()
+                .delete_session_cascade(&self.project_dir, id)
+        });
         let path = self.conversations_dir.join(format!("{id}.json"));
         if path.exists() {
             fs::remove_file(path)?;

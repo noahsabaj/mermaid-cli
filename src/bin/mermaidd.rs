@@ -305,7 +305,13 @@ async fn execute_claimed_task(
     // run is still going — it is what turns a from-now attach into one that
     // can replay what it missed. The end-of-run stamp below stays as the
     // authority; this is the same value, earlier.
-    let _backlink = tokio::spawn(early_backlink(event_tx.subscribe(), task.id.clone()));
+    let _backlink = tokio::spawn(early_backlink(
+        event_tx.subscribe(),
+        task.id.clone(),
+        std::path::PathBuf::from(&task.project_path),
+        task.model_id.clone(),
+        task.title.clone(),
+    ));
     // The run's mailbox, so a `send_to_task` can reach it while it works. The
     // handle arrives as soon as the engine exists -- before the first model
     // call -- and registering it from its own task keeps the executor from
@@ -335,23 +341,7 @@ async fn execute_claimed_task(
     )
     .await;
 
-    // The run's conversation id, captured before the result is consumed. It
-    // is the one thing a follow-up `mermaid run --resume` needs, and until
-    // now the daemon dropped it on the floor: `tasks.conversation_id` is set
-    // at CREATION, before any conversation exists, so it was NULL for every
-    // daemon task and every join through it came back empty.
-    let session_id = result
-        .as_ref()
-        .ok()
-        .map(|run| run.session_id.clone())
-        .filter(|id| !id.is_empty());
-    if let Some(session_id) = &session_id {
-        let task_id = task.id.clone();
-        let session_id = session_id.clone();
-        let _ = mermaid_runtime::with_shared_store(move |store| {
-            store.tasks().set_conversation(&task_id, &session_id)
-        });
-    }
+    link_completed_session(&task, &result);
 
     // The run has ended; `_running_guard` removes the token from the running map
     // when this function returns. Map the outcome to a terminal status + report
@@ -374,6 +364,34 @@ async fn execute_claimed_task(
     );
 }
 
+fn link_completed_session(
+    task: &mermaid_runtime::TaskRecord,
+    result: &Result<mermaid_cli::app::RunResult, anyhow::Error>,
+) {
+    let session_id = result
+        .as_ref()
+        .ok()
+        .map(|run| run.session_id.clone())
+        .filter(|id| !id.is_empty());
+    if let Some(session_id) = session_id {
+        let task_id = task.id.clone();
+        let project_path = std::path::PathBuf::from(&task.project_path);
+        let model_id = task.model_id.clone();
+        let title = Some(task.title.clone());
+        let total_tokens = result.as_ref().ok().map(|run| run.total_tokens as i64);
+        let _ = mermaid_runtime::with_shared_store(move |store| {
+            store.coordinator().link_task_conversation(
+                &task_id,
+                &session_id,
+                &project_path,
+                &model_id,
+                title.as_deref(),
+                total_tokens,
+            )
+        });
+    }
+}
+
 /// Wait for the run's `session_started` line and write `conversation_id`
 /// onto the task row.
 ///
@@ -385,6 +403,9 @@ async fn execute_claimed_task(
 async fn early_backlink(
     mut events: tokio::sync::broadcast::Receiver<mermaid_domain::RunEvent>,
     task_id: String,
+    project_path: std::path::PathBuf,
+    model_id: String,
+    title: String,
 ) {
     loop {
         match events.recv().await {
@@ -394,7 +415,14 @@ async fn early_backlink(
                 }
                 let owned = task_id.clone();
                 if let Err(error) = mermaid_runtime::with_shared_store(move |store| {
-                    store.tasks().set_conversation(&owned, &session_id)
+                    store.coordinator().link_task_conversation(
+                        &owned,
+                        &session_id,
+                        &project_path,
+                        &model_id,
+                        Some(&title),
+                        None,
+                    )
                 }) {
                     tracing::warn!(task = %task_id, %error, "could not stamp the session backlink at run start");
                 }
@@ -2146,8 +2174,13 @@ mod tests {
                 );
 
                 let (events, _rx) = tokio::sync::broadcast::channel(16);
-                let watcher =
-                    tokio::spawn(super::early_backlink(events.subscribe(), task.id.clone()));
+                let watcher = tokio::spawn(super::early_backlink(
+                    events.subscribe(),
+                    task.id.clone(),
+                    std::path::PathBuf::from(&task.project_path),
+                    task.model_id.clone(),
+                    task.title.clone(),
+                ));
                 events
                     .send(mermaid_domain::RunEvent::SessionStarted {
                         protocol_version: mermaid_domain::RUN_EVENT_PROTOCOL_VERSION,
