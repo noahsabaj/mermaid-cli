@@ -186,11 +186,10 @@ fn replay_pending_action(action: &serde_json::Value) -> Result<String> {
         .get("tool")
         .and_then(|value| value.as_str())
         .context("pending action missing string `tool`")?;
-    let workdir = action
-        .get("workdir")
-        .and_then(|value| value.as_str())
-        .map(PathBuf::from)
-        .unwrap_or(std::env::current_dir()?);
+    let workdir = match action.get("workdir").and_then(|value| value.as_str()) {
+        Some(w) => PathBuf::from(w),
+        None => std::env::current_dir()?,
+    };
     let args = action.get("args").unwrap_or(action);
 
     // The stored path comes from (potentially tampered) replay state, so confine
@@ -396,12 +395,12 @@ fn replay_apply_hunk(root: &Path, hunk: &crate::apply_patch::Hunk) -> Result<()>
                     crate::apply_patch::derive_new_contents(&original, chunks).map_err(|e| {
                         anyhow::anyhow!("apply_patch replay for {}: {e}", path.display())
                     })?;
-                let dst = move_path.as_deref().unwrap_or(path);
-                if let Some(parent) = dst.parent() {
+                let destination_path = move_path.as_deref().unwrap_or(path);
+                if let Some(parent) = destination_path.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
-                crate::write_atomic(dst, applied.new_contents.as_bytes())?;
-                if dst != path && path.exists() {
+                crate::write_atomic(destination_path, applied.new_contents.as_bytes())?;
+                if destination_path != path && path.exists() {
                     std::fs::remove_file(path)?;
                 }
             } else {
