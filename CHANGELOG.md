@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Grok (xAI) is now a built-in provider.** Reach xAI's Grok models through their OpenAI-compatible endpoint with `mermaid --model grok/<model>` (alias `xai/<model>`) — for example `grok/grok-4.6` is the flagship (500k context, vision). Set `XAI_API_KEY` (create one at https://console.x.ai). Uses the shared Chat Completions adapter; vision and tool calling work as with any built-in provider. Both `grok/` and `xai/` prefixes resolve to `https://api.x.ai/v1`.
 
+### Fixed
+
+- **Auto-mode safety classifier handles reasoning models without failing on empty responses.** Models with mandatory or internal reasoning (e.g. Gemini 3.7 Flash, DeepSeek R1, Claude thinking, and OpenAI o-series) could exhaust the classifier's prior 150-token output limit before emitting plain text, surfacing as `Auto-review flagged this: classifier returned an empty response`. The classifier now uses 2048 tokens of headroom, supports fallback extraction of verdicts from reasoning traces when plain text is empty, and reports actionable diagnostics (e.g. token limits exceeded) on stream truncation.
+
 ### Changed
 
 - **Filesystem tools can now view, edit, patch, and delete files outside the project directory.**

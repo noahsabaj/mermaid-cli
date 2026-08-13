@@ -323,7 +323,8 @@ pub(super) async fn collect_compaction_text(
 ) -> Result<(String, Option<TokenUsage>), ModelError> {
     // Shared with the Auto-mode safety classifier — see
     // `crate::providers::model::collect_text`.
-    crate::providers::model::collect_text(provider, turn, request, token).await
+    let collected = crate::providers::model::collect_text(provider, turn, request, token).await?;
+    Ok((collected.text, collected.usage))
 }
 
 pub(super) fn record_provider_capabilities(

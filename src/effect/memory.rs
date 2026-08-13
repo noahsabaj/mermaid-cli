@@ -144,7 +144,7 @@ pub(super) async fn consolidate_memory(
     let token = tokio_util::sync::CancellationToken::new();
     let text =
         match crate::providers::model::collect_text(provider, TurnId(0), request, token).await {
-            Ok((t, _)) => t,
+            Ok(collected) => collected.text,
             Err(e) => {
                 let _ = tx
                     .send(Msg::RuntimeText(format!(

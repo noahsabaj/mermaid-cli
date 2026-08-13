@@ -22,13 +22,16 @@ use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
 use crate::providers::factory::ProviderFactory;
+use crate::providers::model::CollectedText;
 use mermaid_domain::{ChatRequest, TurnId};
-use mermaid_model::models::{ChatMessage, ReasoningLevel};
+use mermaid_model::models::{ChatMessage, FinishReason, ReasoningLevel};
 
 /// How long to wait for the classifier before failing safe (escalating).
 const VET_TIMEOUT: Duration = Duration::from_secs(10);
 /// Verdicts are tiny — `ALLOW` or `ESCALATE: <short reason>`.
-const VET_MAX_TOKENS: usize = 150;
+/// Generous budget (2048) so models with mandatory/internal reasoning (Gemini 3, DeepSeek R1, Claude, o-series)
+/// have sufficient headroom to complete reasoning and output the verdict without truncating into an empty response.
+const VET_MAX_TOKENS: usize = 2048;
 
 const SYSTEM_PROMPT: &str = "You are a safety reviewer for an AI coding agent running in \"auto\" mode. \
 The agent has already decided to take an action; your job is to wave through the routine, aligned ones \
@@ -162,13 +165,13 @@ impl AutoClassifier for ModelAutoClassifier {
 
         let call = async move {
             let provider = providers.resolve(&model_id).await?;
-            let (text, _usage) =
+            let collected =
                 crate::providers::model::collect_text(provider, turn, request, token).await?;
-            Ok::<String, mermaid_model::models::ModelError>(text)
+            Ok::<CollectedText, mermaid_model::models::ModelError>(collected)
         };
 
         match tokio::time::timeout(VET_TIMEOUT, call).await {
-            Ok(Ok(text)) => parse_verdict(&text),
+            Ok(Ok(collected)) => parse_collected_verdict(&collected),
             Ok(Err(err)) => VetVerdict::escalate(format!("classifier unavailable: {err}")),
             Err(_) => VetVerdict::escalate("classifier timed out"),
         }
@@ -217,6 +220,67 @@ fn describe_action(req: &VetRequest) -> String {
         req.tool,
         details.join("\n")
     )
+}
+
+/// Parse the classifier's collected response, **failing safe**.
+///
+/// If plain text is present, parses it with [`parse_verdict`]. If plain text is empty,
+/// falls back to extracting an explicit verdict line from the reasoning trace (for models
+/// with mandatory thinking that emit their verdict in the reasoning stream).
+/// If no verdict can be parsed, inspects the stream stop reason to provide an accurate
+/// escalation reason (e.g. token limits exceeded).
+fn parse_collected_verdict(collected: &CollectedText) -> VetVerdict {
+    let trimmed = collected.text.trim();
+    if !trimmed.is_empty() {
+        return parse_verdict(trimmed);
+    }
+    // Fallback: if plain text was empty, attempt to parse the verdict from reasoning trace if available.
+    if let Some(verdict) = collected
+        .reasoning
+        .as_deref()
+        .and_then(try_parse_reasoning_verdict)
+    {
+        return verdict;
+    }
+    if let Some(stop_reason) = &collected.stop_reason {
+        match stop_reason {
+            FinishReason::Length => {
+                return VetVerdict::escalate("classifier token limit exceeded during generation");
+            },
+            FinishReason::ContentFilter => {
+                return VetVerdict::escalate(
+                    "classifier response blocked by content/safety filter",
+                );
+            },
+            _ => {},
+        }
+    }
+    VetVerdict::escalate("classifier returned an empty response")
+}
+
+/// Attempt to extract an ALLOW or ESCALATE verdict from the reasoning text of a thinking model.
+fn try_parse_reasoning_verdict(reasoning: &str) -> Option<VetVerdict> {
+    for line in reasoning
+        .lines()
+        .rev()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+    {
+        let upper = line.to_ascii_uppercase();
+        if upper.contains("ESCALATE") || upper.contains("DENY") {
+            let reason = line
+                .split_once(':')
+                .map(|(_, r)| r.trim())
+                .filter(|r| !r.is_empty())
+                .map(clip)
+                .unwrap_or_else(|| "flagged by the safety classifier".to_string());
+            return Some(VetVerdict::escalate(reason));
+        }
+        if upper.trim_end_matches(['.', '!', ' ']) == "ALLOW" {
+            return Some(VetVerdict::allow());
+        }
+    }
+    None
 }
 
 /// Parse the classifier's reply, **failing safe**. `ESCALATE`/`DENY` are checked

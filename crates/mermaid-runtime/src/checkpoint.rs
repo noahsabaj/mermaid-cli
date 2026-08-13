@@ -379,14 +379,12 @@ fn stage_prior(target: &Path, staging: &Path, counter: &mut usize) -> Result<Opt
 /// tolerating files, directories, and symlinks. `symlink_metadata` does not follow
 /// links, so a symlinked target is unlinked rather than its destination cleared.
 fn remove_path(path: &Path) {
-    match std::fs::symlink_metadata(path) {
-        Ok(meta) if meta.is_dir() => {
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        if meta.is_dir() {
             let _ = std::fs::remove_dir_all(path);
-        },
-        Ok(_) => {
+        } else {
             let _ = std::fs::remove_file(path);
-        },
-        Err(_) => {},
+        }
     }
 }
 

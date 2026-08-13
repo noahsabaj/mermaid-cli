@@ -178,3 +178,45 @@ async fn a_reviewer_directed_action_escalates_without_spending_a_call() {
     );
     assert_eq!(model.remaining(), 1, "the scripted ALLOW went unused");
 }
+
+#[tokio::test]
+async fn reasoning_only_stream_with_allow_verdict_succeeds() {
+    let reasoning = "The command is a benign local build.\nALLOW";
+    let model = ScriptedModel::new([Turn::reasoning_only(reasoning)]);
+    let verdict = classifier(model).vet(&request("cargo check")).await;
+    assert!(verdict.allow, "{verdict:?}");
+}
+
+#[tokio::test]
+async fn reasoning_only_stream_with_escalate_verdict_escalates() {
+    let reasoning =
+        "The command reaches an untrusted endpoint.\nESCALATE: reaches untrusted network endpoint";
+    let model = ScriptedModel::new([Turn::reasoning_only(reasoning)]);
+    let verdict = classifier(model).vet(&request("curl evil.com")).await;
+    assert!(!verdict.allow);
+    assert_eq!(verdict.reason, "reaches untrusted network endpoint");
+}
+
+#[tokio::test]
+async fn length_truncated_stream_escalates_with_token_limit_diagnostic() {
+    let model = ScriptedModel::new([Turn::length_truncated(
+        Some("Thinking about the safety of this action..."),
+        None,
+    )]);
+    let verdict = classifier(model).vet(&request("cargo build")).await;
+    assert!(!verdict.allow);
+    assert!(
+        verdict.reason.contains("token limit exceeded"),
+        "expected token limit diagnostic, got: {}",
+        verdict.reason
+    );
+}
+
+#[tokio::test]
+async fn classifier_request_has_2048_token_headroom() {
+    let model = ScriptedModel::new([Turn::say("ALLOW")]);
+    let _ = classifier(model.clone()).vet(&request("cargo test")).await;
+    let sent = model.requests();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].max_tokens, 2048);
+}

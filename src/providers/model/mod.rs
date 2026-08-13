@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use mermaid_domain::{ChatRequest, TurnId};
 use mermaid_model::models::adapters::ModelLimits;
 use mermaid_model::models::adapters::ollama_sizing::NumCtxSource;
-use mermaid_model::models::{ModelError, Result, TokenUsage};
+use mermaid_model::models::{FinishReason, ModelError, Result, TokenUsage};
 use mermaid_runtime::NewProviderProbe;
 
 use super::ctx::{FinalResponse, StreamContext, StreamEvent};
@@ -117,43 +117,70 @@ pub trait ModelProvider: Send + Sync {
     async fn chat(&self, request: ChatRequest, ctx: StreamContext) -> Result<FinalResponse>;
 }
 
+/// Output collected from a one-shot, non-interactive streaming model call.
+#[derive(Debug, Clone, Default)]
+pub struct CollectedText {
+    pub text: String,
+    pub usage: Option<TokenUsage>,
+    pub stop_reason: Option<FinishReason>,
+    pub reasoning: Option<String>,
+}
+
 /// Run a one-shot, non-interactive model call and collect its streamed text
-/// into a `String`. For internal calls whose output is NOT shown to the user
-/// as it streams — context compaction and the Auto-mode safety classifier.
-/// Drains a private event channel (ignoring reasoning / tool-call events) and
-/// returns the collected text plus final token usage. The `token` lets the
+/// into a `CollectedText`. For internal calls whose output is NOT shown to the user
+/// as it streams — context compaction, memory consolidation, and the Auto-mode safety classifier.
+/// Drains a private event channel, capturing plain text, reasoning trace, final token
+/// usage, and stop reasons (e.g. length limits / content filters). The `token` lets the
 /// caller cancel the call (e.g. on Ctrl+C) like any other turn work.
 pub(crate) async fn collect_text(
     provider: Arc<dyn ModelProvider>,
     turn: TurnId,
     request: ChatRequest,
     token: tokio_util::sync::CancellationToken,
-) -> Result<(String, Option<TokenUsage>)> {
+) -> Result<CollectedText> {
     let (stream_tx, mut stream_rx) = tokio::sync::mpsc::channel::<StreamEvent>(128);
     let ctx = StreamContext::new(token, stream_tx, turn);
     let collector = tokio::task::spawn(async move {
         let mut text = String::new();
+        let mut reasoning = String::new();
         let mut usage = None;
+        let mut stop_reason = None;
         while let Some(event) = stream_rx.recv().await {
             match event {
                 StreamEvent::Text(chunk) => text.push_str(&chunk),
+                StreamEvent::Reasoning(chunk) => reasoning.push_str(&chunk.text),
                 StreamEvent::Done {
-                    usage: done_usage, ..
-                } => usage = done_usage,
+                    usage: done_usage,
+                    stop_reason: done_stop,
+                    ..
+                } => {
+                    usage = done_usage;
+                    stop_reason = done_stop;
+                },
                 // Status is a user-facing plumbing notice, not content —
                 // a text collector has nowhere to surface it.
-                StreamEvent::Reasoning(_) | StreamEvent::ToolCall(_) | StreamEvent::Status(_) => {},
+                StreamEvent::ToolCall(_) | StreamEvent::Status(_) => {},
             }
         }
-        (text, usage)
+        (
+            text,
+            (!reasoning.is_empty()).then_some(reasoning),
+            usage,
+            stop_reason,
+        )
     });
 
     let response = provider.chat(request, ctx).await;
-    let (text, stream_usage) = collector
+    let (text, reasoning, stream_usage, stream_stop_reason) = collector
         .await
         .map_err(|err| ModelError::StreamError(format!("collect_text collector failed: {err}")))?;
     match response {
-        Ok(final_response) => Ok((text, final_response.usage.or(stream_usage))),
+        Ok(final_response) => Ok(CollectedText {
+            text,
+            usage: final_response.usage.or(stream_usage),
+            stop_reason: final_response.stop_reason.or(stream_stop_reason),
+            reasoning,
+        }),
         Err(err) => Err(err),
     }
 }

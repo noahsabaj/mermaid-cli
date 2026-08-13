@@ -234,7 +234,9 @@ fn lexical_normalize(p: &Path) -> PathBuf {
                 }
             },
             Component::CurDir => {},
-            other => out.push(other.as_os_str()),
+            Component::Prefix(prefix) => out.push(prefix.as_os_str()),
+            Component::RootDir => out.push(std::path::MAIN_SEPARATOR_STR),
+            Component::Normal(normal) => out.push(normal),
         }
     }
     out

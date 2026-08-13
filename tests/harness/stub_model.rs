@@ -58,6 +58,12 @@ pub enum Turn {
     /// Take longer than `after` before answering. For deadlines: a caller
     /// with its own timeout can be shown to enforce it.
     Stall(std::time::Duration),
+    /// Stream reasoning chunks and/or text chunks, with an explicit stop reason.
+    Stream {
+        reasoning: Option<String>,
+        text: Option<String>,
+        stop_reason: Option<FinishReason>,
+    },
 }
 
 impl Turn {
@@ -75,6 +81,24 @@ impl Turn {
     /// A turn that ends the run with `text`.
     pub fn say(text: &str) -> Self {
         Self::Say(text.to_string(), None)
+    }
+
+    /// A turn that only emits reasoning and no final plain text.
+    pub fn reasoning_only(reasoning: &str) -> Self {
+        Self::Stream {
+            reasoning: Some(reasoning.to_string()),
+            text: None,
+            stop_reason: Some(FinishReason::Stop),
+        }
+    }
+
+    /// A turn that stops because of length truncation (token limit).
+    pub fn length_truncated(reasoning: Option<&str>, text: Option<&str>) -> Self {
+        Self::Stream {
+            reasoning: reasoning.map(str::to_string),
+            text: text.map(str::to_string),
+            stop_reason: Some(FinishReason::Length),
+        }
     }
 
     /// Hand back a continuation blob alongside this turn's text, so a test
@@ -205,6 +229,31 @@ impl ModelProvider for ScriptedModel {
                     let _ = ctx.sink.send(StreamEvent::ToolCall(call.clone())).await;
                 }
                 (calls, Some(FinishReason::ToolUse))
+            },
+            Turn::Stream {
+                reasoning,
+                text,
+                stop_reason,
+            } => {
+                if let Some(r) = reasoning {
+                    for chunk in split_for_streaming(&r) {
+                        let _ = ctx
+                            .sink
+                            .send(StreamEvent::Reasoning(
+                                mermaid_model::models::ReasoningChunk {
+                                    text: chunk,
+                                    signature: None,
+                                },
+                            ))
+                            .await;
+                    }
+                }
+                if let Some(t) = text {
+                    for chunk in split_for_streaming(&t) {
+                        let _ = ctx.sink.send(StreamEvent::Text(chunk)).await;
+                    }
+                }
+                (Vec::new(), stop_reason)
             },
         };
 
