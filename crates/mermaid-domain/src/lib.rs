@@ -96,8 +96,8 @@ pub use reducer::update;
 pub use request::build_chat_request;
 pub use run_event::{RUN_EVENT_PROTOCOL_VERSION, RunEvent};
 pub use runtime::{
-    ProviderCapabilitySnapshot, RuntimeSignal, RuntimeState, RuntimeTimelineEvent,
-    RuntimeTimelineKind,
+    BackgroundAgent, ProviderCapabilitySnapshot, RunLineChanges, RunTokenCounter, RuntimeSignal,
+    RuntimeState, RuntimeTimelineEvent, RuntimeTimelineKind,
 };
 pub use session_event::{
     SESSION_EVENT_FORMAT_VERSION, SessionEvent, SessionEventLine, SessionScalars, fold_session,

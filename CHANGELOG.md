@@ -29,6 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Modularized domain reducer into focused sub-modules.** The monolithic 15,335-line `crates/mermaid-domain/src/reducer.rs` has been decomposed into a clean modular package (`crates/mermaid-domain/src/reducer/` containing `mod.rs`, `input.rs`, `slash.rs`, `streaming.rs`, `tools.rs`, `subagents.rs`, `lifecycle.rs`, `plan_flow.rs`, and `tests.rs`). Preserves all 313 unit tests, pure MVU core properties, deterministic replay, and reduces layering debt to zero.
+
 - **Filesystem tools can now view, edit, patch, and delete files outside the project directory.**
   `read_file`, `write_file`, `apply_patch`, `delete_file`, and `create_directory` previously rejected
   paths that resolved outside the project root directory or the session scratchpad. Absolute paths

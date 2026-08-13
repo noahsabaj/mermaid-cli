@@ -3,5 +3,4 @@
 # Debt that predates the guard. This file may only SHRINK.
 # Regenerate with: just ratchet
 #
-# 1 keys / 1 occurrences
-layer|crates/mermaid-domain/src/reducer.rs|runtime 1
+# 0 keys / 0 occurrences
