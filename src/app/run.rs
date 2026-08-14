@@ -86,7 +86,7 @@ impl EffectSink for RunLoopSink {
 struct RecorderTap(Option<Recorder>);
 
 impl StepObserver for RecorderTap {
-    async fn observe(&mut self, obs: Observation<'_>) {
+    fn observe(&mut self, obs: Observation<'_>) {
         if let Some(r) = self.0.as_mut()
             && let Err(err) = r.record_msg(obs.now, obs.msg)
         {
@@ -461,7 +461,7 @@ pub async fn run_interactive_with(
         // `state.now` this Msg was reduced under, so `--replay` folds the
         // same log by stamping each entry's `ts` here and recomputes the
         // exact same states.
-        let outcome = engine.step_at(chrono::Local::now(), msg).await;
+        let outcome = engine.step_at(chrono::Local::now(), msg);
 
         // The sink peeled `ComposeInEditor` off on its way past; run it here,
         // where the terminal and event stream it has to suspend actually live.

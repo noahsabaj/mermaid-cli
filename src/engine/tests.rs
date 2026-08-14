@@ -109,7 +109,7 @@ struct Watch {
 }
 
 impl StepObserver for Watch {
-    async fn observe(&mut self, obs: Observation<'_>) {
+    fn observe(&mut self, obs: Observation<'_>) {
         self.seen
             .push((obs.now, matches!(obs.state.turn, TurnState::Idle)));
     }
@@ -120,7 +120,7 @@ async fn the_observer_sees_the_state_before_the_reducer_changes_it() {
     let mut engine =
         Engine::new(fresh_state(), Recording::default()).with_observer(Watch::default());
 
-    engine.step_at(fixed_now(3), prompt("hello")).await;
+    engine.step_at(fixed_now(3), prompt("hello"));
 
     assert!(!engine.is_idle(), "the step left a turn in flight");
     assert_eq!(

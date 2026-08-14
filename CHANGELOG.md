@@ -31,6 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Refactored `StepObserver` and single-step engine execution to be synchronous.** `StepObserver::observe` and `Engine::{step, step_at}` are now synchronous functions (`fn observe(&mut self, obs: Observation<'_>)`), eliminating async state machine allocations from single-step reductions and preventing asynchronous observer backpressure or channel latency from blocking the pure synchronous reducer pump. `ChildRelay` (subagent progress reporting) now uses `tokio::sync::mpsc::unbounded_channel` for non-blocking dispatch.
+
 - **Modularized domain reducer into focused sub-modules.** The monolithic 15,335-line `crates/mermaid-domain/src/reducer.rs` has been decomposed into a clean modular package (`crates/mermaid-domain/src/reducer/` containing `mod.rs`, `input.rs`, `slash.rs`, `streaming.rs`, `tools.rs`, `subagents.rs`, `lifecycle.rs`, `plan_flow.rs`, and `tests.rs`). Preserves all 313 unit tests, pure MVU core properties, deterministic replay, and reduces layering debt to zero.
 
 - **Filesystem tools can now view, edit, patch, and delete files outside the project directory.**

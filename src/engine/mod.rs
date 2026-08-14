@@ -28,7 +28,6 @@ mod handle;
 
 pub use handle::{EngineGone, EngineHandle};
 
-use std::future::Future;
 use std::time::Duration;
 
 use chrono::{DateTime, Local};
@@ -83,16 +82,17 @@ pub struct Observation<'a> {
 
 /// A hook on every message an [`Engine`] pumps.
 ///
-/// `async` because one implementor (the subagent's progress relay) sends on a
-/// bounded channel and must not drop events under backpressure. Implementors
-/// that do no I/O just write a body that never awaits.
+/// Synchronous and non-blocking: observers that emit events or progress to
+/// channels (such as the subagent progress relay or broadcast streams) use
+/// non-blocking channels to ensure observer dispatch never blocks or adds
+/// latency to the reduction pump.
 pub trait StepObserver {
-    fn observe(&mut self, obs: Observation<'_>) -> impl Future<Output = ()> + Send;
+    fn observe(&mut self, obs: Observation<'_>);
 }
 
 /// The no-op observer, for drivers that only want the reducer pumped.
 impl StepObserver for () {
-    async fn observe(&mut self, _obs: Observation<'_>) {}
+    fn observe(&mut self, _obs: Observation<'_>) {}
 }
 
 /// What one reduction did that a driver has to act on.
@@ -368,27 +368,23 @@ impl<S: EffectSink, O: StepObserver> Engine<S, O> {
     }
 
     /// One message under the current wall clock, shown to the observer first.
-    pub async fn step(&mut self, msg: Msg) -> StepOutcome {
-        self.step_at(Local::now(), msg).await
+    pub fn step(&mut self, msg: Msg) -> StepOutcome {
+        self.step_at(Local::now(), msg)
     }
 
     /// [`Engine::step`] with the clock supplied by the caller — used where a
     /// single timestamp is shared with something else, such as the recorder
     /// line that must carry the exact `now` its message was reduced under.
-    pub async fn step_at(&mut self, now: DateTime<Local>, msg: Msg) -> StepOutcome {
-        self.notify(now, &msg).await;
+    pub fn step_at(&mut self, now: DateTime<Local>, msg: Msg) -> StepOutcome {
+        self.notify(now, &msg);
         self.reduce(now, msg)
     }
 
     /// Show one message to the observer, borrowing rather than owning it.
     ///
-    /// Split out from [`Engine::step_at`] so `drive` can await it directly:
-    /// nesting `step_at`'s whole state machine inside the drive loop's would
-    /// give the combined future a second `Msg`-sized slot, and `Msg` is the
-    /// large enum this codebase already carries an expect for. The drive loop
-    /// sits inside every caller's future in turn, so that slot is paid for all
-    /// the way up to `main`.
-    async fn notify(&mut self, now: DateTime<Local>, msg: &Msg) {
+    /// Split out from [`Engine::step_at`] so `drive` can call it directly:
+    /// keeping one `Msg`-sized slot out of the drive loop's future.
+    fn notify(&mut self, now: DateTime<Local>, msg: &Msg) {
         // Split borrow: the observation reads `self.state`, the observe call
         // takes `self.observer` mutably. Disjoint fields, so both are fine.
         let obs = Observation {
@@ -396,7 +392,7 @@ impl<S: EffectSink, O: StepObserver> Engine<S, O> {
             msg,
             state: Self::present(self.state.as_ref()),
         };
-        self.observer.observe(obs).await;
+        self.observer.observe(obs);
     }
 
     /// Pump `inbox` until `policy` says stop.
@@ -467,7 +463,7 @@ impl<S: EffectSink, O: StepObserver> Engine<S, O> {
             // `notify` + `reduce` rather than `step`, to keep one `Msg`-sized
             // slot out of this loop's future — see `notify`.
             let now = Local::now();
-            self.notify(now, &msg).await;
+            self.notify(now, &msg);
             if self.reduce(now, msg).should_exit {
                 return DriveExit::Exited;
             }

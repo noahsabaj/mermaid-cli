@@ -73,7 +73,7 @@ pub struct Engine<S: EffectSink, O: StepObserver = ()> { state, sink, observer }
 
 impl Engine {
     fn  reduce(&mut self, now, msg) -> StepOutcome;   // the pure kernel; sync
-    async fn step(&mut self, msg) -> StepOutcome;     // observe, then reduce
+    fn  step(&mut self, msg) -> StepOutcome;           // observe, then reduce; sync
     async fn drive(&mut self, inbox, policy) -> DriveExit;
 }
 ```
@@ -88,8 +88,10 @@ Three seams, one per axis the six sites actually differ on:
   rest.
 - **`StepObserver`** — what watches each message *before* `update` consumes it.
   The recorder, the `RunEvent` projection, and `ChildProgress` all need the
-  pre-update state, and one of them needs to `.await` a channel send, so the
-  hook is `async`.
+  pre-update state. The hook is strictly synchronous and non-blocking (`fn observe`),
+  ensuring downstream consumer backpressure never blocks the reduction pump;
+  asynchronous observers (e.g. `ChildRelay` and broadcast channels) dispatch over
+  non-blocking channels.
 - **`DrivePolicy`** — `StopWhen` (`Exit` for interactive, `Settled` for
   headless), an optional `CancellationToken` with an explicit `OnCancel`
   (`Abort` or `Unwind { grace }` — the two behaviours sites 2 and 3 already

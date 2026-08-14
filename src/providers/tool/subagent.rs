@@ -779,7 +779,7 @@ impl ToolExecutor for SubagentTool {
         };
         // Child progress flows through a local channel so a Ctrl+B detach can
         // re-route it (turn progress channel → turn-independent notify Msgs).
-        let (child_progress_tx, mut child_progress_rx) = mpsc::channel::<ProgressEvent>(16);
+        let (child_progress_tx, mut child_progress_rx) = mpsc::unbounded_channel::<ProgressEvent>();
         let mut drive = Box::pin(drive_child(
             child_state,
             child_runner,
@@ -854,7 +854,7 @@ impl ToolExecutor for SubagentTool {
 /// the handoff reads as one unit instead of a 11-argument call.
 struct DetachArgs<F> {
     drive: std::pin::Pin<Box<F>>,
-    progress_rx: mpsc::Receiver<ProgressEvent>,
+    progress_rx: mpsc::UnboundedReceiver<ProgressEvent>,
     permit: tokio::sync::OwnedSemaphorePermit,
     /// The child's own cancel token — registered on the spawner so
     /// `/agents kill` and the `agent` tool's kill action can reach it.
@@ -1171,16 +1171,14 @@ async fn drive_child(
     state: State,
     runner: EffectRunner,
     mut msg_rx: mpsc::Receiver<Msg>,
-    parent_progress: mpsc::Sender<ProgressEvent>,
+    parent_progress: mpsc::UnboundedSender<ProgressEvent>,
     prompt: String,
     token: CancellationToken,
     timeout: Duration,
 ) -> (Result<String, DriveError>, State) {
     // Signal start to parent. One stable label — the prompt itself never
     // belongs on the parent's status line.
-    let _ = parent_progress
-        .send(ProgressEvent::SubagentActivity("starting…".to_string()))
-        .await;
+    let _ = parent_progress.send(ProgressEvent::SubagentActivity("starting…".to_string()));
 
     // Project instructions + memory are loaded synchronously into `state` before
     // `drive_child` is called (see `execute`), so the child's first model call
@@ -1261,16 +1259,16 @@ async fn drive_child(
 /// exactly what the reducer strips.
 struct ChildRelay {
     progress: ChildProgress,
-    parent: mpsc::Sender<ProgressEvent>,
+    parent: mpsc::UnboundedSender<ProgressEvent>,
 }
 
 impl StepObserver for ChildRelay {
-    async fn observe(&mut self, obs: Observation<'_>) {
+    fn observe(&mut self, obs: Observation<'_>) {
         for event in self
             .progress
             .observe(obs.msg, obs.state, tokio::time::Instant::now())
         {
-            let _ = self.parent.send(event).await;
+            let _ = self.parent.send(event);
         }
     }
 }

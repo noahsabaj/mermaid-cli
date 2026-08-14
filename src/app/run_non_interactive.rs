@@ -369,7 +369,7 @@ struct RunStream {
 }
 
 impl StepObserver for RunStream {
-    async fn observe(&mut self, obs: Observation<'_>) {
+    fn observe(&mut self, obs: Observation<'_>) {
         // Plumbing notices ("Starting the local Ollama server…") have no
         // renderer here — mirror them to stderr live so the user isn't staring
         // at silence during an up-to-15s server start. stderr, not stdout: the
