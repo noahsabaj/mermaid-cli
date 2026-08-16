@@ -67,7 +67,14 @@ windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Security_Authorization",
+    "Win32_Security_Isolation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_JobObjects",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
     "Win32_System_Threading",
+    "Win32_System_IO",
 ] }
 
 # Linux OS sandbox: pure-Rust seccomp-BPF assembler for the network kill-switch,

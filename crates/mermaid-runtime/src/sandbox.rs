@@ -104,7 +104,18 @@ pub fn enforce(policy: &SandboxPolicy, argv: &[OsString]) -> anyhow::Result<Enfo
         );
         Ok(Enforcement::ExecArgv(macos::wrap_argv(policy, argv)))
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(target_os = "windows")]
+    {
+        use anyhow::Context as _;
+        anyhow::ensure!(
+            windows::appcontainer_available(),
+            "Windows AppContainer is unavailable on this system; refusing to run unconfined"
+        );
+        let exit_code = windows::run_in_appcontainer(policy, argv)
+            .context("Windows AppContainer sandbox execution failed")?;
+        Ok(Enforcement::Ran(exit_code))
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
         let _ = argv;
         anyhow::bail!("no OS sandbox backend on this platform; refusing to run unconfined")
@@ -113,9 +124,9 @@ pub fn enforce(policy: &SandboxPolicy, argv: &[OsString]) -> anyhow::Result<Enfo
 
 /// Whether the network kill-switch is really available on this platform:
 /// Linux when the seccomp filter assembles (supported arch), macOS when
-/// `/usr/bin/sandbox-exec` exists, `false` everywhere else (Windows
-/// AppContainer is a follow-up). Used by `mermaid self-test` and the exec
-/// tool as a safe, fork-free probe — it installs nothing.
+/// `/usr/bin/sandbox-exec` exists, Windows when AppContainer is supported.
+/// Used by `mermaid self-test` and the exec tool as a safe, fork-free probe —
+/// it installs nothing.
 #[must_use]
 pub fn network_killswitch_available() -> bool {
     #[cfg(target_os = "linux")]
@@ -126,7 +137,11 @@ pub fn network_killswitch_available() -> bool {
     {
         macos::sandbox_exec_present()
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(target_os = "windows")]
+    {
+        windows::appcontainer_available()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
         false
     }
@@ -134,8 +149,8 @@ pub fn network_killswitch_available() -> bool {
 
 /// Whether filesystem write-confinement is really available on this platform:
 /// Linux when the Landlock ruleset assembles, macOS when
-/// `/usr/bin/sandbox-exec` exists, `false` everywhere else. Like
-/// [`network_killswitch_available`]: a safe probe that restricts nothing.
+/// `/usr/bin/sandbox-exec` exists, Windows when AppContainer is supported.
+/// Like [`network_killswitch_available`]: a safe probe that restricts nothing.
 /// (On Linux enforcement remains best-effort at apply time — a pre-Landlock
 /// kernel builds the ruleset but cannot enforce it.)
 #[must_use]
@@ -148,11 +163,18 @@ pub fn fs_confinement_available() -> bool {
     {
         macos::sandbox_exec_present()
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(target_os = "windows")]
+    {
+        windows::appcontainer_available()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
         false
     }
 }
+
+#[cfg(target_os = "windows")]
+mod windows;
 
 /// macOS Seatbelt backend: generate an allow-default SBPL profile and rewrite
 /// the command argv to run under `/usr/bin/sandbox-exec`.

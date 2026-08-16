@@ -1,0 +1,8 @@
+# Workspace Cargo configuration.
+
+# Use rust-lld for fast linking on Windows MSVC.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "linker=rust-lld"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "linker=rust-lld"]

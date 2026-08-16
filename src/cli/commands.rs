@@ -835,6 +835,11 @@ fn run_self_test(config: &Config, format: OutputFormat, keep_workspace: bool) ->
             "network sandbox (Seatbelt via sandbox-exec) available on this platform",
             "filesystem confinement (Seatbelt via sandbox-exec) available on this platform",
         )
+    } else if cfg!(target_os = "windows") {
+        (
+            "network sandbox (AppContainer) available on this platform",
+            "filesystem confinement (AppContainer) available on this platform",
+        )
     } else {
         (
             "network sandbox backend available on this platform",
@@ -855,9 +860,12 @@ fn run_self_test(config: &Config, format: OutputFormat, keep_workspace: bool) ->
         ),
     ];
     // Platforms with a sandbox backend must have it working; platforms
-    // without one (Windows until the AppContainer port) truthfully report
-    // "no" above without failing the whole self-test.
-    let sandbox_expected = cfg!(any(target_os = "linux", target_os = "macos"));
+    // without one truthfully report "no" above without failing the whole self-test.
+    let sandbox_expected = cfg!(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "windows"
+    ));
     let ok = compact_smoke.ok
         && runtime_store.status == "ok"
         && (!sandbox_expected || (sandbox_available && fs_sandbox_available));

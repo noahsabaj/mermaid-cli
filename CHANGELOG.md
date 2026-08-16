@@ -7,7 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
+- **Accelerated test iteration and consolidated integration tests.** Restructured 23 separate integration test binaries into a unified integration test runner (`tests/integration.rs` with submodules under `tests/it/`), reducing link steps from 23 down to 1. Configured `rust-lld` fast linker for Windows MSVC via `.cargo/config.toml`, enabled `debug = 1` (line-tables-only) in dev/test profiles to cut debug symbol overhead by ~60%, compiled dev/test dependencies with `opt-level = 2` for faster test execution, and added `just test` recipe for nextest.
+
+- **Decoupled View Layer into `mermaid-ui` Pure Presentation Crate.** Introduced `crates/mermaid-ui`, a pure Model-View-Update presentation crate between the domain model and terminal/graphical frontends. Contains declarative virtual UI node trees (`UiNode`), pure text wrapping and markdown engines with CJK and unicode-width accuracy, semantic theme tokens (`ThemeToken`), and presentation cache structures (`UiCache`). `src/render/` now consumes `mermaid-ui` through a thin backend adapter (`src/render/adapter.rs`) while preserving complete visual parity and passing all tests and source guard ratchets.
+
+- **Native Windows OS Sandboxing (AppContainer & Job Objects).** `--no-network`, `--confine-fs`, and `--sandbox` now confine model-run shell commands on Windows via native Windows AppContainers (LowBox tokens) and Job Objects. Omits network capabilities while sparing `127.0.0.1` localhost loopback for local dev tooling, and applies transient SID ACLs to restrict filesystem writes strictly to project, workdir, and temp roots with automatic RAII cleanup and kill-on-close process tree containment.
 
 - **Unified storage coordinator and `mermaid storage` CLI commands.** Introduced `StorageCoordinator` in `mermaid-runtime` to resolve dual-storage tension between SQLite (`runtime.sqlite3`) and append-only JSONL files (`.mermaid/conversations/`). Automatically backfills task-to-session linkages on completion/start, provides atomic cascade deletion across both databases and filesystem logs, and adds `mermaid storage reconcile`, `mermaid storage gc`, and `mermaid storage delete <id>` subcommands.
 
@@ -30,6 +34,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Auto-mode safety classifier handles reasoning models without failing on empty responses.** Models with mandatory or internal reasoning (e.g. Gemini 3.7 Flash, DeepSeek R1, Claude thinking, and OpenAI o-series) could exhaust the classifier's prior 150-token output limit before emitting plain text, surfacing as `Auto-review flagged this: classifier returned an empty response`. The classifier now uses 2048 tokens of headroom, supports fallback extraction of verdicts from reasoning traces when plain text is empty, and reports actionable diagnostics (e.g. token limits exceeded) on stream truncation.
 
 ### Changed
+
+- **Unified cross-platform fail-closed sandbox enforcement.** Requesting `--sandbox`, `--no-network`, or `--confine-fs` on Windows now enforces kernel containment and strictly fails closed (exit code 126) if sandboxing cannot be applied, eliminating the unconfined fallback warning and achieving feature parity with Linux and macOS.
 
 - **Refactored `StepObserver` and single-step engine execution to be synchronous.** `StepObserver::observe` and `Engine::{step, step_at}` are now synchronous functions (`fn observe(&mut self, obs: Observation<'_>)`), eliminating async state machine allocations from single-step reductions and preventing asynchronous observer backpressure or channel latency from blocking the pure synchronous reducer pump. `ChildRelay` (subagent progress reporting) now uses `tokio::sync::mpsc::unbounded_channel` for non-blocking dispatch.
 

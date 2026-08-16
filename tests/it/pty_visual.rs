@@ -13,9 +13,7 @@
 //!
 //! Cross-platform on purpose (openpty on Unix, ConPTY on Windows).
 
-mod harness;
-
-use harness::{CTRL_L, ENTER, ESC, SHIFT_TAB, Terminal};
+use crate::harness::{CTRL_L, ENTER, ESC, SHIFT_TAB, Terminal};
 use std::time::Duration;
 
 /// The safety cycle is flat and total: five modes, `plan` included, wrapping

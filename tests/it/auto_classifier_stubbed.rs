@@ -25,9 +25,7 @@ use mermaid_cli::providers::{AutoClassifier, ModelAutoClassifier, ProviderFactor
 use mermaid_domain::TurnId;
 use tokio_util::sync::CancellationToken;
 
-#[path = "harness/stub_model.rs"]
-mod stub_model;
-use stub_model::{ScriptedModel, Turn};
+use crate::harness::stub_model::{ScriptedModel, Turn};
 
 const STUB: &str = "stub/scripted";
 

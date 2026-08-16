@@ -2357,6 +2357,7 @@ dependencies = [
  "mermaid-domain",
  "mermaid-model",
  "mermaid-runtime",
+ "mermaid-ui",
  "mime",
  "portable-pty",
  "pulldown-cmark",
@@ -2451,6 +2452,20 @@ dependencies = [
  "toml",
  "tracing",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "mermaid-ui"
+version = "0.25.0"
+dependencies = [
+ "chrono",
+ "mermaid-domain",
+ "mermaid-model",
+ "pulldown-cmark",
+ "rustc-hash",
+ "serde",
+ "serde_json",
+ "unicode-width",
 ]
 
 [[package]]

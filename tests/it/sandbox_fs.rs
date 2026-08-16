@@ -7,7 +7,7 @@
 //! (fork + write + assert EACCES); this proves the launcher wiring: that
 //! `mermaid __sandbox-exec --confine-writes <dir> -- <cmd>` actually restricts
 //! the wrapped command.
-#![cfg(any(target_os = "linux", target_os = "macos"))]
+#![cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -64,21 +64,26 @@ fn confine_writes_allows_inside_and_denies_outside() {
     std::fs::create_dir_all(&outside).unwrap();
     let allowed_arg = allowed.to_str().unwrap().to_string();
 
-    // Inside the allowed dir: the write succeeds.
-    let inside = Command::new(bin)
-        .args([
-            "__sandbox-exec",
-            "--confine-writes",
-            &allowed_arg,
-            "--confine-writes",
-            "/dev",
-            "--",
-            "sh",
-            "-c",
-            &format!("echo hi > {}/in.txt", allowed.display()),
-        ])
-        .output()
-        .expect("spawn confined shell (inside)");
+    let mut inside_cmd = Command::new(bin);
+    inside_cmd.args(["__sandbox-exec", "--confine-writes", &allowed_arg]);
+    #[cfg(unix)]
+    inside_cmd.args(["--confine-writes", "/dev"]);
+    inside_cmd.arg("--");
+
+    #[cfg(windows)]
+    inside_cmd.args([
+        "cmd",
+        "/c",
+        &format!("echo hi > {}/in.txt", allowed.display()),
+    ]);
+    #[cfg(not(windows))]
+    inside_cmd.args([
+        "sh",
+        "-c",
+        &format!("echo hi > {}/in.txt", allowed.display()),
+    ]);
+
+    let inside = inside_cmd.output().expect("spawn confined shell (inside)");
     assert!(
         inside.status.success(),
         "write inside the allowed dir should succeed (stderr={})",
@@ -88,20 +93,18 @@ fn confine_writes_allows_inside_and_denies_outside() {
 
     // Outside it: the write is denied with a permission error.
     let out_file = outside.join("out.txt");
-    let denied = Command::new(bin)
-        .args([
-            "__sandbox-exec",
-            "--confine-writes",
-            &allowed_arg,
-            "--confine-writes",
-            "/dev",
-            "--",
-            "sh",
-            "-c",
-            &format!("echo hi > {}", out_file.display()),
-        ])
-        .output()
-        .expect("spawn confined shell (outside)");
+    let mut denied_cmd = Command::new(bin);
+    denied_cmd.args(["__sandbox-exec", "--confine-writes", &allowed_arg]);
+    #[cfg(unix)]
+    denied_cmd.args(["--confine-writes", "/dev"]);
+    denied_cmd.arg("--");
+
+    #[cfg(windows)]
+    denied_cmd.args(["cmd", "/c", &format!("echo hi > {}", out_file.display())]);
+    #[cfg(not(windows))]
+    denied_cmd.args(["sh", "-c", &format!("echo hi > {}", out_file.display())]);
+
+    let denied = denied_cmd.output().expect("spawn confined shell (outside)");
     assert!(
         !denied.status.success(),
         "write outside the allowed dir should fail"

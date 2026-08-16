@@ -13,7 +13,7 @@ use rustc_hash::FxHashMap;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::render::markdown::parse_markdown;
-use crate::render::theme::Theme;
+use crate::render::theme::{ColorValueExt, Theme};
 use mermaid_domain::{
     ActionDetails, ActionDisplay, ActionResult, QuestionAnswer, ToolMetadata, format_compact_count,
 };

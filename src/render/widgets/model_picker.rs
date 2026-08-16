@@ -24,7 +24,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 use unicode_width::UnicodeWidthStr;
 
-use crate::render::theme::Theme;
+use crate::render::theme::{ColorValueExt, Theme};
 use mermaid_domain::ModelChoice;
 
 /// Rows drawn at once. Enough to see a provider's block without swallowing the

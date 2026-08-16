@@ -7,7 +7,7 @@
 //! (fork + `socket` + assert SIGSYS); this test proves the launcher wiring:
 //! that `mermaid __sandbox-exec --no-network -- <cmd>` actually installs the
 //! confinement before running the wrapped command.
-#![cfg(any(target_os = "linux", target_os = "macos"))]
+#![cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 
 use std::process::Command;
 
@@ -118,18 +118,15 @@ fn no_network_blocks_tcp_connect_but_allows_it_otherwise() {
 fn no_network_still_allows_ordinary_local_commands() {
     let bin = env!("CARGO_BIN_EXE_mermaid");
     // A command that only touches the local filesystem must still work under the
-    // network denial (it blocks internet sockets, not AF_UNIX / local I/O).
-    let output = Command::new(bin)
-        .args([
-            "__sandbox-exec",
-            "--no-network",
-            "--",
-            "sh",
-            "-c",
-            "echo ok && ls / >/dev/null",
-        ])
-        .output()
-        .expect("spawn sandboxed shell");
+    // network denial (it blocks internet sockets, not local I/O).
+    let mut cmd = Command::new(bin);
+    cmd.args(["__sandbox-exec", "--no-network", "--"]);
+    #[cfg(windows)]
+    cmd.args(["cmd", "/c", "echo ok"]);
+    #[cfg(not(windows))]
+    cmd.args(["sh", "-c", "echo ok && ls / >/dev/null"]);
+
+    let output = cmd.output().expect("spawn sandboxed shell");
     assert!(
         output.status.success(),
         "local command should run under --no-network (stderr={})",

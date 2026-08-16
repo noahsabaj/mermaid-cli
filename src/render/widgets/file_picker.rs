@@ -16,7 +16,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Widget},
 };
 
-use crate::render::theme::Theme;
+use crate::render::theme::{ColorValueExt, Theme};
 
 /// Visible-row window, matching the slash palette's geometry.
 const MAX_VISIBLE_ROWS: usize = 8;

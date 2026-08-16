@@ -6,7 +6,7 @@ use ratatui::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::render::theme::Theme;
+use crate::render::theme::{ColorValueExt, Theme};
 
 /// State for the input widget
 #[derive(Debug, Clone)]

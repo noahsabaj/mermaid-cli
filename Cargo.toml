@@ -22,6 +22,7 @@ members = [
     "crates/mermaid-domain",
     "crates/mermaid-model",
     "crates/mermaid-runtime",
+    "crates/mermaid-ui",
 ]
 
 [[bin]]
@@ -110,6 +111,7 @@ sha2 = "0.11"
 mermaid-domain = { path = "crates/mermaid-domain", version = "0.25.0" }
 mermaid-model = { path = "crates/mermaid-model", version = "0.25.0" }
 mermaid-runtime = { path = "crates/mermaid-runtime", version = "0.25.0" }
+mermaid-ui = { path = "crates/mermaid-ui", version = "0.25.0" }
 
 # Additional utilities
 rustc-hash = "2.0"  # Faster non-cryptographic hash for HashMap
@@ -150,6 +152,7 @@ portable-pty = "0.9"
 mermaid-domain = { path = "crates/mermaid-domain", version = "0.25.0" }
 mermaid-model = { path = "crates/mermaid-model", version = "0.25.0" }
 mermaid-runtime = { path = "crates/mermaid-runtime", version = "0.25.0" }
+mermaid-ui = { path = "crates/mermaid-ui", version = "0.25.0" }
 # Scoped env-var guards — replaces `unsafe { std::env::set_var / remove_var }`
 # patterns in model + auth tests. Safer under `--test-threads > 1`.
 # `async_closure` feature enables `async_with_vars` for tokio-test paths.
@@ -173,6 +176,18 @@ lto = true
 codegen-units = 1
 strip = true
 opt-level = 3
+
+[profile.dev]
+debug = 1
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.test]
+debug = 1
+
+[profile.test.package."*"]
+opt-level = 2
 
 [target."cfg(unix)".dependencies]
 ruzstd = "0.8.3"

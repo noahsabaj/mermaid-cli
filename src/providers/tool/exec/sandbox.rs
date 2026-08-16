@@ -137,5 +137,9 @@ pub(crate) fn is_permission_denial(run: &CommandRunOutput) -> bool {
     let failed = matches!(run.exit_code, Some(code) if code != 0);
     failed
         && (run.output.contains("Permission denied")
-            || run.output.contains("Operation not permitted"))
+            || run.output.contains("Operation not permitted")
+            || run.output.contains("Access is denied")
+            || run.output.contains("UnauthorizedAccessException")
+            || run.output.contains("10013")
+            || run.output.contains("WSAEACCES"))
 }

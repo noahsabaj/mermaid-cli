@@ -22,7 +22,7 @@
 .codex
 
 # Configuration files (contain user-specific settings)
-config.toml
+/config.toml
 
 # CLAUDE.md (contains AI assistant instructions)
 CLAUDE.md

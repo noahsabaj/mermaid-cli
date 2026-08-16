@@ -5,8 +5,8 @@
 
 use mermaid_domain::slash_commands::COMMAND_REGISTRY;
 
-const README: &str = include_str!("../README.md");
-const CONFIG_DOC: &str = include_str!("../docs/configuration.md");
+const README: &str = include_str!("../../README.md");
+const CONFIG_DOC: &str = include_str!("../../docs/configuration.md");
 
 /// The fenced toml block holding `[safety]` — the sample users copy.
 ///

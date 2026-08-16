@@ -14,6 +14,10 @@ check:
     just guards
     cargo nextest run --workspace
 
+# Run the test suite via nextest.
+test *ARGS:
+    cargo nextest run --workspace {{ARGS}}
+
 # Dependency-free source guards. CI runs exactly these.
 #
 # `just check` used to skip them while claiming to be "what CI runs" — CI has

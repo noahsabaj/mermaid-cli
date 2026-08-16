@@ -34,9 +34,7 @@ use mermaid_domain::{
 };
 use mermaid_model::models::{ChatMessage, ReasoningLevel};
 
-#[path = "harness/stub_model.rs"]
-mod stub_model;
-use stub_model::{ScriptedModel, Turn};
+use crate::harness::stub_model::{ScriptedModel, Turn};
 
 const STUB: &str = "stub/scripted";
 

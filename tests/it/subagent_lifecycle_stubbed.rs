@@ -23,9 +23,7 @@ use mermaid_cli::providers::tool::web::WebCapabilities;
 use mermaid_domain::{Msg, ToolCallId, ToolStatus, TurnId};
 use mermaid_runtime::SafetyMode;
 
-#[path = "harness/stub_model.rs"]
-mod stub_model;
-use stub_model::{ScriptedModel, Turn};
+use crate::harness::stub_model::{ScriptedModel, Turn};
 
 const STUB: &str = "stub/scripted";
 

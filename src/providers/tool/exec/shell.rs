@@ -59,7 +59,16 @@ pub(crate) fn shell_invocation(
             args.push("--confine-writes".into());
             args.push(dir.into());
         }
-        args.extend(["--".into(), "sh".into(), "-c".into(), command.into()]);
+        args.push("--".into());
+        if mermaid_runtime::HostShell::current() == mermaid_runtime::HostShell::PowerShell {
+            args.push(powershell_program().into());
+            args.push("-NoProfile".into());
+            args.push("-NonInteractive".into());
+            args.push("-Command".into());
+            args.push(powershell_wrap(command).into());
+        } else {
+            args.extend(["sh".into(), "-c".into(), command.into()]);
+        }
         ShellInvocation { program: exe, args }
     } else if mermaid_runtime::HostShell::current() == mermaid_runtime::HostShell::PowerShell {
         // `HostShell::current()` is the shared predicate: risk

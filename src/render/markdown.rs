@@ -3,7 +3,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::render::theme::Theme;
+use crate::render::theme::{ColorValueExt, Theme};
 
 /// A parsed markdown line plus whether it is **preformatted** — i.e. must NOT be
 /// word-wrapped by the chat renderer (which collapses runs of whitespace). Code

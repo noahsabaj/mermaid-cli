@@ -12,7 +12,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 
 use super::truncate_to_cells;
-use crate::render::theme::Theme;
+use crate::render::theme::{ColorValueExt, Theme};
 use mermaid_domain::RewindCandidate;
 
 pub struct RewindPickerWidget<'a> {

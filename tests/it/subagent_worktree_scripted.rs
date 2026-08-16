@@ -25,9 +25,7 @@ use mermaid_domain::{ToolCallId, ToolStatus, TurnId};
 use mermaid_runtime::SafetyMode;
 use mermaid_runtime::git::git;
 
-#[path = "harness/stub_model.rs"]
-mod stub_model;
-use stub_model::{ScriptedModel, Turn};
+use crate::harness::stub_model::{ScriptedModel, Turn};
 
 /// The id the stub is seeded under. Nothing builds a provider for it.
 const STUB: &str = "stub/scripted";

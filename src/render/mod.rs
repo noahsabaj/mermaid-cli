@@ -14,6 +14,7 @@
 //! cache, scroll position, theme choice) — it never affects
 //! reducer outcomes or persisted state.
 
+pub mod adapter;
 pub mod markdown;
 pub mod theme;
 pub mod widgets;
@@ -31,8 +32,8 @@ use mermaid_domain::{State, TurnState};
 use mermaid_model::models::{ReasoningCapability, ReasoningLevel, nearest_effort};
 
 use widgets::{
-    ChatState, ChatWidget, GenerationStatus, InputState, InputWidget, SlashPaletteWidget,
-    StatusWidget, build_status_lines,
+    ChatState, ChatWidget, ColorValueExt, GenerationStatus, InputState, InputWidget,
+    SlashPaletteWidget, StatusWidget, build_status_lines,
 };
 
 /// Transient render-layer state that lives across frames but isn't

@@ -143,11 +143,11 @@ MCP servers contribute tools under the `mcp__<server>__<tool>` prefix, **deferre
 
 Approval policy and OS confinement are independent. The policy (`plan`, `read_only`, `ask`, `auto`, `full_access`) decides what needs your say-so; the sandbox decides what the kernel permits regardless:
 
-- `--no-network` — blocks web tools everywhere, and on Linux/macOS stops model-run commands from reaching the network
+- `--no-network` — blocks web tools everywhere, and stops model-run commands from reaching the network
 - `--confine-fs` — write-class filesystem access only beneath the project root, cwd, and temp
 - `--sandbox` — both at once
 
-Enforcement is seccomp-BPF plus Landlock on Linux, Seatbelt on macOS, nothing yet on Windows. It fails closed: unappliable confinement exits 126 rather than running unconfined. See [docs/sandbox.md](docs/sandbox.md).
+Enforcement is seccomp-BPF plus Landlock on Linux, Seatbelt on macOS, AppContainer plus Job Objects on Windows. It fails closed: unappliable confinement exits 126 rather than running unconfined. See [docs/sandbox.md](docs/sandbox.md).
 
 ## Project instructions
 

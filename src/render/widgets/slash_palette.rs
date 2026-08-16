@@ -15,7 +15,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Widget},
 };
 
-use crate::render::theme::Theme;
+use crate::render::theme::{ColorValueExt, Theme};
 use mermaid_domain::slash_commands::PaletteEntry;
 
 /// Hard cap on visible rows — anything beyond is hidden until the user

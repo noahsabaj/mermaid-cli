@@ -36,9 +36,7 @@
 //! Run with `UPDATE_SNAPSHOTS=1` to (re)write `tests/snapshots/*.txt`. Review
 //! the diff like any other diff: an unexplained change is the bug.
 
-mod harness;
-
-use harness::{ENTER, Terminal};
+use crate::harness::{self, ENTER, Terminal};
 use std::time::Duration;
 
 /// Assistant markdown as the transcript actually paints it: multi-word inline

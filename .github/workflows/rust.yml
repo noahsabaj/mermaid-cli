@@ -282,7 +282,7 @@ jobs:
           ISO="$RUNNER_TEMP/isolated"
           mkdir -p "$ISO"
           cp -r crates/. "$ISO/"
-          for crate in mermaid-runtime mermaid-model mermaid-domain; do
+          for crate in mermaid-runtime mermaid-model mermaid-domain mermaid-ui; do
             echo "::group::$crate (standalone)"
             ( cd "$ISO/$crate" && cargo build --all-targets )
             echo "::endgroup::"
@@ -393,10 +393,9 @@ jobs:
         run: cargo test --lib searxng::tests::managed_searxng_end_to_end -- --ignored --exact
 
   # OS-sandbox enforcement on the non-Linux platforms with a real backend
-  # (the Linux `integration` job above already runs these tests). macOS-only
-  # for now; the Windows AppContainer port adds windows-latest. The
-  # `#[ignore]`d tests include the Seatbelt profile-compile canary, so an SBPL
-  # grammar change in a new macOS release fails this job loudly.
+  # (the Linux `integration` job above already runs these tests). macOS and
+  # Windows AppContainer backends. The `#[ignore]`d tests include the Seatbelt
+  # profile-compile canary and Windows AppContainer ACL/isolation verification.
   # Real macOS verification of the clipboard FILE-REFERENCE paste path.
   #
   # This path (Finder 'Copy' on an image file, rather than copying the image
@@ -446,7 +445,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest]
+        os: [macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master

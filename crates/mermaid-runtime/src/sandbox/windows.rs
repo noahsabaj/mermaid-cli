@@ -1,0 +1,701 @@
+//! Windows AppContainer and Job Object sandbox backend.
+//!
+//! Enforces network kill-switch and filesystem write-confinement via
+//! native Windows AppContainers (LowBox tokens) and Job Objects.
+
+use std::ffi::{OsStr, OsString};
+use std::os::windows::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
+use std::ptr::{null, null_mut};
+
+use anyhow::Context as _;
+use windows_sys::Win32::Foundation::*;
+use windows_sys::Win32::Security::Authorization::*;
+use windows_sys::Win32::Security::Isolation::*;
+use windows_sys::Win32::Security::*;
+use windows_sys::Win32::Storage::FileSystem::*;
+use windows_sys::Win32::System::Console::*;
+use windows_sys::Win32::System::JobObjects::*;
+use windows_sys::Win32::System::LibraryLoader::*;
+use windows_sys::Win32::System::Threading::*;
+
+use super::SandboxPolicy;
+
+/// Convert an `OsStr` / `Path` to a null-terminated UTF-16 vector for Win32 API calls.
+fn to_wide_null(s: &OsStr) -> Vec<u16> {
+    s.encode_wide().chain(Some(0)).collect()
+}
+
+/// Convert a string slice to a null-terminated UTF-16 vector.
+fn str_to_wide_null(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(Some(0)).collect()
+}
+
+/// RAII wrapper for an AppContainer profile and its `PSID`.
+struct AppContainerProfileGuard {
+    name_w: Vec<u16>,
+    sid: PSID,
+}
+
+impl AppContainerProfileGuard {
+    fn create(name: &str) -> anyhow::Result<Self> {
+        let name_w = str_to_wide_null(name);
+        let display_name_w = str_to_wide_null("Mermaid Sandbox");
+        let desc_w = str_to_wide_null("Mermaid Sandboxed Process");
+        let mut psid: PSID = null_mut();
+
+        unsafe {
+            let _ = DeleteAppContainerProfile(name_w.as_ptr());
+        }
+
+        let hr = unsafe {
+            CreateAppContainerProfile(
+                name_w.as_ptr(),
+                display_name_w.as_ptr(),
+                desc_w.as_ptr(),
+                null(),
+                0,
+                &mut psid,
+            )
+        };
+        if hr != 0 || psid.is_null() {
+            anyhow::bail!("CreateAppContainerProfile failed (HRESULT {hr:#x})");
+        }
+        Ok(Self { name_w, sid: psid })
+    }
+
+    fn as_psid(&self) -> PSID {
+        self.sid
+    }
+}
+
+impl Drop for AppContainerProfileGuard {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.sid.is_null() {
+                FreeSid(self.sid);
+            }
+            let _ = DeleteAppContainerProfile(self.name_w.as_ptr());
+        }
+    }
+}
+
+/// RAII wrapper for a Win32 `HANDLE`.
+struct AutoHandle(HANDLE);
+
+impl AutoHandle {
+    fn new(h: HANDLE) -> Self {
+        Self(h)
+    }
+
+    fn is_valid(&self) -> bool {
+        !self.0.is_null() && self.0 != INVALID_HANDLE_VALUE
+    }
+
+    fn raw(&self) -> HANDLE {
+        self.0
+    }
+}
+
+impl Drop for AutoHandle {
+    fn drop(&mut self) {
+        if self.is_valid() {
+            unsafe {
+                CloseHandle(self.0);
+            }
+        }
+    }
+}
+
+/// RAII guard that restores a directory's previous DACL when dropped.
+struct DaclGuard {
+    path_w: Vec<u16>,
+    old_dacl: *mut ACL,
+    sec_desc: PSECURITY_DESCRIPTOR,
+    new_dacl: *mut ACL,
+}
+
+impl Drop for DaclGuard {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = SetNamedSecurityInfoW(
+                self.path_w.as_mut_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                null_mut(),
+                null_mut(),
+                self.old_dacl,
+                null_mut(),
+            );
+            if !self.new_dacl.is_null() {
+                LocalFree(self.new_dacl as _);
+            }
+            if !self.sec_desc.is_null() {
+                LocalFree(self.sec_desc as _);
+            }
+        }
+    }
+}
+
+/// Grant filesystem permissions to `sid` on `path`.
+fn grant_path_access(
+    path: &Path,
+    sid: PSID,
+    access_mask: u32,
+) -> anyhow::Result<Option<DaclGuard>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let mut path_w = to_wide_null(path.as_os_str());
+    let mut old_dacl: *mut ACL = null_mut();
+    let mut sec_desc: PSECURITY_DESCRIPTOR = null_mut();
+
+    let status = unsafe {
+        GetNamedSecurityInfoW(
+            path_w.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            null_mut(),
+            null_mut(),
+            &mut old_dacl,
+            null_mut(),
+            &mut sec_desc,
+        )
+    };
+    if status != ERROR_SUCCESS {
+        anyhow::bail!(
+            "GetNamedSecurityInfoW failed for {}: {status}",
+            path.display()
+        );
+    }
+
+    let mut ea: EXPLICIT_ACCESS_W = unsafe { std::mem::zeroed() };
+    ea.grfAccessPermissions = access_mask;
+    ea.grfAccessMode = GRANT_ACCESS;
+    ea.grfInheritance = CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE;
+    ea.Trustee.pMultipleTrustee = null_mut();
+    ea.Trustee.MultipleTrusteeOperation = 0;
+    ea.Trustee.TrusteeForm = TRUSTEE_IS_SID;
+    ea.Trustee.TrusteeType = TRUSTEE_IS_UNKNOWN;
+    ea.Trustee.ptstrName = sid as _;
+
+    let mut new_dacl: *mut ACL = null_mut();
+    let status = unsafe { SetEntriesInAclW(1, &ea, old_dacl, &mut new_dacl) };
+    if status != ERROR_SUCCESS {
+        unsafe {
+            if !sec_desc.is_null() {
+                LocalFree(sec_desc as _);
+            }
+        }
+        anyhow::bail!("SetEntriesInAclW failed for {}: {status}", path.display());
+    }
+
+    let status = unsafe {
+        SetNamedSecurityInfoW(
+            path_w.as_mut_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            null_mut(),
+            null_mut(),
+            new_dacl,
+            null_mut(),
+        )
+    };
+    if status != ERROR_SUCCESS {
+        unsafe {
+            LocalFree(new_dacl as _);
+            if !sec_desc.is_null() {
+                LocalFree(sec_desc as _);
+            }
+        }
+        anyhow::bail!(
+            "SetNamedSecurityInfoW failed for {}: {status}",
+            path.display()
+        );
+    }
+
+    Ok(Some(DaclGuard {
+        path_w,
+        old_dacl,
+        sec_desc,
+        new_dacl,
+    }))
+}
+
+/// Quote a single command line argument according to standard Windows rules.
+pub(crate) fn quote_windows_arg(arg: &OsStr) -> String {
+    let s = arg.to_string_lossy();
+    if s.is_empty() {
+        return "\"\"".to_string();
+    }
+    if !s.contains([' ', '\t', '\n', '\x0b', '\"']) {
+        return s.to_string();
+    }
+    let mut out = String::from("\"");
+    let mut backslashes = 0;
+    for c in s.chars() {
+        if c == '\\' {
+            backslashes += 1;
+        } else if c == '"' {
+            for _ in 0..(backslashes * 2 + 1) {
+                out.push('\\');
+            }
+            backslashes = 0;
+            out.push('"');
+        } else {
+            for _ in 0..backslashes {
+                out.push('\\');
+            }
+            backslashes = 0;
+            out.push(c);
+        }
+    }
+    for _ in 0..(backslashes * 2) {
+        out.push('\\');
+    }
+    out.push('"');
+    out
+}
+
+/// Format an `argv` array into a single Windows command line string.
+pub(crate) fn build_windows_cmdline(argv: &[OsString]) -> String {
+    argv.iter()
+        .map(|a| quote_windows_arg(a))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Enable loopback exemption for the given AppContainer SID via FirewallAPI.dll.
+fn enable_loopback_exemption(sid: PSID) {
+    type FnNetworkIsolationSetAppContainerConfig =
+        unsafe extern "system" fn(u32, *const SID_AND_ATTRIBUTES) -> u32;
+
+    let dll_name = str_to_wide_null("FirewallAPI.dll");
+    let h_mod = unsafe { LoadLibraryW(dll_name.as_ptr()) };
+    if h_mod.is_null() {
+        return;
+    }
+    let proc_name = c"NetworkIsolationSetAppContainerConfig";
+    let proc = unsafe { GetProcAddress(h_mod, proc_name.as_ptr() as _) };
+    if let Some(func) = proc {
+        let set_config: FnNetworkIsolationSetAppContainerConfig =
+            unsafe { std::mem::transmute(func) };
+        let item = SID_AND_ATTRIBUTES {
+            Sid: sid,
+            Attributes: 0,
+        };
+        unsafe {
+            let _ = set_config(1, &item);
+        }
+    }
+    unsafe {
+        CloseHandle(h_mod as _);
+    }
+}
+
+/// Check if Windows AppContainer support is available on this system.
+pub(crate) fn appcontainer_available() -> bool {
+    let name = "mermaid-probe";
+    let name_w = str_to_wide_null(name);
+    let mut psid: PSID = null_mut();
+    let hr = unsafe { DeriveAppContainerSidFromAppContainerName(name_w.as_ptr(), &mut psid) };
+    if hr == 0 && !psid.is_null() {
+        unsafe {
+            FreeSid(psid);
+        }
+        true
+    } else {
+        false
+    }
+}
+
+const WRITE_PERMISSIONS: u32 =
+    FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE;
+
+/// Proc thread attribute identifiers.
+const PROC_THREAD_ATTRIBUTE_HANDLE_LIST_ID: usize = 0x00020002;
+const PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES_ID: usize = 0x00020009;
+
+fn setup_dacl_guards(policy: &SandboxPolicy, app_sid: PSID) -> anyhow::Result<Vec<DaclGuard>> {
+    let mut guards = Vec::new();
+    for dir in &policy.allowed_writes {
+        if let Some(guard) = grant_path_access(dir, app_sid, WRITE_PERMISSIONS)? {
+            guards.push(guard);
+        }
+    }
+    Ok(guards)
+}
+
+fn collect_stdio_handles(app_sid: PSID) -> (Vec<HANDLE>, HANDLE, HANDLE, HANDLE) {
+    let h_stdin = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
+    let h_stdout = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
+    let h_stderr = unsafe { GetStdHandle(STD_ERROR_HANDLE) };
+
+    let mut handles = Vec::new();
+    for &h in &[h_stdin, h_stdout, h_stderr] {
+        if !h.is_null() && h != INVALID_HANDLE_VALUE {
+            unsafe {
+                let _ = SetHandleInformation(h, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+            }
+            grant_handle_access(h, app_sid);
+            handles.push(h);
+        }
+    }
+    (handles, h_stdin, h_stdout, h_stderr)
+}
+
+fn grant_handle_access(h: HANDLE, sid: PSID) {
+    if h.is_null() || h == INVALID_HANDLE_VALUE {
+        return;
+    }
+    unsafe {
+        let mut p_old_dacl: *mut ACL = null_mut();
+        let mut p_sec_desc: PSECURITY_DESCRIPTOR = null_mut();
+        let status = GetSecurityInfo(
+            h,
+            SE_KERNEL_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            null_mut(),
+            null_mut(),
+            &mut p_old_dacl,
+            null_mut(),
+            &mut p_sec_desc,
+        );
+        if status == ERROR_SUCCESS {
+            let mut ea: EXPLICIT_ACCESS_W = std::mem::zeroed();
+            ea.grfAccessPermissions = GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE;
+            ea.grfAccessMode = GRANT_ACCESS;
+            ea.grfInheritance = 0;
+            ea.Trustee.TrusteeForm = TRUSTEE_IS_SID;
+            ea.Trustee.TrusteeType = TRUSTEE_IS_UNKNOWN;
+            ea.Trustee.ptstrName = sid as _;
+
+            let mut p_new_dacl: *mut ACL = null_mut();
+            if SetEntriesInAclW(1, &ea, p_old_dacl, &mut p_new_dacl) == ERROR_SUCCESS {
+                let _ = SetSecurityInfo(
+                    h,
+                    SE_KERNEL_OBJECT,
+                    DACL_SECURITY_INFORMATION,
+                    null_mut(),
+                    null_mut(),
+                    p_new_dacl,
+                    null_mut(),
+                );
+                LocalFree(p_new_dacl as _);
+            }
+            if !p_sec_desc.is_null() {
+                LocalFree(p_sec_desc as _);
+            }
+        }
+    }
+}
+
+fn setup_proc_attributes(
+    sec_cap: &mut SECURITY_CAPABILITIES,
+    handles: &mut [HANDLE],
+) -> anyhow::Result<(Vec<u8>, LPPROC_THREAD_ATTRIBUTE_LIST)> {
+    let mut attr_size: usize = 0;
+    unsafe {
+        let _ = InitializeProcThreadAttributeList(null_mut(), 2, 0, &mut attr_size);
+    }
+    let mut attr_buf = vec![0u8; attr_size];
+    let attr_list = attr_buf.as_mut_ptr() as LPPROC_THREAD_ATTRIBUTE_LIST;
+    let ok = unsafe { InitializeProcThreadAttributeList(attr_list, 2, 0, &mut attr_size) };
+    anyhow::ensure!(ok != 0, "InitializeProcThreadAttributeList failed");
+
+    let ok = unsafe {
+        UpdateProcThreadAttribute(
+            attr_list,
+            0,
+            PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES_ID,
+            sec_cap as *mut _ as _,
+            std::mem::size_of::<SECURITY_CAPABILITIES>(),
+            null_mut(),
+            null_mut(),
+        )
+    };
+    anyhow::ensure!(ok != 0, "UpdateProcThreadAttribute (sec cap) failed");
+
+    if !handles.is_empty() {
+        let ok = unsafe {
+            UpdateProcThreadAttribute(
+                attr_list,
+                0,
+                PROC_THREAD_ATTRIBUTE_HANDLE_LIST_ID,
+                handles.as_mut_ptr() as _,
+                std::mem::size_of_val(handles),
+                null_mut(),
+                null_mut(),
+            )
+        };
+        anyhow::ensure!(ok != 0, "UpdateProcThreadAttribute (handles) failed");
+    }
+
+    Ok((attr_buf, attr_list))
+}
+
+/// Resolve a program name to an absolute executable path using PATH and System32.
+fn resolve_executable(program: &OsStr) -> PathBuf {
+    let path = Path::new(program);
+    if path.is_absolute() || path.components().count() > 1 {
+        return path.to_path_buf();
+    }
+    let exts = [".exe", ".cmd", ".bat", ""];
+    let prog_str = program.to_string_lossy();
+    if let Some(path_var) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            for ext in exts {
+                let candidate = dir.join(format!("{prog_str}{ext}"));
+                if candidate.is_file() && candidate.metadata().map(|m| m.len() > 0).unwrap_or(false)
+                {
+                    return candidate;
+                }
+            }
+        }
+    }
+    if let Some(system_root) = std::env::var_os("SystemRoot") {
+        let sys32 = PathBuf::from(system_root).join("System32");
+        for ext in exts {
+            let candidate = sys32.join(format!("{prog_str}{ext}"));
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
+    }
+    path.to_path_buf()
+}
+
+fn spawn_sandboxed_child(
+    argv: &[OsString],
+    startup_info_ex: &mut STARTUPINFOEXW,
+    h_job: &AutoHandle,
+) -> anyhow::Result<i32> {
+    let mut resolved_argv = argv.to_vec();
+    if let Some(prog) = argv.first() {
+        resolved_argv[0] = resolve_executable(prog).into_os_string();
+    }
+    let cmdline = build_windows_cmdline(&resolved_argv);
+    let mut cmdline_w = str_to_wide_null(&cmdline);
+    let mut proc_info: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+
+    let created = unsafe {
+        CreateProcessW(
+            null(),
+            cmdline_w.as_mut_ptr(),
+            null(),
+            null(),
+            TRUE,
+            EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED,
+            null(),
+            null(),
+            &startup_info_ex.StartupInfo,
+            &mut proc_info,
+        )
+    };
+    if created == 0 {
+        let err = unsafe { GetLastError() };
+        anyhow::bail!("CreateProcessW failed for '{cmdline}' (error code {err})");
+    }
+
+    let h_proc = AutoHandle::new(proc_info.hProcess);
+    let h_thread = AutoHandle::new(proc_info.hThread);
+
+    let assigned = unsafe { AssignProcessToJobObject(h_job.raw(), h_proc.raw()) };
+    if assigned == 0 {
+        let err = unsafe { GetLastError() };
+        anyhow::bail!("AssignProcessToJobObject failed (error code {err})");
+    }
+
+    unsafe {
+        ResumeThread(h_thread.raw());
+    }
+    drop(h_thread);
+
+    unsafe {
+        WaitForSingleObject(h_proc.raw(), INFINITE);
+    }
+
+    let mut exit_code: u32 = 0;
+    unsafe {
+        GetExitCodeProcess(h_proc.raw(), &mut exit_code);
+    }
+
+    Ok(exit_code as i32)
+}
+
+/// Run a command inside an ephemeral AppContainer and Job Object.
+pub(crate) fn run_in_appcontainer(
+    policy: &SandboxPolicy,
+    argv: &[OsString],
+) -> anyhow::Result<i32> {
+    anyhow::ensure!(!argv.is_empty(), "cannot run empty argv");
+
+    let nonce: u64 = {
+        let mut b = [0u8; 8];
+        let _ = getrandom::fill(&mut b);
+        u64::from_ne_bytes(b)
+    };
+    let container_name = format!("mermaid-sandbox-{}-{:016x}", std::process::id(), nonce);
+    let app_sid =
+        AppContainerProfileGuard::create(&container_name).context("create AppContainer profile")?;
+
+    enable_loopback_exemption(app_sid.as_psid());
+
+    let _dacl_guards = setup_dacl_guards(policy, app_sid.as_psid())?;
+
+    let mut sec_cap: SECURITY_CAPABILITIES = unsafe { std::mem::zeroed() };
+    sec_cap.AppContainerSid = app_sid.as_psid();
+    sec_cap.Capabilities = null_mut();
+    sec_cap.CapabilityCount = 0;
+
+    let (mut handles, h_stdin, h_stdout, h_stderr) = collect_stdio_handles(app_sid.as_psid());
+    let (_attr_buf, attr_list) = setup_proc_attributes(&mut sec_cap, &mut handles)?;
+
+    let mut startup_info_ex: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
+    startup_info_ex.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
+    startup_info_ex.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    startup_info_ex.StartupInfo.hStdInput = h_stdin;
+    startup_info_ex.StartupInfo.hStdOutput = h_stdout;
+    startup_info_ex.StartupInfo.hStdError = h_stderr;
+    startup_info_ex.lpAttributeList = attr_list;
+
+    let h_job = AutoHandle::new(unsafe { CreateJobObjectW(null(), null()) });
+    anyhow::ensure!(h_job.is_valid(), "CreateJobObjectW failed");
+
+    let mut limit_info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+    limit_info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    let ok = unsafe {
+        SetInformationJobObject(
+            h_job.raw(),
+            JobObjectExtendedLimitInformation,
+            &limit_info as *const _ as _,
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        )
+    };
+    anyhow::ensure!(ok != 0, "SetInformationJobObject failed");
+
+    let res = spawn_sandboxed_child(argv, &mut startup_info_ex, &h_job);
+    unsafe {
+        DeleteProcThreadAttributeList(attr_list);
+    }
+    res
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quote_windows_arg_handles_plain_and_spaces() {
+        assert_eq!(quote_windows_arg(OsStr::new("hello")), "hello");
+        assert_eq!(
+            quote_windows_arg(OsStr::new("hello world")),
+            "\"hello world\""
+        );
+        assert_eq!(quote_windows_arg(OsStr::new("")), "\"\"");
+    }
+
+    #[test]
+    fn quote_windows_arg_escapes_quotes_and_backslashes() {
+        assert_eq!(
+            quote_windows_arg(OsStr::new("say \"hello\"")),
+            "\"say \\\"hello\\\"\""
+        );
+        assert_eq!(
+            quote_windows_arg(OsStr::new(r"C:\Program Files\App\")),
+            "\"C:\\Program Files\\App\\\\\""
+        );
+    }
+
+    #[test]
+    fn build_windows_cmdline_formats_multiple_args() {
+        let argv = vec![
+            OsString::from("cmd.exe"),
+            OsString::from("/c"),
+            OsString::from("echo hello world"),
+        ];
+        assert_eq!(
+            build_windows_cmdline(&argv),
+            "cmd.exe /c \"echo hello world\""
+        );
+    }
+
+    #[test]
+    fn appcontainer_available_returns_true_on_modern_windows() {
+        assert!(appcontainer_available());
+    }
+
+    #[test]
+    fn appcontainer_executes_simple_command() {
+        let policy = SandboxPolicy::default();
+        let argv = vec![
+            OsString::from("cmd.exe"),
+            OsString::from("/c"),
+            OsString::from("echo 1"),
+        ];
+        let exit_code = run_in_appcontainer(&policy, &argv).expect("run in appcontainer");
+        assert_eq!(exit_code, 0);
+    }
+
+    #[test]
+    fn appcontainer_enforces_write_confinement() {
+        let base = std::env::temp_dir().join(format!(
+            "mermaid-appcontainer-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let allowed = base.join("allowed");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&allowed).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let policy = SandboxPolicy {
+            deny_network: false,
+            allowed_writes: vec![allowed.clone()],
+        };
+
+        let in_file = allowed.join("in.txt");
+        let inside_argv = vec![
+            OsString::from("cmd.exe"),
+            OsString::from("/c"),
+            OsString::from(format!("echo hello > {}", in_file.display())),
+        ];
+        let code = run_in_appcontainer(&policy, &inside_argv).expect("inside write");
+        assert_eq!(code, 0);
+        assert!(in_file.exists());
+
+        let out_file = outside.join("out.txt");
+        let outside_argv = vec![
+            OsString::from("cmd.exe"),
+            OsString::from("/c"),
+            OsString::from(format!("echo hello > {}", out_file.display())),
+        ];
+        let code = run_in_appcontainer(&policy, &outside_argv).expect("outside write");
+        assert_ne!(code, 0);
+        assert!(!out_file.exists());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn appcontainer_enforces_network_isolation() {
+        let temp = std::env::temp_dir();
+        let policy = SandboxPolicy {
+            deny_network: true,
+            allowed_writes: vec![temp],
+        };
+        let py_cmd = "import socket; s = socket.socket(socket.AF_INET, socket.SOCK_STREAM); s.settimeout(0.5); s.connect(('8.8.8.8', 80))";
+        let argv = vec![
+            OsString::from("python.exe"),
+            OsString::from("-c"),
+            OsString::from(py_cmd),
+        ];
+        if resolve_executable(std::ffi::OsStr::new("python.exe")).is_file() {
+            let code = run_in_appcontainer(&policy, &argv).expect("run in appcontainer");
+            assert_ne!(code, 0);
+        }
+    }
+}

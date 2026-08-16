@@ -18,6 +18,7 @@ mod status;
 mod status_line;
 mod tasks;
 
+pub use crate::render::theme::ColorValueExt;
 pub use approval::ApprovalModalWidget;
 pub use chat::{ChatState, ChatWidget, ImageClickTarget};
 pub use conversation_list::ConversationListWidget;

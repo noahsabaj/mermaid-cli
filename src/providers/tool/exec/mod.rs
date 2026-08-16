@@ -278,15 +278,17 @@ impl ToolExecutor for ExecuteCommandTool {
         // "project"` / `--confine-fs`), the shell is wrapped in the
         // `__sandbox-exec` launcher, which enforces the policy via the
         // platform backend (Linux: seccomp network kill-switch + Landlock
-        // write rules; macOS: Seatbelt via sandbox-exec) before running it —
-        // so a denied network attempt or out-of-bounds write fails with a
-        // signature the completion arm below maps to a clear denial. Platforms
-        // WITH a backend (linux/macos) always wrap when a policy is requested —
-        // if the probe says the backend is broken, the launcher fails closed
-        // (exit 126) rather than running unconfined. Only platforms with no
-        // backend at all (Windows until the AppContainer port) downgrade to an
-        // unconfined run, with a once-per-process warning.
-        let sandbox_expected = cfg!(any(target_os = "linux", target_os = "macos"));
+        // write rules; macOS: Seatbelt via sandbox-exec; Windows: AppContainer
+        // + Job Objects) before running it — so a denied network attempt or
+        // out-of-bounds write fails with a signature the completion arm below
+        // maps to a clear denial. Platforms WITH a backend always wrap when a
+        // policy is requested — if the probe says the backend is broken, the
+        // launcher fails closed (exit 126) rather than running unconfined.
+        let sandbox_expected = cfg!(any(
+            target_os = "linux",
+            target_os = "macos",
+            target_os = "windows"
+        ));
         let net_requested = matches!(ctx.config.safety.network, NetworkPolicy::Deny);
         let fs_requested = matches!(ctx.config.safety.filesystem, FilesystemPolicy::Project);
         let (net_available, fs_available) = sandbox_probes();
@@ -736,7 +738,11 @@ mod tests {
         assert_eq!(args.first().map(String::as_str), Some("__sandbox-exec"));
         assert!(args.contains(&"--no-network".to_string()));
         assert!(!args.contains(&"--confine-writes".to_string()));
-        assert!(args.contains(&"sh".to_string()));
+        assert!(
+            args.iter()
+                .any(|a| ["sh", "pwsh", "powershell"].contains(&a.as_str())),
+            "args: {args:?}"
+        );
     }
 
     #[test]

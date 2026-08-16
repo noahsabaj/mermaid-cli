@@ -20,9 +20,7 @@ use mermaid_cli::providers::tool::ToolRegistry;
 use mermaid_domain::{Config, Msg, State};
 use mermaid_model::models::MessageRole;
 
-#[path = "harness/stub_model.rs"]
-mod stub_model;
-use stub_model::{ScriptedModel, Turn};
+use crate::harness::stub_model::{ScriptedModel, Turn};
 
 const STUB: &str = "stub/scripted";
 
