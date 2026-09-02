@@ -69,6 +69,24 @@ impl<'a> AllowedRoots<'a> {
     }
 }
 
+/// Which allowed root a resolved path landed in -- or neither of them.
+///
+/// Three states rather than a bool, and every filesystem tool matches on it:
+/// a tool cannot consume a resolution without deciding what an out-of-project
+/// path means for it. The resolver used to answer a three-way question with
+/// `Ok`/`Err`, and once `Err` stopped being the answer for external paths,
+/// `read_file` read any path on disk without a gate because nothing forced it
+/// to look at the third case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PathContainment {
+    /// Inside the project workdir.
+    Project,
+    /// Inside the per-session scratchpad: session-private and ephemeral.
+    Scratchpad,
+    /// Anywhere else on the filesystem.
+    External,
+}
+
 /// A caller-supplied path resolved into whichever allowed root contains it.
 #[derive(Debug)]
 pub(crate) struct ResolvedInRoot {
@@ -80,9 +98,8 @@ pub(crate) struct ResolvedInRoot {
     pub rel: PathBuf,
     /// The root the path landed in, owned so blocking jobs can take it.
     pub root: PathBuf,
-    /// True when the path landed in the session scratchpad rather than the
-    /// project directory.
-    pub in_scratchpad: bool,
+    /// Where the path landed. Callers match on this; see [`PathContainment`].
+    pub containment: PathContainment,
 }
 
 /// The canonical path resolver for the filesystem tools: resolve `raw`
@@ -99,7 +116,7 @@ pub(crate) fn resolve_in_roots(
             abs: abs.clone(),
             rel: relative_within(roots.workdir, raw)?,
             root: roots.workdir.to_path_buf(),
-            in_scratchpad: false,
+            containment: PathContainment::Project,
         });
     }
     if let Some(scratch) = roots.scratchpad
@@ -112,7 +129,7 @@ pub(crate) fn resolve_in_roots(
                 abs,
                 rel: relative_within(scratch, raw)?,
                 root: scratch.to_path_buf(),
-                in_scratchpad: true,
+                containment: PathContainment::Scratchpad,
             });
         }
         // A symlink planted inside the scratchpad escapes the scratch root:
@@ -132,7 +149,7 @@ pub(crate) fn resolve_in_roots(
         abs,
         rel,
         root,
-        in_scratchpad: false,
+        containment: PathContainment::External,
     })
 }
 
@@ -281,27 +298,28 @@ mod tests {
 
         // Relative paths land in the project root.
         let r = resolve_in_roots(&roots, "sub/file.txt").unwrap();
-        assert!(!r.in_scratchpad);
+        assert_eq!(r.containment, PathContainment::Project);
         assert_eq!(r.rel, PathBuf::from("sub/file.txt"));
         assert_eq!(r.root, project);
 
         // An absolute path inside the scratchpad lands there, relative to it.
         let raw = scratch.join("nested/notes.txt");
         let r = resolve_in_roots(&roots, raw.to_str().unwrap()).unwrap();
-        assert!(r.in_scratchpad);
+        assert_eq!(r.containment, PathContainment::Scratchpad);
         assert_eq!(r.rel, PathBuf::from("nested/notes.txt"));
         assert_eq!(r.root, scratch);
 
-        // Outside both roots -> resolves successfully as an external path (not in scratchpad).
+        // Outside both roots resolves, and says so: the caller decides what an
+        // external path means for it.
         let outside = base.join("elsewhere/file.txt");
         let r = resolve_in_roots(&roots, outside.to_str().unwrap()).unwrap();
-        assert!(!r.in_scratchpad);
+        assert_eq!(r.containment, PathContainment::External);
         assert!(r.abs.ends_with(Path::new("elsewhere").join("file.txt")));
 
         // A `..` escape from the project must not fall into the scratchpad —
         // relative paths never match the scratch root.
         let r = resolve_in_roots(&roots, "../scratch/sneaky.txt").unwrap();
-        assert!(!r.in_scratchpad);
+        assert_eq!(r.containment, PathContainment::External);
 
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -332,7 +350,7 @@ mod tests {
         std::os::unix::fs::symlink(&outside, scratch.join("to_outside")).unwrap();
 
         // Writing "into" the scratchpad but through the escaping symlink must
-        // be rejected (never resolves in_scratchpad, never silently rewrites
+        // be rejected (never resolves as `Scratchpad`, never silently rewrites
         // the project).
         for tail in ["to_project/secrets/leak.txt", "to_outside/home/leak.txt"] {
             let raw = scratch.join(tail);

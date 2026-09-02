@@ -22,7 +22,7 @@ use mermaid_runtime::apply_patch::{Hunk, UpdateFileChunk, derive_new_contents, p
 use super::super::ctx::ExecContext;
 use super::ToolExecutor;
 use super::filesystem::{MutationGate, after_file_mutation, diff_summary, mutation_policy_outcome};
-use super::path_safety::{AllowedRoots, ResolvedInRoot, resolve_in_roots};
+use super::path_safety::{AllowedRoots, PathContainment, ResolvedInRoot, resolve_in_roots};
 
 const APPLY_PATCH_DESCRIPTION: &str = "Edit files with a patch. Pass `patch` as one string in this exact envelope:\n*** Begin Patch\n*** Update File: <path>\n@@ <optional anchor line, e.g. a function signature>\n <unchanged context line>\n-<line to remove>\n+<line to add>\n*** End Patch\nUse '*** Add File: <path>' then '+'-prefixed lines to create a file; '*** Delete File: <path>' to remove one; '*** Move to: <path>' immediately after an Update File line to rename. Include a few unchanged context lines (prefixed with a space) around each change so the edit can be located; matching tolerates whitespace/quote drift. Paths may be relative to the project directory or absolute.";
 
@@ -80,14 +80,15 @@ impl ToolExecutor for ApplyPatchTool {
             "task_id": ctx.task_id.clone(),
         });
         // Only project files are checkpointable; the gate bypasses entirely
-        // when EVERY hunk lands in the session scratchpad.
+        // when EVERY hunk lands in the session scratchpad, and escalates when
+        // any hunk lands outside the project.
         let plan_write = match mutation_policy_outcome(
             &ctx,
             "apply_patch",
             &summary_path,
             &paths.project,
             pending_action,
-            paths.all_scratch,
+            paths.containment,
         )
         .await
         {
@@ -178,7 +179,10 @@ impl PlannedOp {
 struct PatchPaths {
     all: Vec<PathBuf>,
     project: Vec<PathBuf>,
-    all_scratch: bool,
+    /// The patch's containment as a whole, for the policy gate: `External` if
+    /// any hunk lands outside both roots, else `Scratchpad` if every hunk lands
+    /// in the scratchpad, else `Project`.
+    containment: PathContainment,
 }
 
 /// Resolve each hunk's path(s) into root-relative ops (project workdir or
@@ -189,14 +193,16 @@ fn plan_ops(ctx: &ExecContext, hunks: &[Hunk]) -> Result<(Vec<PlannedOp>, PatchP
     let mut ops = Vec::new();
     let mut all: Vec<PathBuf> = Vec::new();
     let mut project: Vec<PathBuf> = Vec::new();
-    fn remember(r: &ResolvedInRoot, all: &mut Vec<PathBuf>, project: &mut Vec<PathBuf>) {
+    let mut any_external = false;
+    let mut remember = |r: &ResolvedInRoot, all: &mut Vec<PathBuf>, project: &mut Vec<PathBuf>| {
         if !all.contains(&r.abs) {
             all.push(r.abs.clone());
         }
-        if !r.in_scratchpad && !project.contains(&r.abs) {
+        if r.containment != PathContainment::Scratchpad && !project.contains(&r.abs) {
             project.push(r.abs.clone());
         }
-    }
+        any_external |= r.containment == PathContainment::External;
+    };
     for hunk in hunks {
         match hunk {
             Hunk::AddFile { path, contents } => {
@@ -251,13 +257,19 @@ fn plan_ops(ctx: &ExecContext, hunks: &[Hunk]) -> Result<(Vec<PlannedOp>, PatchP
     }
     all.sort();
     project.sort();
-    let all_scratch = !all.is_empty() && project.is_empty();
+    let containment = if any_external {
+        PathContainment::External
+    } else if !all.is_empty() && project.is_empty() {
+        PathContainment::Scratchpad
+    } else {
+        PathContainment::Project
+    };
     Ok((
         ops,
         PatchPaths {
             all,
             project,
-            all_scratch,
+            containment,
         },
     ))
 }

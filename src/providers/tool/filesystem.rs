@@ -23,7 +23,8 @@ use mermaid_model::constants::MAX_RESPONSE_CHARS as MAX_FILE_READ_BYTES;
 use super::super::ctx::ExecContext;
 use super::ToolExecutor;
 use super::path_safety::{
-    AllowedRoots, ResolvedInRoot, relative_within, resolve_in_roots, resolve_path_within,
+    AllowedRoots, PathContainment, ResolvedInRoot, relative_within, resolve_in_roots,
+    resolve_path_within,
 };
 
 /// Small helper for building a `ToolDefinition` with a typical
@@ -175,6 +176,23 @@ impl ToolExecutor for ReadFileTool {
         let mut any_truncated = false;
 
         for (idx, raw_path) in paths.iter().enumerate() {
+            let target = match resolve_read_target(&roots, raw_path) {
+                Ok(target) => target,
+                Err(e) => {
+                    return ToolOutcome::error(
+                        format!("{raw_path}: {e}"),
+                        start.elapsed().as_secs_f64(),
+                    );
+                },
+            };
+            // A path outside every allowed root is an external side effect:
+            // it goes through the policy gate before a byte is read, exactly
+            // as an external write does.
+            if let Some(abs) = &target.external
+                && let Some(blocked) = external_read_gate(&ctx, raw_path, abs).await
+            {
+                return blocked;
+            }
             // Race the file read against the turn's cancel token. If
             // the user Ctrl+C's mid-read, we bail immediately.
             tokio::select! {
@@ -182,7 +200,7 @@ impl ToolExecutor for ReadFileTool {
                 _ = ctx.token.cancelled() => {
                     return ToolOutcome::cancelled();
                 },
-                read = read_one(&roots, raw_path) => {
+                read = read_one(target.root, target.rel) => {
                     match read {
                         Ok((content, was_truncated)) => {
                             // A byte-identical repeat of a read this same turn
@@ -289,7 +307,7 @@ impl ToolExecutor for DeleteFileTool {
             abs,
             rel,
             root,
-            in_scratchpad,
+            containment,
         } = match resolve_in_roots(&roots, raw_path) {
             Ok(r) => r,
             Err(e) => return err(&format!("delete_file: {e}"), 0.0),
@@ -308,7 +326,7 @@ impl ToolExecutor for DeleteFileTool {
             raw_path,
             std::slice::from_ref(&abs),
             pending_action,
-            in_scratchpad,
+            containment,
         )
         .await
         {
@@ -326,7 +344,7 @@ impl ToolExecutor for DeleteFileTool {
         // Scratchpad files are session-private and ephemeral — never
         // checkpointed into the project's restore history.
         if ctx.config.safety.checkpoint_on_mutation
-            && !in_scratchpad
+            && containment != PathContainment::Scratchpad
             && let Err(e) = mermaid_runtime::create_checkpoint_for_task(
                 &ctx.workdir,
                 std::slice::from_ref(&abs),
@@ -400,7 +418,7 @@ impl ToolExecutor for CreateDirectoryTool {
             abs,
             rel,
             root,
-            in_scratchpad,
+            containment,
         } = match resolve_in_roots(&roots, raw_path) {
             Ok(r) => r,
             Err(e) => return err(&format!("create_directory: {e}"), 0.0),
@@ -419,7 +437,7 @@ impl ToolExecutor for CreateDirectoryTool {
             raw_path,
             std::slice::from_ref(&abs),
             pending_action,
-            in_scratchpad,
+            containment,
         )
         .await
         {
@@ -434,7 +452,7 @@ impl ToolExecutor for CreateDirectoryTool {
         };
         // Scratchpad dirs are session-private and ephemeral — never checkpointed.
         if ctx.config.safety.checkpoint_on_mutation
-            && !in_scratchpad
+            && containment != PathContainment::Scratchpad
             && let Err(e) = mermaid_runtime::create_checkpoint_for_task(
                 &ctx.workdir,
                 std::slice::from_ref(&abs),
@@ -521,7 +539,7 @@ impl ToolExecutor for WriteFileTool {
             abs: abs_path,
             rel,
             root,
-            in_scratchpad,
+            containment,
         } = match resolve_in_roots(&roots, path) {
             Ok(r) => r,
             Err(e) => return ToolOutcome::error(format!("write_file: {e}"), 0.0),
@@ -540,7 +558,7 @@ impl ToolExecutor for WriteFileTool {
             path,
             std::slice::from_ref(&abs_path),
             pending_action,
-            in_scratchpad,
+            containment,
         )
         .await
         {
@@ -558,7 +576,7 @@ impl ToolExecutor for WriteFileTool {
         };
         // Scratchpad files are session-private and ephemeral — never checkpointed.
         if ctx.config.safety.checkpoint_on_mutation
-            && !in_scratchpad
+            && containment != PathContainment::Scratchpad
             && let Err(e) = mermaid_runtime::create_checkpoint_for_task(
                 &ctx.workdir,
                 std::slice::from_ref(&abs_path),
@@ -682,7 +700,7 @@ impl ToolExecutor for EditFileTool {
             abs: abs_path,
             rel,
             root,
-            in_scratchpad,
+            containment,
         } = match resolve_in_roots(&roots, path) {
             Ok(r) => r,
             Err(e) => return ToolOutcome::error(format!("edit_file: {e}"), 0.0),
@@ -707,7 +725,7 @@ impl ToolExecutor for EditFileTool {
             path,
             std::slice::from_ref(&abs_path),
             pending_action,
-            in_scratchpad,
+            containment,
         )
         .await
         {
@@ -722,7 +740,7 @@ impl ToolExecutor for EditFileTool {
         };
 
         if ctx.config.safety.checkpoint_on_mutation
-            && !in_scratchpad
+            && containment != PathContainment::Scratchpad
             && let Err(e) = mermaid_runtime::create_checkpoint_for_task(
                 &ctx.workdir,
                 std::slice::from_ref(&abs_path),
@@ -867,29 +885,103 @@ fn resolve_in_memory_roots(workdir: &Path, raw: &str) -> Option<(PathBuf, PathBu
     None
 }
 
-/// Read one file (bounded). Returns the (possibly marker-footed) text and the
-/// REAL truncation flag from the bounded read, so the caller propagates that
-/// rather than sniffing the output for the marker string — which a file whose
-/// own content contains that literal text would otherwise falsely trip (#78).
-async fn read_one(roots: &AllowedRoots<'_>, raw: &str) -> std::io::Result<(String, bool)> {
-    // Canonical containment gate — rejects escapes (incl. existing symlinks
-    // that resolve outside the allowed roots) before we touch the file, and
-    // names the root-relative path for the confined fd read, so the bytes come
-    // from the inode the kernel resolved under RESOLVE_BENEATH rather than
-    // whatever a concurrently-swapped symlink now points at (#77).
-    let ResolvedInRoot { rel, root, .. } = match resolve_in_roots(roots, raw) {
-        Ok(resolved) => resolved,
+/// Where a `read_file` target lands once the resolver and the memory-root
+/// fallback have spoken.
+struct ReadTarget {
+    root: PathBuf,
+    rel: PathBuf,
+    /// `Some(abs)` when the target sits outside every allowed root and must
+    /// clear [`external_read_gate`] before it is opened.
+    external: Option<PathBuf>,
+}
+
+/// Resolve a read target through the canonical containment resolver, and
+/// answer its three-way verdict: project and scratchpad reads are ungated;
+/// durable-memory reads are ungated too (memory is agent-owned by design and
+/// lives outside the project); anything else outside the roots is external and
+/// carries its absolute path for the gate.
+///
+/// `Err` only when the path cannot be resolved at all (a workdir that will not
+/// canonicalize, or no existing ancestor) and is not a memory path either.
+fn resolve_read_target(roots: &AllowedRoots<'_>, raw: &str) -> std::io::Result<ReadTarget> {
+    match resolve_in_roots(roots, raw) {
+        Ok(ResolvedInRoot {
+            abs,
+            rel,
+            root,
+            containment,
+        }) => match containment {
+            PathContainment::Project | PathContainment::Scratchpad => Ok(ReadTarget {
+                root,
+                rel,
+                external: None,
+            }),
+            PathContainment::External => Ok(resolve_in_memory_roots(roots.workdir, raw).map_or(
+                ReadTarget {
+                    root,
+                    rel,
+                    external: Some(abs),
+                },
+                |(root, rel)| ReadTarget {
+                    root,
+                    rel,
+                    external: None,
+                },
+            )),
+        },
         Err(msg) => {
             let (root, rel) = resolve_in_memory_roots(roots.workdir, raw)
                 .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::PermissionDenied, msg))?;
-            ResolvedInRoot {
-                abs: root.join(&rel),
-                rel,
+            Ok(ReadTarget {
                 root,
-                in_scratchpad: false,
-            }
+                rel,
+                external: None,
+            })
         },
-    };
+    }
+}
+
+/// Gate a read of `abs`, a path outside the project and the scratchpad.
+///
+/// Filed as `ToolCategory::ExternalDirectory` — an external side effect, the
+/// same class an out-of-project `working_dir` gets from the exec tool — so
+/// `ask` prompts (allowlistable per directory), `auto` consults the intent
+/// classifier, `full_access` proceeds, and the read-only floor (read-only and
+/// plan modes) denies. Not replayable: a read has nothing to replay, so a
+/// headless `ask` session refuses it unless untrusted tools were allowed.
+///
+/// Returns the blocking outcome, or `None` to proceed.
+async fn external_read_gate(ctx: &ExecContext, raw: &str, abs: &Path) -> Option<ToolOutcome> {
+    let mut request = mermaid_runtime::ActionRequest::new(
+        "read_file",
+        mermaid_runtime::ToolCategory::ExternalDirectory,
+        format!("read_file {raw}"),
+    );
+    request.path = Some(abs.display().to_string());
+    let pending_action = serde_json::json!({
+        "tool": "read_file",
+        "args": { "path": raw },
+        "workdir": ctx.workdir.display().to_string(),
+        "turn_id": ctx.turn.0,
+        "call_id": ctx.call_id.0,
+        "task_id": ctx.task_id.clone(),
+    });
+    match super::policy_gate::gate(ctx, request, &[], pending_action, false, false).await {
+        super::policy_gate::Gate::Block(outcome) => Some(outcome),
+        super::policy_gate::Gate::Proceed { .. } => None,
+    }
+}
+
+/// Read one file (bounded) from `rel` beneath `root`. Returns the (possibly
+/// marker-footed) text and the REAL truncation flag from the bounded read, so
+/// the caller propagates that rather than sniffing the output for the marker
+/// string — which a file whose own content contains that literal text would
+/// otherwise falsely trip (#78).
+///
+/// The root-relative path feeds the confined fd read, so the bytes come from
+/// the inode the kernel resolved under `RESOLVE_BENEATH` rather than whatever
+/// a concurrently-swapped symlink now points at (#77).
+async fn read_one(root: PathBuf, rel: PathBuf) -> std::io::Result<(String, bool)> {
     let result = tokio::task::spawn_blocking(move || {
         let file = mermaid_runtime::open_beneath(&root, &rel, mermaid_runtime::OpenIntent::Read)?;
         // Bounded read: never pull more than the cap (+1 probe byte) into RAM,
@@ -1011,11 +1103,6 @@ fn edit_file_blocking(
     })
 }
 
-/// `scratch_contained` is true when the mutation touches ONLY the session
-/// scratchpad (`ResolvedInRoot::in_scratchpad`). The gate downgrades an
-/// `Ask`/`Classify` on such a mutation to proceed — scratch files are
-/// session-private and ephemeral — while read-only mode and `Deny` overrides
-/// still block it.
 /// Outcome of gating a file mutation. `Proceed` carries `plan_write`: whether
 /// the allowance came from plan mode's plan-file carve-out, which the caller
 /// stamps onto `ToolRunMetadata::plan_file_written`.
@@ -1031,19 +1118,35 @@ pub(super) enum MutationGate {
     },
 }
 
+/// Gate a file mutation by where its target landed.
+///
+/// `containment` is the resolver's verdict for the path, matched here so that
+/// every mutating tool answers the three-way question in one place:
+/// - `Project`: an ordinary edit (`ToolCategory::Edit`).
+/// - `Scratchpad`: the gate downgrades an `Ask`/`Classify` to proceed — scratch
+///   files are session-private and ephemeral — while read-only mode and `Deny`
+///   overrides still block it.
+/// - `External`: a path outside both roots is an external side effect
+///   (`ToolCategory::ExternalDirectory`), so it prompts in `ask`, goes through
+///   the intent classifier in `auto`, and is denied by the read-only floor —
+///   the same treatment an out-of-project `working_dir` gets from the exec
+///   tool. Before this, an external write classified like an in-project one
+///   and `auto` mode allowed it unasked.
 pub(super) async fn mutation_policy_outcome(
     ctx: &ExecContext,
     tool: &str,
     path: &str,
     checkpoint_paths: &[PathBuf],
     pending_action: serde_json::Value,
-    scratch_contained: bool,
+    containment: PathContainment,
 ) -> MutationGate {
-    let mut request = mermaid_runtime::ActionRequest::new(
-        tool,
-        mermaid_runtime::ToolCategory::Edit,
-        format!("{tool} {path}"),
-    );
+    let category = match containment {
+        PathContainment::Project | PathContainment::Scratchpad => {
+            mermaid_runtime::ToolCategory::Edit
+        },
+        PathContainment::External => mermaid_runtime::ToolCategory::ExternalDirectory,
+    };
+    let mut request = mermaid_runtime::ActionRequest::new(tool, category, format!("{tool} {path}"));
     request.path = Some(path.to_string());
     // File mutations are replayable: an Ask decision checkpoints, records an
     // approval, and blocks (handled inside the gate).
@@ -1053,7 +1156,7 @@ pub(super) async fn mutation_policy_outcome(
         checkpoint_paths,
         pending_action,
         true,
-        scratch_contained,
+        containment == PathContainment::Scratchpad,
     )
     .await
     {
@@ -1140,16 +1243,23 @@ mod tests {
         fs::write(&fact, "the fact body").unwrap();
 
         let roots = AllowedRoots::new(&workdir, None);
-        let (content, truncated) = read_one(&roots, fact.to_str().unwrap()).await.unwrap();
+        // A memory path sits outside the project yet resolves ungated: memory
+        // is agent-owned by design.
+        let target = resolve_read_target(&roots, fact.to_str().unwrap()).unwrap();
+        assert!(target.external.is_none(), "memory reads are not external");
+        let (content, truncated) = read_one(target.root, target.rel).await.unwrap();
         assert!(!truncated);
         assert_eq!(content, "the fact body");
 
-        // Outside path is also readable.
+        // A stray path outside every root resolves too, but carries its
+        // absolute path for the gate: `execute` must not read it unasked.
         let stray = base.join("stray.txt");
         fs::write(&stray, "nope").unwrap();
+        let target = resolve_read_target(&roots, stray.to_str().unwrap()).unwrap();
         assert_eq!(
-            read_one(&roots, stray.to_str().unwrap()).await.unwrap().0,
-            "nope"
+            target.external.as_deref().map(|p| p.ends_with("stray.txt")),
+            Some(true),
+            "a path outside every root is external"
         );
 
         let _ = fs::remove_dir_all(&base);
@@ -1984,6 +2094,236 @@ mod tests {
         assert!(outcome.output().contains("fuzzy"));
         let new_content = fs::read_to_string(&file).unwrap();
         assert_eq!(new_content, "start\n    tight_whitespace();\nend\n");
+        let _ = fs::remove_dir_all(project.parent().unwrap());
+    }
+
+    // ─── Reads outside the project go through the policy gate ─────────────
+
+    /// A project dir plus a file that sits outside every allowed root.
+    fn external_read_fixture(name: &str) -> (PathBuf, PathBuf) {
+        let workdir = temp_root(&format!("{name}_project"));
+        let external_dir = temp_root(&format!("{name}_external"));
+        let external_file = external_dir.join("ext.txt");
+        fs::write(&external_file, "external content").unwrap();
+        (workdir, external_file)
+    }
+
+    fn ctx_in_mode(
+        mode: mermaid_runtime::SafetyMode,
+        workdir: PathBuf,
+    ) -> (ExecContext, tokio::sync::mpsc::Receiver<ProgressEvent>) {
+        let mut config = mermaid_domain::Config::default();
+        config.safety.mode = mode;
+        crate::providers::ctx::test_exec_context_with_config(
+            TurnId(1),
+            ToolCallId(1),
+            workdir,
+            config,
+        )
+    }
+
+    async fn read_external(ctx: ExecContext, external_file: &Path) -> ToolOutcome {
+        ReadFileTool
+            .execute(
+                serde_json::json!({"path": external_file.to_string_lossy().to_string()}),
+                ctx,
+            )
+            .await
+    }
+
+    /// The read-only floor: an out-of-project read is an external side effect,
+    /// denied in `read_only` and in plan mode. Before the gate, `read_file`
+    /// handed back `~/.ssh/id_rsa` in every mode without a prompt.
+    #[tokio::test]
+    async fn read_outside_the_project_is_denied_under_the_read_only_floor() {
+        for mode in [
+            mermaid_runtime::SafetyMode::ReadOnly,
+            mermaid_runtime::SafetyMode::Plan,
+        ] {
+            let (workdir, external_file) = external_read_fixture("read_ext_readonly");
+            let (ctx, _rx) = ctx_in_mode(mode, workdir.clone());
+            let outcome = read_external(ctx, &external_file).await;
+            assert_eq!(
+                outcome.status,
+                mermaid_domain::ToolStatus::Error,
+                "{mode:?} must deny an external read: {outcome:?}"
+            );
+            assert!(
+                !outcome.output().contains("external content"),
+                "{mode:?} leaked the file body: {}",
+                outcome.output()
+            );
+            let _ = fs::remove_dir_all(&workdir);
+            let _ = fs::remove_dir_all(external_file.parent().unwrap());
+        }
+    }
+
+    /// Inside the project nothing changes: a `read_only` session still reads
+    /// its own files without a prompt.
+    #[tokio::test]
+    async fn read_inside_the_project_stays_ungated_in_read_only_mode() {
+        let workdir = temp_root("read_inside_readonly");
+        fs::write(workdir.join("notes.md"), "project content").unwrap();
+        let (ctx, _rx) = ctx_in_mode(mermaid_runtime::SafetyMode::ReadOnly, workdir.clone());
+        let outcome = ReadFileTool
+            .execute(serde_json::json!({"path": "notes.md"}), ctx)
+            .await;
+        assert_eq!(
+            outcome.status,
+            mermaid_domain::ToolStatus::Success,
+            "{outcome:?}"
+        );
+        assert_eq!(outcome.output(), "project content");
+        let _ = fs::remove_dir_all(&workdir);
+    }
+
+    /// `ask` mode prompts, and the prompt's "don't ask again" scope is the
+    /// file's directory — never the whole tool, so approving one external
+    /// read cannot silently cover a credential file later in the session.
+    #[tokio::test]
+    async fn read_outside_the_project_prompts_in_ask_mode_scoped_to_its_directory() {
+        let (workdir, external_file) = external_read_fixture("read_ext_ask");
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<mermaid_domain::Msg>(8);
+        let broker = crate::providers::ApprovalBroker::new(tx);
+        let (mut ctx, _prx) = ctx_in_mode(mermaid_runtime::SafetyMode::Ask, workdir.clone());
+        ctx.approval = Some(broker.clone());
+        let file_for_task = external_file.clone();
+        let handle = tokio::spawn(async move { read_external(ctx, &file_for_task).await });
+
+        let (call_id, tool, scope) = match rx.recv().await.expect("approval requested") {
+            mermaid_domain::Msg::ApprovalRequested {
+                call_id,
+                tool,
+                allowlist_scope,
+                ..
+            } => (call_id, tool, allowlist_scope),
+            other => panic!("expected ApprovalRequested, got {other:?}"),
+        };
+        assert_eq!(tool, "read_file");
+        let expected_dir = external_file.canonicalize().unwrap();
+        let expected_dir = expected_dir.parent().unwrap();
+        assert_eq!(
+            scope,
+            format!("read_file:{}", expected_dir.display()),
+            "external reads are allowlisted per directory"
+        );
+
+        broker.resolve(call_id, crate::providers::ApprovalDecision::Approve);
+        let outcome = handle.await.unwrap();
+        assert_eq!(
+            outcome.status,
+            mermaid_domain::ToolStatus::Success,
+            "{outcome:?}"
+        );
+        assert_eq!(outcome.output(), "external content");
+        let _ = fs::remove_dir_all(&workdir);
+        let _ = fs::remove_dir_all(external_file.parent().unwrap());
+    }
+
+    /// The user's "No" is final: the read fails and the body never leaves disk.
+    #[tokio::test]
+    async fn read_outside_the_project_denied_by_the_user_is_an_error() {
+        let (workdir, external_file) = external_read_fixture("read_ext_deny");
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<mermaid_domain::Msg>(8);
+        let broker = crate::providers::ApprovalBroker::new(tx);
+        let (mut ctx, _prx) = ctx_in_mode(mermaid_runtime::SafetyMode::Ask, workdir.clone());
+        ctx.approval = Some(broker.clone());
+        let file_for_task = external_file.clone();
+        let handle = tokio::spawn(async move { read_external(ctx, &file_for_task).await });
+        let call_id = match rx.recv().await.expect("approval requested") {
+            mermaid_domain::Msg::ApprovalRequested { call_id, .. } => call_id,
+            other => panic!("expected ApprovalRequested, got {other:?}"),
+        };
+        broker.resolve(call_id, crate::providers::ApprovalDecision::Deny);
+        let outcome = handle.await.unwrap();
+        assert_eq!(
+            outcome.status,
+            mermaid_domain::ToolStatus::Error,
+            "{outcome:?}"
+        );
+        assert!(!outcome.output().contains("external content"));
+        let _ = fs::remove_dir_all(&workdir);
+        let _ = fs::remove_dir_all(external_file.parent().unwrap());
+    }
+
+    /// A symlink planted inside the project that resolves outside it is an
+    /// external read: the resolver canonicalizes through the link, so the
+    /// gate sees the real target, not the friendly-looking relative path.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symlink_inside_the_project_that_points_outside_is_gated() {
+        let (workdir, external_file) = external_read_fixture("read_ext_symlink");
+        std::os::unix::fs::symlink(&external_file, workdir.join("innocent.txt")).unwrap();
+        let (ctx, _rx) = ctx_in_mode(mermaid_runtime::SafetyMode::ReadOnly, workdir.clone());
+        let outcome = ReadFileTool
+            .execute(serde_json::json!({"path": "innocent.txt"}), ctx)
+            .await;
+        assert_eq!(
+            outcome.status,
+            mermaid_domain::ToolStatus::Error,
+            "{outcome:?}"
+        );
+        assert!(!outcome.output().contains("external content"));
+        let _ = fs::remove_dir_all(&workdir);
+        let _ = fs::remove_dir_all(external_file.parent().unwrap());
+    }
+
+    /// `auto` mode classifies external writes instead of allowing them: with no
+    /// classifier bound the gate escalates, so nothing lands outside the
+    /// project unasked. Before this, an external write classified like an
+    /// in-project edit and `auto` wrote it with a checkpoint and no question.
+    #[tokio::test]
+    async fn write_outside_the_project_is_not_silently_allowed_in_auto_mode() {
+        let (project, scratch) = scratch_fixture("outside_auto");
+        let outside = project.parent().unwrap().join("elsewhere").join("out.txt");
+        let (ctx, _rx) = scratch_ctx(
+            mermaid_runtime::SafetyMode::Auto,
+            project.clone(),
+            Some(scratch.clone()),
+        );
+        let outcome = WriteFileTool
+            .execute(
+                serde_json::json!({
+                    "path": outside.to_str().unwrap(),
+                    "content": "must not land unasked",
+                }),
+                ctx,
+            )
+            .await;
+        assert_eq!(
+            outcome.status,
+            mermaid_domain::ToolStatus::Error,
+            "auto mode must escalate an external write: {outcome:?}"
+        );
+        assert!(!outside.exists(), "the external file was written anyway");
+        let _ = fs::remove_dir_all(project.parent().unwrap());
+    }
+
+    /// The control: an in-project write in `auto` mode is still an ordinary
+    /// edit and proceeds without a prompt.
+    #[tokio::test]
+    async fn write_inside_the_project_stays_allowed_in_auto_mode() {
+        let (project, scratch) = scratch_fixture("inside_auto");
+        let (ctx, _rx) = scratch_ctx(
+            mermaid_runtime::SafetyMode::Auto,
+            project.clone(),
+            Some(scratch.clone()),
+        );
+        let outcome = WriteFileTool
+            .execute(
+                serde_json::json!({"path": "inside.txt", "content": "fine"}),
+                ctx,
+            )
+            .await;
+        assert_eq!(
+            outcome.status,
+            mermaid_domain::ToolStatus::Success,
+            "{outcome:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(project.join("inside.txt")).unwrap(),
+            "fine"
+        );
         let _ = fs::remove_dir_all(project.parent().unwrap());
     }
 }

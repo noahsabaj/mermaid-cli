@@ -9,7 +9,8 @@
 //!   1. New file under `src/providers/tool/`.
 //!   2. Impl `ToolExecutor` for a unit struct — both `execute` and
 //!      `schema`.
-//!   3. Register it in `ToolRegistry::default()`.
+//!   3. Register it in `ToolRegistry::build()` — the ONE factory production
+//!      uses. There is no second registry to forget.
 //!
 //! Because `schema()` lives on the same trait as `execute()`, the
 //! name + JSON schema the model sees cannot drift from the handler
@@ -97,6 +98,16 @@ pub struct ToolRegistry {
     subagent_spawner: Option<Arc<subagent::SubagentSpawner>>,
 }
 
+/// An empty registry. Every session's registry comes from [`ToolRegistry::build`];
+/// this exists for callers that assemble one by hand (stubs, the subagent
+/// child registry) and for the `Default` convention, never as a second list
+/// of built-in tools.
+impl Default for ToolRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ToolRegistry {
     #[must_use]
     pub fn new() -> Self {
@@ -182,33 +193,6 @@ impl ToolRegistry {
     }
 }
 
-impl Default for ToolRegistry {
-    fn default() -> Self {
-        let mut r = Self::new();
-        r.register(Arc::new(filesystem::ReadFileTool));
-        r.register(Arc::new(filesystem::WriteFileTool));
-        r.register(Arc::new(filesystem::EditFileTool));
-        r.register(Arc::new(apply_patch::ApplyPatchTool));
-        r.register(Arc::new(filesystem::DeleteFileTool));
-        r.register(Arc::new(filesystem::CreateDirectoryTool));
-        r.register(Arc::new(exec::ExecuteCommandTool));
-        r.register(Arc::new(memory::MemoryTool));
-        r.register(Arc::new(ask_user_question::AskUserQuestionTool));
-        // Plan-mode tools are internal (never in describe_all): the reducer
-        // advertises each definition only in the mode where it applies.
-        r.register(Arc::new(enter_plan_mode::EnterPlanModeTool));
-        r.register(Arc::new(exit_plan_mode::ExitPlanModeTool));
-        r.register(Arc::new(tasks::TaskCreateTool));
-        r.register(Arc::new(tasks::TaskUpdateTool));
-        r.register(Arc::new(tasks::TaskListTool));
-        // MCP proxy is the dispatcher for every mcp__server__tool
-        // call; it's internal (not advertised) but MUST be registered
-        // so runtime lookups succeed.
-        r.register(Arc::new(mcp::McpToolProxy));
-        r
-    }
-}
-
 /// Whether the host mermaid process is running interactively (TUI)
 /// or headlessly (one-shot `mermaid run <prompt>` / CI). Controls
 /// which tools get registered: headless mode never advertises
@@ -265,6 +249,7 @@ impl ToolRegistry {
         let web_capabilities = Arc::new(web::WebCapabilities::resolve(&config.web));
         r.register(Arc::new(filesystem::ReadFileTool));
         r.register(Arc::new(filesystem::WriteFileTool));
+        r.register(Arc::new(filesystem::EditFileTool));
         r.register(Arc::new(apply_patch::ApplyPatchTool));
         r.register(Arc::new(filesystem::DeleteFileTool));
         r.register(Arc::new(filesystem::CreateDirectoryTool));
@@ -341,12 +326,23 @@ impl ToolRegistry {
 mod tests {
     use super::*;
 
+    /// The production registry as a headless session sees it: `build()` with
+    /// a default config and a stub provider factory. Tests go through the same
+    /// factory production does, so a tool registered anywhere else does not
+    /// exist as far as they are concerned.
+    fn headless_registry() -> Arc<ToolRegistry> {
+        let cfg = mermaid_domain::Config::default();
+        let providers = Arc::new(crate::providers::ProviderFactory::new(cfg.clone()));
+        ToolRegistry::build(&cfg, TuiMode::Headless, providers)
+    }
+
     #[test]
     fn default_registry_has_builtin_tools() {
-        let r = ToolRegistry::default();
+        let r = headless_registry();
         for name in &[
             "read_file",
             "write_file",
+            "edit_file",
             "apply_patch",
             "delete_file",
             "create_directory",
@@ -405,7 +401,7 @@ mod tests {
 
     #[test]
     fn describe_all_returns_one_per_user_facing_tool() {
-        let r = ToolRegistry::default();
+        let r = headless_registry();
         let schemas = r.describe_all();
         // mcp_proxy is registered but internal — filtered out of
         // describe_all. So len() includes it but schemas don't.
@@ -425,7 +421,7 @@ mod tests {
 
     #[test]
     fn mcp_proxy_is_registered_but_internal() {
-        let r = ToolRegistry::default();
+        let r = headless_registry();
         let proxy = r.get("mcp_proxy").expect("mcp_proxy registered");
         assert!(proxy.is_internal());
         assert!(!r.describe_all().iter().any(|s| s.name == "mcp_proxy"));
@@ -433,7 +429,7 @@ mod tests {
 
     #[test]
     fn schema_name_matches_executor_name() {
-        let r = ToolRegistry::default();
+        let r = headless_registry();
         for name in r.names() {
             let tool = r.get(name).unwrap();
             assert_eq!(tool.name(), tool.schema().name.as_str());

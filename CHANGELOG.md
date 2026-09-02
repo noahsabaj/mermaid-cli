@@ -32,6 +32,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   binaries that the consolidation into `tests/integration.rs` had removed, so those
   jobs (including the Windows AppContainer suite) had not run a single test since.
   They invoke the consolidated binary with an `it::<module>::` filter.
+- **`read_file` could read any file on disk, in every safety mode, with no
+  prompt.** Lifting project-root containment for the filesystem tools
+  (2026-08-13) left reads with no policy gate at all: the resolver started
+  answering `Ok` for an outside path and nothing downstream looked. The model
+  could read `~/.ssh/id_rsa` or the key-bearing config in `read_only` and plan
+  mode. A path outside the project and the scratchpad is now an external side
+  effect for reads as it already was for the exec tool's `working_dir`: the
+  read-only floor denies it, `ask` prompts with a "don't ask again" scoped to
+  that directory rather than to the tool, `auto` consults the intent classifier,
+  and `full_access` proceeds. Memory files stay readable without a prompt.
+  Structurally, the resolver now returns a three-way `PathContainment`
+  (`Project` / `Scratchpad` / `External`) that every filesystem tool matches on,
+  so a tool cannot consume a resolution without deciding what an outside path
+  means for it.
+- **`auto` mode wrote outside the project without asking.** An external
+  `write_file`, `edit_file`, `apply_patch`, `delete_file` or `create_directory`
+  classified as an ordinary file mutation, which `auto` allows unprompted. They
+  now carry the external-access class, so `auto` classifies them and `ask`
+  prompts per directory.
+- **`edit_file` was advertised to every model and unreachable.** The system
+  prompt and the previous entry announced it, but `ToolRegistry::build()`, the
+  one factory production uses, never registered it; only a test-only
+  `ToolRegistry::default()` did, and the drift guard tested that one. Any model
+  that followed the prompt burned a turn on an unknown tool. The tool is
+  registered where sessions build their registry, subagents may be granted it,
+  the prompt says when to reach for it versus `apply_patch`, the test-only
+  registry is gone, and the guard asserts against `build()`.
 
 - **`apply_patch` supports unified diff range headers (`@@ -start,count +start,count @@`).**
   When models generate standard unified diff hunk headers rather than Codex-style anchor lines,
@@ -42,6 +69,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Auto-mode safety classifier handles reasoning models without failing on empty responses.** Models with mandatory or internal reasoning (e.g. Gemini 3.7 Flash, DeepSeek R1, Claude thinking, and OpenAI o-series) could exhaust the classifier's prior 150-token output limit before emitting plain text, surfacing as `Auto-review flagged this: classifier returned an empty response`. The classifier now uses 2048 tokens of headroom, supports fallback extraction of verdicts from reasoning traces when plain text is empty, and reports actionable diagnostics (e.g. token limits exceeded) on stream truncation.
 
 ### Changed
+
+- **Reads outside the project prompt in `ask` mode.** The approval names the
+  file and offers "don't ask again" for its directory. Headless `ask` runs
+  refuse them unless `--allow-untrusted-tools` is set, like other
+  non-replayable actions.
 
 - **Unified cross-platform fail-closed sandbox enforcement.** Requesting `--sandbox`, `--no-network`, or `--confine-fs` on Windows now enforces kernel containment and strictly fails closed (exit code 126) if sandboxing cannot be applied, eliminating the unconfined fallback warning and achieving feature parity with Linux and macOS.
 

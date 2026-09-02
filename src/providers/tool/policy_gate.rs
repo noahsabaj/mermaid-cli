@@ -197,7 +197,7 @@ fn action_detail(tool: &str, args: &serde_json::Value) -> Option<String> {
 /// `replayable` semantics.
 ///
 /// `scratch_contained` is true when the caller has PROVEN the action touches
-/// only the session scratchpad (`ResolvedInRoot::in_scratchpad` for the file
+/// only the session scratchpad (`ResolvedInRoot::containment` for the file
 /// mutators, `command_provably_in_scratch` for the exec tool). Scratch files
 /// are session-private and ephemeral, so — like durable memory in
 /// `PolicyEngine::decide` — an `Ask`/`Classify` on an eligible risk class is
@@ -551,7 +551,10 @@ async fn inline_decision(
     risk: RiskClass,
     classifier_reason: Option<String>,
 ) -> Gate {
-    let key = allowlist_key(&request.tool, request.command.as_deref());
+    let external_path = (request.category == mermaid_runtime::ToolCategory::ExternalDirectory)
+        .then_some(request.path.as_deref())
+        .flatten();
+    let key = allowlist_key(&request.tool, request.command.as_deref(), external_path);
     // An empty key marks a non-allowlistable action — always prompt, never
     // match a stored entry (#6, #31).
     // `plan_write: false` throughout this function: the plan-file carve-out
@@ -1781,6 +1784,7 @@ mod tests {
         let key = allowlist_key(
             "web_fetch",
             Some("web_fetch https://docs.x.ai/docs/reference"),
+            None,
         );
         assert_eq!(key, "web_fetch:docs.x.ai");
     }
