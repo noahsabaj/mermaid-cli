@@ -97,7 +97,7 @@ the same PR as the style change.
 
 Terminal behavior that a `Line`/`Span` assertion cannot see — a shredded
 background, a glyph past a border, a stale status band — is covered separately
-by `tests/pty_frame.rs`, which drives the real binary on a pty and compares
+by `tests/it/pty_frame.rs`, which drives the real binary on a pty and compares
 whole terminal grids against `tests/snapshots/*.txt`. Those DO run on every
-platform. Regenerate with `UPDATE_SNAPSHOTS=1 cargo test --test pty_frame` and
+platform. Regenerate with `UPDATE_SNAPSHOTS=1 cargo test --test integration -- it::pty_frame::` and
 read the diff before accepting it.

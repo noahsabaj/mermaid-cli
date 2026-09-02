@@ -361,11 +361,11 @@ jobs:
       - name: Build binaries
         run: cargo build --workspace
       - name: Daemon integration tests (ignored)
-        run: cargo test --test daemon_integration -- --ignored
+        run: cargo test --test integration -- --ignored it::daemon_integration::
       - name: Sandbox network kill-switch (ignored, Linux)
-        run: cargo test --test sandbox_network -- --ignored
+        run: cargo test --test integration -- --ignored it::sandbox_network::
       - name: Sandbox filesystem confinement (ignored, Linux)
-        run: cargo test --test sandbox_fs -- --ignored
+        run: cargo test --test integration -- --ignored it::sandbox_fs::
       - name: Self-test (deterministic, model-free)
         run: cargo run --bin mermaid -- self-test --format json
 
@@ -457,8 +457,8 @@ jobs:
       - name: Build binaries
         run: cargo build --workspace
       - name: Sandbox network denial (ignored)
-        run: cargo test --test sandbox_network -- --ignored
+        run: cargo test --test integration -- --ignored it::sandbox_network::
       - name: Sandbox filesystem confinement (ignored)
-        run: cargo test --test sandbox_fs -- --ignored
+        run: cargo test --test integration -- --ignored it::sandbox_fs::
       - name: Self-test (real sandbox availability probes)
         run: cargo run --bin mermaid -- self-test --format json

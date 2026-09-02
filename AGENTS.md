@@ -62,15 +62,18 @@ tests hold the detail; this is what's easy to get wrong.
   shortening a function tells you to delete its attribute. Converting the
   existing `#[allow]`s found four that were suppressing nothing.
 
-  **A local clippy run only covers your own platform.** `tests/pty_exit.rs`
-  and `tests/daemon_integration.rs` are `#![cfg(unix)]`, `tests/sandbox_*.rs`
-  are Linux+macOS, and 99 items under `src/` and `crates/` are `#[cfg(unix)]`.
-  On Windows those compile to nothing, so clippy has nothing to lint and a
-  green local run says nothing about them — the two `too_many_lines`
-  violations in `pty_exit.rs` were found by CI, not by any local sweep. To
-  check a gated file before pushing, drop its `#![cfg(...)]` and run
-  `cargo clippy --test <name>`; that reproduces the Linux verdict exactly.
-  Restore the attribute afterwards.
+  **A local clippy run only covers your own platform.** The integration
+  suite is one binary (`tests/integration.rs`, modules under `tests/it/`);
+  `tests/it/mod.rs` gates `pty_exit` and `daemon_integration` with
+  `#[cfg(unix)]` and `sandbox_fs`/`sandbox_network` with Linux+macOS+Windows,
+  and 99 items under `src/` and `crates/` are `#[cfg(unix)]`. On Windows those
+  compile to nothing, so clippy has nothing to lint and a green local run says
+  nothing about them — the two `too_many_lines` violations in `pty_exit.rs`
+  were found by CI, not by any local sweep. To check a gated module before
+  pushing, drop the `#[cfg(...)]` on its `mod` line in `tests/it/mod.rs` (and
+  any `#![cfg(...)]` at the top of the file) and run
+  `cargo clippy --test integration`; that reproduces the Linux verdict exactly.
+  Restore both afterwards.
 - UI surfaces get coverage; keep the render/reducer tests green.
 
 ## Ratchets

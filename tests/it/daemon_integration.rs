@@ -7,7 +7,7 @@
 //! The three `#[ignore]`d tests spawn a real `mermaidd` and assert its
 //! on-startup wiring; run them with:
 //!
-//!     cargo test --test daemon_integration -- --ignored
+//!     cargo test --test integration -- --ignored it::daemon_integration::
 //!
 //! They are kept out of CI's default run so real-process timing can never flake
 //! it. Everything is isolated under a unique `XDG_DATA_HOME`, so parallel runs
@@ -191,7 +191,7 @@ fn approval_claim_has_exactly_one_winner_under_thread_contention() {
 }
 
 #[test]
-#[ignore = "spawns a real mermaidd; run with: cargo test --test daemon_integration -- --ignored"]
+#[ignore = "spawns a real mermaidd; run with: cargo test --test integration -- --ignored it::daemon_integration::"]
 fn daemon_singleton_flock_rejects_a_second_start() {
     // #131: a daemon-lifetime advisory flock makes two concurrent starts safe —
     // the second must refuse rather than race the connect-probe → unlink → bind
@@ -231,7 +231,7 @@ fn daemon_singleton_flock_rejects_a_second_start() {
 }
 
 #[test]
-#[ignore = "spawns a real mermaidd; run with: cargo test --test daemon_integration -- --ignored"]
+#[ignore = "spawns a real mermaidd; run with: cargo test --test integration -- --ignored it::daemon_integration::"]
 fn daemon_startup_reconciles_running_task_and_gcs_old_archived_row() {
     // #120 + #130: on startup the daemon recovers state a crashed predecessor
     // left stranded — a task stuck `Running` is failed, and archived rows past
