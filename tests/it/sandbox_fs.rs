@@ -49,7 +49,7 @@ fn fresh_base() -> PathBuf {
 }
 
 #[test]
-#[ignore = "spawns the real binary; run with: cargo test --test sandbox_fs -- --ignored"]
+#[ignore = "spawns the real binary; run with: cargo test --test integration -- --ignored it::sandbox_fs::"]
 fn confine_writes_allows_inside_and_denies_outside() {
     #[cfg(target_os = "linux")]
     if !landlock_active() {
@@ -121,7 +121,7 @@ fn confine_writes_allows_inside_and_denies_outside() {
 /// params or this inside-write would be denied.
 #[test]
 #[cfg(target_os = "macos")]
-#[ignore = "spawns the real binary; run with: cargo test --test sandbox_fs -- --ignored"]
+#[ignore = "spawns the real binary; run with: cargo test --test integration -- --ignored it::sandbox_fs::"]
 fn confine_writes_honors_uncanonicalized_tmpdir_root() {
     let bin = env!("CARGO_BIN_EXE_mermaid");
     let base = fresh_base();
@@ -158,7 +158,7 @@ fn confine_writes_honors_uncanonicalized_tmpdir_root() {
 /// command and this fails loudly in CI.
 #[test]
 #[cfg(target_os = "macos")]
-#[ignore = "spawns the real binary; run with: cargo test --test sandbox_fs -- --ignored"]
+#[ignore = "spawns the real binary; run with: cargo test --test integration -- --ignored it::sandbox_fs::"]
 fn seatbelt_profile_compiles_under_both_policies() {
     let bin = env!("CARGO_BIN_EXE_mermaid");
     let base = fresh_base();

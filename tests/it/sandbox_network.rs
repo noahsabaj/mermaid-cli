@@ -32,7 +32,7 @@ const MAKE_INET_SOCKET: &str = "import socket; socket.socket(socket.AF_INET, soc
 /// the connect-based test below covers both platforms.
 #[test]
 #[cfg(target_os = "linux")]
-#[ignore = "spawns the real binary + python3; run with: cargo test --test sandbox_network -- --ignored"]
+#[ignore = "spawns the real binary + python3; run with: cargo test --test integration -- --ignored it::sandbox_network::"]
 fn no_network_blocks_inet_socket_but_allows_it_otherwise() {
     let Some(py) = python() else {
         eprintln!("skipping: no python interpreter on PATH");
@@ -74,7 +74,7 @@ fn no_network_blocks_inet_socket_but_allows_it_otherwise() {
 /// `--no-network` (Linux: SIGSYS at `socket()`; macOS: EPERM at `connect()`)
 /// and succeeds without it.
 #[test]
-#[ignore = "spawns the real binary + python3; run with: cargo test --test sandbox_network -- --ignored"]
+#[ignore = "spawns the real binary + python3; run with: cargo test --test integration -- --ignored it::sandbox_network::"]
 fn no_network_blocks_tcp_connect_but_allows_it_otherwise() {
     let Some(py) = python() else {
         eprintln!("skipping: no python interpreter on PATH");
@@ -114,7 +114,7 @@ fn no_network_blocks_tcp_connect_but_allows_it_otherwise() {
 }
 
 #[test]
-#[ignore = "spawns the real binary; run with: cargo test --test sandbox_network -- --ignored"]
+#[ignore = "spawns the real binary; run with: cargo test --test integration -- --ignored it::sandbox_network::"]
 fn no_network_still_allows_ordinary_local_commands() {
     let bin = env!("CARGO_BIN_EXE_mermaid");
     // A command that only touches the local filesystem must still work under the

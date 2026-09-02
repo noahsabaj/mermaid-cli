@@ -25,6 +25,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **CI on `main` was red from 2026-08-13.** `h2` 0.4.15 carried RUSTSEC-2026-0258
+  (unbounded empty DATA frames), so the required Security Audit job failed on every
+  run; it is 0.4.19 now. The daemon and sandbox integration jobs still invoked
+  `cargo test --test daemon_integration|sandbox_network|sandbox_fs`, per-file test
+  binaries that the consolidation into `tests/integration.rs` had removed, so those
+  jobs (including the Windows AppContainer suite) had not run a single test since.
+  They invoke the consolidated binary with an `it::<module>::` filter.
+
 - **`apply_patch` supports unified diff range headers (`@@ -start,count +start,count @@`).**
   When models generate standard unified diff hunk headers rather than Codex-style anchor lines,
   `apply_patch` now parses and strips coordinate range metadata, extracting any trailing function

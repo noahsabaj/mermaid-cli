@@ -11,7 +11,7 @@
 //! runs on every push:
 //!
 //! ```text
-//! MODEL_API_KEY=... cargo test --test subagent_worktree -- --ignored --test-threads=1
+//! MODEL_API_KEY=... cargo test --test integration -- --ignored it::subagent_worktree:: --test-threads=1
 //! ```
 //!
 //! `#[ignore]`d so the default suite skips it. The default suite still
