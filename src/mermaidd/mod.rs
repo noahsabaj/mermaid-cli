@@ -12,13 +12,23 @@ mod scheduler;
 mod server;
 mod subscribe;
 
-use api::*;
 #[cfg(test)]
-use cli::*;
-use recovery::*;
-use scheduler::*;
-use server::*;
-use subscribe::*;
+use cli::{CliAction, classify_args};
+#[cfg(test)]
+use recovery::sweep_stale_bg_logs_in;
+use scheduler::{SCHEDULER, Scheduler};
+#[cfg(test)]
+use scheduler::{classify_run_result, early_backlink, scheduler};
+#[cfg(test)]
+use server::parse_subscribe;
+#[cfg(unix)]
+use server::serve_unix;
+#[cfg(windows)]
+use server::serve_windows;
+#[cfg(all(test, unix))]
+use server::uid_allowed;
+#[cfg(test)]
+use subscribe::{catch_up_events, handle_subscribe_stream};
 
 /// Start the daemon and serve until it is stopped.
 ///

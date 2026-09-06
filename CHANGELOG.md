@@ -293,6 +293,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   set it; the UI's `/visible-reasoning` toggle hides the trace at render time
   and keeps it in the transcript, which is the design. The adapters always emit
   reasoning now, and Anthropic's `thinking.display` is always `summarized`.
+- **The daemon module imports what it uses.** `mermaidd/mod.rs` pulled every
+  sibling in with a glob and three siblings pulled `super::*` back, nine
+  wildcards in all; each file now names the items it needs. The pedantic
+  baseline is re-recorded after the batch of merges: `wildcard_imports` is
+  back at 37, and four lints the merges moved up are recorded as they stand
+  -- `panic` 136 to 139, `redundant_pub_crate` 187 to 190,
+  `option_if_let_else` 71 to 74, `large_stack_arrays` 28 to 29 -- while
+  twenty-two others shrank, 2,230 occurrences to 2,166 across 79 lints.
 
 ## [0.25.0] - 2026-08-10
 
