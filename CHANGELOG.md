@@ -70,6 +70,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   documented in `docs/sandbox.md`. Three Windows tests cover the capability
   list, the implicit temp grant, and that write confinement alone leaves the
   network reachable.
+- **Concurrent sandboxed commands on Windows no longer strip each other's
+  write grant.** The guard that undid a command's directory grant restored
+  the DACL it had captured before the grant, which also removed any grant a
+  command started since (a background command plus a foreground one on the
+  same project root). It now revokes its own container SID and nothing
+  else; a test grants a directory to two containers, drops one, and checks
+  the other's grant is still there.
 - **Secret files are owner-only on Windows too.** `write_atomic_with_mode`
   dropped its `0600` on non-Unix and relied on the directory's inherited ACL.
   On Windows it now creates the temp file through `CreateFileW` with the

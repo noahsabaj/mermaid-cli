@@ -118,49 +118,47 @@ impl Drop for AutoHandle {
     }
 }
 
-/// RAII guard that restores a directory's previous DACL when dropped.
+/// RAII guard that revokes one container SID's grant on a directory when
+/// dropped.
+///
+/// It revokes the SID, not "restores the previous DACL": every sandboxed
+/// command grants its own container SID on the same project root, and two
+/// commands overlap whenever a background command is running. Restoring a
+/// DACL captured before the second grant would strip the second command's
+/// access mid-run (which is exactly how it surfaced: a test's redirect into
+/// a granted directory failed with access denied while a sibling test's
+/// guard dropped). Each container SID is unique to its run, so revoking it
+/// touches nothing another command added.
 struct DaclGuard {
     path_w: Vec<u16>,
-    old_dacl: *mut ACL,
-    sec_desc: PSECURITY_DESCRIPTOR,
-    new_dacl: *mut ACL,
+    /// The container SID, copied: the guard may outlive the profile that
+    /// produced it.
+    sid: Vec<u8>,
 }
 
 impl Drop for DaclGuard {
     fn drop(&mut self) {
-        unsafe {
-            let _ = SetNamedSecurityInfoW(
-                self.path_w.as_mut_ptr(),
-                SE_FILE_OBJECT,
-                DACL_SECURITY_INFORMATION,
-                null_mut(),
-                null_mut(),
-                self.old_dacl,
-                null_mut(),
-            );
-            if !self.new_dacl.is_null() {
-                LocalFree(self.new_dacl as _);
-            }
-            if !self.sec_desc.is_null() {
-                LocalFree(self.sec_desc as _);
-            }
-        }
+        let _ = edit_path_dacl(
+            &mut self.path_w,
+            self.sid.as_mut_ptr().cast(),
+            REVOKE_ACCESS,
+            0,
+        );
     }
 }
 
-/// Grant filesystem permissions to `sid` on `path`.
-fn grant_path_access(
-    path: &Path,
+/// Read `path`'s DACL, apply one `EXPLICIT_ACCESS` entry for `sid`
+/// (`GRANT_ACCESS` with `access_mask`, or `REVOKE_ACCESS`), and write it
+/// back. Reads the DACL at call time rather than reusing an earlier copy, so
+/// concurrent edits by other commands' guards compose instead of clobbering.
+fn edit_path_dacl(
+    path_w: &mut [u16],
     sid: PSID,
+    mode: ACCESS_MODE,
     access_mask: u32,
-) -> anyhow::Result<Option<DaclGuard>> {
-    if !path.exists() {
-        return Ok(None);
-    }
-    let mut path_w = to_wide_null(path.as_os_str());
+) -> anyhow::Result<()> {
     let mut old_dacl: *mut ACL = null_mut();
     let mut sec_desc: PSECURITY_DESCRIPTOR = null_mut();
-
     let status = unsafe {
         GetNamedSecurityInfoW(
             path_w.as_ptr(),
@@ -173,16 +171,14 @@ fn grant_path_access(
             &mut sec_desc,
         )
     };
-    if status != ERROR_SUCCESS {
-        anyhow::bail!(
-            "GetNamedSecurityInfoW failed for {}: {status}",
-            path.display()
-        );
-    }
+    anyhow::ensure!(
+        status == ERROR_SUCCESS,
+        "GetNamedSecurityInfoW failed: {status}"
+    );
 
     let mut ea: EXPLICIT_ACCESS_W = unsafe { std::mem::zeroed() };
     ea.grfAccessPermissions = access_mask;
-    ea.grfAccessMode = GRANT_ACCESS;
+    ea.grfAccessMode = mode;
     ea.grfInheritance = CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE;
     ea.Trustee.pMultipleTrustee = null_mut();
     ea.Trustee.MultipleTrusteeOperation = 0;
@@ -194,13 +190,10 @@ fn grant_path_access(
     let status = unsafe { SetEntriesInAclW(1, &ea, old_dacl, &mut new_dacl) };
     if status != ERROR_SUCCESS {
         unsafe {
-            if !sec_desc.is_null() {
-                LocalFree(sec_desc as _);
-            }
+            LocalFree(sec_desc as _);
         }
-        anyhow::bail!("SetEntriesInAclW failed for {}: {status}", path.display());
+        anyhow::bail!("SetEntriesInAclW failed: {status}");
     }
-
     let status = unsafe {
         SetNamedSecurityInfoW(
             path_w.as_mut_ptr(),
@@ -212,24 +205,43 @@ fn grant_path_access(
             null_mut(),
         )
     };
-    if status != ERROR_SUCCESS {
-        unsafe {
-            LocalFree(new_dacl as _);
-            if !sec_desc.is_null() {
-                LocalFree(sec_desc as _);
-            }
-        }
-        anyhow::bail!(
-            "SetNamedSecurityInfoW failed for {}: {status}",
-            path.display()
-        );
+    unsafe {
+        LocalFree(new_dacl as _);
+        LocalFree(sec_desc as _);
     }
+    anyhow::ensure!(
+        status == ERROR_SUCCESS,
+        "SetNamedSecurityInfoW failed: {status}"
+    );
+    Ok(())
+}
 
+/// Byte copy of a SID, so a guard can name its trustee after the profile
+/// that produced the SID is gone.
+fn copy_sid(sid: PSID) -> Vec<u8> {
+    let len = unsafe { GetLengthSid(sid) } as usize;
+    let mut buf = vec![0u8; len];
+    unsafe {
+        CopySid(len as u32, buf.as_mut_ptr().cast(), sid);
+    }
+    buf
+}
+
+/// Grant filesystem permissions to `sid` on `path`; the guard revokes them.
+fn grant_path_access(
+    path: &Path,
+    sid: PSID,
+    access_mask: u32,
+) -> anyhow::Result<Option<DaclGuard>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let mut path_w = to_wide_null(path.as_os_str());
+    edit_path_dacl(&mut path_w, sid, GRANT_ACCESS, access_mask)
+        .with_context(|| format!("granting the sandbox access to {}", path.display()))?;
     Ok(Some(DaclGuard {
         path_w,
-        old_dacl,
-        sec_desc,
-        new_dacl,
+        sid: copy_sid(sid),
     }))
 }
 
@@ -864,6 +876,108 @@ mod tests {
             !stderr.contains("Permission denied") && !stderr.contains("10013"),
             "connect refused by capability omission (exit {code}): {stderr}"
         );
+    }
+
+    /// Two commands granting the same directory: dropping the first guard
+    /// must leave the second's grant in place. The previous guard restored
+    /// the DACL it had captured before the second grant existed.
+    #[test]
+    fn dropping_one_grant_keeps_a_concurrent_grant_on_the_same_directory() {
+        fn sid_string(sid: PSID) -> String {
+            let mut w: *mut u16 = null_mut();
+            assert_ne!(unsafe { ConvertSidToStringSidW(sid, &mut w) }, 0);
+            let mut len = 0;
+            while unsafe { *w.add(len) } != 0 {
+                len += 1;
+            }
+            let s = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(w, len) });
+            unsafe {
+                LocalFree(w.cast());
+            }
+            s
+        }
+        fn dacl_sddl(path: &Path) -> String {
+            let path_w = to_wide_null(path.as_os_str());
+            let mut sd: PSECURITY_DESCRIPTOR = null_mut();
+            let rc = unsafe {
+                GetNamedSecurityInfoW(
+                    path_w.as_ptr(),
+                    SE_FILE_OBJECT,
+                    DACL_SECURITY_INFORMATION,
+                    null_mut(),
+                    null_mut(),
+                    null_mut(),
+                    null_mut(),
+                    &mut sd,
+                )
+            };
+            assert_eq!(rc, ERROR_SUCCESS);
+            let mut w: *mut u16 = null_mut();
+            assert_ne!(
+                unsafe {
+                    ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                        sd,
+                        SDDL_REVISION_1,
+                        DACL_SECURITY_INFORMATION,
+                        &mut w,
+                        null_mut(),
+                    )
+                },
+                0
+            );
+            let mut len = 0;
+            while unsafe { *w.add(len) } != 0 {
+                len += 1;
+            }
+            let s = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(w, len) });
+            unsafe {
+                LocalFree(w.cast());
+                LocalFree(sd.cast());
+            }
+            s
+        }
+
+        let dir = std::env::temp_dir().join(format!(
+            "mermaid-appcontainer-grants-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let first = AppContainerProfileGuard::create(&format!(
+            "mermaid-test-grant-a-{}",
+            std::process::id()
+        ))
+        .unwrap();
+        let second = AppContainerProfileGuard::create(&format!(
+            "mermaid-test-grant-b-{}",
+            std::process::id()
+        ))
+        .unwrap();
+        let first_sid = sid_string(first.as_psid());
+        let second_sid = sid_string(second.as_psid());
+
+        let guard_a = grant_path_access(&dir, first.as_psid(), WRITE_PERMISSIONS).unwrap();
+        let guard_b = grant_path_access(&dir, second.as_psid(), WRITE_PERMISSIONS).unwrap();
+        let both = dacl_sddl(&dir);
+        assert!(
+            both.contains(&first_sid) && both.contains(&second_sid),
+            "{both}"
+        );
+
+        drop(guard_a);
+        let after = dacl_sddl(&dir);
+        assert!(
+            !after.contains(&first_sid),
+            "first grant survived its guard: {after}"
+        );
+        assert!(
+            after.contains(&second_sid),
+            "second grant was stripped: {after}"
+        );
+
+        drop(guard_b);
+        let none = dacl_sddl(&dir);
+        assert!(!none.contains(&second_sid), "{none}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
