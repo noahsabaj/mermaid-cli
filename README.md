@@ -124,6 +124,7 @@ The model calls these autonomously:
 |------|-------------|
 | `read_file` | Read files (text, PDF, images) |
 | `write_file` | Create or overwrite files (timestamped backup) |
+| `edit_file` | Single-location search-and-replace; refuses an ambiguous match |
 | `apply_patch` | Multi-hunk, context-anchored edits with a diff (fuzzy-tolerant) |
 | `delete_file` | Delete files (timestamped backup) |
 | `create_directory` | Create directories |
@@ -132,6 +133,9 @@ The model calls these autonomously:
 | `web_search` | Search the web (managed local SearXNG by default) |
 | `web_fetch` | Fetch a URL into a bounded session snapshot (in-process, no key) |
 | `agent` | Spawn an autonomous subagent for parallel tasks |
+| `task_create`, `task_update`, `task_list` | The live task checklist (`/todos`) |
+| `ask_user_question` | Multiple-choice questions when a decision is the user's to make |
+| `enter_plan_mode`, `exit_plan_mode` | Propose plan mode for large or risky work, and leave it with a plan |
 
 MCP servers contribute tools under the `mcp__<server>__<tool>` prefix, **deferred** by default: one `tool_search` tool promotes matches for the rest of the session, so unpromoted schemas never count against `/context`. Opt out with `mcp_defer_tools = false`.
 

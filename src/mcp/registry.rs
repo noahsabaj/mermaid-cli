@@ -668,6 +668,9 @@ mod tests {
     #[test]
     fn registry_entries_are_well_formed() {
         assert!(!REGISTRY.is_empty(), "registry must not be empty");
+        // The README says "a registry of 16 popular MCP servers" in two
+        // places; a preset added or removed here has to update them.
+        assert_eq!(REGISTRY.len(), 16, "update the README's server count");
         for entry in REGISTRY {
             assert!(
                 matches!(entry.command, "npx" | "uvx"),
