@@ -265,19 +265,49 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// The written file's DACL is protected (no inherited ACEs) and names
-    /// only the owning user and `SYSTEM`: none of the directory's inherited
-    /// grants to Users, Authenticated Users or Everyone survive.
+    /// The written file's DACL is exactly the daemon pipe's: protected (no
+    /// inherited ACEs), the owning user and `SYSTEM`, nothing else. Both
+    /// descriptors are rendered by the same SDDL normaliser before comparing,
+    /// because it abbreviates well-known accounts (the CI runner's user is the
+    /// built-in Administrator and renders as `LA`, not as its `S-1-5-21-…`).
     #[test]
     #[cfg(windows)]
     fn write_atomic_with_mode_gives_the_file_an_owner_only_dacl() {
         use std::os::windows::ffi::OsStrExt;
         use windows_sys::Win32::Foundation::LocalFree;
         use windows_sys::Win32::Security::Authorization::{
-            ConvertSecurityDescriptorToStringSecurityDescriptorW, GetNamedSecurityInfoW,
+            ConvertSecurityDescriptorToStringSecurityDescriptorW,
+            ConvertStringSecurityDescriptorToSecurityDescriptorW, GetNamedSecurityInfoW,
             SDDL_REVISION_1, SE_FILE_OBJECT,
         };
         use windows_sys::Win32::Security::{DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR};
+
+        /// `D:...` for a descriptor's DACL, as Windows itself spells it.
+        fn dacl_sddl(descriptor: PSECURITY_DESCRIPTOR) -> String {
+            let mut sddl_w: *mut u16 = std::ptr::null_mut();
+            let ok = unsafe {
+                ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                    descriptor,
+                    SDDL_REVISION_1,
+                    DACL_SECURITY_INFORMATION,
+                    &mut sddl_w,
+                    std::ptr::null_mut(),
+                )
+            };
+            assert_ne!(
+                ok, 0,
+                "ConvertSecurityDescriptorToStringSecurityDescriptorW"
+            );
+            let mut len = 0;
+            while unsafe { *sddl_w.add(len) } != 0 {
+                len += 1;
+            }
+            let sddl = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(sddl_w, len) });
+            unsafe {
+                LocalFree(sddl_w.cast());
+            }
+            sddl
+        }
 
         let dir = std::env::temp_dir().join(format!("mermaid-atomic-dacl-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
@@ -289,7 +319,7 @@ mod tests {
             .encode_wide()
             .chain(std::iter::once(0))
             .collect();
-        let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        let mut actual: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
         let rc = unsafe {
             GetNamedSecurityInfoW(
                 wide.as_ptr(),
@@ -299,47 +329,47 @@ mod tests {
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
-                &mut descriptor,
+                &mut actual,
             )
         };
         assert_eq!(rc, 0, "GetNamedSecurityInfoW");
-        let mut sddl_w: *mut u16 = std::ptr::null_mut();
+        let actual_sddl = dacl_sddl(actual);
+        unsafe {
+            LocalFree(actual.cast());
+        }
+        let _ = fs::remove_dir_all(&dir);
+
+        let expected_source = crate::daemon::pipe_sddl(&crate::daemon::current_user_sid().unwrap());
+        let wide: Vec<u16> = expected_source
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut expected: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
         let ok = unsafe {
-            ConvertSecurityDescriptorToStringSecurityDescriptorW(
-                descriptor,
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                wide.as_ptr(),
                 SDDL_REVISION_1,
-                DACL_SECURITY_INFORMATION,
-                &mut sddl_w,
+                &mut expected,
                 std::ptr::null_mut(),
             )
         };
         assert_ne!(
             ok, 0,
-            "ConvertSecurityDescriptorToStringSecurityDescriptorW"
+            "ConvertStringSecurityDescriptorToSecurityDescriptorW"
         );
-        let mut len = 0;
-        while unsafe { *sddl_w.add(len) } != 0 {
-            len += 1;
-        }
-        let sddl = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(sddl_w, len) });
+        let expected_sddl = dacl_sddl(expected);
         unsafe {
-            LocalFree(sddl_w.cast());
-            LocalFree(descriptor.cast());
+            LocalFree(expected.cast());
         }
-        let _ = fs::remove_dir_all(&dir);
 
-        let sid = crate::daemon::current_user_sid().unwrap();
-        assert!(sddl.starts_with("D:P"), "not protected: {sddl}");
         assert!(
-            sddl.contains(&format!(";;;{sid})")),
-            "owner missing: {sddl}"
+            actual_sddl.starts_with("D:P"),
+            "not protected: {actual_sddl}"
         );
-        for inherited in [";;;BU)", ";;;AU)", ";;;WD)", ";;;BA)"] {
-            assert!(
-                !sddl.contains(inherited),
-                "inherited grant {inherited} survives: {sddl}"
-            );
-        }
+        assert_eq!(
+            actual_sddl, expected_sddl,
+            "file DACL differs from the owner-only descriptor"
+        );
     }
 
     #[test]
