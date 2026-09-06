@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 
-use super::*;
+use super::scheduler::{scheduler, task_title_from_prompt};
 
 pub(super) async fn handle_command(command: &str, require_auth: bool) -> Result<serde_json::Value> {
     if command.starts_with('{') {

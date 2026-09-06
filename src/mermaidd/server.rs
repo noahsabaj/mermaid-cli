@@ -4,7 +4,10 @@
 use anyhow::{Context, Result};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 
-use super::*;
+use super::api::{authorize, handle_command};
+use super::recovery::startup_recovery;
+use super::scheduler::scheduler_drain_loop;
+use super::subscribe::handle_subscribe_stream;
 
 pub(super) const DEFAULT_TCP_ADDR: &str = "127.0.0.1:39871";
 

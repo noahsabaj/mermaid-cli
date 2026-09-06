@@ -4,7 +4,7 @@
 use anyhow::Result;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
-use super::*;
+use super::scheduler::scheduler;
 
 /// The terminal `RunEvent` a LATE subscriber gets: the task already ended,
 /// so there is no live stream to join and the record has to answer for it.
