@@ -60,7 +60,7 @@ use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::constants::MAX_RESPONSE_CHARS;
+use super::accumulator::{CappedText, ended_without_terminal, error_body};
 use crate::models::ModelCapabilities;
 use crate::models::adapters::driver::{Flow, Framing, StreamProtocol, drive_stream};
 use crate::models::config::ModelConfig;
@@ -77,32 +77,6 @@ use crate::models::types::{
 
 use super::ModelLimits;
 
-const TRUNCATION_MARKER: &str = "\n\n[TRUNCATED: response exceeded size limit]";
-
-/// Append `chunk` to `buf`, char-boundary-safe truncation at `cap` bytes.
-/// Sets `*truncated` once tripped; subsequent calls become no-ops. Same
-/// shape as the helpers in the other adapters.
-fn push_capped(buf: &mut String, chunk: &str, truncated: &mut bool, cap: usize) {
-    if *truncated {
-        return;
-    }
-    buf.push_str(chunk);
-    if buf.len() > cap {
-        let end = buf.floor_char_boundary(cap);
-        buf.truncate(end);
-        buf.push_str(TRUNCATION_MARKER);
-        *truncated = true;
-    }
-}
-
-/// Map Gemini's `finishReason` onto the normalized [`FinishReason`]. Gemini
-/// reports tool calls with `STOP` (the call rides in `parts`), so there is no
-/// `ToolUse` mapping; safety/recitation/blocklist reasons are content blocks.
-/// Whether an empty (no-content) Gemini candidate/chunk is a benign normal
-/// completion rather than a block to surface as an error. `FINISH_REASON_
-/// UNSPECIFIED` is included — it's not a safety block, and intermediate stream
-/// chunks legitimately carry it — so the streaming and non-streaming paths treat
-/// an empty response identically (#51).
 fn gemini_empty_is_benign(reason: &str) -> bool {
     matches!(reason, "STOP" | "MAX_TOKENS" | "FINISH_REASON_UNSPECIFIED")
 }
@@ -116,19 +90,6 @@ fn map_gemini_finish_reason(s: &str) -> FinishReason {
         },
         other => FinishReason::Other(other.to_string()),
     }
-}
-
-/// F56: whether a Gemini stream ended abnormally — it closed before the
-/// terminal `finishReason` was ever observed on a chunk. Gemini ends every
-/// normal stream (including tool-call turns, which report `STOP`) with a
-/// candidate `finishReason`; there is no separate `[DONE]`-style frame, so the
-/// `finishReason` IS the terminal marker. Its absence means the connection
-/// dropped mid-response — surfacing a clean `Ok` (with `stop_reason: None`)
-/// would be indistinguishable from a real completion, so the caller returns a
-/// stream error. A `MAX_TOKENS` truncation sets a real `finishReason`
-/// (`Length`), so it is NOT abnormal and is preserved.
-fn stream_closed_abnormally(finish_reason: Option<&FinishReason>) -> bool {
-    finish_reason.is_none()
 }
 
 /// Translate `ReasoningLevel` to Gemini 2.5's `thinkingBudget` (int
@@ -776,7 +737,7 @@ impl StreamProtocol for GeminiStream {
         // (with `stop_reason: None`) that would be indistinguishable from a real
         // completion. A `MAX_TOKENS` truncation set a real `finishReason`, so it
         // does NOT trip this and is preserved.
-        if stream_closed_abnormally(self.state.finish_reason.as_ref()) {
+        if ended_without_terminal(self.state.finish_reason.as_ref()) {
             return Err(ModelError::StreamError(
                 "Gemini stream closed before a terminal finishReason; the \
                  connection was likely dropped mid-response"
@@ -789,14 +750,14 @@ impl StreamProtocol for GeminiStream {
         let usage = self.state.usage();
 
         Ok(ModelResponse {
-            content: self.state.text_acc,
+            content: self.state.text_acc.into_string(),
             usage,
             model_name: self.model_name,
             stop_reason: self.state.finish_reason,
             thinking: if self.state.thinking_acc.is_empty() {
                 None
             } else {
-                Some(self.state.thinking_acc)
+                Some(self.state.thinking_acc.into_string())
             },
             tool_calls: if self.state.tool_calls_done.is_empty() {
                 None
@@ -813,10 +774,9 @@ impl StreamProtocol for GeminiStream {
 /// tested directly with synthetic SSE event sequences.
 #[derive(Debug, Default)]
 struct StreamState {
-    text_acc: String,
-    thinking_acc: String,
+    text_acc: CappedText,
+    thinking_acc: CappedText,
     tool_calls_done: Vec<ToolCall>,
-    truncated: bool,
     prompt_tokens: usize,
     completion_tokens: usize,
     cached_input_tokens: usize,
@@ -980,7 +940,7 @@ fn process_chunk_payload(
         let Some(text) = part.get("text").and_then(|v| v.as_str()) else {
             continue;
         };
-        if text.is_empty() || state.truncated {
+        if text.is_empty() {
             continue;
         }
         let is_thought = part
@@ -988,26 +948,24 @@ fn process_chunk_payload(
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
         if is_thought {
+            // Each buffer carries its own cap: a long thought must not stop
+            // the answer's text from accumulating.
+            if !state.thinking_acc.accepting() {
+                continue;
+            }
             if !hide_reasoning_trace {
                 out.push(StreamEvent::Reasoning(ReasoningChunk {
                     text: text.to_string(),
                     signature: None,
                 }));
             }
-            push_capped(
-                &mut state.thinking_acc,
-                text,
-                &mut state.truncated,
-                MAX_RESPONSE_CHARS,
-            );
+            state.thinking_acc.push(text);
         } else {
+            if !state.text_acc.accepting() {
+                continue;
+            }
             out.push(StreamEvent::Text(text.to_string()));
-            push_capped(
-                &mut state.text_acc,
-                text,
-                &mut state.truncated,
-                MAX_RESPONSE_CHARS,
-            );
+            state.text_acc.push(text);
         }
     }
     Ok(())
@@ -1149,10 +1107,7 @@ struct UsageMetadata {
 async fn http_error_from_response(response: reqwest::Response) -> ModelError {
     let status = response.status().as_u16();
     let debug = crate::models::error::ResponseDebugContext::from_headers(response.headers());
-    let body = response
-        .text()
-        .await
-        .unwrap_or_else(|_| "Unknown error".to_string());
+    let body = error_body(response, "Unknown error").await;
     if let Ok(parsed) = serde_json::from_str::<Value>(&body)
         && let Some(err) = parsed.get("error")
     {
@@ -1297,7 +1252,7 @@ mod tests {
         let payload = r#"{"promptFeedback":{"safetyRatings":[]},"candidates":[{"content":{"parts":[{"text":"hello"}]}}]}"#;
         process_chunk_payload(payload, &mut state, &mut events, false)
             .expect("benign feedback is ok");
-        assert_eq!(state.text_acc, "hello");
+        assert_eq!(state.text_acc.as_str(), "hello");
     }
 
     fn test_adapter() -> GeminiAdapter {
@@ -2058,7 +2013,7 @@ mod tests {
         .to_string();
         process_chunk_payload(&chunk2, &mut state, &mut events, false).unwrap();
 
-        assert_eq!(state.text_acc, "Hello, world!");
+        assert_eq!(state.text_acc.as_str(), "Hello, world!");
         assert_eq!(state.prompt_tokens, 5);
         assert_eq!(state.completion_tokens, 3);
         assert_eq!(state.usage().expect("usage present").total_tokens(), 8);
@@ -2128,8 +2083,8 @@ mod tests {
         .to_string();
         process_chunk_payload(&chunk2, &mut state, &mut events, false).unwrap();
 
-        assert_eq!(state.thinking_acc, "let me think...");
-        assert_eq!(state.text_acc, "the answer is 42");
+        assert_eq!(state.thinking_acc.as_str(), "let me think...");
+        assert_eq!(state.text_acc.as_str(), "the answer is 42");
 
         assert_eq!(count_reasoning(&events), 1);
         assert_eq!(count_text(&events), 1);
@@ -2180,8 +2135,8 @@ mod tests {
         .to_string();
         process_chunk_payload(&chunk, &mut state, &mut events, false).unwrap();
 
-        assert_eq!(state.thinking_acc, "thinking...");
-        assert_eq!(state.text_acc, "calling tool now");
+        assert_eq!(state.thinking_acc.as_str(), "thinking...");
+        assert_eq!(state.text_acc.as_str(), "calling tool now");
         assert_eq!(state.tool_calls_done.len(), 1);
 
         assert_eq!(count_reasoning(&events), 1);
@@ -2205,7 +2160,7 @@ mod tests {
 
         // Accumulator gets the text (so the final ModelResponse.thinking
         // is populated), but no Reasoning event is emitted.
-        assert_eq!(state.thinking_acc, "hidden thoughts");
+        assert_eq!(state.thinking_acc.as_str(), "hidden thoughts");
         assert_eq!(count_reasoning(&events), 0);
     }
 
@@ -2278,7 +2233,7 @@ mod tests {
         .to_string();
         process_chunk_payload(&chunk, &mut state, &mut events, false).unwrap();
         assert_eq!(state.finish_reason, Some(FinishReason::Length));
-        assert_eq!(state.text_acc, "partial");
+        assert_eq!(state.text_acc.as_str(), "partial");
     }
 
     #[test]
@@ -2293,7 +2248,7 @@ mod tests {
                 .to_string();
         process_chunk_payload(&chunk, &mut state, &mut events, false).unwrap();
         assert!(
-            stream_closed_abnormally(state.finish_reason.as_ref()),
+            ended_without_terminal(state.finish_reason.as_ref()),
             "no finishReason observed yet → abnormal if the stream ends here"
         );
 
@@ -2303,16 +2258,16 @@ mod tests {
         })
         .to_string();
         process_chunk_payload(&final_chunk, &mut state, &mut events, false).unwrap();
-        assert!(!stream_closed_abnormally(state.finish_reason.as_ref()));
+        assert!(!ended_without_terminal(state.finish_reason.as_ref()));
     }
 
     #[test]
     fn stream_closed_abnormally_preserves_max_tokens_truncation() {
         // CRUCIAL: a MAX_TOKENS truncation is a real terminal finishReason
         // (Length) — it must NOT be misclassified as an abnormal close.
-        assert!(stream_closed_abnormally(None));
-        assert!(!stream_closed_abnormally(Some(&FinishReason::Length)));
-        assert!(!stream_closed_abnormally(Some(&FinishReason::Stop)));
+        assert!(ended_without_terminal(None));
+        assert!(!ended_without_terminal(Some(&FinishReason::Length)));
+        assert!(!ended_without_terminal(Some(&FinishReason::Stop)));
     }
 
     #[test]

@@ -27,6 +27,9 @@ use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use super::accumulator::{
+    ended_without_terminal, error_body, parse_tool_args, push_capped, push_tool_arg, slot_in_bounds,
+};
 use crate::constants::MAX_RESPONSE_CHARS;
 use crate::models::ModelCapabilities;
 use crate::models::adapters::driver::{Flow, Framing, StreamProtocol, drive_stream};
@@ -46,46 +49,9 @@ use crate::models::types::{
     TokenUsage,
 };
 
-const TRUNCATION_MARKER: &str = "\n\n[TRUNCATED: response exceeded size limit]";
 /// API version pin per Anthropic stability guarantee. Bump when a feature
 /// we use moves to a newer version line.
 const ANTHROPIC_VERSION: &str = "2023-06-01";
-
-/// Append `chunk` to `buf`, char-boundary-safe truncation at `cap` bytes.
-/// Sets `*truncated` once tripped; subsequent calls become no-ops. Same
-/// shape as the helpers in the Ollama and OpenAI-compat adapters.
-fn push_capped(buf: &mut String, chunk: &str, truncated: &mut bool, cap: usize) {
-    if *truncated {
-        return;
-    }
-    buf.push_str(chunk);
-    if buf.len() > cap {
-        let end = buf.floor_char_boundary(cap);
-        buf.truncate(end);
-        buf.push_str(TRUNCATION_MARKER);
-        *truncated = true;
-    }
-}
-
-/// Append a streaming tool-argument fragment, hard-capping the buffer at
-/// `MAX_TOOL_ARG_BYTES`. A crafted stream could otherwise send unbounded
-/// `partial_json` fragments and grow this buffer without limit (the daemon is
-/// long-lived). Past the cap we stop appending at a char boundary; the
-/// now-truncated JSON simply fails to parse and falls back to a raw string —
-/// bounded, not an OOM (#14).
-fn push_tool_arg(buf: &mut String, frag: &str) {
-    let cap = crate::constants::MAX_TOOL_ARG_BYTES;
-    if buf.len() >= cap {
-        return;
-    }
-    if buf.len() + frag.len() <= cap {
-        buf.push_str(frag);
-    } else {
-        let room = cap - buf.len();
-        let end = frag.floor_char_boundary(room);
-        buf.push_str(&frag[..end]);
-    }
-}
 
 /// Map Anthropic's `stop_reason` onto the normalized [`FinishReason`].
 fn map_anthropic_stop_reason(s: &str) -> FinishReason {
@@ -96,19 +62,6 @@ fn map_anthropic_stop_reason(s: &str) -> FinishReason {
         "refusal" => FinishReason::ContentFilter,
         other => FinishReason::Other(other.to_string()),
     }
-}
-
-/// F56: whether an Anthropic stream ended abnormally — the connection closed
-/// before ANY terminal frame was observed. A normal stream ends with a
-/// `message_stop` event, preceded by a `message_delta` that carries the
-/// terminal `stop_reason`. If NEITHER was seen the turn is truncated, not
-/// complete; surfacing a clean `Ok` (with `stop_reason: None`) here would be
-/// indistinguishable from a real completion, so the caller returns a stream
-/// error instead. A `max_tokens` truncation is NOT abnormal — it arrives as a
-/// real `stop_reason` (`Length`), so it's preserved and the runtime's
-/// compact-and-continue path still fires.
-fn stream_closed_abnormally(saw_message_stop: bool, stop_reason: Option<&FinishReason>) -> bool {
-    !saw_message_stop && stop_reason.is_none()
 }
 
 /// Finalize one completed (or interrupted) content block into the response
@@ -143,10 +96,7 @@ fn finalize_block(
             let arguments: Value = if input_buf.is_empty() {
                 json!({})
             } else {
-                match serde_json::from_str(&input_buf) {
-                    Ok(v) => v,
-                    Err(_) => Value::String(input_buf),
-                }
+                parse_tool_args(&name, input_buf)
             };
             let tc = ToolCall {
                 id: if id.is_empty() { None } else { Some(id) },
@@ -972,7 +922,15 @@ pub(crate) struct AnthropicStream {
     thinking_acc: String,
     signature_acc: Option<String>,
     tool_calls_done: Vec<ToolCall>,
-    truncated: bool,
+    /// Per-buffer caps (see `accumulator::push_capped`): a thinking trace
+    /// that trips its cap must not stop the answer's text from accumulating.
+    text_truncated: bool,
+    thinking_truncated: bool,
+    /// Whether any usage frame arrived. Without one the response reports no
+    /// usage rather than a provider-sourced zero, which the reducer would
+    /// otherwise fold as authoritative and reset the context gauge with
+    /// (#125 / F54 on the other adapters).
+    saw_usage: bool,
     prompt_tokens: usize,
     completion_tokens: usize,
     cache_creation_tokens: usize,
@@ -994,7 +952,9 @@ impl AnthropicStream {
             thinking_acc: String::new(),
             signature_acc: None,
             tool_calls_done: Vec::new(),
-            truncated: false,
+            text_truncated: false,
+            thinking_truncated: false,
+            saw_usage: false,
             prompt_tokens: 0,
             completion_tokens: 0,
             cache_creation_tokens: 0,
@@ -1033,6 +993,7 @@ impl StreamProtocol for AnthropicStream {
                     .and_then(|v| v.as_u64())
                 {
                     self.prompt_tokens = input as usize;
+                    self.saw_usage = true;
                 }
                 if let Some(cache_creation) = parsed
                     .pointer("/message/usage/cache_creation_input_tokens")
@@ -1081,6 +1042,15 @@ impl StreamProtocol for AnthropicStream {
                     // results we don't request) — track as inert.
                     _ => BlockAccumulator::Other,
                 };
+                if !slot_in_bounds(index) {
+                    // A well-framed stream can open blocks forever; past the
+                    // bound the block is dropped and its deltas find no slot.
+                    tracing::warn!(
+                        index,
+                        "anthropic stream opened a content block past the bound; ignoring it"
+                    );
+                    return Ok(Flow::Continue);
+                }
                 self.blocks.insert(index, acc);
             },
             "content_block_delta" => {
@@ -1099,9 +1069,9 @@ impl StreamProtocol for AnthropicStream {
                             .and_then(|d| d.get("text"))
                             .and_then(|v| v.as_str())
                             .unwrap_or("");
-                        if !text.is_empty() && !self.truncated {
+                        if !text.is_empty() && !self.text_truncated {
                             out.push(StreamEvent::Text(text.to_string()));
-                            push_capped(buf_s, text, &mut self.truncated, MAX_RESPONSE_CHARS);
+                            push_capped(buf_s, text, &mut self.text_truncated, MAX_RESPONSE_CHARS);
                         }
                     },
                     (BlockAccumulator::Thinking { content, signature }, "thinking_delta") => {
@@ -1109,7 +1079,7 @@ impl StreamProtocol for AnthropicStream {
                             .and_then(|d| d.get("thinking"))
                             .and_then(|v| v.as_str())
                             .unwrap_or("");
-                        if !text.is_empty() && !self.truncated {
+                        if !text.is_empty() && !self.thinking_truncated {
                             if !hide_reasoning_trace {
                                 // #9: this is intentionally `None` here —
                                 // `signature_delta` arrives AFTER the
@@ -1124,7 +1094,12 @@ impl StreamProtocol for AnthropicStream {
                                     signature: signature.clone(),
                                 }));
                             }
-                            push_capped(content, text, &mut self.truncated, MAX_RESPONSE_CHARS);
+                            push_capped(
+                                content,
+                                text,
+                                &mut self.thinking_truncated,
+                                MAX_RESPONSE_CHARS,
+                            );
                         }
                     },
                     (BlockAccumulator::Thinking { signature, .. }, "signature_delta") => {
@@ -1169,6 +1144,7 @@ impl StreamProtocol for AnthropicStream {
                     .and_then(|v| v.as_u64())
                 {
                     self.completion_tokens = tokens as usize;
+                    self.saw_usage = true;
                 }
                 // The terminal stop_reason rides on `message_delta`.
                 if let Some(sr) = parsed
@@ -1223,7 +1199,10 @@ impl StreamProtocol for AnthropicStream {
         // below would even hand back partial content as if finished. Surface a
         // stream error instead. A `max_tokens` truncation set a real
         // `stop_reason`, so it does NOT trip this and is preserved.
-        if stream_closed_abnormally(self.saw_message_stop, self.stop_reason.as_ref()) {
+        // A normal stream ends with `message_stop`, preceded by the
+        // `message_delta` that carries the terminal `stop_reason`; neither
+        // seen means the connection closed under us (F56).
+        if !self.saw_message_stop && ended_without_terminal(self.stop_reason.as_ref()) {
             return Err(ModelError::StreamError(
                 "Anthropic stream closed before any terminal frame (message_stop / \
                  message_delta stop_reason); the connection was likely dropped \
@@ -1278,11 +1257,11 @@ impl StreamProtocol for AnthropicStream {
 
         Ok(ModelResponse {
             content: self.text_acc,
-            usage: Some(
+            usage: self.saw_usage.then(|| {
                 TokenUsage::provider(self.prompt_tokens, self.completion_tokens)
                     .with_cache_creation(self.cache_creation_tokens)
-                    .with_cached_input(self.cache_read_tokens),
-            ),
+                    .with_cached_input(self.cache_read_tokens)
+            }),
             model_name: self.model_name,
             stop_reason: self.stop_reason,
             thinking: if self.thinking_acc.is_empty() {
@@ -1436,10 +1415,7 @@ enum BlockAccumulator {
 async fn http_error_from_response(response: reqwest::Response) -> ModelError {
     let status = response.status().as_u16();
     let debug = crate::models::error::ResponseDebugContext::from_headers(response.headers());
-    let body = response
-        .text()
-        .await
-        .unwrap_or_else(|_| "Unknown error".to_string());
+    let body = error_body(response, "Unknown error").await;
     // Try to parse Anthropic's error JSON shape so the user sees the
     // actual error message rather than a raw JSON blob.
     if let Ok(parsed) = serde_json::from_str::<Value>(&body)
@@ -1538,23 +1514,24 @@ mod tests {
 
     #[test]
     fn stream_closed_abnormally_distinguishes_drop_from_completion() {
-        // F56: closed before ANY terminal frame (no message_stop, no
-        // message_delta stop_reason) → abnormal, surfaced as a stream error.
-        assert!(stream_closed_abnormally(false, None));
+        // The predicate `finish()` applies: closed before ANY terminal frame
+        // (no message_stop, no message_delta stop_reason) is abnormal and
+        // surfaces as a stream error (F56).
+        let closed_abnormally = |saw_message_stop: bool, stop_reason: Option<&FinishReason>| {
+            !saw_message_stop && ended_without_terminal(stop_reason)
+        };
+        assert!(closed_abnormally(false, None));
         // Clean completion: message_stop observed.
-        assert!(!stream_closed_abnormally(true, Some(&FinishReason::Stop)));
+        assert!(!closed_abnormally(true, Some(&FinishReason::Stop)));
         // Dropped after message_delta (stop_reason set) but before message_stop:
         // we have the real finish reason, so it's complete — NOT abnormal (the
         // open-block drain then recovers any fully-streamed tool_use/text).
-        assert!(!stream_closed_abnormally(false, Some(&FinishReason::Stop)));
+        assert!(!closed_abnormally(false, Some(&FinishReason::Stop)));
         // CRUCIAL: a max_tokens truncation arrives as a real stop_reason
         // (Length) — it must NOT be misclassified as an abnormal close.
-        assert!(!stream_closed_abnormally(
-            false,
-            Some(&FinishReason::Length)
-        ));
+        assert!(!closed_abnormally(false, Some(&FinishReason::Length)));
         // Defensive: a message_stop frame is terminal even with no stop_reason.
-        assert!(!stream_closed_abnormally(true, None));
+        assert!(!closed_abnormally(true, None));
     }
 
     #[test]
@@ -2602,5 +2579,21 @@ mod tests {
     fn name_returns_model_id() {
         let adapter = test_adapter();
         assert_eq!(adapter.name(), "claude-sonnet-4-6");
+    }
+
+    /// A well-framed stream can open content blocks forever, one small frame
+    /// each, and the SSE cap never trips. The block map is bounded by
+    /// `slot_in_bounds` instead; past it, blocks are ignored.
+    #[test]
+    fn content_blocks_past_the_bound_are_ignored() {
+        let mut stream = AnthropicStream::new("claude-test".to_string(), false);
+        let mut out = Vec::new();
+        for index in 0..(crate::constants::MAX_TOOL_CALLS + 50) {
+            let frame = format!(
+                r#"{{"type":"content_block_start","index":{index},"content_block":{{"type":"text","text":""}}}}"#
+            );
+            stream.on_frame(&frame, &mut out).unwrap();
+        }
+        assert_eq!(stream.blocks.len(), crate::constants::MAX_TOOL_CALLS);
     }
 }

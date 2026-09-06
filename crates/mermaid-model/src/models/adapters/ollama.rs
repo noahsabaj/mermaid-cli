@@ -10,7 +10,7 @@ use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::constants::MAX_RESPONSE_CHARS;
+use super::accumulator::{CappedText, error_body};
 use crate::models::ModelCapabilities;
 use crate::models::adapters::driver::{
     Flow, Framing, StreamProtocol, drive_stream, plain_http_error,
@@ -23,17 +23,10 @@ use crate::models::stream::{StatusNotify, StreamEvent, StreamSink};
 use crate::models::traits::Model;
 use crate::models::types::{ChatMessage, FinishReason, MessageRole, ModelResponse, TokenUsage};
 
-/// Marker appended to `content` and `thinking` once the per-stream size cap
-/// is hit. Subsequent chunks are silently dropped so a runaway model can't
-/// exhaust memory in non-interactive mode or sub-agents (the TUI applies its
-/// own cap on the buffered response, but the adapter is the only line of
-/// defense for non-TUI callers).
-const TRUNCATION_MARKER: &str = "\n\n[TRUNCATED: response exceeded size limit]";
-
 /// Mutable accumulators for stream processing, grouped to reduce parameter count.
 struct StreamAccumulator {
-    content: String,
-    thinking: String,
+    content: CappedText,
+    thinking: CappedText,
     tool_calls: Vec<crate::models::ToolCall>,
     /// Suppress `StreamEvent::Reasoning` emission to the turn's sink.
     /// The accumulator still records `thinking` so `ModelResponse.thinking`
@@ -58,11 +51,6 @@ struct StreamAccumulator {
     /// `saw_done` keeps that legitimate `Ok + FinishReason::Length` truncation
     /// from being misclassified as a stream error.
     saw_done: bool,
-    /// True once `content` OR `thinking` has been truncated to the size cap.
-    /// Once set, further chunks are silently dropped — both from the
-    /// accumulator AND from typed-event emission. Prevents a runaway model
-    /// from filling memory in non-interactive mode and sub-agents.
-    truncated: bool,
 }
 
 impl StreamAccumulator {
@@ -84,21 +72,6 @@ impl StreamAccumulator {
     /// the runtime's compact-and-continue — is NOT misclassified as an error.
     fn closed_abnormally(&self) -> bool {
         !self.saw_done
-    }
-}
-
-/// Append `chunk` to `buf`, char-boundary-safe truncation at `cap` bytes.
-/// Sets `*truncated` once tripped; subsequent calls become no-ops.
-fn push_capped(buf: &mut String, chunk: &str, truncated: &mut bool, cap: usize) {
-    if *truncated {
-        return;
-    }
-    buf.push_str(chunk);
-    if buf.len() > cap {
-        let end = buf.floor_char_boundary(cap);
-        buf.truncate(end);
-        buf.push_str(TRUNCATION_MARKER);
-        *truncated = true;
     }
 }
 
@@ -455,8 +428,8 @@ impl OllamaAdapter {
     /// is what makes the emission order the production order. The `Done`
     /// event comes from the provider wrapper, never from here.
     ///
-    /// Once the per-stream `MAX_RESPONSE_CHARS` cap trips (`acc.truncated`),
-    /// further content / thinking chunks are silently dropped — both from
+    /// Once a buffer's `MAX_RESPONSE_CHARS` cap trips (`CappedText`, one flag
+    /// per buffer), further chunks for it are silently dropped — both from
     /// the accumulator AND from typed-event emission. Tool calls and token
     /// usage are still recorded because those are bounded.
     fn process_stream_chunk(
@@ -468,7 +441,7 @@ impl OllamaAdapter {
         // (so `ModelResponse.thinking` stays populated for callers that read
         // the final response); only emitted when not hidden.
         if let Some(ref thinking_chunk) = json_chunk.message.thinking
-            && !acc.truncated
+            && acc.thinking.accepting()
             && !thinking_chunk.is_empty()
         {
             if !acc.hide_reasoning_trace {
@@ -477,12 +450,7 @@ impl OllamaAdapter {
                     signature: None,
                 }));
             }
-            push_capped(
-                &mut acc.thinking,
-                thinking_chunk,
-                &mut acc.truncated,
-                MAX_RESPONSE_CHARS,
-            );
+            acc.thinking.push(thinking_chunk);
         }
 
         // Tool calls — bounded, no cap needed. Emitted as typed events
@@ -495,14 +463,9 @@ impl OllamaAdapter {
         }
 
         // Regular text content.
-        if !json_chunk.message.content.is_empty() && !acc.truncated {
+        if !json_chunk.message.content.is_empty() && acc.content.accepting() {
             out.push(StreamEvent::Text(json_chunk.message.content.clone()));
-            push_capped(
-                &mut acc.content,
-                &json_chunk.message.content,
-                &mut acc.truncated,
-                MAX_RESPONSE_CHARS,
-            );
+            acc.content.push(&json_chunk.message.content);
         }
 
         // Capture token usage + stop reason from the `done` chunk. `saw_usage`
@@ -761,10 +724,7 @@ impl OllamaAdapter {
             let status = response.status().as_u16();
             let debug =
                 crate::models::error::ResponseDebugContext::from_headers(response.headers());
-            let error_text = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
+            let error_text = error_body(response, "Unknown error").await;
             return Err(ModelError::Backend(BackendError::HttpError {
                 status,
                 message: error_text,
@@ -883,8 +843,8 @@ impl OllamaStream {
         Self {
             model_name,
             acc: StreamAccumulator {
-                content: String::new(),
-                thinking: String::new(),
+                content: CappedText::new(),
+                thinking: CappedText::new(),
                 tool_calls: Vec::new(),
                 hide_reasoning_trace,
                 prompt_tokens: 0,
@@ -892,7 +852,6 @@ impl OllamaStream {
                 saw_usage: false,
                 done_reason: None,
                 saw_done: false,
-                truncated: false,
             },
         }
     }
@@ -930,7 +889,7 @@ impl StreamProtocol for OllamaStream {
         let thinking = if self.acc.thinking.is_empty() {
             None
         } else {
-            Some(self.acc.thinking)
+            Some(self.acc.thinking.into_string())
         };
         let tool_calls = if self.acc.tool_calls.is_empty() {
             None
@@ -945,7 +904,7 @@ impl StreamProtocol for OllamaStream {
         // and drop the provider_continuation for Anthropic.
 
         Ok(ModelResponse {
-            content: self.acc.content,
+            content: self.acc.content.into_string(),
             usage,
             model_name: self.model_name,
             stop_reason,
@@ -1187,36 +1146,8 @@ fn normalize_url(url: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{TRUNCATION_MARKER, normalize_url, push_capped, uses_effort_string_think};
-
-    // --- push_capped: response-size cap for streaming accumulators ---
-
-    #[test]
-    fn push_capped_under_cap_appends_normally() {
-        let mut buf = String::new();
-        let mut truncated = false;
-        push_capped(&mut buf, "hello", &mut truncated, 100);
-        push_capped(&mut buf, " world", &mut truncated, 100);
-        assert_eq!(buf, "hello world");
-        assert!(!truncated);
-    }
-
-    #[test]
-    fn push_capped_truncates_once_then_drops_chunks() {
-        let mut buf = String::new();
-        let mut truncated = false;
-        let cap = 32;
-        // First chunk overflows.
-        push_capped(&mut buf, &"a".repeat(200), &mut truncated, cap);
-        assert!(truncated);
-        assert!(buf.ends_with(TRUNCATION_MARKER));
-        let len_after_first = buf.len();
-        // Subsequent chunks are silently dropped.
-        push_capped(&mut buf, &"b".repeat(200), &mut truncated, cap);
-        push_capped(&mut buf, "tail", &mut truncated, cap);
-        assert_eq!(buf.len(), len_after_first);
-        assert_eq!(buf.matches(TRUNCATION_MARKER).count(), 1);
-    }
+    use super::super::accumulator::CappedText;
+    use super::{normalize_url, uses_effort_string_think};
 
     // --- /api/ps placement parsing (mirrors model_placement's selection) ---
 
@@ -1244,17 +1175,6 @@ mod tests {
         assert_eq!(pick("other:7b"), Some((4_000_000_000, 8_000_000_000)));
         assert_eq!(pick("nogpu:1b"), None); // missing size_vram → None
         assert_eq!(pick("absent:1b"), None); // not loaded → None
-    }
-
-    #[test]
-    fn push_capped_respects_char_boundary_for_cjk() {
-        let mut buf = String::new();
-        let mut truncated = false;
-        // 4 bytes lands inside the second 3-byte 你; floor must back off to 3.
-        push_capped(&mut buf, "你你你你", &mut truncated, 4);
-        let body = &buf[..buf.find('\n').unwrap()];
-        assert_eq!(body, "你");
-        assert!(buf.ends_with(TRUNCATION_MARKER));
     }
 
     #[test]
@@ -1712,8 +1632,8 @@ mod tests {
         // #49: token totals use saturating_add (here near usize::MAX).
         use super::{OllamaMessage, OllamaStreamChunk, StreamAccumulator};
         let mut acc = StreamAccumulator {
-            content: String::new(),
-            thinking: String::new(),
+            content: CappedText::new(),
+            thinking: CappedText::new(),
             tool_calls: Vec::new(),
             hide_reasoning_trace: false,
             prompt_tokens: 0,
@@ -1721,7 +1641,6 @@ mod tests {
             saw_usage: false,
             done_reason: None,
             saw_done: false,
-            truncated: false,
         };
         let chunk = OllamaStreamChunk {
             message: OllamaMessage {
@@ -1751,8 +1670,8 @@ mod tests {
 
     fn empty_accumulator() -> super::StreamAccumulator {
         super::StreamAccumulator {
-            content: String::new(),
-            thinking: String::new(),
+            content: CappedText::new(),
+            thinking: CappedText::new(),
             tool_calls: Vec::new(),
             hide_reasoning_trace: false,
             prompt_tokens: 0,
@@ -1760,7 +1679,6 @@ mod tests {
             saw_usage: false,
             done_reason: None,
             saw_done: false,
-            truncated: false,
         }
     }
 

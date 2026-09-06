@@ -76,4 +76,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dbus-secret-service = { version = "4", features = ["vendored"] }
 
 [dev-dependencies]
+# Builds `reqwest::Response` values from `http::Response` for the shared
+# error-body tests; the same `http` major reqwest 0.13 speaks.
+http = "1"
 temp-env = "0.3"

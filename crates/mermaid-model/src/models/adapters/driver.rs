@@ -36,7 +36,7 @@
 
 use futures::StreamExt;
 
-use crate::models::error::{BackendError, ModelError, Result};
+use crate::models::error::{ModelError, Result};
 use crate::models::stream::{StreamEvent, StreamSink, emit_all};
 use crate::models::types::ModelResponse;
 use crate::utils::{drain_complete_lines, drain_sse_events};
@@ -215,17 +215,7 @@ where
 /// For providers that attach no interpretable error envelope worth
 /// unwrapping. Anthropic and Gemini both do, and keep their own.
 pub async fn plain_http_error(response: reqwest::Response) -> ModelError {
-    let status = response.status().as_u16();
-    let debug = crate::models::error::ResponseDebugContext::from_headers(response.headers());
-    let message = response
-        .text()
-        .await
-        .unwrap_or_else(|_| "Unknown error".to_string());
-    ModelError::Backend(BackendError::HttpError {
-        status,
-        message,
-        debug,
-    })
+    super::accumulator::http_error(response, "Unknown error").await
 }
 
 #[cfg(test)]

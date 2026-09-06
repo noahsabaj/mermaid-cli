@@ -45,7 +45,9 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::constants::MAX_RESPONSE_CHARS;
+use super::accumulator::{
+    CappedText, ended_without_terminal, error_body, parse_tool_args, push_tool_arg,
+};
 use crate::models::ModelCapabilities;
 use crate::models::adapters::driver::{
     Flow, Framing, StreamProtocol, drive_stream, plain_http_error,
@@ -63,47 +65,6 @@ use crate::models::tool_call::{FunctionCall, ToolCall};
 use crate::models::traits::Model;
 use crate::models::types::{ChatMessage, FinishReason, MessageRole, ModelResponse, TokenUsage};
 
-const TRUNCATION_MARKER: &str = "\n\n[TRUNCATED: response exceeded size limit]";
-
-/// Append `chunk` to `buf`, char-boundary-safe truncation at `cap` bytes.
-/// Sets `*truncated` once tripped; subsequent calls become no-ops. Same
-/// shape as the helper in `adapters/ollama.rs` — duplicated rather than
-/// shared because (a) the marker text differs in spirit (provider-specific
-/// limits could grow different copy later), and (b) the dependency
-/// graph stays one-way (utils have no provider knowledge).
-fn push_capped(buf: &mut String, chunk: &str, truncated: &mut bool, cap: usize) {
-    if *truncated {
-        return;
-    }
-    buf.push_str(chunk);
-    if buf.len() > cap {
-        let end = buf.floor_char_boundary(cap);
-        buf.truncate(end);
-        buf.push_str(TRUNCATION_MARKER);
-        *truncated = true;
-    }
-}
-
-/// Append a streaming tool-argument fragment, hard-capping the buffer at
-/// `MAX_TOOL_ARG_BYTES`. A crafted stream could otherwise send unbounded
-/// `arguments` fragments and grow this buffer without limit (the daemon is
-/// long-lived). Past the cap we stop appending at a char boundary; the
-/// now-truncated JSON simply fails to parse and falls back to a raw string —
-/// bounded, not an OOM (#14).
-fn push_tool_arg(buf: &mut String, frag: &str) {
-    let cap = crate::constants::MAX_TOOL_ARG_BYTES;
-    if buf.len() >= cap {
-        return;
-    }
-    if buf.len() + frag.len() <= cap {
-        buf.push_str(frag);
-    } else {
-        let room = cap - buf.len();
-        let end = frag.floor_char_boundary(room);
-        buf.push_str(&frag[..end]);
-    }
-}
-
 /// Map OpenAI's `finish_reason` onto the normalized [`FinishReason`].
 fn map_openai_finish_reason(s: &str) -> FinishReason {
     match s {
@@ -113,19 +74,6 @@ fn map_openai_finish_reason(s: &str) -> FinishReason {
         "content_filter" => FinishReason::ContentFilter,
         other => FinishReason::Other(other.to_string()),
     }
-}
-
-/// F56: whether an OpenAI-compatible stream ended abnormally — it closed before
-/// any `finish_reason` was observed on a choice. The `[DONE]` sentinel is
-/// swallowed upstream by `drain_sse_events`, so a choice's `finish_reason`
-/// (`stop`/`length`/`tool_calls`/`content_filter`) is the only terminal marker
-/// this adapter can see; a conformant Chat Completions stream always carries
-/// one. Its absence means the connection dropped mid-response — returning a
-/// clean `Ok` (with `stop_reason: None`) would be indistinguishable from a real
-/// completion, so the caller surfaces a stream error. A `length` truncation
-/// sets a real `finish_reason`, so it is NOT abnormal and is preserved.
-fn stream_closed_abnormally(stop_reason: Option<&FinishReason>) -> bool {
-    stop_reason.is_none()
 }
 
 /// OpenAI-compatible model adapter.
@@ -451,10 +399,7 @@ impl OpenAICompatAdapter {
             let status = response.status().as_u16();
             let debug =
                 crate::models::error::ResponseDebugContext::from_headers(response.headers());
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
+            let body = error_body(response, "Unknown error").await;
             return Err(ModelError::Backend(BackendError::HttpError {
                 status,
                 message: body,
@@ -572,10 +517,9 @@ pub(crate) struct OpenAICompatStream {
     profile: &'static ProviderProfile,
     model_name: String,
     hide_reasoning_trace: bool,
-    content_acc: String,
-    thinking_acc: String,
+    content_acc: CappedText,
+    thinking_acc: CappedText,
     tool_calls_partial: Vec<PartialToolCall>,
-    truncated: bool,
     stop_reason: Option<FinishReason>,
     /// The full token breakdown (cached-input + reasoning) from the last usage
     /// frame. Stays `None` until a usage frame arrives, so a stream that never
@@ -598,10 +542,9 @@ impl OpenAICompatStream {
             profile,
             model_name,
             hide_reasoning_trace,
-            content_acc: String::new(),
-            thinking_acc: String::new(),
+            content_acc: CappedText::default(),
+            thinking_acc: CappedText::default(),
             tool_calls_partial: Vec::new(),
-            truncated: false,
             stop_reason: None,
             usage_acc: None,
             inline_tags: matches!(
@@ -616,10 +559,6 @@ impl OpenAICompatStream {
 impl StreamProtocol for OpenAICompatStream {
     const FRAMING: Framing = Framing::Sse;
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "predates the lint; see .github/baselines/expect_budget.txt"
-    )]
     fn on_frame(&mut self, frame: &str, out: &mut Vec<StreamEvent>) -> Result<Flow> {
         // A mid-stream error frame (common on OpenRouter) is an
         // `{"error": ...}` object, not a chat chunk. Surface it as a
@@ -693,16 +632,13 @@ impl StreamProtocol for OpenAICompatStream {
                 }),
             _ => None,
         };
-        if let Some(chunk) = reasoning_chunk {
+        if let Some(chunk) = reasoning_chunk
+            && self.thinking_acc.accepting()
+        {
             if !self.hide_reasoning_trace {
                 out.push(StreamEvent::Reasoning(chunk.clone()));
             }
-            push_capped(
-                &mut self.thinking_acc,
-                &chunk.text,
-                &mut self.truncated,
-                MAX_RESPONSE_CHARS,
-            );
+            self.thinking_acc.push(&chunk.text);
         }
 
         // Text content. For inline-tags providers, route through
@@ -710,41 +646,28 @@ impl StreamProtocol for OpenAICompatStream {
         // into its own channel; otherwise emit as plain text.
         if let Some(text) = delta.content.as_ref()
             && !text.is_empty()
-            && !self.truncated
         {
             if self.inline_tags {
+                // The tag machine must see every byte even once a buffer is
+                // full, or a `</think>` could be missed; only the emit and
+                // the accumulate are gated, each by its own buffer.
                 let (text_part, reasoning_part) = self.think_state.feed(text);
-                if !text_part.is_empty() {
+                if !text_part.is_empty() && self.content_acc.accepting() {
                     out.push(StreamEvent::Text(text_part.clone()));
-                    push_capped(
-                        &mut self.content_acc,
-                        &text_part,
-                        &mut self.truncated,
-                        MAX_RESPONSE_CHARS,
-                    );
+                    self.content_acc.push(&text_part);
                 }
-                if !reasoning_part.is_empty() {
+                if !reasoning_part.is_empty() && self.thinking_acc.accepting() {
                     if !self.hide_reasoning_trace {
                         out.push(StreamEvent::Reasoning(ReasoningChunk {
                             text: reasoning_part.clone(),
                             signature: None,
                         }));
                     }
-                    push_capped(
-                        &mut self.thinking_acc,
-                        &reasoning_part,
-                        &mut self.truncated,
-                        MAX_RESPONSE_CHARS,
-                    );
+                    self.thinking_acc.push(&reasoning_part);
                 }
-            } else {
+            } else if self.content_acc.accepting() {
                 out.push(StreamEvent::Text(text.clone()));
-                push_capped(
-                    &mut self.content_acc,
-                    text,
-                    &mut self.truncated,
-                    MAX_RESPONSE_CHARS,
-                );
+                self.content_acc.push(text);
             }
         }
 
@@ -765,7 +688,7 @@ impl StreamProtocol for OpenAICompatStream {
         // checked before finalizing/emitting tool calls so a dropped connection
         // doesn't hand back a half-built turn. A `length` truncation set a real
         // `finish_reason`, so it does NOT trip this and is preserved.
-        if stream_closed_abnormally(self.stop_reason.as_ref()) {
+        if ended_without_terminal(self.stop_reason.as_ref()) {
             return Err(ModelError::StreamError(format!(
                 "{} stream closed before a terminal finish_reason; the connection \
                  was likely dropped mid-response",
@@ -777,28 +700,18 @@ impl StreamProtocol for OpenAICompatStream {
         // get emitted to the text channel; see ThinkTagState::flush).
         if self.inline_tags {
             let (text_tail, reasoning_tail) = self.think_state.flush();
-            if !text_tail.is_empty() && !self.truncated {
+            if !text_tail.is_empty() && self.content_acc.accepting() {
                 out.push(StreamEvent::Text(text_tail.clone()));
-                push_capped(
-                    &mut self.content_acc,
-                    &text_tail,
-                    &mut self.truncated,
-                    MAX_RESPONSE_CHARS,
-                );
+                self.content_acc.push(&text_tail);
             }
-            if !reasoning_tail.is_empty() && !self.truncated {
+            if !reasoning_tail.is_empty() && self.thinking_acc.accepting() {
                 if !self.hide_reasoning_trace {
                     out.push(StreamEvent::Reasoning(ReasoningChunk {
                         text: reasoning_tail.clone(),
                         signature: None,
                     }));
                 }
-                push_capped(
-                    &mut self.thinking_acc,
-                    &reasoning_tail,
-                    &mut self.truncated,
-                    MAX_RESPONSE_CHARS,
-                );
+                self.thinking_acc.push(&reasoning_tail);
             }
         }
 
@@ -818,7 +731,7 @@ impl StreamProtocol for OpenAICompatStream {
         let thinking = if self.thinking_acc.is_empty() {
             None
         } else {
-            Some(self.thinking_acc)
+            Some(self.thinking_acc.into_string())
         };
         let tool_calls = if final_tool_calls.is_empty() {
             None
@@ -841,7 +754,7 @@ impl StreamProtocol for OpenAICompatStream {
         }
 
         Ok(ModelResponse {
-            content: self.content_acc,
+            content: self.content_acc.into_string(),
             // `None` when the stream never reported usage, so the reducer keeps
             // its char/4 estimate instead of resetting the gauge to zero (#125).
             usage: self.usage_acc,
@@ -1283,15 +1196,7 @@ impl PartialToolCall {
         let arguments: Value = if self.arguments_buf.is_empty() {
             json!({})
         } else {
-            match serde_json::from_str(&self.arguments_buf) {
-                Ok(v) => v,
-                Err(_) => {
-                    // Malformed JSON: surface the raw string so the
-                    // executor can decide how to handle it. The agent
-                    // loop's parse-error path will catch this.
-                    Value::String(self.arguments_buf)
-                },
-            }
+            parse_tool_args(&name, self.arguments_buf)
         };
         Some(ToolCall {
             id: self.id,
@@ -1334,10 +1239,7 @@ fn parse_full_tool_call(wire: ToolCallWire) -> ToolCall {
     let arguments: Value = if wire.function.arguments.is_empty() {
         json!({})
     } else {
-        match serde_json::from_str(&wire.function.arguments) {
-            Ok(v) => v,
-            Err(_) => Value::String(wire.function.arguments),
-        }
+        parse_tool_args(&name, wire.function.arguments)
     };
     ToolCall {
         id: wire.id,
@@ -1738,12 +1640,12 @@ mod tests {
     fn stream_closed_abnormally_distinguishes_drop_from_completion() {
         // F56: no finish_reason observed → the stream dropped mid-response and
         // must surface as a stream error, not a clean Ok.
-        assert!(stream_closed_abnormally(None));
+        assert!(ended_without_terminal(None));
         // A real terminal finish_reason → clean completion.
-        assert!(!stream_closed_abnormally(Some(&FinishReason::Stop)));
-        assert!(!stream_closed_abnormally(Some(&FinishReason::ToolUse)));
+        assert!(!ended_without_terminal(Some(&FinishReason::Stop)));
+        assert!(!ended_without_terminal(Some(&FinishReason::ToolUse)));
         // CRUCIAL: a `length` truncation is a real finish_reason — NOT abnormal.
-        assert!(!stream_closed_abnormally(Some(&FinishReason::Length)));
+        assert!(!ended_without_terminal(Some(&FinishReason::Length)));
     }
 
     #[test]
@@ -2617,10 +2519,12 @@ mod tests {
         // Sanity that this adapter's marker matches the agreed shape so
         // any consumer that greps for it (TUI's chat widget, log
         // scrapers) sees the same text.
-        let mut buf = String::new();
-        let mut t = false;
-        push_capped(&mut buf, &"a".repeat(50), &mut t, 10);
-        assert!(t);
-        assert!(buf.ends_with(TRUNCATION_MARKER));
+        let mut buf = CappedText::with_cap(10);
+        buf.push(&"a".repeat(50));
+        assert!(buf.truncated());
+        assert!(
+            buf.as_str()
+                .ends_with(super::super::accumulator::TRUNCATION_MARKER)
+        );
     }
 }

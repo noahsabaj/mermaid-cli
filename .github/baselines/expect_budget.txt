@@ -3,7 +3,7 @@
 # Debt that predates the guard. This file may only SHRINK.
 # Regenerate with: just ratchet
 #
-# 54 keys / 67 occurrences
+# 54 keys / 66 occurrences
 expect|clippy::large_enum_variant|crates/mermaid-domain/src/msg.rs 1
 expect|clippy::large_enum_variant|src/app/run.rs 1
 expect|clippy::should_implement_trait|crates/mermaid-model/src/ids.rs 1
@@ -21,7 +21,7 @@ expect|clippy::too_many_lines|crates/mermaid-domain/src/reducer/streaming.rs 2
 expect|clippy::too_many_lines|crates/mermaid-domain/src/reports.rs 1
 expect|clippy::too_many_lines|crates/mermaid-model/src/models/adapters/anthropic.rs 2
 expect|clippy::too_many_lines|crates/mermaid-model/src/models/adapters/gemini.rs 1
-expect|clippy::too_many_lines|crates/mermaid-model/src/models/adapters/openai_compat.rs 2
+expect|clippy::too_many_lines|crates/mermaid-model/src/models/adapters/openai_compat.rs 1
 expect|clippy::too_many_lines|crates/mermaid-model/src/models/error.rs 1
 expect|clippy::too_many_lines|crates/mermaid-runtime/src/policy/shell/lexer.rs 1
 expect|clippy::too_many_lines|crates/mermaid-runtime/src/storage/mod.rs 2

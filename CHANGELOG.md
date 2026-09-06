@@ -21,6 +21,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A long reasoning trace silently emptied the answer that followed it.**
+  Every adapter shared one truncation flag between its reasoning and its
+  content accumulators, so a trace past the 400K-char response cap stopped the
+  content buffer accepting text; with reasoning at `max` the user saw a
+  truncation marker and no answer. Each buffer now caps itself.
+- **The Meta adapter had no response cap.** Content and reasoning grew without
+  bound; every other adapter capped at 400K chars. All five share one capped
+  buffer type now.
+- **Anthropic reported zero usage when no usage frame arrived.** A proxy that
+  drops `message_delta` handed the reducer a provider-sourced `0 / 0`, which
+  is folded as authoritative and reset the context gauge; Gemini and Ollama
+  had guarded this since #125. The rule is now checked for every provider by
+  the conformance suite.
+- **Provider error bodies reached the transcript unredacted and uncapped.**
+  A 4xx from an OpenAI-compatible gateway routinely echoes the request,
+  `Authorization: Bearer …` included, and four of the five adapters copied
+  the body straight into the error the transcript renders and persists (Meta
+  redacted, with a comment explaining a risk that applied to all). Error
+  bodies are now read through one helper: at most 64 KiB, then redacted.
+- **Unbounded per-stream maps.** Anthropic keyed its content-block map on the
+  stream's own block index and Meta appended a tool call per fresh `call_id`,
+  so a well-framed hostile stream could grow either without limit, one small
+  frame at a time. Both are bounded by the tool-call cap (256).
+- **A streamed tool call whose arguments failed to parse dropped the reason.**
+  The fallback still passes the raw text through, but the parse error (most
+  often "the argument cap fired") is logged instead of discarded.
+
+
 - **CI on `main` was red from 2026-08-13.** `h2` 0.4.15 carried RUSTSEC-2026-0258
   (unbounded empty DATA frames), so the required Security Audit job failed on every
   run; it is 0.4.19 now. The daemon and sandbox integration jobs still invoked
@@ -91,6 +119,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   file and offers "don't ask again" for its directory. Headless `ask` runs
   refuse them unless `--allow-untrusted-tools` is set, like other
   non-replayable actions.
+- **The adapters share their stream-accumulation rules.** Caps, index bounds,
+  the usage-or-none rule, error-body handling and the abnormal-close test
+  live in one module (`models/adapters/accumulator.rs`) that the five
+  adapters call, and the conformance suite asserts each rule against every
+  provider. Five hand-written `ChatRequest -> ModelConfig` conversions, two of
+  which had dropped the resolved context window and output cap, are one
+  `From` impl beside `ChatRequest`.
+
 
 - **Unified cross-platform fail-closed sandbox enforcement.** Requesting `--sandbox`, `--no-network`, or `--confine-fs` on Windows now enforces kernel containment and strictly fails closed (exit code 126) if sandboxing cannot be applied, eliminating the unconfined fallback warning and achieving feature parity with Linux and macOS.
 

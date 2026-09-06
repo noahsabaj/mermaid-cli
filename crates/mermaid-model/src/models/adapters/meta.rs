@@ -22,6 +22,7 @@ use async_trait::async_trait;
 use reqwest::Client;
 use serde_json::{Value, json};
 
+use super::accumulator::{CappedText, http_error, parse_tool_args, slot_in_bounds};
 use crate::models::adapters::driver::{Flow, Framing, StreamProtocol, drive_stream};
 use crate::models::capabilities::ModelCapabilities;
 use crate::models::config::ModelConfig;
@@ -173,8 +174,8 @@ pub(crate) struct MetaStream {
     /// response's `output` — and the agent must not run it twice.
     emitted_calls: HashSet<String>,
     tool_calls: Vec<ToolCall>,
-    content: String,
-    thinking: String,
+    content: CappedText,
+    thinking: CappedText,
     /// The terminal frame's `response` object plus which event carried it.
     /// `None` until then, which is exactly what makes a cut body detectable.
     terminal: Option<(Value, String)>,
@@ -186,8 +187,8 @@ impl MetaStream {
             model_name,
             emitted_calls: HashSet::new(),
             tool_calls: Vec::new(),
-            content: String::new(),
-            thinking: String::new(),
+            content: CappedText::default(),
+            thinking: CappedText::default(),
             terminal: None,
         }
     }
@@ -198,6 +199,12 @@ impl MetaStream {
             return;
         };
         let call_id = call.id.clone().unwrap_or_default();
+        if !slot_in_bounds(self.tool_calls.len()) {
+            // A stream can mint a fresh call_id per frame forever; past the
+            // bound the call is dropped rather than accumulated.
+            tracing::warn!("meta stream exceeded the tool-call bound; ignoring further calls");
+            return;
+        }
         if self.emitted_calls.insert(call_id) {
             self.tool_calls.push(call.clone());
             out.push(StreamEvent::ToolCall(call));
@@ -219,14 +226,18 @@ impl StreamProtocol for MetaStream {
             .unwrap_or_default();
         match event_type {
             "response.output_text.delta" => {
-                if let Some(delta) = event.get("delta").and_then(Value::as_str) {
-                    self.content.push_str(delta);
+                if let Some(delta) = event.get("delta").and_then(Value::as_str)
+                    && self.content.accepting()
+                {
+                    self.content.push(delta);
                     out.push(StreamEvent::Text(delta.to_string()));
                 }
             },
             "response.reasoning_summary_text.delta" => {
-                if let Some(delta) = event.get("delta").and_then(Value::as_str) {
-                    self.thinking.push_str(delta);
+                if let Some(delta) = event.get("delta").and_then(Value::as_str)
+                    && self.thinking.accepting()
+                {
+                    self.thinking.push(delta);
                     out.push(StreamEvent::Reasoning(ReasoningChunk {
                         text: delta.to_string(),
                         signature: None,
@@ -294,11 +305,11 @@ impl StreamProtocol for MetaStream {
         let stop_reason = meta_finish_reason(&response, &event_type, !self.tool_calls.is_empty());
 
         Ok(ModelResponse {
-            content: self.content,
+            content: self.content.into_string(),
             usage: response.get("usage").map(meta_usage),
             model_name: self.model_name,
             stop_reason: Some(stop_reason),
-            thinking: (!self.thinking.is_empty()).then_some(self.thinking),
+            thinking: (!self.thinking.is_empty()).then(|| self.thinking.into_string()),
             tool_calls: (!self.tool_calls.is_empty()).then_some(self.tool_calls),
             provider_continuation: Some(continuation),
         })
@@ -315,8 +326,7 @@ fn tool_call_from_item(item: &Value) -> Option<ToolCall> {
         .get("arguments")
         .and_then(Value::as_str)
         .unwrap_or("{}");
-    let arguments = serde_json::from_str(raw_arguments)
-        .unwrap_or_else(|_| Value::String(raw_arguments.to_string()));
+    let arguments = parse_tool_args(&name, raw_arguments.to_string());
     Some(ToolCall {
         id: Some(call_id),
         function: FunctionCall { name, arguments },
@@ -594,17 +604,7 @@ fn meta_failure(event: &Value) -> ModelError {
 /// body, and a Responses 4xx routinely echoes the `Authorization` header
 /// back inside the message.
 async fn meta_http_error(response: reqwest::Response) -> ModelError {
-    let status = response.status().as_u16();
-    let debug = crate::models::error::ResponseDebugContext::from_headers(response.headers());
-    let body = response
-        .text()
-        .await
-        .unwrap_or_else(|_| "Meta request failed".to_string());
-    ModelError::Backend(BackendError::HttpError {
-        status,
-        message: crate::utils::redact_secrets(&body),
-        debug,
-    })
+    http_error(response, "Meta request failed").await
 }
 
 #[cfg(test)]
@@ -846,5 +846,22 @@ mod tests {
             1
         );
         assert_eq!(response.tool_calls.expect("tool calls").len(), 1);
+    }
+
+    /// Each `response.output_item.done` may carry a fresh `call_id`; the
+    /// tool-call list is bounded by `slot_in_bounds` so a hostile stream
+    /// cannot grow it (and the agent loop's work list) without limit.
+    #[test]
+    fn tool_calls_past_the_bound_are_ignored() {
+        let mut stream = MetaStream::new("muse-spark-test".to_string());
+        let mut out = Vec::new();
+        for i in 0..(crate::constants::MAX_TOOL_CALLS + 50) {
+            let frame = format!(
+                r#"{{"type":"response.output_item.done","item":{{"type":"function_call","call_id":"call_{i}","name":"read_file","arguments":"{{}}","status":"completed"}}}}"#
+            );
+            stream.on_frame(&frame, &mut out).unwrap();
+        }
+        assert_eq!(stream.tool_calls.len(), crate::constants::MAX_TOOL_CALLS);
+        assert_eq!(out.len(), crate::constants::MAX_TOOL_CALLS);
     }
 }
