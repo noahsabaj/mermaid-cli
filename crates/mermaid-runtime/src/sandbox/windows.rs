@@ -794,40 +794,43 @@ mod tests {
     }
 
     /// A policy that names no write roots is `--no-network` alone: the child
-    /// must still be able to write where an unconfined command would (the
-    /// temp directory here; the working directory is the other implicit root).
+    /// must still be able to write where an unconfined command would, so the
+    /// working directory and the temp directory are granted. Asserted on the
+    /// root list rather than by running a child: the grant propagates
+    /// inheritable ACEs down the whole working directory, which in a test is
+    /// the checkout (and its `target/`) while other test binaries are busy in
+    /// it -- slow, and it raced once in CI. The grant mechanism itself is
+    /// exercised by `appcontainer_enforces_write_confinement`.
     #[test]
-    fn appcontainer_without_write_roots_grants_the_temp_directory() {
+    fn a_policy_without_write_roots_grants_cwd_and_temp() {
         let policy = SandboxPolicy {
             deny_network: true,
             allowed_writes: Vec::new(),
         };
-        assert!(write_roots(&policy).contains(&std::env::temp_dir()));
-        let file = std::env::temp_dir().join(format!(
-            "mermaid-appcontainer-implicit-{}.txt",
-            std::process::id()
-        ));
-        let argv = vec![
-            OsString::from("cmd.exe"),
-            OsString::from("/c"),
-            OsString::from(format!("echo hello > {}", file.display())),
-        ];
-        let code = run_in_appcontainer(&policy, &argv).expect("run in appcontainer");
-        assert_eq!(code, 0);
-        assert!(file.exists(), "{}", file.display());
-        let _ = std::fs::remove_file(&file);
+        let roots = write_roots(&policy);
+        assert!(roots.contains(&std::env::temp_dir()), "{roots:?}");
+        assert!(
+            roots.contains(&std::env::current_dir().unwrap()),
+            "{roots:?}"
+        );
+        let explicit = SandboxPolicy {
+            deny_network: true,
+            allowed_writes: vec![std::env::temp_dir()],
+        };
+        assert_eq!(write_roots(&explicit), vec![std::env::temp_dir()]);
     }
 
     /// With write confinement alone the network stays reachable: a connect
-    /// attempt may fail for lack of a route on the runner, but never with
-    /// `WSAEACCES` (10013), which is the capability-omission signature.
+    /// attempt may fail for lack of a route on the runner (exit 4), but never
+    /// with `WSAEACCES` (exit 3), which is the capability-omission signature.
+    /// Any other exit means the probe itself did not run.
     #[test]
     fn appcontainer_with_write_confinement_alone_keeps_the_network() {
         let policy = SandboxPolicy {
             deny_network: false,
             allowed_writes: vec![std::env::temp_dir()],
         };
-        let py_cmd = "import socket\ns = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\ns.settimeout(2)\ntry:\n    s.connect(('8.8.8.8', 53))\nexcept OSError as e:\n    raise SystemExit(1 if e.errno == 10013 else 0)";
+        let py_cmd = "import socket, sys\ns = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\ns.settimeout(3)\ntry:\n    s.connect(('8.8.8.8', 53))\nexcept OSError as e:\n    print(e, file=sys.stderr)\n    sys.exit(3 if e.errno == 10013 else 4)\nsys.exit(0)";
         let argv = vec![
             OsString::from("python.exe"),
             OsString::from("-c"),
@@ -835,9 +838,9 @@ mod tests {
         ];
         if resolve_executable(std::ffi::OsStr::new("python.exe")).is_file() {
             let code = run_in_appcontainer(&policy, &argv).expect("run in appcontainer");
-            assert_eq!(
-                code, 0,
-                "connect failed with WSAEACCES: capabilities missing"
+            assert!(
+                code == 0 || code == 4,
+                "exit {code}: 3 is WSAEACCES (capabilities missing), anything else is the probe failing"
             );
         }
     }
