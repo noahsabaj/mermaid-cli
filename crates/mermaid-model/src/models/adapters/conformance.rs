@@ -226,6 +226,16 @@ macro_rules! scenario {
     }};
 }
 
+/// Run a synthetic body, whole only: the bodies below carry a 400 KB delta,
+/// and dribbling that one byte at a time through the SSE boundary scan is a
+/// test of the scanner's cost, not of the rule under test.
+macro_rules! scenario_body {
+    ($build:expr, $provider:literal, $body:expr) => {{
+        let result = run($build(false), &$body, Delivery::Whole).await;
+        (result, $provider)
+    }};
+}
+
 /// One scenario across every provider that records it, in provider order.
 macro_rules! all_providers {
     ($sse:literal, $ndjson:literal) => {
@@ -366,4 +376,163 @@ async fn ollama_keeps_the_frame_its_body_closed_on() {
     assert_eq!(outcome.content, "Hello");
     assert_eq!(outcome.stop_reason, Some(FinishReason::Stop));
     assert_eq!(outcome.usage, Some((12, 7)));
+}
+
+// ---------------------------------------------------------------------------
+// The accumulator rules (`adapters/accumulator.rs`). Each of these used to be
+// a per-adapter copy, and the copies drifted; a rule asserted here for every
+// provider cannot drift in the sixth.
+// ---------------------------------------------------------------------------
+
+/// The reasoning fixture with one delta swapped for a body that passes the
+/// response cap.
+fn oversized(provider: &str, name: &str, needle: &str) -> String {
+    let filler = "w".repeat(crate::constants::MAX_RESPONSE_CHARS + 16);
+    let body = fixture(provider, name);
+    assert!(body.contains(needle), "{provider}/{name} lacks {needle:?}");
+    body.replace(needle, &filler)
+}
+
+/// Every provider's reasoning fixture, with `needle` grown past the cap.
+async fn oversized_everywhere(needle: &str) -> Vec<(ScenarioResult, &'static str)> {
+    vec![
+        scenario_body!(
+            protocols::anthropic,
+            "anthropic",
+            oversized("anthropic", "reasoning.sse", needle)
+        ),
+        scenario_body!(
+            protocols::gemini,
+            "gemini",
+            oversized("gemini", "reasoning.sse", needle)
+        ),
+        scenario_body!(
+            protocols::openai_compat,
+            "openai_compat",
+            oversized("openai_compat", "reasoning.sse", needle)
+        ),
+        scenario_body!(
+            protocols::meta,
+            "meta",
+            oversized("meta", "reasoning.sse", needle)
+        ),
+        scenario_body!(
+            protocols::ollama,
+            "ollama",
+            oversized("ollama", "reasoning.ndjson", needle)
+        ),
+    ]
+}
+
+#[tokio::test]
+async fn a_reasoning_trace_past_the_cap_leaves_the_answer_everywhere() {
+    for (result, provider) in oversized_everywhere("weighing ").await {
+        let outcome = result.unwrap_or_else(|e| panic!("{provider}: {e:?}"));
+        assert_eq!(
+            outcome.content, "the answer",
+            "{provider}: the answer after an oversized trace was dropped"
+        );
+        let thinking = outcome.thinking.unwrap_or_default();
+        assert!(
+            thinking.ends_with(super::accumulator::TRUNCATION_MARKER),
+            "{provider}: the trace was not marked as truncated"
+        );
+    }
+}
+
+#[tokio::test]
+async fn content_past_the_cap_is_marked_everywhere() {
+    let cap = crate::constants::MAX_RESPONSE_CHARS;
+    for (result, provider) in oversized_everywhere("the answer").await {
+        let outcome = result.unwrap_or_else(|e| panic!("{provider}: {e:?}"));
+        assert!(
+            outcome
+                .content
+                .ends_with(super::accumulator::TRUNCATION_MARKER),
+            "{provider}: oversized content was not marked"
+        );
+        assert!(
+            outcome.content.len() <= cap + super::accumulator::TRUNCATION_MARKER.len(),
+            "{provider}: content kept growing past the cap ({} bytes)",
+            outcome.content.len()
+        );
+        assert_eq!(
+            outcome.thinking.as_deref(),
+            Some("weighing options"),
+            "{provider}: the trace was disturbed by the content cap"
+        );
+    }
+}
+
+/// Every JSON frame of `body` with its usage fields removed, whatever the
+/// provider calls them.
+fn strip_usage(body: &str) -> String {
+    fn scrub(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Object(map) => {
+                for key in ["usage", "usageMetadata", "prompt_eval_count", "eval_count"] {
+                    map.remove(key);
+                }
+                map.values_mut().for_each(scrub);
+            },
+            serde_json::Value::Array(items) => items.iter_mut().for_each(scrub),
+            _ => {},
+        }
+    }
+    body.lines()
+        .map(|line| {
+            let (prefix, json) = match line.strip_prefix("data: ") {
+                Some(rest) => ("data: ", rest),
+                None => ("", line),
+            };
+            match serde_json::from_str::<serde_json::Value>(json) {
+                Ok(mut value) => {
+                    scrub(&mut value);
+                    format!("{prefix}{value}")
+                },
+                Err(_) => line.to_string(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
+}
+
+#[tokio::test]
+async fn no_usage_frame_means_no_usage_everywhere() {
+    // A stream that never reports usage must say so with `None`: a provider
+    // usage of zero is folded as authoritative billing truth and resets the
+    // context gauge (#125 / F54). Anthropic was the last adapter to fabricate
+    // one.
+    let cases = vec![
+        scenario_body!(
+            protocols::anthropic,
+            "anthropic",
+            strip_usage(&fixture("anthropic", "text.sse"))
+        ),
+        scenario_body!(
+            protocols::gemini,
+            "gemini",
+            strip_usage(&fixture("gemini", "text.sse"))
+        ),
+        scenario_body!(
+            protocols::openai_compat,
+            "openai_compat",
+            strip_usage(&fixture("openai_compat", "text.sse"))
+        ),
+        scenario_body!(
+            protocols::meta,
+            "meta",
+            strip_usage(&fixture("meta", "text.sse"))
+        ),
+        scenario_body!(
+            protocols::ollama,
+            "ollama",
+            strip_usage(&fixture("ollama", "text.ndjson"))
+        ),
+    ];
+    for (result, provider) in cases {
+        let outcome = result.unwrap_or_else(|e| panic!("{provider}: {e:?}"));
+        assert_eq!(outcome.usage, None, "{provider}: fabricated a usage record");
+    }
 }

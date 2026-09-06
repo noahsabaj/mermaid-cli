@@ -12,7 +12,7 @@
 
 use async_trait::async_trait;
 
-use mermaid_domain::{ChatRequest, ToolDefinition};
+use mermaid_domain::ChatRequest;
 use mermaid_model::models::adapters::anthropic::AnthropicAdapter;
 use mermaid_model::models::{Model, ModelConfig, ModelError, Result};
 
@@ -77,7 +77,7 @@ impl ModelProvider for AnthropicProvider {
     }
 
     async fn chat(&self, request: ChatRequest, ctx: StreamContext) -> Result<FinalResponse> {
-        let config = build_model_config(&request);
+        let config = ModelConfig::from(&request);
         let chat_fut = self
             .adapter
             .chat(&request.messages, &config, Some(ctx.sink.clone()));
@@ -113,61 +113,5 @@ impl ModelProvider for AnthropicProvider {
             tool_calls: response.tool_calls.unwrap_or_default(),
             stop_reason,
         })
-    }
-}
-
-fn build_model_config(request: &ChatRequest) -> ModelConfig {
-    ModelConfig {
-        model: request.model_id.clone(),
-        temperature: request.temperature,
-        max_tokens: request.max_tokens,
-        reasoning: request.reasoning,
-        system_prompt: Some(request.system_prompt.clone()),
-        dynamic_system_suffix: request.instructions.clone(),
-        tools: request
-            .tools
-            .iter()
-            .map(ToolDefinition::to_openai_json)
-            .collect(),
-        resolved_context_window: request.resolved_context_window,
-        resolved_max_output: request.resolved_max_output,
-        // The adapter maps this to `output_config.format` (native
-        // structured output); client-side validation stays the final gate.
-        output_schema: request.output_schema.clone(),
-        ..Default::default()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn build_model_config_maps_fields() {
-        let req = ChatRequest {
-            model_id: "anthropic/claude-opus-4-7".to_string(),
-            messages: vec![],
-            system_prompt: "sys".to_string(),
-            instructions: Some("MERMAID.md content".to_string()),
-            reasoning: mermaid_model::models::ReasoningLevel::XHigh,
-            temperature: 0.7,
-            max_tokens: 8192,
-            tools: vec![],
-
-            ollama_num_ctx: None,
-            ollama_allow_ram_offload: None,
-            resolved_context_window: None,
-            resolved_max_output: None,
-            output_schema: None,
-            suppress_auto_compact: false,
-            suppressed_builtin_tools: Vec::new(),
-        };
-        let cfg = build_model_config(&req);
-        assert_eq!(cfg.reasoning, mermaid_model::models::ReasoningLevel::XHigh);
-        assert_eq!(cfg.max_tokens, 8192);
-        assert_eq!(
-            cfg.dynamic_system_suffix.as_deref(),
-            Some("MERMAID.md content")
-        );
     }
 }

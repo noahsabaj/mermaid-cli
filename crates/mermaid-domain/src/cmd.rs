@@ -428,6 +428,33 @@ impl ToolDefinition {
     }
 }
 
+/// The one conversion from a request to the adapter-facing `ModelConfig`.
+/// Five provider wrappers used to hand-write this and they drifted: two of
+/// them dropped the resolved context window and output cap that the
+/// Anthropic and Meta adapters size their output budget from. Living beside
+/// `ChatRequest`, a new field is added here or nowhere.
+impl From<&ChatRequest> for mermaid_model::models::ModelConfig {
+    fn from(request: &ChatRequest) -> Self {
+        Self {
+            model: request.model_id.clone(),
+            temperature: request.temperature,
+            max_tokens: request.max_tokens,
+            reasoning: request.reasoning,
+            system_prompt: Some(request.system_prompt.clone()),
+            dynamic_system_suffix: request.instructions.clone(),
+            tools: request
+                .tools
+                .iter()
+                .map(ToolDefinition::to_openai_json)
+                .collect(),
+            resolved_context_window: request.resolved_context_window,
+            resolved_max_output: request.resolved_max_output,
+            output_schema: request.output_schema.clone(),
+            ..Self::default()
+        }
+    }
+}
+
 impl Cmd {
     /// Human-readable tag, for tracing + replay logs. Stable across
     /// refactors (tests assert against it).
@@ -779,5 +806,52 @@ mod tests {
         let c = Cmd::CancelScope(TurnId(42));
         let s = c.summary();
         assert!(s.contains("turn#42"));
+    }
+}
+
+#[cfg(test)]
+mod model_config_tests {
+    use super::*;
+    use mermaid_model::models::ModelConfig;
+
+    /// Every shared field lands. The resolved limits are the ones the copies
+    /// had lost: the Gemini and OpenAI-compatible wrappers omitted them, so an
+    /// adapter that sized its output budget from them saw `None`.
+    #[test]
+    fn model_config_from_request_copies_the_shared_fields() {
+        let req = ChatRequest {
+            model_id: "anthropic/claude-test".to_string(),
+            messages: vec![],
+            system_prompt: "sys".to_string(),
+            instructions: Some("MERMAID.md content".to_string()),
+            reasoning: ReasoningLevel::XHigh,
+            temperature: 0.7,
+            max_tokens: 8192,
+            tools: vec![ToolDefinition {
+                name: "read_file".to_string(),
+                description: "read".to_string(),
+                input_schema: serde_json::json!({"type": "object"}),
+            }],
+            ollama_num_ctx: None,
+            ollama_allow_ram_offload: None,
+            resolved_context_window: Some(200_000),
+            resolved_max_output: Some(32_000),
+            output_schema: Some(serde_json::json!({"type": "object"})),
+            suppress_auto_compact: false,
+            suppressed_builtin_tools: Vec::new(),
+        };
+        let cfg = ModelConfig::from(&req);
+        assert_eq!(cfg.model, "anthropic/claude-test");
+        assert_eq!(cfg.reasoning, ReasoningLevel::XHigh);
+        assert_eq!(cfg.max_tokens, 8192);
+        assert_eq!(cfg.system_prompt.as_deref(), Some("sys"));
+        assert_eq!(
+            cfg.dynamic_system_suffix.as_deref(),
+            Some("MERMAID.md content")
+        );
+        assert_eq!(cfg.tools.len(), 1);
+        assert_eq!(cfg.resolved_context_window, Some(200_000));
+        assert_eq!(cfg.resolved_max_output, Some(32_000));
+        assert!(cfg.output_schema.is_some());
     }
 }

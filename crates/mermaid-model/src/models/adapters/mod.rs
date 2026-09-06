@@ -6,6 +6,9 @@
 //! Each owns its wire format and nothing else: [`driver`] holds the read
 //! loop they all used to carry a copy of.
 
+/// The stream-accumulation rules (caps, bounds, usage, error bodies) every
+/// adapter calls instead of carrying its own copy.
+pub(super) mod accumulator;
 pub mod anthropic;
 /// One test suite driven over recorded response bodies, one per provider.
 /// In-crate rather than under `tests/` so it can reach the protocol

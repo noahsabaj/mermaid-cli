@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use mermaid_domain::{ChatRequest, ToolDefinition};
+use mermaid_domain::ChatRequest;
 use mermaid_model::models::adapters::ollama::{OllamaAdapter, OllamaModelInfo};
 use mermaid_model::models::adapters::ollama_sizing::{
     NumCtxInputs, converge_num_ctx, default_ollama_num_predict, kv_bytes_per_token,
@@ -326,21 +326,7 @@ fn build_model_config(
     num_ctx: Option<usize>,
     provider_max_output: Option<usize>,
 ) -> ModelConfig {
-    let mut mc = ModelConfig {
-        model: request.model_id.clone(),
-        temperature: request.temperature,
-        max_tokens: request.max_tokens,
-        reasoning: request.reasoning,
-        system_prompt: Some(request.system_prompt.clone()),
-        dynamic_system_suffix: request.instructions.clone(),
-        tools: request
-            .tools
-            .iter()
-            .map(ToolDefinition::to_openai_json)
-            .collect(),
-        output_schema: request.output_schema.clone(),
-        ..Default::default()
-    };
+    let mut mc = ModelConfig::from(request);
     // Effective context window (auto-fitted to memory / override / global).
     if let Some(n) = num_ctx {
         mc.set_backend_option("ollama".into(), "num_ctx".into(), n.to_string());
