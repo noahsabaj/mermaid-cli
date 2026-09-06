@@ -18,7 +18,6 @@
 
 pub mod apply_patch;
 pub mod ask_user_question;
-pub mod computer_use;
 pub mod enter_plan_mode;
 pub mod exec;
 pub mod exit_plan_mode;
@@ -193,46 +192,12 @@ impl ToolRegistry {
     }
 }
 
-/// Whether the host mermaid process is running interactively (TUI)
-/// or headlessly (one-shot `mermaid run <prompt>` / CI). Controls
-/// which tools get registered: headless mode never advertises
-/// GUI / computer-use tools even when a display probes alive, because
-/// a CI job has no user to watch the screenshot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TuiMode {
-    Interactive,
-    Headless,
-}
-
 impl ToolRegistry {
-    /// Register the computer-use tools the given backend can actually drive.
-    /// Screenshot works on every usable backend; the five input tools need
-    /// pointer/keyboard injection (X11/Wayland); `list_windows` is X11-only.
-    /// Advertising a tool the backend can't drive means the model is told it
-    /// has a capability that `bail!`s at call time (#35).
-    fn register_computer_use_tools(&mut self, backend: computer_use::Backend) {
-        let driver = Arc::new(computer_use::ComputerUseDriver::new(backend));
-        self.register(Arc::new(computer_use::ScreenshotTool::new(driver.clone())));
-        if backend.supports_input_injection() {
-            self.register(Arc::new(computer_use::ClickTool::new(driver.clone())));
-            self.register(Arc::new(computer_use::TypeTextTool::new(driver.clone())));
-            self.register(Arc::new(computer_use::PressKeyTool::new(driver.clone())));
-            self.register(Arc::new(computer_use::ScrollTool::new(driver.clone())));
-            self.register(Arc::new(computer_use::MouseMoveTool::new(driver.clone())));
-        }
-        if backend.supports_window_listing() {
-            self.register(Arc::new(computer_use::ListWindowsTool::new(driver.clone())));
-        }
-    }
-
     /// Config-aware factory. Always registers filesystem + exec +
     /// the MCP proxy + the subagent tool. Conditionally registers:
     ///
     ///   - Viable `web_fetch` and `web_search` capabilities resolved once by
     ///     `web::WebCapabilities`. Global network denial omits both.
-    ///   - The computer-use tools the detected backend can drive (see
-    ///     `register_computer_use_tools`) iff `mode == Interactive` AND
-    ///     `computer_use::probe()` returns a usable backend.
     ///
     /// `providers` is the shared `ProviderFactory` that the effect
     /// runner also holds; the `SubagentSpawner` needs it so child
@@ -242,7 +207,6 @@ impl ToolRegistry {
     /// across turns without cloning the underlying `HashMap`.
     pub fn build(
         config: &mermaid_domain::Config,
-        mode: TuiMode,
         providers: Arc<crate::providers::ProviderFactory>,
     ) -> Arc<Self> {
         let mut r = Self::new();
@@ -295,17 +259,6 @@ impl ToolRegistry {
             }
         }
 
-        // Computer-use tools only register when (a) the process runs
-        // interactively (Headless CI has no user to watch a screenshot)
-        // AND (b) a display backend passes the startup probe. Failed
-        // probe → tools aren't advertised → model can't call them.
-        if mode == TuiMode::Interactive {
-            let backend = computer_use::probe();
-            if backend.is_usable() {
-                r.register_computer_use_tools(backend);
-            }
-        }
-
         // Subagents: always register. Depth + breadth caps live on
         // `SubagentSpawner`; the tool itself is harmless when nobody
         // calls it. Headless runs do register the agent — a CI prompt
@@ -333,7 +286,7 @@ mod tests {
     fn headless_registry() -> Arc<ToolRegistry> {
         let cfg = mermaid_domain::Config::default();
         let providers = Arc::new(crate::providers::ProviderFactory::new(cfg.clone()));
-        ToolRegistry::build(&cfg, TuiMode::Headless, providers)
+        ToolRegistry::build(&cfg, providers)
     }
 
     #[test]
@@ -353,50 +306,6 @@ mod tests {
         }
         assert!(r.get("not_a_tool").is_none());
         assert!(r.len() >= 6);
-    }
-
-    #[test]
-    fn computer_use_registration_is_selective_per_backend() {
-        use computer_use::Backend;
-        let reg = |b: Backend| {
-            let mut r = ToolRegistry::new();
-            r.register_computer_use_tools(b);
-            r
-        };
-
-        // macOS: only screenshot — the input verbs + list_windows bail at
-        // runtime, so advertising them just wastes the model's turns (#35).
-        let mac = reg(Backend::MacOS);
-        assert!(mac.get("screenshot").is_some());
-        for t in [
-            "click",
-            "type_text",
-            "press_key",
-            "scroll",
-            "mouse_move",
-            "list_windows",
-        ] {
-            assert!(mac.get(t).is_none(), "macOS must not advertise {t}");
-        }
-
-        // Wayland: input tools, but no list_windows (no portable enumeration).
-        let way = reg(Backend::Wayland);
-        assert!(way.get("click").is_some());
-        assert!(way.get("list_windows").is_none());
-
-        // X11: all seven.
-        let x11 = reg(Backend::X11);
-        for t in [
-            "screenshot",
-            "click",
-            "type_text",
-            "press_key",
-            "scroll",
-            "mouse_move",
-            "list_windows",
-        ] {
-            assert!(x11.get(t).is_some(), "X11 missing {t}");
-        }
     }
 
     #[test]
@@ -454,7 +363,7 @@ mod tests {
         }
         let cfg = mermaid_domain::Config::default();
         let providers = Arc::new(crate::providers::ProviderFactory::new(cfg.clone()));
-        let r = ToolRegistry::build(&cfg, TuiMode::Headless, providers);
+        let r = ToolRegistry::build(&cfg, providers);
         assert!(
             r.get("web_fetch").is_some(),
             "native web_fetch registers without a key"
@@ -490,7 +399,7 @@ mod tests {
         let mut cfg = mermaid_domain::Config::default();
         cfg.web.search_backend = mermaid_domain::SearchBackend::Ollama;
         let providers = Arc::new(crate::providers::ProviderFactory::new(cfg.clone()));
-        let r = ToolRegistry::build(&cfg, TuiMode::Interactive, providers);
+        let r = ToolRegistry::build(&cfg, providers);
         assert!(r.get("web_search").is_some(), "web_search registered");
         assert!(r.get("web_fetch").is_some(), "web_fetch registered");
         unsafe {
@@ -597,7 +506,7 @@ mod tests {
         let mut cfg = mermaid_domain::Config::default();
         cfg.web.search_backend = mermaid_domain::SearchBackend::Searxng;
         let providers = Arc::new(crate::providers::ProviderFactory::new(cfg.clone()));
-        let r = ToolRegistry::build(&cfg, TuiMode::Headless, providers);
+        let r = ToolRegistry::build(&cfg, providers);
         assert!(
             r.get("web_search").is_some(),
             "searxng web_search registers without a key"
@@ -619,7 +528,7 @@ mod tests {
         cfg.safety.network = mermaid_domain::NetworkPolicy::Deny;
         cfg.web.search_backend = mermaid_domain::SearchBackend::Searxng;
         let providers = Arc::new(crate::providers::ProviderFactory::new(cfg.clone()));
-        let registry = ToolRegistry::build(&cfg, TuiMode::Headless, providers);
+        let registry = ToolRegistry::build(&cfg, providers);
         assert!(registry.get("web_fetch").is_none());
         assert!(registry.get("web_search").is_none());
         assert!(registry.get("read_file").is_some());
@@ -656,7 +565,7 @@ mod tests {
         }
         let cfg = mermaid_domain::Config::default();
         let providers = Arc::new(crate::providers::ProviderFactory::new(cfg.clone()));
-        let registry = ToolRegistry::build(&cfg, TuiMode::Headless, providers);
+        let registry = ToolRegistry::build(&cfg, providers);
         match crate::searxng::managed_backend_viability() {
             Ok(_) => {
                 assert!(registry.get("web_search").is_some());

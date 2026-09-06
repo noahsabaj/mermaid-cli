@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use mermaid_cli::providers::{ProviderFactory, ToolRegistry, TuiMode};
+use mermaid_cli::providers::{ProviderFactory, ToolRegistry};
 
 /// Systematized version of the old `subagent` regression: every core
 /// tool name the prompt advertises must resolve in the registry, so the
@@ -21,7 +21,7 @@ fn advertised_tools_exist_in_the_registry() {
     // had it, the real one did not, and this guard passed.
     let config = mermaid_domain::Config::default();
     let providers = Arc::new(ProviderFactory::new(config.clone()));
-    let registry = ToolRegistry::build(&config, TuiMode::Headless, providers);
+    let registry = ToolRegistry::build(&config, providers);
     for name in [
         "read_file",
         "write_file",

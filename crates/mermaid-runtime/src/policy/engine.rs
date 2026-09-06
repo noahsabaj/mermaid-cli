@@ -356,9 +356,7 @@ fn classify(request: &ActionRequest, host_shell: HostShell) -> RiskClass {
             .map(|cmd| shell::classify::classify_command_for(host_shell, cmd))
             .unwrap_or(RiskClass::ShellMutation),
         ToolCategory::Web | ToolCategory::Network => RiskClass::Network,
-        ToolCategory::ExternalDirectory | ToolCategory::ComputerUse | ToolCategory::Mcp => {
-            RiskClass::ExternalAccess
-        },
+        ToolCategory::ExternalDirectory | ToolCategory::Mcp => RiskClass::ExternalAccess,
         ToolCategory::Subagent => RiskClass::Process,
         ToolCategory::Process => RiskClass::Process,
         // Short-circuited in `decide` before this risk is used for a decision;
@@ -2023,14 +2021,10 @@ mod tests {
 
     #[test]
     fn read_only_mode_denies_external_tool_categories() {
-        // C1/H1/H2: ReadOnly must block mcp/computer-use/raw network. Subagent
-        // spawn is the deliberate Allow exception; Web takes the separate Ask
-        // path tested below.
-        for cat in [
-            ToolCategory::Network,
-            ToolCategory::Mcp,
-            ToolCategory::ComputerUse,
-        ] {
+        // C1/H1/H2: ReadOnly must block mcp/raw network. Subagent spawn is
+        // the deliberate Allow exception; Web takes the separate Ask path
+        // tested below.
+        for cat in [ToolCategory::Network, ToolCategory::Mcp] {
             let decision =
                 PolicyEngine::new(SafetyMode::ReadOnly).decide(&ActionRequest::new("t", cat, "s"));
             assert!(

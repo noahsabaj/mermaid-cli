@@ -100,6 +100,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   release workflow never published the crate, so the next release would have
   failed at `cargo publish`. Deleted, with the theme back in
   `src/render/theme.rs` where it was. No frame changes.
+- **Computer use.** The seven GUI tools (`screenshot`, `click`, `type_text`,
+  `press_key`, `scroll`, `mouse_move`, `list_windows`) and everything that
+  existed only for them: the `[computer_use]` config table, the
+  `ComputerUse` tool category, approval kind and tool metadata, the
+  interactive/headless registry switch, the screenshot timing constants, the
+  system prompt's GUI procedure, and 2,558 lines of `xdotool`/`scrot`/`grim`
+  drivers. It shipped as seven tools on X11, six on Wayland, one on macOS and
+  none on Windows, with no test that ever drove a real backend, and the
+  desktop is not what this program is for. Tool-returned images (an MCP
+  browser's page capture) keep the eviction and on-disk stripping the
+  screenshots had, under the name they now deserve. An old `[computer_use]`
+  table in `config.toml` is ignored like any unknown key.
+- **`mermaid pr create`.** A wrapper over `gh pr create` / `glab mr create`
+  that added flags to those flags. Use the host CLI.
+- **`mermaid chat`, `mermaid version`, `[non_interactive]`.** `chat` was the
+  bare `mermaid`; `version` was `--version`; the config table had no readers
+  and its own docs said so.
 
 ### Changed
 

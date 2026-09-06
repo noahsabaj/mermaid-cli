@@ -1778,13 +1778,6 @@ port = 11434
     }
 
     #[test]
-    fn config_defaults_computer_use_auto_screenshot_on() {
-        // An empty/legacy config must keep the auto-screenshot behavior (#98).
-        let cfg: Config = toml::from_str("").expect("empty config");
-        assert!(cfg.computer_use.auto_screenshot);
-    }
-
-    #[test]
     fn prompt_config_replaces_and_appends_without_persisting() {
         let mut cfg = Config::default();
         cfg.prompt.system_prompt = Some("base".to_string());

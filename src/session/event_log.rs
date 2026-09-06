@@ -13,9 +13,9 @@
 //!
 //! This module is the ONE disk chokepoint for events, owning the same
 //! properties the snapshot writer owns for its file: session-id validation
-//! before any path join, credential redaction per line, screenshot
+//! before any path join, credential redaction per line, tool-image
 //! stripping on message-bearing events (and dropping `image` events
-//! outright — a screenshot must not reach durable storage, #99), owner-only
+//! outright — a tool image must not reach durable storage, #99), owner-only
 //! create mode, and a read cap. A failed append evicts the cached `seq`
 //! cursor so the next save re-derives it from disk — the same self-healing
 //! posture as `with_shared_store` on the flaky-drive case.
@@ -42,10 +42,10 @@ const MAX_LOG_BYTES: u64 = 128 * 1024 * 1024;
 /// one id within a process cannot collide.
 static CONFLICT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// Marker appended to a message's text when its screenshot bytes are
+/// Marker appended to a message's text when its tool-image bytes are
 /// dropped at the append chokepoint — the same marker the snapshot writer
 /// uses, so a fold and a stored snapshot describe the strip identically.
-const SCREENSHOT_ELIDED_MARKER: &str = "\n[screenshot not persisted]";
+const TOOL_IMAGE_ELIDED_MARKER: &str = "\n[tool image not persisted]";
 
 /// Appender + reader for the per-session `.jsonl` logs of one
 /// conversations directory. Shared behind the manager's `Arc`, so clones
@@ -486,19 +486,19 @@ const fn is_idempotent(event: &SessionEvent) -> bool {
     }
 }
 
-/// Screenshot policy at the disk boundary (#99), matching the snapshot
+/// Tool-image policy at the disk boundary (#99), matching the snapshot
 /// writer's: images on non-User messages are dropped (with the marker
-/// appended), and standalone `image` events — always a tool screenshot
+/// appended), and standalone `image` events — always a tool image
 /// routed onto an assistant message — are dropped whole. User-supplied
 /// images are intentional content and pass through.
 fn sanitize_event(event: &SessionEvent) -> Option<SessionEvent> {
     match event {
         SessionEvent::Image { .. } => None,
         SessionEvent::Message { message } => Some(SessionEvent::Message {
-            message: strip_screenshot(message),
+            message: strip_tool_images(message),
         }),
         SessionEvent::InsertedBeforeLast { message } => Some(SessionEvent::InsertedBeforeLast {
-            message: strip_screenshot(message),
+            message: strip_tool_images(message),
         }),
         SessionEvent::Compaction {
             at,
@@ -507,14 +507,14 @@ fn sanitize_event(event: &SessionEvent) -> Option<SessionEvent> {
         } => Some(SessionEvent::Compaction {
             at: *at,
             record: record.clone(),
-            replacement: replacement.iter().map(strip_screenshot).collect(),
+            replacement: replacement.iter().map(strip_tool_images).collect(),
         }),
         SessionEvent::Reset { at, messages } => Some(SessionEvent::Reset {
             at: *at,
-            messages: messages.iter().map(strip_screenshot).collect(),
+            messages: messages.iter().map(strip_tool_images).collect(),
         }),
         // Carry-through variants, listed rather than wildcarded so a new
-        // event type has to state its screenshot policy here.
+        // event type has to state its tool-image policy here.
         event @ (SessionEvent::Started { .. }
         | SessionEvent::Action { .. }
         | SessionEvent::State(_)
@@ -523,14 +523,14 @@ fn sanitize_event(event: &SessionEvent) -> Option<SessionEvent> {
     }
 }
 
-fn strip_screenshot(message: &ChatMessage) -> ChatMessage {
+fn strip_tool_images(message: &ChatMessage) -> ChatMessage {
     if message.role == MessageRole::User || message.images.is_none() {
         return message.clone();
     }
     let mut stripped = message.clone();
     stripped.images = None;
-    if !stripped.content.ends_with(SCREENSHOT_ELIDED_MARKER) {
-        stripped.content.push_str(SCREENSHOT_ELIDED_MARKER);
+    if !stripped.content.ends_with(TOOL_IMAGE_ELIDED_MARKER) {
+        stripped.content.push_str(TOOL_IMAGE_ELIDED_MARKER);
     }
     stripped
 }
@@ -795,11 +795,11 @@ mod tests {
     }
 
     #[test]
-    fn screenshots_and_secrets_never_reach_the_log() {
+    fn tool_images_and_secrets_never_reach_the_log() {
         let root = temp_root("sanitize");
         let manager = ConversationManager::new(&root).unwrap();
         let mut state = driven_state(&root);
-        // A tool screenshot lands on the assistant message + its event.
+        // A tool image lands on the assistant message + its event.
         state.session.attach_image("SHOTBYTES64".to_string());
         // A credential crosses the transcript.
         state.session.append(

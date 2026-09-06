@@ -32,9 +32,7 @@ const PROJECT_ALLOWED_TOP_LEVEL: &[&str] = &[
     "ollama",
     "ollama_num_ctx_per_model",
     "compaction",
-    "computer_use",
     "memory",
-    "non_interactive",
     "safety",
     "ui",
 ];

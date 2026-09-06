@@ -166,10 +166,6 @@ pub enum Commands {
         /// Model id, e.g. `<provider>/<model>`
         model: String,
     },
-    /// Start a chat session (default)
-    Chat,
-    /// Show version information
-    Version,
     /// Update Mermaid to the latest release
     Update {
         /// Only report whether an update is available; don't install it
@@ -357,12 +353,6 @@ pub enum Commands {
     },
     /// List configured MCP servers
     Mcp,
-    /// Create a pull/merge request from the current branch via the host CLI
-    /// (`gh` for GitHub, `glab` for GitLab)
-    Pr {
-        #[command(subcommand)]
-        command: PrCommand,
-    },
     /// Configure Ollama Cloud API key (interactive prompt). Run this
     /// from your shell before starting mermaid — it reads stdin and
     /// doesn't work from inside the TUI.
@@ -396,7 +386,7 @@ pub enum Commands {
         #[arg(long)]
         no_execute: bool,
 
-        /// Allow non-replayable tools (web/mcp/subagent/computer-use) to run on
+        /// Allow non-replayable tools (web/mcp/subagent) to run on
         /// an `Ask` decision in this headless run. Off by default — `ask` mode
         /// otherwise refuses them when there's no approval UI.
         #[arg(long)]
@@ -467,44 +457,6 @@ pub enum PairCommand {
     Revoke {
         /// Pairing token id
         id: String,
-    },
-}
-
-/// Which Git hosting provider's CLI to drive.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum GitHost {
-    /// GitHub, via the `gh` CLI.
-    Github,
-    /// GitLab, via the `glab` CLI.
-    Gitlab,
-}
-
-#[derive(Subcommand, Debug)]
-pub enum PrCommand {
-    /// Create a PR/MR from the current branch. Wraps `gh pr create` /
-    /// `glab mr create`, reusing their existing authentication.
-    Create {
-        /// PR/MR title. Omitted → filled from the branch's commits.
-        #[arg(short, long)]
-        title: Option<String>,
-        /// PR/MR body text.
-        #[arg(short, long)]
-        body: Option<String>,
-        /// Read the body from a file (e.g. a saved review summary).
-        #[arg(long, value_name = "FILE", conflicts_with = "body")]
-        summary: Option<PathBuf>,
-        /// Base branch to merge into (defaults to the host's default branch).
-        #[arg(long)]
-        base: Option<String>,
-        /// Open as a draft.
-        #[arg(long)]
-        draft: bool,
-        /// Open the creation page in a browser instead of creating directly.
-        #[arg(long)]
-        web: bool,
-        /// Force a provider instead of auto-detecting from the `origin` remote.
-        #[arg(long, value_enum)]
-        provider: Option<GitHost>,
     },
 }
 

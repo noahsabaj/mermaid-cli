@@ -42,10 +42,6 @@ pub struct Config {
     #[serde(default)]
     pub ui: UiConfig,
 
-    /// Non-interactive mode configuration
-    #[serde(default)]
-    pub non_interactive: NonInteractiveConfig,
-
     /// MCP server configurations
     #[serde(default)]
     pub mcp_servers: HashMap<String, McpServerConfig>,
@@ -134,10 +130,6 @@ pub struct Config {
     /// Context-compaction settings.
     #[serde(default)]
     pub compaction: CompactionConfig,
-
-    /// Computer-use (desktop control) preferences.
-    #[serde(default)]
-    pub computer_use: ComputerUseConfig,
 
     /// Foreground `execute_command` behavior.
     #[serde(default)]
@@ -336,7 +328,7 @@ pub struct SafetyConfig {
     #[serde(default)]
     pub auto_classifier_model: Option<String>,
     /// Headless escape hatch: when true, non-replayable tools (web/mcp/
-    /// `subagent/computer_use`) are allowed to PROCEED on an `Ask` decision in a
+    /// `subagent`) are allowed to PROCEED on an `Ask` decision in a
     /// headless run (no approval UI) instead of being blocked. Default `false`
     /// — `mermaid run` in `ask` mode otherwise refuses these. Set via
     /// `--allow-untrusted-tools` or config for CI that needs them.
@@ -694,26 +686,6 @@ impl CompactionConfig {
 /// `value` unless it is zero, in which case `fallback`.
 fn nonzero_or(value: usize, fallback: usize) -> usize {
     if value == 0 { fallback } else { value }
-}
-
-/// Computer-use (desktop control) preferences.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ComputerUseConfig {
-    /// After a successful click / `type_text` / `press_key`, auto-capture the
-    /// focused window and attach it inline so the model can verify the result.
-    /// On by default (non-breaking); set false to cut the per-action capture
-    /// cost + image tokens when visual feedback isn't needed. The model can
-    /// still call `screenshot` explicitly.
-    pub auto_screenshot: bool,
-}
-
-impl Default for ComputerUseConfig {
-    fn default() -> Self {
-        Self {
-            auto_screenshot: true,
-        }
-    }
 }
 
 /// Subagent (`agent` tool) settings.
@@ -1149,29 +1121,6 @@ impl Default for WebConfig {
             allow_ollama_search_fallback: false,
             searxng_url: String::from("http://localhost:8080"),
             allowed_domains: Vec::new(),
-        }
-    }
-}
-
-/// Non-interactive mode configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct NonInteractiveConfig {
-    /// Output format (text, json, markdown)
-    pub output_format: String,
-    /// Maximum tokens to generate
-    pub max_tokens: usize,
-    /// Don't execute agent actions (dry run)
-    pub no_execute: bool,
-}
-
-impl Default for NonInteractiveConfig {
-    fn default() -> Self {
-        Self {
-            output_format: String::from("text"),
-            // 0 = AUTO (see `ModelSettings::max_tokens`).
-            max_tokens: 0,
-            no_execute: false,
         }
     }
 }

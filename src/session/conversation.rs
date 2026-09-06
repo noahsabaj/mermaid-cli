@@ -48,8 +48,8 @@ fn read_conversation_capped(path: &Path) -> std::io::Result<String> {
     fs::read_to_string(path)
 }
 
-/// Marker left in a message's text when its screenshot bytes are dropped on save.
-const SCREENSHOT_ELIDED_MARKER: &str = "\n[screenshot not persisted]";
+/// Marker left in a message's text when its tool-image bytes are dropped on save.
+const TOOL_IMAGE_ELIDED_MARKER: &str = "\n[tool image not persisted]";
 
 /// Top-level key in a checkpoint file naming the last log `seq` folded into
 /// it. Absent on legacy snapshots and on any file written before the log
@@ -57,18 +57,19 @@ const SCREENSHOT_ELIDED_MARKER: &str = "\n[screenshot not persisted]";
 /// trusting the checkpoint. See `docs/design/fold-first-resume.md`.
 const CHECKPOINT_SEQ_KEY: &str = "checkpoint_seq";
 
-/// Return a sanitized copy of `messages` with computer-use screenshot bytes
-/// removed before they reach durable storage (#99). Screenshots — which can
-/// capture on-screen secrets — attach to **non-User** messages (the assistant
-/// message the capture is routed onto, or a tool outcome); user-supplied
-/// multimodal images attach to **User** messages and are intentional content,
-/// so they're preserved. The live in-memory conversation is untouched (this
-/// runs on a copy at the save chokepoint), so the chat and model context still
-/// see the screenshot for the session — only the on-disk copy is scrubbed.
+/// Return a sanitized copy of `messages` with tool-returned image bytes
+/// removed before they reach durable storage (#99). Tool images (an MCP
+/// browser's page capture, say) can carry on-screen secrets and attach to
+/// **non-User** messages (the assistant message the capture is routed onto,
+/// or a tool outcome); user-supplied multimodal images attach to **User**
+/// messages and are intentional content, so they're preserved. The live
+/// in-memory conversation is untouched (this runs on a copy at the save
+/// chokepoint), so the chat and model context still see the image for the
+/// session — only the on-disk copy is scrubbed.
 ///
 /// Returns `None` when nothing needed stripping, so the hot save path avoids a
-/// clone in the common (no-screenshot) case.
-fn strip_persisted_screenshots(messages: &[ChatMessage]) -> Option<Vec<ChatMessage>> {
+/// clone in the common (no-image) case.
+fn strip_persisted_tool_images(messages: &[ChatMessage]) -> Option<Vec<ChatMessage>> {
     let needs = messages
         .iter()
         .any(|m| m.role != MessageRole::User && m.images.is_some());
@@ -79,8 +80,8 @@ fn strip_persisted_screenshots(messages: &[ChatMessage]) -> Option<Vec<ChatMessa
     for m in out.iter_mut() {
         if m.role != MessageRole::User && m.images.is_some() {
             m.images = None;
-            if !m.content.ends_with(SCREENSHOT_ELIDED_MARKER) {
-                m.content.push_str(SCREENSHOT_ELIDED_MARKER);
+            if !m.content.ends_with(TOOL_IMAGE_ELIDED_MARKER) {
+                m.content.push_str(TOOL_IMAGE_ELIDED_MARKER);
             }
         }
     }
@@ -333,11 +334,11 @@ impl ConversationManager {
         let filename = format!("{}.json", conversation.id);
         let path = self.conversations_dir.join(filename);
 
-        // Sanitize before persisting: strip computer-use screenshot bytes (#99)
+        // Sanitize before persisting: strip tool-returned image bytes (#99)
         // AND scrub credential-shaped strings, so a persisted `read_file` of
         // `.env` or an API error echoing a key can't sit in cleartext (mirrors
         // the --record redaction in recorder.rs). Only clones when scrubbing.
-        let mut value = match strip_persisted_screenshots(conversation.messages()) {
+        let mut value = match strip_persisted_tool_images(conversation.messages()) {
             Some(sanitized) => {
                 let mut stripped = conversation.clone();
                 *stripped.messages_mut() = sanitized;
@@ -794,37 +795,37 @@ mod tests {
     }
 
     #[test]
-    fn strip_persisted_screenshots_drops_assistant_images_keeps_user_images() {
+    fn strip_persisted_tool_images_drops_assistant_images_keeps_user_images() {
         let messages = vec![
             ChatMessage::user("look at this").with_images(vec!["USER_PASTED_B64".to_string()]),
             ChatMessage::assistant("here is the screen")
                 .with_images(vec!["SCREENSHOT_B64".to_string()]),
             ChatMessage::assistant("no image here"),
         ];
-        let sanitized = strip_persisted_screenshots(&messages).expect("had a screenshot to strip");
+        let sanitized = strip_persisted_tool_images(&messages).expect("had a tool image to strip");
         // User-supplied image preserved.
         assert_eq!(
             sanitized[0].images.as_deref(),
             Some(["USER_PASTED_B64".to_string()].as_slice())
         );
-        // Assistant screenshot dropped + marker added.
+        // Assistant image dropped + marker added.
         assert!(sanitized[1].images.is_none());
-        assert!(sanitized[1].content.ends_with(SCREENSHOT_ELIDED_MARKER));
+        assert!(sanitized[1].content.ends_with(TOOL_IMAGE_ELIDED_MARKER));
         // Untouched assistant message is unchanged (no spurious marker).
-        assert!(!sanitized[2].content.ends_with(SCREENSHOT_ELIDED_MARKER));
+        assert!(!sanitized[2].content.ends_with(TOOL_IMAGE_ELIDED_MARKER));
     }
 
     #[test]
-    fn strip_persisted_screenshots_is_none_without_assistant_images() {
+    fn strip_persisted_tool_images_is_none_without_assistant_images() {
         let messages = vec![
             ChatMessage::user("hi").with_images(vec!["USER_B64".to_string()]),
             ChatMessage::assistant("no images"),
         ];
-        assert!(strip_persisted_screenshots(&messages).is_none());
+        assert!(strip_persisted_tool_images(&messages).is_none());
     }
 
     #[test]
-    fn saved_conversation_json_has_no_screenshot_bytes() {
+    fn saved_conversation_json_has_no_tool_image_bytes() {
         let dir = std::env::temp_dir().join("mermaid_strip_test");
         let _ = fs::create_dir_all(&dir);
         let mut conv = ConversationHistory::new("/tmp/p".into(), "m".into(), Local::now());
@@ -841,10 +842,10 @@ mod tests {
         let raw = fs::read_to_string(dir.join(format!("{}.json", conv.id))).expect("read");
         assert!(
             !raw.contains("SHOTBYTES"),
-            "screenshot leaked to disk: {raw}"
+            "tool image leaked to disk: {raw}"
         );
         assert!(raw.contains("USERIMG"), "user image should persist");
-        // Live conversation untouched — still carries the screenshot in-session.
+        // Live conversation untouched — still carries the image in-session.
         assert_eq!(
             conv.messages()[1].images.as_deref(),
             Some(["SHOTBYTES".to_string()].as_slice())
