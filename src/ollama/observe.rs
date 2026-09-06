@@ -78,11 +78,11 @@ fn combine(
 async fn live_models(config: &Config) -> Option<Vec<String>> {
     use mermaid_model::models::adapters::ollama::OllamaAdapter;
     use mermaid_model::models::{BackendConfig, Model};
+    // Observing never mutates: autostart stays hard-off however the config
+    // reads, so a listing cannot bring a stopped server up.
     let backend = BackendConfig {
-        ollama_url: config.ollama.base_url(),
-        timeout_secs: 5,
-        max_idle_per_host: 2,
         ollama_autostart: false,
+        ..super::probe_config(config)
     };
     match OllamaAdapter::new("__list__", Arc::new(backend)).await {
         Ok(adapter) => adapter.list_models().await.ok(),

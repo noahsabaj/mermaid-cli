@@ -22,10 +22,13 @@ pub mod tool;
 
 pub use approval::{ApprovalBroker, ApprovalDecision, allowlist_key, is_domain_allowed};
 pub use auto_classifier::{AutoClassifier, ModelAutoClassifier, VetRequest, VetVerdict};
-pub use ctx::{
-    ExecContext, FinalResponse, StreamContext, StreamEvent, clone_messages, test_exec_context,
-    test_stream_context,
-};
+pub use ctx::{ExecContext, FinalResponse, StreamContext, StreamEvent, clone_messages};
+/// Test-only context builders. Behind a feature rather than `#[cfg(test)]`
+/// because the integration tests under `tests/` link the library without
+/// `cfg(test)`; the self dev-dependency in `Cargo.toml` turns the feature on
+/// for them, and a release build has no trace of these.
+#[cfg(any(test, feature = "test-support"))]
+pub use ctx::{test_exec_context, test_stream_context};
 pub use discovery::{
     ConfiguredProvider, ProviderCatalog, ProviderProblem, configured_remote_providers,
     provider_catalogs, provider_problems,

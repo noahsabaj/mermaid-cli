@@ -414,13 +414,22 @@ fn create_run_task(
             model_id.to_string(),
         ))
         .ok()?;
-    let _ = store
+    // Best-effort by the flaky-drive posture, but never silent: a task row
+    // stuck on `queued` because this write failed is a puzzle the log should
+    // solve.
+    if let Err(error) = store
         .tasks()
-        .update_status(&task.id, TaskStatus::Running, None);
-    if no_execute {
-        let _ = store
-            .tasks()
-            .add_event(&task.id, "run_option", "tools disabled by --no-execute");
+        .update_status(&task.id, TaskStatus::Running, None)
+    {
+        tracing::warn!(task = %task.id, %error, "could not mark the run task running");
+    }
+    if no_execute
+        && let Err(error) =
+            store
+                .tasks()
+                .add_event(&task.id, "run_option", "tools disabled by --no-execute")
+    {
+        tracing::warn!(task = %task.id, %error, "could not record the run option");
     }
     let _ = mermaid_runtime::run_plugin_hooks(
         "task_start",
@@ -439,7 +448,9 @@ fn finish_run_task(task_id: Option<&str>, status: TaskStatus, final_report: Opti
         return;
     };
     if let Ok(store) = RuntimeStore::open_default() {
-        let _ = store.tasks().update_status(task_id, status, final_report);
+        if let Err(error) = store.tasks().update_status(task_id, status, final_report) {
+            tracing::warn!(task = %task_id, %error, "could not record the run's terminal status");
+        }
         let _ = mermaid_runtime::run_plugin_hooks(
             "task_stop",
             &serde_json::json!({

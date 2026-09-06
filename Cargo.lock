@@ -2354,6 +2354,7 @@ dependencies = [
  "ignore",
  "insta",
  "jsonschema",
+ "mermaid-cli",
  "mermaid-domain",
  "mermaid-model",
  "mermaid-runtime",

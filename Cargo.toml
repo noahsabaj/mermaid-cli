@@ -143,7 +143,15 @@ shell-words = "1.1"
 # crate the exit-regression test harness uses as a dev-dependency.
 portable-pty = "0.9"
 
+# The workspace's one feature: it exists so `src/providers/ctx.rs`'s test-only
+# context builders can be gated out of release builds while the integration
+# tests under `tests/` (which link the library without `cfg(test)`) still see
+# them, via the self dev-dependency below.
+[features]
+test-support = []
+
 [dev-dependencies]
+mermaid-cli = { path = ".", features = ["test-support"] }
 # Integration tests link the library plus dev-deps, NOT `[dependencies]`. Both
 # workspace crates are declared here so `tests/` can name them directly instead
 # of reaching them through `mermaid_cli`'s re-export facades.

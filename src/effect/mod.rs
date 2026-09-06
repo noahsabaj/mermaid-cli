@@ -1505,7 +1505,12 @@ impl EffectRunner {
                                 workspace,
                             ) = spawner.kill_detached(&id)
                             {
-                                tokio::spawn(workspace.discard());
+                                // In `detached`, not a bare `tokio::spawn`: shutdown
+                                // drains that set, so quitting mid-discard cannot
+                                // leave the worktree on disk with no record of it.
+                                self.detached.spawn(async move {
+                                    workspace.discard().await;
+                                });
                             }
                         },
                         None => {

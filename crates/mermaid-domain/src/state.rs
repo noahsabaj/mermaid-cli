@@ -1312,6 +1312,12 @@ pub struct UiState {
 }
 
 /// How long a [`UiState::toast`] stays on screen.
+/// How long `TurnState::Cancelling` may wait for the effect runner's
+/// `TurnCancelled` before the reducer abandons the turn itself. Matches the
+/// daemon's graceful-then-hard stop; the UI's "cleanup taking a while" hint
+/// shows well before this.
+pub const CANCEL_WATCHDOG: std::time::Duration = std::time::Duration::from_secs(15);
+
 pub const TOAST_TTL: chrono::Duration = chrono::Duration::milliseconds(2000);
 
 impl UiState {

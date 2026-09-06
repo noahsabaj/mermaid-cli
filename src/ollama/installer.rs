@@ -2,19 +2,14 @@ use super::detector;
 use super::guide;
 use anyhow::Result;
 use mermaid_domain::Config;
+use mermaid_model::models::Model;
 use mermaid_model::models::adapters::ollama::OllamaAdapter;
-use mermaid_model::models::{BackendConfig, Model};
 use std::sync::Arc;
 
 /// List installed Ollama models via the HTTP API using the user's
 /// config. Falls back to an empty list on any HTTP error.
 async fn list_installed_models(config: &Config) -> Vec<String> {
-    let backend = BackendConfig {
-        ollama_url: config.ollama.base_url(),
-        timeout_secs: 5,
-        max_idle_per_host: 2,
-        ollama_autostart: config.ollama.auto_start,
-    };
+    let backend = super::probe_config(config);
     let autostart = backend.ollama_autostart;
     match OllamaAdapter::new("__list__", Arc::new(backend)).await {
         // This runs pre-TUI on plain console, so the autostart notice can go

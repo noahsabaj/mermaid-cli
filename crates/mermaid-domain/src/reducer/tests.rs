@@ -9335,3 +9335,36 @@ fn ui_state_default_is_empty() {
     assert!(s.input_buffer.is_empty());
     assert!(matches!(s.mode, UiMode::EditingInput));
 }
+
+/// A cancel the effect runner never acknowledges must not strand the session:
+/// past the watchdog a tick abandons the turn (with a notice), and under it
+/// the reducer keeps waiting.
+#[test]
+fn a_cancel_that_never_completes_is_abandoned_by_the_watchdog() {
+    let mut state = state_with_two_exchanges();
+    let since = std::time::SystemTime::from(state.now);
+    state.turn = TurnState::Cancelling {
+        id: TurnId(1),
+        since,
+    };
+    state.now += chrono::Duration::seconds(2);
+    let (state, _) = update(state, Msg::Tick);
+    assert!(
+        matches!(state.turn, TurnState::Cancelling { .. }),
+        "under the watchdog the reducer keeps waiting"
+    );
+
+    let mut state = state;
+    state.now += chrono::Duration::seconds(20);
+    let before = state.session.messages().len();
+    let (state, _) = update(state, Msg::Tick);
+    assert!(
+        matches!(state.turn, TurnState::Idle),
+        "past the watchdog the turn is abandoned"
+    );
+    assert_eq!(
+        state.session.messages().len(),
+        before + 1,
+        "and the user is told"
+    );
+}

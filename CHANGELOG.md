@@ -47,6 +47,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A streamed tool call whose arguments failed to parse dropped the reason.**
   The fallback still passes the raw text through, but the parse error (most
   often "the argument cap fired") is logged instead of discarded.
+- **A cancel the effect runner never finished stranded the session.** `Cancelling`
+  waited forever for the runner's acknowledgement; a wedged child process or a
+  panicked task meant the composer never reopened and only killing the process
+  helped. The reducer now abandons the turn itself after 15 seconds, with a
+  notice, off the injected clock so `--replay` reproduces it.
+- **Quitting during a subagent's worktree cleanup could leave the checkout on
+  disk.** The discard ran on a detached task nothing waited for; it joins the
+  runner's shutdown drain now.
+- **Failed task-row writes in `mermaid run` were silent.** A task stuck on
+  `queued` because the status write failed left nothing in the log; the
+  failures are logged.
+- **The Ollama capability probe's failures were indistinguishable from "yes".**
+  A slow or rejected `/api/show` fell back to "supports thinking" with no log
+  line, which is the shape of the `think`-on-a-model-without-it 400. Each
+  failure mode is logged before the fallback.
+- **The SSE boundary scan was quadratic against a stream that withheld its
+  separator.** Two whole-buffer `windows()` scans per chunk; now one linear
+  pass keyed on the newline byte.
 
 - **CI on `main` was red from 2026-08-13.** `h2` 0.4.15 carried RUSTSEC-2026-0258
   (unbounded empty DATA frames), so the required Security Audit job failed on every
@@ -150,6 +168,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   emoji guard also bans the Misc Technical run (`⏩`..`⏺`, `⌚`, `⌛`), which
   sits below the dingbat block but renders as colour glyphs.
 
+- **Internal dedup.** One Ollama `BackendConfig` constructor (two call sites
+  hand-rolled the literal with different timeouts), one lexical path normalizer
+  (`mermaid_runtime::normalize_lexical`; the file tools carried a copy that
+  disagreed on an unpoppable `..`), and the test-only tool-context builders are
+  behind a `test-support` feature instead of shipping in the release binary --
+  the workspace's first feature flag, turned on for the integration tests by a
+  self dev-dependency.
 - **Reads outside the project prompt in `ask` mode.** The approval names the
   file and offers "don't ask again" for its directory. Headless `ask` runs
   refuse them unless `--allow-untrusted-tools` is set, like other

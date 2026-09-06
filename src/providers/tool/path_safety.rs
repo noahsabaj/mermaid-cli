@@ -164,8 +164,8 @@ pub(crate) fn resolve_in_roots(
 pub(crate) fn relative_within(workdir: &Path, raw: &str) -> Result<PathBuf, String> {
     let p = PathBuf::from(raw);
     let candidate = if p.is_absolute() { p } else { workdir.join(&p) };
-    let normalized = lexical_normalize(&candidate);
-    let root = lexical_normalize(workdir);
+    let normalized = mermaid_runtime::normalize_lexical(&candidate);
+    let root = mermaid_runtime::normalize_lexical(workdir);
     match normalized.strip_prefix(&root) {
         Ok(rel) => Ok(rel.to_path_buf()),
         Err(_) => Err(format!(
@@ -180,7 +180,7 @@ pub(crate) fn relative_within(workdir: &Path, raw: &str) -> Result<PathBuf, Stri
 /// `root` is the nearest existing directory ancestor (or parent directory for an existing file),
 /// and `rel` is the path relative to that `root`.
 fn resolve_external_target(candidate: &Path) -> Result<(PathBuf, PathBuf, PathBuf), String> {
-    let normalized = lexical_normalize(candidate);
+    let normalized = mermaid_runtime::normalize_lexical(candidate);
     let mut ancestor = normalized.as_path();
     let mut tail: Vec<std::ffi::OsString> = Vec::new();
     let (real_root, tail) = loop {
@@ -232,31 +232,6 @@ fn resolve_external_target(candidate: &Path) -> Result<(PathBuf, PathBuf, PathBu
 /// ancestor.
 fn resolve_via_existing_ancestor(candidate: &Path) -> Result<PathBuf, String> {
     resolve_external_target(candidate).map(|(_, _, abs)| abs)
-}
-
-/// Normalize a path lexically (no filesystem access), collapsing `.` and
-/// resolving `..` without symlink expansion. Used when a target doesn't exist
-/// yet so `canonicalize` would fail but we still want to reject `..`-escapes.
-fn lexical_normalize(p: &Path) -> PathBuf {
-    use std::path::Component;
-    let mut out = PathBuf::new();
-    for comp in p.components() {
-        match comp {
-            Component::ParentDir => {
-                // Drop the last segment if one exists; otherwise keep the `..`
-                // (can only happen on relative paths, which the caller has
-                // already joined against workdir).
-                if !out.pop() {
-                    out.push("..");
-                }
-            },
-            Component::CurDir => {},
-            Component::Prefix(prefix) => out.push(prefix.as_os_str()),
-            Component::RootDir => out.push(std::path::MAIN_SEPARATOR_STR),
-            Component::Normal(normal) => out.push(normal),
-        }
-    }
-    out
 }
 
 #[cfg(test)]
