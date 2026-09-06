@@ -109,30 +109,16 @@ fn compaction_row(
 /// Feed the cross-project session index off a successful snapshot save.
 /// Best-effort by design: the row is an index over the files, never the
 /// truth, so a store hiccup must not fail the save that just succeeded.
+/// Feed the cross-project session index off a successful append. Best-effort
+/// by design: the row is an index over the files, never the truth, so a store
+/// hiccup must not fail the save that just succeeded; the daemon rebuilds the
+/// index from disk on its next start regardless.
 fn upsert_session_index(
     manager: &crate::session::ConversationManager,
     snapshot: &mermaid_domain::ConversationHistory,
 ) {
-    let conversation_path = manager
-        .conversations_dir()
-        .join(format!("{}.json", snapshot.id));
-    let _ = mermaid_runtime::with_shared_store(|store| {
-        store.sessions().upsert(mermaid_runtime::NewSession {
-            id: Some(snapshot.id.clone()),
-            // The snapshot's own field, not the runner's workdir: they are
-            // the same string by construction (`State::new` derives it from
-            // `cwd`), and one source beats two that must agree.
-            project_path: snapshot.project_path.clone(),
-            model_id: snapshot.model_name.clone(),
-            title: Some(snapshot.title.clone()),
-            conversation_path: Some(conversation_path.display().to_string()),
-            // Saturating rather than `as`: the column is signed, and a
-            // count that somehow exceeded i64 must not land negative.
-            total_tokens: Some(
-                i64::try_from(snapshot.cumulative_token_usage.total_tokens()).unwrap_or(i64::MAX),
-            ),
-        })
-    });
+    let row = crate::session::session_row(manager.conversations_dir(), snapshot);
+    let _ = mermaid_runtime::with_shared_store(|store| store.sessions().upsert(row));
 }
 
 #[derive(Clone)]

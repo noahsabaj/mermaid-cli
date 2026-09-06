@@ -618,11 +618,10 @@ impl ConversationManager {
     /// fail the delete.
     pub fn delete_conversation(&self, id: &str) -> Result<()> {
         validate_conversation_id(id)?;
-        let _ = mermaid_runtime::with_shared_store(|store| {
-            store
-                .coordinator()
-                .delete_session_cascade(&self.project_dir, id)
-        });
+        // The index row and what hangs off it in the runtime store. Best-effort
+        // like the sidecars: the files are the truth, and the daemon's next
+        // start prunes any row this misses.
+        let _ = mermaid_runtime::with_shared_store(|store| store.sessions().delete(id));
         let path = self.conversations_dir.join(format!("{id}.json"));
         if path.exists() {
             fs::remove_file(path)?;

@@ -92,6 +92,42 @@ impl SessionsRepo<'_> {
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
     }
+
+    /// The ids of every session row indexed under `project_path`.
+    ///
+    /// # Errors
+    ///
+    /// Errors if the statement fails to prepare or run.
+    pub fn ids_for_project(&self, project_path: &str) -> Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id FROM sessions WHERE project_path = ?1")?;
+        let rows = stmt.query_map([project_path], |row| row.get::<_, String>(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    /// Remove a session's index row and everything that hangs off it in this
+    /// store -- its compaction and checkpoint rows -- and detach any task that
+    /// pointed at it, in one transaction. The files under
+    /// `.mermaid/conversations/` are the caller's to remove; this is the
+    /// database half of deleting a conversation. Returns whether a row existed.
+    ///
+    /// # Errors
+    ///
+    /// Errors if the transaction or any statement fails.
+    pub fn delete(&self, id: &str) -> Result<bool> {
+        let tx = self.conn.unchecked_transaction()?;
+        let removed = tx.execute("DELETE FROM sessions WHERE id = ?1", [id])?;
+        tx.execute("DELETE FROM compactions WHERE session_id = ?1", [id])?;
+        tx.execute("DELETE FROM checkpoints WHERE session_id = ?1", [id])?;
+        tx.execute(
+            "UPDATE tasks SET conversation_id = NULL WHERE conversation_id = ?1",
+            [id],
+        )?;
+        tx.commit()?;
+        Ok(removed > 0)
+    }
 }
 
 impl TasksRepo<'_> {
