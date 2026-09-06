@@ -90,9 +90,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The clippy that measures the debt is pinned, not `stable`: each release
+      # moves the pedantic counts, so a baseline recorded by one version fails
+      # under the next on nothing anyone wrote. The script runs
+      # `cargo +<pinned>`; this installs the same version from the same file.
+      - name: Read the pinned clippy toolchain
+        id: clippy-toolchain
+        run: echo "version=$(tr -d '[:space:]' < .github/baselines/clippy_toolchain.txt)" >> "$GITHUB_OUTPUT"
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
         with:
-          toolchain: stable
+          toolchain: ${{ steps.clippy-toolchain.outputs.version }}
           components: clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
