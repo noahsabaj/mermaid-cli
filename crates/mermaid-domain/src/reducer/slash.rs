@@ -76,6 +76,7 @@ pub fn handle_todos_command(state: &mut State, cmds: &mut Vec<Cmd>, arg: Option<
 
 /// The `/todos` listing: the full checklist with descriptions, cost stamps,
 /// and recent evidence — the detail view the compact band doesn't show.
+#[must_use]
 pub fn todos_text(state: &State) -> String {
     let store = &state.session.conversation.tasks;
     if store.is_empty() {
@@ -807,6 +808,7 @@ pub fn sweep_spent_nudges(state: &mut State) -> bool {
     messages.len() != before
 }
 
+#[must_use]
 pub fn ollama_pull_target(model_id: &str) -> Option<String> {
     let model_id = model_id.trim();
     if model_id.is_empty() {

@@ -236,6 +236,7 @@ pub fn handle_compaction_finished(
     });
 }
 
+#[must_use]
 pub fn compaction_intervening_messages(
     current: &[ChatMessage],
     source: &[crate::CompactionBoundary],
@@ -359,6 +360,7 @@ pub fn handle_stream_tool_call(
 /// length-truncation can't be (or has stopped being) auto-recovered. Shared by
 /// `handle_stream_done` (cap reached / nothing to compact) and
 /// `handle_compaction_failed` (recovery compaction couldn't reduce the context).
+#[must_use]
 pub fn truncation_hint(state: &State) -> String {
     let mut msg = "Response truncated — reached the model's max output-token limit.".to_string();
     // Ollama quick-fix: if auto-fit capped the window below the model's max, tell
@@ -382,6 +384,7 @@ pub fn truncation_hint(state: &State) -> String {
 /// budgeting mermaid no longer imposes its own cap, so the stop was either the
 /// user's explicit `max_tokens` hard cap or the model/provider's own
 /// per-response ceiling.
+#[must_use]
 pub fn output_cap_hint(state: &State) -> String {
     let cap = state.settings.default_model.max_tokens;
     if cap > 0 {

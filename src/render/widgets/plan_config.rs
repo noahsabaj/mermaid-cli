@@ -9,7 +9,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Widget},
 };
 
-use crate::render::theme::{ColorValueExt, Theme};
+use crate::render::theme::Theme;
 use mermaid_domain::PlanConfig;
 
 /// Row count (kept in sync with `plan_config_rows` and the reducer's key

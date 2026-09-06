@@ -49,19 +49,9 @@ LAYERS: dict[str, Layer] = {
             "crate carries no `mermaid-runtime` dependency at all."
         ),
     ),
-    # -- rank 2: the pure presentation layer -------------------------------
-    "crates/mermaid-ui/src": Layer(
-        may_use=frozenset({"domain", "mermaid_domain", "models", "mermaid_model", "constants", "utils"}),
-        pure=True,
-        why=(
-            "`mermaid-ui` is the pure presentation and layout layer. "
-            "It computes virtual UI node trees and handles text wrapping and "
-            "theming without any terminal I/O or backend dependencies."
-        ),
-    ),
-    # -- rank 3: the pure view ---------------------------------------------
+    # -- rank 2: the pure view ---------------------------------------------
     "src/render": Layer(
-        may_use=frozenset({"domain", "mermaid_domain", "ui", "mermaid_ui", "models", "constants", "utils"}),
+        may_use=frozenset({"domain", "mermaid_domain", "models", "constants", "utils"}),
         pure=True,
         why=(
             "`render(&State) -> Frame` is a pure function of domain state. "
@@ -73,7 +63,7 @@ LAYERS: dict[str, Layer] = {
 }
 
 # Module names that resolve through a re-export facade in `src/lib.rs`.
-ALIASES = {"mermaid_model": "models", "mermaid_runtime": "runtime", "mermaid_ui": "ui"}
+ALIASES = {"mermaid_model": "models", "mermaid_runtime": "runtime"}
 
 IMPURE = [
     # filesystem / network / process

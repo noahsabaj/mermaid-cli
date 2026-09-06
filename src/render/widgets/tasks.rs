@@ -23,7 +23,7 @@ use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use crate::render::markdown::parse_markdown_inline;
-use crate::render::theme::{ColorValueExt, Theme};
+use crate::render::theme::Theme;
 use crate::render::wrap::wrap_styled_line;
 use mermaid_domain::checklist::{ChecklistItem, ChecklistStatus, ChecklistStore};
 use mermaid_domain::{ChecklistOrigin, TurnState};

@@ -311,6 +311,7 @@ pub fn step_number(set: &mut mermaid_model::question::PendingQuestionSet, q_idx:
 }
 
 /// Format a number without a trailing `.0` for whole values.
+#[must_use]
 pub fn format_number(n: f64) -> String {
     if n.fract() == 0.0 && n.abs() < 1e15 {
         format!("{}", n as i64)
@@ -891,6 +892,7 @@ pub fn handle_rewind_esc(state: &mut State) {
 /// The rewind targets: user-role `Normal` messages, NEWEST FIRST (the most
 /// recent exchange is the most likely rewind point). Excerpts are the first
 /// non-empty line, clipped.
+#[must_use]
 pub fn rewind_candidates(messages: &[ChatMessage]) -> Vec<crate::RewindCandidate> {
     const EXCERPT_MAX_CHARS: usize = 80;
     messages
@@ -1238,6 +1240,7 @@ pub fn filter_model_choices<'a>(
 
 /// Are `needle`'s chars present in `haystack`, in order (not necessarily
 /// adjacent)? Both are expected lowercase.
+#[must_use]
 pub fn is_subsequence(needle: &str, haystack: &str) -> bool {
     let mut chars = haystack.chars();
     needle.chars().all(|n| chars.any(|h| h == n))
@@ -1375,6 +1378,7 @@ pub fn complete_file_mention(state: &mut State) {
 /// Clamp a raw byte offset onto the nearest preceding char boundary
 /// in `s`. Callers that trust their cursor is already valid can skip
 /// this; paste + multi-step transformations should use it.
+#[must_use]
 pub fn clamp_cursor(s: &str, pos: usize) -> usize {
     let capped = pos.min(s.len());
     s.floor_char_boundary(capped)
@@ -1440,6 +1444,7 @@ pub fn history_nav_forward(state: &mut State) {
 /// Cycle `ReasoningLevel` through every variant, wrapping around. Used
 /// by Alt+T. Order matches the `Ord` impl so the cycle walks from
 /// lowest to highest and back to None.
+#[must_use]
 pub fn cycle_reasoning(
     current: mermaid_model::models::ReasoningLevel,
 ) -> mermaid_model::models::ReasoningLevel {
@@ -1462,6 +1467,7 @@ pub fn cycle_reasoning(
 /// one (`permissiveness() == 0`), so the walk starts there. Entering it still
 /// allocates a plan path and may swap the model; that side of the transition
 /// lives in [`apply_safety_mode`], which every mode switch routes through.
+#[must_use]
 pub fn cycle_safety(
     current: mermaid_model::safety::SafetyMode,
 ) -> mermaid_model::safety::SafetyMode {

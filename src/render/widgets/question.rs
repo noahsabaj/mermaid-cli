@@ -15,7 +15,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 use unicode_width::UnicodeWidthStr;
 
 use super::truncate_to_cells;
-use crate::render::theme::{ColorValueExt, Theme};
+use crate::render::theme::Theme;
 use crate::render::wrap::wrap_styled_line;
 use mermaid_model::question::{OptionPreview, PendingQuestionSet, Question, QuestionSelection};
 
