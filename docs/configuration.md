@@ -74,7 +74,8 @@ port = 11434
 # MERMAID_OLLAMA_AUTOSTART=0 in the environment — if you manage Ollama
 # yourself (custom bind address, containers, CI).
 auto_start = true
-# cloud_api_key = "your-key"  # for :cloud models
+# Ollama Cloud authenticates with the OLLAMA_API_KEY environment variable
+# (`mermaid cloud-setup` stores it); there is no config key for it.
 # num_gpu = 10
 # num_thread = 8
 # num_ctx = 8192

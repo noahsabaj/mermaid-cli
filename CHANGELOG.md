@@ -7,18 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- **Accelerated test iteration and consolidated integration tests.** Restructured 23 separate integration test binaries into a unified integration test runner (`tests/integration.rs` with submodules under `tests/it/`), reducing link steps from 23 down to 1. Configured `rust-lld` fast linker for Windows MSVC via `.cargo/config.toml`, enabled `debug = 1` (line-tables-only) in dev/test profiles to cut debug symbol overhead by ~60%, compiled dev/test dependencies with `opt-level = 2` for faster test execution, and added `just test` recipe for nextest.
+### Added
 
-- **Native Windows OS Sandboxing (AppContainer & Job Objects).** `--no-network`, `--confine-fs`, and `--sandbox` now confine model-run shell commands on Windows via native Windows AppContainers (LowBox tokens) and Job Objects. Omits network capabilities while sparing `127.0.0.1` localhost loopback for local dev tooling, and applies transient SID ACLs to restrict filesystem writes strictly to project, workdir, and temp roots with automatic RAII cleanup and kill-on-close process tree containment.
-
-- **First-class `edit_file` search-and-replace editing tool.** Models can now perform surgical, single-location edits via `edit_file` (`path`, `target_content`, `replacement_content`, optional `allow_multiple`), eliminating diff syntax envelope friction for targeted changes. The replacement engine features graduated fuzzy matching (exact, trailing whitespace, full trim, Unicode normalization), uniqueness validation, atomic writes beneath root, checkpoint snapshotting, and approval replay.
-
-- **Domain-level and config-based allowlisting for web tools.** Interactive approval modals for `web_fetch` now offer host-level "don't ask again" allowlisting (e.g. `web_fetch:docs.x.ai` or `web_fetch:localhost:8080`), permitting subsequent requests to the approved host for the duration of the session without reprompting. `web_search` similarly supports session-wide allowlisting. Persistent domain trust can also be configured declaratively via `[web] allowed_domains = ["docs.x.ai", "localhost:8080"]` in `config.toml`.
-
-- **Task checklist inline Markdown rendering and multi-line wrapping.** Task subjects in the live checklist band, collapsed "Next:" line, and the spinner status headline now parse inline Markdown formatting (`**bold**`, `` `code` ``, `*italics*`, `~~strikethrough~~`, `[links](url)`). In the expanded checklist, tasks now wrap cleanly across multiple lines with hanging indentation aligned under the task text column, and windowing dynamically respects a visual line budget around the in-progress task. Completed tasks preserve their bold/code weights while applying dimming and strikethrough styling across all spans.
-
-- **Grok (xAI) is now a built-in provider.** Reach xAI's Grok models through their OpenAI-compatible endpoint with `mermaid --model grok/<model>` (alias `xai/<model>`) — for example `grok/grok-4.6` is the flagship (500k context, vision). Set `XAI_API_KEY` (create one at https://console.x.ai). Uses the shared Chat Completions adapter; vision and tool calling work as with any built-in provider. Both `grok/` and `xai/` prefixes resolve to `https://api.x.ai/v1`.
-
+- **One integration test binary.** The 23 integration test crates under
+  `tests/` are one `tests/integration.rs` with a module per former crate
+  under `tests/it/`, so a test run links once instead of 23 times. Alongside:
+  `rust-lld` for Windows MSVC via `.cargo/config.toml`, line-tables-only
+  debug info in the dev and test profiles, `opt-level = 2` for dev
+  dependencies, and a `just test` recipe for nextest.
+- **Windows OS sandbox.** `--no-network`, `--confine-fs` and `--sandbox`
+  confine model-run shell commands on Windows through an AppContainer and a
+  Job Object: the network kill-switch omits the container's network
+  capabilities (loopback to `127.0.0.1` is exempted for local tooling), write
+  confinement grants the container SID access to the project, working and
+  temp directories and nothing else, and the job kills the process tree when
+  the handle closes. Documented in `docs/sandbox.md`.
+- **`edit_file`: single-location search-and-replace.** `path`,
+  `target_content`, `replacement_content`, and `allow_multiple` for when the
+  target legitimately repeats. Matching degrades in steps -- exact, trailing
+  whitespace, full trim, Unicode normalisation -- and refuses an ambiguous
+  match. Same containment, checkpoint and approval-replay path as
+  `apply_patch`, which stays for multi-hunk and new-file work.
+- **Allowlisting for the web tools.** The `web_fetch` approval offers "don't
+  ask again" for the host (`web_fetch:docs.x.ai`, `web_fetch:localhost:8080`)
+  for the rest of the session; `web_search` can be allowlisted the same way.
+  `[web] allowed_domains = ["docs.x.ai", "localhost:8080"]` in `config.toml`
+  makes the trust persistent.
+- **Inline Markdown in the task checklist.** Task subjects in the checklist
+  band, the collapsed "Next:" line and the spinner headline render `**bold**`,
+  `` `code` ``, `*italics*`, `~~strikethrough~~` and `[links](url)`. Long
+  subjects wrap with a hanging indent under the text column, and the window
+  around the in-progress task is budgeted in visual lines rather than
+  subjects. Completed tasks keep their weights under the dim and
+  strikethrough.
+- **Grok (xAI) is a built-in provider.** `mermaid --model grok/<model>`
+  (alias `xai/<model>`) reaches xAI's OpenAI-compatible endpoint at
+  `https://api.x.ai/v1` with `XAI_API_KEY`. Vision and tool calling work as
+  with any Chat Completions provider.
 ### Fixed
 
 - **A long reasoning trace silently emptied the answer that followed it.**
@@ -112,14 +137,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the prompt says when to reach for it versus `apply_patch`, the test-only
   registry is gone, and the guard asserts against `build()`.
 
-- **`apply_patch` supports unified diff range headers (`@@ -start,count +start,count @@`).**
-  When models generate standard unified diff hunk headers rather than Codex-style anchor lines,
-  `apply_patch` now parses and strips coordinate range metadata, extracting any trailing function
-  context as the anchor line (or `None` if empty) instead of searching for coordinate strings like
-  `-294,28 +294,56 @@` in the target file.
-
-- **Auto-mode safety classifier handles reasoning models without failing on empty responses.** Models with mandatory or internal reasoning (e.g. Gemini 3.7 Flash, DeepSeek R1, Claude thinking, and OpenAI o-series) could exhaust the classifier's prior 150-token output limit before emitting plain text, surfacing as `Auto-review flagged this: classifier returned an empty response`. The classifier now uses 2048 tokens of headroom, supports fallback extraction of verdicts from reasoning traces when plain text is empty, and reports actionable diagnostics (e.g. token limits exceeded) on stream truncation.
-
+- **`apply_patch` accepts unified diff range headers.** `@@ -start,count
+  +start,count @@` lines from `git diff` and `diff -u` are parsed instead of
+  rejected, so a patch pasted from either tool applies without editing its
+  hunk headers first.
+- **The `auto`-mode classifier no longer fails on models that reason
+  first.** Models with mandatory or internal reasoning could spend the
+  classifier's 150-token budget before emitting any plain text, and every
+  such action failed with `classifier returned an empty response`. The
+  budget is 2048 tokens, a verdict is also read out of the reasoning trace
+  when the text is empty, and a truncated stream reports the cause.
 ### Removed
 
 - **`crates/mermaid-ui`.** A second copy of the render layer — its own markdown
@@ -198,19 +225,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which had dropped the resolved context window and output cap, are one
   `From` impl beside `ChatRequest`.
 
-- **Unified cross-platform fail-closed sandbox enforcement.** Requesting `--sandbox`, `--no-network`, or `--confine-fs` on Windows now enforces kernel containment and strictly fails closed (exit code 126) if sandboxing cannot be applied, eliminating the unconfined fallback warning and achieving feature parity with Linux and macOS.
-
-- **Refactored `StepObserver` and single-step engine execution to be synchronous.** `StepObserver::observe` and `Engine::{step, step_at}` are now synchronous functions (`fn observe(&mut self, obs: Observation<'_>)`), eliminating async state machine allocations from single-step reductions and preventing asynchronous observer backpressure or channel latency from blocking the pure synchronous reducer pump. `ChildRelay` (subagent progress reporting) now uses `tokio::sync::mpsc::unbounded_channel` for non-blocking dispatch.
-
-- **Modularized domain reducer into focused sub-modules.** The monolithic 15,335-line `crates/mermaid-domain/src/reducer.rs` has been decomposed into a clean modular package (`crates/mermaid-domain/src/reducer/` containing `mod.rs`, `input.rs`, `slash.rs`, `streaming.rs`, `tools.rs`, `subagents.rs`, `lifecycle.rs`, `plan_flow.rs`, and `tests.rs`). Preserves all 313 unit tests, pure MVU core properties, deterministic replay, and reduces layering debt to zero.
-
-- **Filesystem tools can now view, edit, patch, and delete files outside the project directory.**
-  `read_file`, `write_file`, `apply_patch`, `delete_file`, and `create_directory` previously rejected
-  paths that resolved outside the project root directory or the session scratchpad. Absolute paths
-  (and traversing relative paths) now resolve to their actual locations on disk, allowing Mermaid
-  to interact with external files while retaining safety gating, Linux kernel-enforced sandboxed
-  writes, checkpoint snapshotting, and `/undo` restore capabilities.
-
+- **The Windows sandbox fails closed.** Requesting `--sandbox`,
+  `--no-network` or `--confine-fs` on Windows now either confines the command
+  or exits 126; the warn-and-run-unconfined fallback is gone, matching Linux
+  and macOS.
+- **`StepObserver::observe` and `Engine::{step, step_at}` are synchronous.**
+  A single reducer step allocated an async state machine and could be held
+  up by an observer's channel; the observer is a plain call now, and
+  `ChildRelay` (subagent progress) sends on an unbounded channel so it never
+  blocks the pump.
+- **The reducer is a module tree.** The 15,335-line
+  `crates/mermaid-domain/src/reducer.rs` is `reducer/{mod, input, slash,
+  streaming, tools, subagents, lifecycle, plan_flow, tests}.rs`. No behaviour
+  change; the 313 reducer tests moved with their code.
+- **The file tools reach outside the project.** `read_file`, `write_file`,
+  `edit_file`, `apply_patch`, `delete_file` and `create_directory` used to
+  reject any path that resolved outside the project root or the session
+  scratchpad; an absolute or traversing path now resolves to where it points.
+  Reads and mutations outside the project go through the policy gate as
+  external access (see the `ask`-mode entry below), and mutations keep the
+  checkpoint, `/undo` and Linux write-confinement they had inside it.
 - **The `/model` picker stops repeating the provider on every row, and a
   scrolled window still names the one it is showing.** Every row spelled out
   the full id under a heading that already said it, so NVIDIA's own catalog
@@ -242,6 +276,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `subscribe`, `api`), with one `cfg(any(unix, windows))` gate on the module
   in place of sixty per-item ones. A pure move: the unit and ignored
   integration tests went with their functions and are unchanged.
+- **Docs caught up with the binary.** `docs/cli-reference.md` lists
+  `--system-prompt`, `--append-system-prompt-file`, `-c/--config`,
+  `--profile`, `-v` and `--confine-fs`, and the `/todos`, `/scratchpad` and
+  `/agents` commands; `docs/configuration.md` no longer shows a
+  `cloud_api_key` the config has never read (the key is `OLLAMA_API_KEY`);
+  `docs/tools.md` names the core tools and explains when `edit_file` and
+  `apply_patch` each apply; the README's tool table gains `edit_file`, the
+  checklist tools, `ask_user_question` and the plan-mode pair, and its "16
+  MCP servers" is pinned by a test on the registry. The `--confine-fs` help
+  no longer calls macOS and Windows a no-op. This section's entries for the
+  August batch are rewritten in the file's own voice and corrected where
+  they described code that did not exist.
 
 - **Internal: the `hide_reasoning_trace` adapter flag is gone.** Nothing ever
   set it; the UI's `/visible-reasoning` toggle hides the trace at render time

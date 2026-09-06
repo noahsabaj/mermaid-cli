@@ -19,7 +19,12 @@ mermaid --path /path/to/project                  # Run against a specific projec
 mermaid --record /tmp/session.jsonl              # Record reducer events for replay/debugging
 mermaid --replay /tmp/session.jsonl              # Reconstruct a recorded session (headless, deterministic)
 mermaid --append-system-prompt "Prefer small diffs" # Add one-off runtime instructions
-mermaid --system-prompt-file ./prompt.md         # Replace the default prompt for one run
+mermaid --append-system-prompt-file ./rules.md   # ...or append them from a file
+mermaid --system-prompt "You are terse."          # Replace the default prompt for one run
+mermaid --system-prompt-file ./prompt.md         # ...or replace it from a file
+mermaid -c safety.mode=full_access               # Override any config key for this run (repeatable, TOML values)
+mermaid --profile ci                             # Apply the [profiles.ci] overlay from your user config
+mermaid -v                                       # Verbose logging
 mermaid run --plan "refactor the auth flow"      # Headless plan mode: read-only run that delivers a plan file
 mermaid run --plan --plan-autoaccept "..."       # ...and continue straight into implementation
 mermaid list                                    # List available models across providers
@@ -44,8 +49,9 @@ mermaid --resume <id> run "and now the tests"   # Continue a saved session headl
                                                 #   ndjson session_started/result, json result,
                                                 #   or the `session:` line on stderr)
 mermaid --continue run "keep going"             # Resume this directory's most recent session
-mermaid --no-network run "audit the code"       # Deny web tools everywhere; shell network on Linux/macOS
-mermaid --sandbox run "refactor this"           # Also confine writes to the project (Linux/macOS)
+mermaid --no-network run "audit the code"       # Deny web tools everywhere; shell network on Linux/macOS/Windows
+mermaid --confine-fs run "tidy the tests"       # Confine shell writes to the project, temp dir (and /dev)
+mermaid --sandbox run "refactor this"           # Both at once (see docs/sandbox.md)
 mermaid add <name>                              # Add an MCP server (e.g., context7, git)
 mermaid remove <name>                           # Remove a configured MCP server
 mermaid mcp                                     # List configured MCP servers
@@ -121,6 +127,8 @@ Everyday:
 - `/cancel [id]` — cancel the active turn or a durable task
 - `/handoff [id]`, `/report [id]` — write a current-context report or inspect a task report
 - `/theme [dark|light]` — switch the color theme (persisted); `NO_COLOR` disables colors entirely
+- `/todos` — show or edit the task checklist the agent keeps for the current run
+- `/scratchpad` — show the session's scratch directory and what is in it
 - `/editor` — compose the prompt in `$VISUAL`/`$EDITOR` (Ctrl+O keeps the current draft)
 - `/help` (`/h`), `/quit` (`/q`)
 
@@ -153,6 +161,7 @@ Integrations:
 Advanced runtime:
 
 - `/tasks`, `/task <id>`, `/pause <id>`, `/resume <id>`
+- `/agents` — list background subagents, or kill one
 - `/processes`, `/logs <id>`, `/stop <id>`, `/restart <id>`, `/open <target>`, `/ports`
 
 Reasoning choices persist per-model: set `/reasoning high` on one model and `/reasoning low` on another, and each is remembered independently across sessions.
