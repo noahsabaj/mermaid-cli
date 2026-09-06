@@ -11,8 +11,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Native Windows OS Sandboxing (AppContainer & Job Objects).** `--no-network`, `--confine-fs`, and `--sandbox` now confine model-run shell commands on Windows via native Windows AppContainers (LowBox tokens) and Job Objects. Omits network capabilities while sparing `127.0.0.1` localhost loopback for local dev tooling, and applies transient SID ACLs to restrict filesystem writes strictly to project, workdir, and temp roots with automatic RAII cleanup and kill-on-close process tree containment.
 
-- **Unified storage coordinator and `mermaid storage` CLI commands.** Introduced `StorageCoordinator` in `mermaid-runtime` to resolve dual-storage tension between SQLite (`runtime.sqlite3`) and append-only JSONL files (`.mermaid/conversations/`). Automatically backfills task-to-session linkages on completion/start, provides atomic cascade deletion across both databases and filesystem logs, and adds `mermaid storage reconcile`, `mermaid storage gc`, and `mermaid storage delete <id>` subcommands.
-
 - **First-class `edit_file` search-and-replace editing tool.** Models can now perform surgical, single-location edits via `edit_file` (`path`, `target_content`, `replacement_content`, optional `allow_multiple`), eliminating diff syntax envelope friction for targeted changes. The replacement engine features graduated fuzzy matching (exact, trailing whitespace, full trim, Unicode normalization), uniqueness validation, atomic writes beneath root, checkpoint snapshotting, and approval replay.
 
 - **Domain-level and config-based allowlisting for web tools.** Interactive approval modals for `web_fetch` now offer host-level "don't ask again" allowlisting (e.g. `web_fetch:docs.x.ai` or `web_fetch:localhost:8080`), permitting subsequent requests to the approved host for the duration of the session without reprompting. `web_search` similarly supports session-wide allowlisting. Persistent domain trust can also be configured declaratively via `[web] allowed_domains = ["docs.x.ai", "localhost:8080"]` in `config.toml`.
@@ -77,6 +75,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `src/render/theme.rs` where it was. No frame changes.
 
 ### Changed
+
+- **The session index rebuilds itself.** SQLite's `sessions` table is a cache
+  over `.mermaid/conversations/`: every save upserts the row, and `mermaidd`
+  now rebuilds the index on every start for every project it knows, backfilling
+  rows for sessions that have files but no row (including ones with only a
+  `.jsonl` log and no checkpoint yet) and dropping rows whose files are gone.
+  Deleting a conversation removes its row directly. The reconciler that had
+  been added for this, and its `mermaid storage gc|reconcile|delete`
+  subcommands, are gone: it ran only by hand, compared no fields, and scanned
+  the checkpoint file that stopped being the truth when the event log became
+  it.
 
 - **Reads outside the project prompt in `ask` mode.** The approval names the
   file and offers "don't ask again" for its directory. Headless `ask` runs

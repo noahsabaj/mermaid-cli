@@ -54,11 +54,9 @@ pub fn with_shared_store<T>(op: impl FnOnce(&RuntimeStore) -> Result<T>) -> Resu
     result
 }
 
-pub mod coordinator;
 pub mod repos;
 pub mod rows;
 
-pub use coordinator::*;
 pub use mermaid_model::records::*;
 pub use repos::*;
 pub use rows::*;
@@ -356,8 +354,20 @@ impl RuntimeStore {
         OutcomesRepo { conn: &self.conn }
     }
 
-    pub fn coordinator(&self) -> coordinator::StorageCoordinator<'_> {
-        coordinator::StorageCoordinator::new(self)
+    /// Every project directory this store has ever indexed a session or a
+    /// task for. The daemon walks these on start to rebuild the session index
+    /// from what is on disk.
+    ///
+    /// # Errors
+    ///
+    /// Errors if the statement fails to prepare or run.
+    pub fn known_project_paths(&self) -> Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT project_path FROM sessions UNION SELECT project_path FROM tasks")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     }
 
     /// Recover state stranded by a previous daemon's crash/stop (#120, #118).
@@ -2644,5 +2654,82 @@ mod tests {
             "second delete is a no-op"
         );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn sessions_delete_cascades_rows_and_detaches_tasks() {
+        let store = RuntimeStore::open(temp_db("sessions_delete")).expect("open");
+        let session = store
+            .sessions()
+            .upsert(NewSession {
+                id: Some("s-doomed".to_string()),
+                project_path: "/proj".to_string(),
+                model_id: "m".to_string(),
+                title: Some("t".to_string()),
+                conversation_path: None,
+                total_tokens: None,
+            })
+            .unwrap();
+        let task = store
+            .tasks()
+            .create(NewTask::new("t", "/proj", "m"))
+            .unwrap();
+        store
+            .tasks()
+            .set_conversation(&task.id, &session.id)
+            .unwrap();
+        assert_eq!(
+            store
+                .tasks()
+                .get(&task.id)
+                .unwrap()
+                .unwrap()
+                .conversation_id
+                .as_deref(),
+            Some("s-doomed")
+        );
+
+        assert!(store.sessions().delete("s-doomed").unwrap());
+        assert!(store.sessions().get("s-doomed").unwrap().is_none());
+        assert_eq!(
+            store
+                .tasks()
+                .get(&task.id)
+                .unwrap()
+                .unwrap()
+                .conversation_id,
+            None,
+            "a task pointing at the deleted session is detached"
+        );
+        assert!(
+            !store.sessions().delete("s-doomed").unwrap(),
+            "a second delete finds nothing"
+        );
+    }
+
+    #[test]
+    fn known_project_paths_unions_sessions_and_tasks() {
+        let store = RuntimeStore::open(temp_db("known_projects")).expect("open");
+        store
+            .sessions()
+            .upsert(NewSession {
+                id: Some("s1".to_string()),
+                project_path: "/a".to_string(),
+                model_id: "m".to_string(),
+                title: None,
+                conversation_path: None,
+                total_tokens: None,
+            })
+            .unwrap();
+        store.tasks().create(NewTask::new("t", "/b", "m")).unwrap();
+        store.tasks().create(NewTask::new("t2", "/a", "m")).unwrap();
+        let mut paths = store.known_project_paths().unwrap();
+        paths.sort();
+        assert_eq!(paths, vec!["/a".to_string(), "/b".to_string()]);
+        assert_eq!(
+            store.sessions().ids_for_project("/a").unwrap(),
+            vec!["s1".to_string()]
+        );
+        assert!(store.sessions().ids_for_project("/b").unwrap().is_empty());
     }
 }

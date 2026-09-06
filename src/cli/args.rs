@@ -378,11 +378,6 @@ pub enum Commands {
         /// Provider name whose stored key to remove
         provider: String,
     },
-    /// Manage, reconcile, and clean storage (SQLite runtime DB and conversation files)
-    Storage {
-        #[command(subcommand)]
-        command: StorageCommand,
-    },
     /// Run a single prompt non-interactively
     Run {
         /// Prompt to execute. Omit or pass `-` to read it from piped stdin;
@@ -545,36 +540,6 @@ pub enum DaemonCommand {
     },
     /// Print the generated service unit without installing it
     PrintUnit,
-}
-
-#[derive(Subcommand, Debug)]
-pub enum StorageCommand {
-    /// Garbage-collect expired records and logs across SQLite and conversation files
-    Gc {
-        /// Retention window in days for finished tasks/events/conversations (default: 30)
-        #[arg(long, default_value_t = 30)]
-        retention_days: i64,
-        /// Retention window in days for outcomes training records (default: 90)
-        #[arg(long, default_value_t = 90)]
-        outcomes_retention_days: i64,
-        /// Optional project directory to prune (defaults to current directory)
-        #[arg(short, long)]
-        path: Option<PathBuf>,
-    },
-    /// Reconcile state between SQLite runtime tables and conversation files
-    Reconcile {
-        /// Target project path (defaults to current directory)
-        #[arg(short, long)]
-        path: Option<PathBuf>,
-    },
-    /// Delete a conversation session across both SQLite and filesystem stores
-    Delete {
-        /// Session ID to delete
-        id: String,
-        /// Target project path (defaults to current directory)
-        #[arg(short, long)]
-        path: Option<PathBuf>,
-    },
 }
 
 #[derive(Subcommand, Debug)]

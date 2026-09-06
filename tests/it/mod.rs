@@ -23,7 +23,6 @@ mod run_event_stream;
 mod sandbox_fs;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 mod sandbox_network;
-mod storage_coordinator_cli;
 mod subagent_lifecycle_stubbed;
 mod subagent_worktree;
 mod subagent_worktree_scripted;
