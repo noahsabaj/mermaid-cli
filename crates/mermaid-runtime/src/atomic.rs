@@ -361,6 +361,10 @@ mod tests {
         unsafe {
             LocalFree(expected.cast());
         }
+        // The descriptor grants `GA` (generic all); the kernel maps generic
+        // rights to the object's specific mask when a FILE is created, so the
+        // file reads back with `FA` (file all access). Same grant, file spelling.
+        let expected_sddl = expected_sddl.replace(";GA;", ";FA;");
 
         assert!(
             actual_sddl.starts_with("D:P"),
