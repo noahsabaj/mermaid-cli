@@ -43,15 +43,6 @@ pub struct ModelConfig {
     #[serde(default)]
     pub reasoning: ReasoningLevel,
 
-    /// Hide reasoning traces from the user-facing stream while still
-    /// allowing the model to reason server-side. Maps to Ollama's
-    /// `--hidethinking` semantics and Anthropic's `thinking.display:
-    /// "hidden"`. Internal plumbing; the reducer currently never
-    /// sets this (no UI toggle) but the adapter pipeline honors it
-    /// when a future toggle lands.
-    #[serde(default)]
-    pub hide_reasoning_trace: bool,
-
     /// Backend-specific options (provider name -> key/value pairs)
     /// Example: {"ollama": {"`num_gpu"`: "10", "`num_ctx"`: "8192"}}
     #[serde(default)]
@@ -103,7 +94,6 @@ impl Default for ModelConfig {
             system_prompt: None,
             dynamic_system_suffix: None,
             reasoning: ReasoningLevel::default(),
-            hide_reasoning_trace: false,
             backend_options: HashMap::new(),
             tools: Vec::new(),
             resolved_context_window: None,

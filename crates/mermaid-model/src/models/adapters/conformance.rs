@@ -182,31 +182,27 @@ mod protocols {
     use super::super::ollama::OllamaStream;
     use super::super::openai_compat::OpenAICompatStream;
 
-    pub(super) fn anthropic(hide_reasoning: bool) -> AnthropicStream {
-        AnthropicStream::new("claude-test".to_string(), hide_reasoning)
+    pub(super) fn anthropic() -> AnthropicStream {
+        AnthropicStream::new("claude-test".to_string())
     }
 
-    pub(super) fn gemini(hide_reasoning: bool) -> GeminiStream {
-        GeminiStream::new("gemini-test".to_string(), hide_reasoning)
+    pub(super) fn gemini() -> GeminiStream {
+        GeminiStream::new("gemini-test".to_string())
     }
 
-    pub(super) fn ollama(hide_reasoning: bool) -> OllamaStream {
-        OllamaStream::new("ollama-test".to_string(), hide_reasoning)
+    pub(super) fn ollama() -> OllamaStream {
+        OllamaStream::new("ollama-test".to_string())
     }
 
-    /// Meta is the one protocol with no reasoning-trace switch: the
-    /// Responses API sends summaries, and mermaid asks for them
-    /// unconditionally. The flag is accepted and ignored so the shared
-    /// harness keeps one shape.
-    pub(super) fn meta(_hide_reasoning: bool) -> MetaStream {
+    pub(super) fn meta() -> MetaStream {
         MetaStream::new("muse-spark-test".to_string())
     }
 
     /// `deepinfra` carries `ReasoningExtraction::DeltaContentField
     /// ("reasoning_content")`, the shape the reasoning fixture records.
-    pub(super) fn openai_compat(hide_reasoning: bool) -> OpenAICompatStream {
+    pub(super) fn openai_compat() -> OpenAICompatStream {
         let profile = crate::models::lookup_provider("deepinfra").expect("registry has deepinfra");
-        OpenAICompatStream::new(profile, "openai-test".to_string(), hide_reasoning)
+        OpenAICompatStream::new(profile, "openai-test".to_string())
     }
 }
 
@@ -215,8 +211,8 @@ mod protocols {
 macro_rules! scenario {
     ($build:expr, $provider:literal, $file:literal) => {{
         let body = fixture($provider, $file);
-        let whole = run($build(false), &body, Delivery::Whole).await;
-        let dribbled = run($build(false), &body, Delivery::OneByteAtATime).await;
+        let whole = run($build(), &body, Delivery::Whole).await;
+        let dribbled = run($build(), &body, Delivery::OneByteAtATime).await;
         assert_eq!(
             whole, dribbled,
             "{}/{}: chunk boundaries changed the result",
@@ -231,7 +227,7 @@ macro_rules! scenario {
 /// test of the scanner's cost, not of the rule under test.
 macro_rules! scenario_body {
     ($build:expr, $provider:literal, $body:expr) => {{
-        let result = run($build(false), &$body, Delivery::Whole).await;
+        let result = run($build(), &$body, Delivery::Whole).await;
         (result, $provider)
     }};
 }
@@ -276,44 +272,6 @@ async fn reasoning_splits_from_content_everywhere() {
         assert_eq!(outcome.streamed_text, "the answer");
         assert_eq!(outcome.content, "the answer");
         assert_eq!(outcome.usage, Some((20, 11)));
-    }
-}
-
-#[tokio::test]
-async fn hiding_the_trace_suppresses_the_event_not_the_accumulator_everywhere() {
-    // Hiding reasoning is a display choice. `ModelResponse.thinking` still
-    // has to carry it — that is what round-trips into the next request.
-    let hidden = vec![
-        run(
-            protocols::anthropic(true),
-            &fixture("anthropic", "reasoning.sse"),
-            Delivery::Whole,
-        )
-        .await,
-        run(
-            protocols::gemini(true),
-            &fixture("gemini", "reasoning.sse"),
-            Delivery::Whole,
-        )
-        .await,
-        run(
-            protocols::openai_compat(true),
-            &fixture("openai_compat", "reasoning.sse"),
-            Delivery::Whole,
-        )
-        .await,
-        run(
-            protocols::ollama(true),
-            &fixture("ollama", "reasoning.ndjson"),
-            Delivery::Whole,
-        )
-        .await,
-    ];
-    for outcome in hidden {
-        let outcome = outcome.expect("hidden reasoning still succeeds");
-        assert_eq!(outcome.streamed_reasoning, "");
-        assert_eq!(outcome.thinking.as_deref(), Some("weighing options"));
-        assert_eq!(outcome.streamed_text, "the answer");
     }
 }
 

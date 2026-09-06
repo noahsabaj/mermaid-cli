@@ -28,11 +28,6 @@ struct StreamAccumulator {
     content: CappedText,
     thinking: CappedText,
     tool_calls: Vec<crate::models::ToolCall>,
-    /// Suppress `StreamEvent::Reasoning` emission to the turn's sink.
-    /// The accumulator still records `thinking` so `ModelResponse.thinking`
-    /// stays populated for backward-compat callers — only the user-visible
-    /// stream is gated. Mirrors Ollama's `--hidethinking` semantics.
-    hide_reasoning_trace: bool,
     prompt_tokens: usize,
     completion_tokens: usize,
     /// Set once the terminal `done` chunk reports real eval counts. A stream cut
@@ -406,14 +401,13 @@ impl OllamaAdapter {
         &self,
         response: reqwest::Response,
         sink: Option<&StreamSink>,
-        hide_reasoning_trace: bool,
     ) -> Result<ModelResponse> {
         if !response.status().is_success() {
             return Err(plain_http_error(response).await);
         }
         drive_stream(
             response.bytes_stream(),
-            OllamaStream::new(self.model_name.clone(), hide_reasoning_trace),
+            OllamaStream::new(self.model_name.clone()),
             sink,
         )
         .await
@@ -437,19 +431,17 @@ impl OllamaAdapter {
         out: &mut Vec<StreamEvent>,
         acc: &mut StreamAccumulator,
     ) {
-        // Reasoning / thinking content. Always recorded into `acc.thinking`
-        // (so `ModelResponse.thinking` stays populated for callers that read
-        // the final response); only emitted when not hidden.
+        // Reasoning / thinking content: emitted to the sink and recorded
+        // into `acc.thinking` so `ModelResponse.thinking` stays populated
+        // for callers that read the final response.
         if let Some(ref thinking_chunk) = json_chunk.message.thinking
             && acc.thinking.accepting()
             && !thinking_chunk.is_empty()
         {
-            if !acc.hide_reasoning_trace {
-                out.push(StreamEvent::Reasoning(ReasoningChunk {
-                    text: thinking_chunk.clone(),
-                    signature: None,
-                }));
-            }
+            out.push(StreamEvent::Reasoning(ReasoningChunk {
+                text: thinking_chunk.clone(),
+                signature: None,
+            }));
             acc.thinking.push(thinking_chunk);
         }
 
@@ -818,8 +810,7 @@ impl Model for OllamaAdapter {
         let response = self.send_chat(&request_body, sink.as_ref()).await?;
 
         if let Some(sink) = sink {
-            self.handle_stream(response, Some(&sink), config.hide_reasoning_trace)
-                .await
+            self.handle_stream(response, Some(&sink)).await
         } else {
             self.decode_non_streaming(response).await
         }
@@ -839,14 +830,13 @@ pub(crate) struct OllamaStream {
 }
 
 impl OllamaStream {
-    pub(crate) const fn new(model_name: String, hide_reasoning_trace: bool) -> Self {
+    pub(crate) const fn new(model_name: String) -> Self {
         Self {
             model_name,
             acc: StreamAccumulator {
                 content: CappedText::new(),
                 thinking: CappedText::new(),
                 tool_calls: Vec::new(),
-                hide_reasoning_trace,
                 prompt_tokens: 0,
                 completion_tokens: 0,
                 saw_usage: false,
@@ -1635,7 +1625,6 @@ mod tests {
             content: CappedText::new(),
             thinking: CappedText::new(),
             tool_calls: Vec::new(),
-            hide_reasoning_trace: false,
             prompt_tokens: 0,
             completion_tokens: 0,
             saw_usage: false,
@@ -1673,7 +1662,6 @@ mod tests {
             content: CappedText::new(),
             thinking: CappedText::new(),
             tool_calls: Vec::new(),
-            hide_reasoning_trace: false,
             prompt_tokens: 0,
             completion_tokens: 0,
             saw_usage: false,

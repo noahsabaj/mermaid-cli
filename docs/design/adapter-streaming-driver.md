@@ -180,7 +180,7 @@ same scenarios:
 | scenario | asserts |
 |---|---|
 | `text` | plain deltas concatenate; `Text` events in order |
-| `reasoning` | reasoning splits from content; `hide_reasoning_trace` suppresses the event but not the accumulator |
+| `reasoning` | reasoning splits from content and is always emitted |
 | `tool_call` | fragmented arguments reassemble; `ToolCall` arrives before the response |
 | `truncation` | a real `length`/`MAX_TOKENS` stop survives as `FinishReason::Length` |
 | `error_frame` | a mid-stream error payload becomes a typed `ProviderError`, not a parse failure (#123) |

@@ -689,14 +689,13 @@ impl GeminiAdapter {
         &self,
         response: reqwest::Response,
         sink: Option<&StreamSink>,
-        hide_reasoning_trace: bool,
     ) -> Result<ModelResponse> {
         if !response.status().is_success() {
             return Err(http_error_from_response(response).await);
         }
         drive_stream(
             response.bytes_stream(),
-            GeminiStream::new(self.model_name.clone(), hide_reasoning_trace),
+            GeminiStream::new(self.model_name.clone()),
             sink,
         )
         .await
@@ -710,15 +709,13 @@ impl GeminiAdapter {
 pub(crate) struct GeminiStream {
     state: StreamState,
     model_name: String,
-    hide_reasoning_trace: bool,
 }
 
 impl GeminiStream {
-    pub(crate) fn new(model_name: String, hide_reasoning_trace: bool) -> Self {
+    pub(crate) fn new(model_name: String) -> Self {
         Self {
             state: StreamState::default(),
             model_name,
-            hide_reasoning_trace,
         }
     }
 }
@@ -727,7 +724,7 @@ impl StreamProtocol for GeminiStream {
     const FRAMING: Framing = Framing::Sse;
 
     fn on_frame(&mut self, frame: &str, out: &mut Vec<StreamEvent>) -> Result<Flow> {
-        process_chunk_payload(frame, &mut self.state, out, self.hide_reasoning_trace)?;
+        process_chunk_payload(frame, &mut self.state, out)?;
         Ok(Flow::Continue)
     }
 
@@ -813,7 +810,6 @@ fn process_chunk_payload(
     payload: &str,
     state: &mut StreamState,
     out: &mut Vec<StreamEvent>,
-    hide_reasoning_trace: bool,
 ) -> Result<()> {
     let parsed: Value = serde_json::from_str(payload).map_err(|e| ModelError::ParseError {
         message: format!("Failed to parse Gemini stream chunk: {e}"),
@@ -953,12 +949,10 @@ fn process_chunk_payload(
             if !state.thinking_acc.accepting() {
                 continue;
             }
-            if !hide_reasoning_trace {
-                out.push(StreamEvent::Reasoning(ReasoningChunk {
-                    text: text.to_string(),
-                    signature: None,
-                }));
-            }
+            out.push(StreamEvent::Reasoning(ReasoningChunk {
+                text: text.to_string(),
+                signature: None,
+            }));
             state.thinking_acc.push(text);
         } else {
             if !state.text_acc.accepting() {
@@ -1000,8 +994,7 @@ impl Model for GeminiAdapter {
         let body = self.build_request_body(messages, config);
         let response = self.send_chat(&body, sink.is_some()).await?;
         if let Some(sink) = sink {
-            self.handle_stream(response, Some(&sink), config.hide_reasoning_trace)
-                .await
+            self.handle_stream(response, Some(&sink)).await
         } else {
             self.decode_non_streaming(response).await
         }
@@ -1225,7 +1218,7 @@ mod tests {
         let mut state = StreamState::default();
         let mut events: Vec<StreamEvent> = Vec::new();
         let payload = r#"{"promptFeedback":{"blockReason":"PROHIBITED_CONTENT"}}"#;
-        let err = process_chunk_payload(payload, &mut state, &mut events, false)
+        let err = process_chunk_payload(payload, &mut state, &mut events)
             .expect_err("prompt block must error");
         match err {
             ModelError::Backend(BackendError::ProviderError {
@@ -1250,8 +1243,7 @@ mod tests {
         let mut state = StreamState::default();
         let mut events: Vec<StreamEvent> = Vec::new();
         let payload = r#"{"promptFeedback":{"safetyRatings":[]},"candidates":[{"content":{"parts":[{"text":"hello"}]}}]}"#;
-        process_chunk_payload(payload, &mut state, &mut events, false)
-            .expect("benign feedback is ok");
+        process_chunk_payload(payload, &mut state, &mut events).expect("benign feedback is ok");
         assert_eq!(state.text_acc.as_str(), "hello");
     }
 
@@ -1997,7 +1989,7 @@ mod tests {
             }]
         })
         .to_string();
-        process_chunk_payload(&chunk1, &mut state, &mut events, false).unwrap();
+        process_chunk_payload(&chunk1, &mut state, &mut events).unwrap();
 
         // Chunk 2: "world!" + usage.
         let chunk2 = json!({
@@ -2011,7 +2003,7 @@ mod tests {
             }
         })
         .to_string();
-        process_chunk_payload(&chunk2, &mut state, &mut events, false).unwrap();
+        process_chunk_payload(&chunk2, &mut state, &mut events).unwrap();
 
         assert_eq!(state.text_acc.as_str(), "Hello, world!");
         assert_eq!(state.prompt_tokens, 5);
@@ -2031,7 +2023,7 @@ mod tests {
         let mut state = StreamState::default();
         let chunk =
             json!({ "candidates": [{ "content": {"parts": [{"text": "hi"}]} }] }).to_string();
-        process_chunk_payload(&chunk, &mut state, &mut events, false).unwrap();
+        process_chunk_payload(&chunk, &mut state, &mut events).unwrap();
         assert!(!state.saw_usage);
         assert!(state.usage().is_none());
     }
@@ -2052,7 +2044,7 @@ mod tests {
             }
         })
         .to_string();
-        process_chunk_payload(&chunk, &mut state, &mut events, false).unwrap();
+        process_chunk_payload(&chunk, &mut state, &mut events).unwrap();
         assert!(state.saw_usage);
         let usage = state.usage().expect("usage present");
         assert_eq!(
@@ -2073,7 +2065,7 @@ mod tests {
             }]
         })
         .to_string();
-        process_chunk_payload(&chunk1, &mut state, &mut events, false).unwrap();
+        process_chunk_payload(&chunk1, &mut state, &mut events).unwrap();
 
         let chunk2 = json!({
             "candidates": [{
@@ -2081,7 +2073,7 @@ mod tests {
             }]
         })
         .to_string();
-        process_chunk_payload(&chunk2, &mut state, &mut events, false).unwrap();
+        process_chunk_payload(&chunk2, &mut state, &mut events).unwrap();
 
         assert_eq!(state.thinking_acc.as_str(), "let me think...");
         assert_eq!(state.text_acc.as_str(), "the answer is 42");
@@ -2105,7 +2097,7 @@ mod tests {
             }]
         })
         .to_string();
-        process_chunk_payload(&chunk, &mut state, &mut events, false).unwrap();
+        process_chunk_payload(&chunk, &mut state, &mut events).unwrap();
 
         assert_eq!(state.tool_calls_done.len(), 1);
         let tc = &state.tool_calls_done[0];
@@ -2133,7 +2125,7 @@ mod tests {
             }]
         })
         .to_string();
-        process_chunk_payload(&chunk, &mut state, &mut events, false).unwrap();
+        process_chunk_payload(&chunk, &mut state, &mut events).unwrap();
 
         assert_eq!(state.thinking_acc.as_str(), "thinking...");
         assert_eq!(state.text_acc.as_str(), "calling tool now");
@@ -2142,26 +2134,6 @@ mod tests {
         assert_eq!(count_reasoning(&events), 1);
         assert_eq!(count_text(&events), 1);
         assert_eq!(count_tool_calls(&events), 1);
-    }
-
-    #[test]
-    fn stream_hide_reasoning_trace_suppresses_event_but_accumulates() {
-        let mut events: Vec<StreamEvent> = Vec::new();
-        let mut state = StreamState::default();
-
-        let chunk = json!({
-            "candidates": [{
-                "content": {"parts": [{"text": "hidden thoughts", "thought": true}]}
-            }]
-        })
-        .to_string();
-        // hide_reasoning_trace = true.
-        process_chunk_payload(&chunk, &mut state, &mut events, true).unwrap();
-
-        // Accumulator gets the text (so the final ModelResponse.thinking
-        // is populated), but no Reasoning event is emitted.
-        assert_eq!(state.thinking_acc.as_str(), "hidden thoughts");
-        assert_eq!(count_reasoning(&events), 0);
     }
 
     #[test]
@@ -2177,7 +2149,7 @@ mod tests {
             }
         })
         .to_string();
-        let result = process_chunk_payload(&chunk, &mut state, &mut events, false);
+        let result = process_chunk_payload(&chunk, &mut state, &mut events);
         assert!(result.is_err());
         match result {
             Err(ModelError::Backend(BackendError::ProviderError { code, message, .. })) => {
@@ -2204,7 +2176,7 @@ mod tests {
             }]
         })
         .to_string();
-        process_chunk_payload(&chunk, &mut state, &mut events, false).unwrap();
+        process_chunk_payload(&chunk, &mut state, &mut events).unwrap();
 
         assert_eq!(state.tool_calls_done.len(), 2);
         assert_eq!(state.tool_calls_done[0].id.as_deref(), Some("call_0"));
@@ -2217,7 +2189,7 @@ mod tests {
         let mut state = StreamState::default();
         // A content-free SAFETY block must error, not silently succeed (#1).
         let chunk = json!({ "candidates": [{ "finishReason": "SAFETY" }] }).to_string();
-        assert!(process_chunk_payload(&chunk, &mut state, &mut events, false).is_err());
+        assert!(process_chunk_payload(&chunk, &mut state, &mut events).is_err());
     }
 
     #[test]
@@ -2231,7 +2203,7 @@ mod tests {
             }]
         })
         .to_string();
-        process_chunk_payload(&chunk, &mut state, &mut events, false).unwrap();
+        process_chunk_payload(&chunk, &mut state, &mut events).unwrap();
         assert_eq!(state.finish_reason, Some(FinishReason::Length));
         assert_eq!(state.text_acc.as_str(), "partial");
     }
@@ -2246,7 +2218,7 @@ mod tests {
         let chunk =
             json!({ "candidates": [{ "content": {"parts": [{"text": "partial answer"}]} }] })
                 .to_string();
-        process_chunk_payload(&chunk, &mut state, &mut events, false).unwrap();
+        process_chunk_payload(&chunk, &mut state, &mut events).unwrap();
         assert!(
             ended_without_terminal(state.finish_reason.as_ref()),
             "no finishReason observed yet → abnormal if the stream ends here"
@@ -2257,7 +2229,7 @@ mod tests {
             "candidates": [{ "content": {"parts": [{"text": "."}]}, "finishReason": "STOP" }]
         })
         .to_string();
-        process_chunk_payload(&final_chunk, &mut state, &mut events, false).unwrap();
+        process_chunk_payload(&final_chunk, &mut state, &mut events).unwrap();
         assert!(!ended_without_terminal(state.finish_reason.as_ref()));
     }
 
@@ -2287,7 +2259,7 @@ mod tests {
             }]
         })
         .to_string();
-        process_chunk_payload(&chunk, &mut state, &mut events, false).unwrap();
+        process_chunk_payload(&chunk, &mut state, &mut events).unwrap();
         assert_eq!(state.tool_calls_done.len(), 2);
         assert_eq!(state.tool_calls_done[0].id.as_deref(), Some("call_0"));
         assert_eq!(state.tool_calls_done[1].id.as_deref(), Some("call_1"));

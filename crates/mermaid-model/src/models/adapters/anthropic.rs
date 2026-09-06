@@ -701,18 +701,11 @@ impl AnthropicAdapter {
                 // actually wants thinking — adaptive models accept
                 // omission as disabled. Bundle the `display` field so
                 // Opus 4.7 surfaces reasoning chunks (it defaults to
-                // `"omitted"` — would otherwise hide the trace). The
-                // `hide_reasoning_trace` flag wires it: `omitted` for
-                // hidden, `summarized` for visible.
+                // `"omitted"` — would otherwise hide the trace).
                 if effective_reasoning != ReasoningLevel::None {
-                    let display = if config.hide_reasoning_trace {
-                        "omitted"
-                    } else {
-                        "summarized"
-                    };
                     body["thinking"] = json!({
                         "type": "adaptive",
-                        "display": display,
+                        "display": "summarized",
                     });
                 }
             },
@@ -896,14 +889,13 @@ impl AnthropicAdapter {
         &self,
         response: reqwest::Response,
         sink: Option<&StreamSink>,
-        hide_reasoning_trace: bool,
     ) -> Result<ModelResponse> {
         if !response.status().is_success() {
             return Err(http_error_from_response(response).await);
         }
         drive_stream(
             response.bytes_stream(),
-            AnthropicStream::new(self.model_name.clone(), hide_reasoning_trace),
+            AnthropicStream::new(self.model_name.clone()),
             sink,
         )
         .await
@@ -917,7 +909,6 @@ impl AnthropicAdapter {
 /// each is accumulated under its own key until its stop frame closes it.
 pub(crate) struct AnthropicStream {
     model_name: String,
-    hide_reasoning_trace: bool,
     text_acc: String,
     thinking_acc: String,
     signature_acc: Option<String>,
@@ -944,10 +935,9 @@ pub(crate) struct AnthropicStream {
 }
 
 impl AnthropicStream {
-    pub(crate) fn new(model_name: String, hide_reasoning_trace: bool) -> Self {
+    pub(crate) fn new(model_name: String) -> Self {
         Self {
             model_name,
-            hide_reasoning_trace,
             text_acc: String::new(),
             thinking_acc: String::new(),
             signature_acc: None,
@@ -974,7 +964,6 @@ impl StreamProtocol for AnthropicStream {
         reason = "predates the lint; see .github/baselines/expect_budget.txt"
     )]
     fn on_frame(&mut self, frame: &str, out: &mut Vec<StreamEvent>) -> Result<Flow> {
-        let hide_reasoning_trace = self.hide_reasoning_trace;
         let parsed: Value = match serde_json::from_str(frame) {
             Ok(v) => v,
             Err(e) => {
@@ -1080,20 +1069,18 @@ impl StreamProtocol for AnthropicStream {
                             .and_then(|v| v.as_str())
                             .unwrap_or("");
                         if !text.is_empty() && !self.thinking_truncated {
-                            if !hide_reasoning_trace {
-                                // #9: this is intentionally `None` here —
-                                // `signature_delta` arrives AFTER the
-                                // thinking deltas, so streamed reasoning
-                                // chunks can't carry it. The final
-                                // `ModelResponse.provider_continuation`
-                                // (captured at block stop) is correct and
-                                // is what round-trips; streamed chunks are
-                                // display-only.
-                                out.push(StreamEvent::Reasoning(ReasoningChunk {
-                                    text: text.to_string(),
-                                    signature: signature.clone(),
-                                }));
-                            }
+                            // #9: this is intentionally `None` here —
+                            // `signature_delta` arrives AFTER the
+                            // thinking deltas, so streamed reasoning
+                            // chunks can't carry it. The final
+                            // `ModelResponse.provider_continuation`
+                            // (captured at block stop) is correct and
+                            // is what round-trips; streamed chunks are
+                            // display-only.
+                            out.push(StreamEvent::Reasoning(ReasoningChunk {
+                                text: text.to_string(),
+                                signature: signature.clone(),
+                            }));
                             push_capped(
                                 content,
                                 text,
@@ -1313,8 +1300,7 @@ impl Model for AnthropicAdapter {
         }
         let response = self.send_chat(&body).await?;
         if let Some(sink) = sink {
-            self.handle_stream(response, Some(&sink), config.hide_reasoning_trace)
-                .await
+            self.handle_stream(response, Some(&sink)).await
         } else {
             self.decode_non_streaming(response).await
         }
@@ -2393,27 +2379,10 @@ mod tests {
         let messages = vec![ChatMessage::user("Hi")];
         let config = ModelConfig {
             reasoning: ReasoningLevel::Medium,
-            hide_reasoning_trace: false,
             ..Default::default()
         };
         let body = adapter.build_request_body(&messages, &config);
         assert_eq!(body["thinking"]["display"], "summarized");
-    }
-
-    /// Step 5c: when the user enables `hide_reasoning_trace`, send
-    /// `display: "omitted"` so the API doesn't waste bandwidth streaming
-    /// thinking tokens we'd just discard client-side.
-    #[test]
-    fn build_request_body_sets_display_omitted_when_hide_reasoning_trace() {
-        let adapter = test_adapter();
-        let messages = vec![ChatMessage::user("Hi")];
-        let config = ModelConfig {
-            reasoning: ReasoningLevel::Medium,
-            hide_reasoning_trace: true,
-            ..Default::default()
-        };
-        let body = adapter.build_request_body(&messages, &config);
-        assert_eq!(body["thinking"]["display"], "omitted");
     }
 
     #[test]
@@ -2586,7 +2555,7 @@ mod tests {
     /// `slot_in_bounds` instead; past it, blocks are ignored.
     #[test]
     fn content_blocks_past_the_bound_are_ignored() {
-        let mut stream = AnthropicStream::new("claude-test".to_string(), false);
+        let mut stream = AnthropicStream::new("claude-test".to_string());
         let mut out = Vec::new();
         for index in 0..(crate::constants::MAX_TOOL_CALLS + 50) {
             let frame = format!(
