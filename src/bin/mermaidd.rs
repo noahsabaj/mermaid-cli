@@ -1,5 +1,6 @@
 //! `mermaidd`: the daemon binary. Everything it does lives in
-//! `mermaid_cli::mermaidd`; this file parses two flags and calls [`run`].
+//! `mermaid_cli::mermaidd`; this file parses two flags and calls
+//! [`mermaid_cli::mermaidd::run`].
 
 #[cfg(any(unix, windows))]
 #[tokio::main]

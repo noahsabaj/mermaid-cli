@@ -4,7 +4,6 @@ pub mod clipboard;
 pub mod effect;
 pub mod engine;
 pub mod mcp;
-/// The daemon, as a library; `src/bin/mermaidd.rs` is its entry point.
 #[cfg(any(unix, windows))]
 pub mod mermaidd;
 pub mod ollama;
