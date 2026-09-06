@@ -66,6 +66,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   separator.** Two whole-buffer `windows()` scans per chunk; now one linear
   pass keyed on the newline byte.
 
+- **The pedantic lint ratchet names its clippy.** The Lint Debt job on
+  `main` failed on every commit after its baseline was re-recorded, the
+  recording commit included: CI's `stable` was rustc 1.98.1, the baseline was
+  measured with a developer's 1.97.0, and the two clippys disagree on twelve
+  of the eighty counts (two lints exist only in the newer one) with no source
+  change between them. `.github/baselines/clippy_toolchain.txt` now names the
+  toolchain; the script runs `cargo +<that>`, the CI job installs the same
+  version from the same file, and a missing toolchain fails with the
+  `rustup` line to run. Moving to a newer clippy is an edit to that file plus
+  `just clippy-debt-record`, one commit in which the counts move for that
+  reason alone.
 - **CI on `main` was red from 2026-08-13.** `h2` 0.4.15 carried RUSTSEC-2026-0258
   (unbounded empty DATA frames), so the required Security Audit job failed on every
   run; it is 0.4.19 now. The daemon and sandbox integration jobs still invoked

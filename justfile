@@ -49,7 +49,10 @@ ratchet:
 # clippy's fingerprint and rebuilds the workspace — minutes, against
 # milliseconds for the file-reading guards. CI runs it off the PR critical
 # path. `CLIPPY_RATCHET_TARGET_DIR` keeps that rebuild out of ./target, so the
-# next `cargo test` does not pay for this one.
+# next `cargo test` does not pay for this one. Both recipes run the clippy
+# named in .github/baselines/clippy_toolchain.txt (the script adds the
+# `+<toolchain>`), because each release moves these counts; to move to a
+# newer clippy, edit that file and re-record.
 clippy-debt:
     CLIPPY_RATCHET_TARGET_DIR=target/clippy-debt {{python}} .github/scripts/check_clippy_ratchet.py
 

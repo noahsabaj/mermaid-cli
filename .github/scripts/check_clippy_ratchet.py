@@ -47,6 +47,17 @@ items under `src/` are `#[cfg(unix)]`. Running `just clippy-debt-record` on
 Windows produces a *different, wrong* file. That is why a failure prints the
 full baseline it measured rather than only telling you to regenerate: on the
 platform that cannot regenerate it, the CI log is the source.
+
+THE BASELINE IS ALSO A MEASUREMENT BY ONE CLIPPY. Each release moves these
+lints: 1.97 and 1.98.1 disagree on `clippy::panic` by two and on
+`missing_const_for_fn` by one across this workspace, with no source change
+between the runs. A baseline recorded by one version and checked by another
+fails on nothing anyone wrote, and CI's `stable` moves every six weeks while
+a developer's does not. So `.github/baselines/clippy_toolchain.txt` names the
+toolchain, this script runs `cargo +<that>`, the CI job installs the same
+version from the same file, and moving to a newer clippy is an edit to that
+file followed by `just clippy-debt-record` -- one commit that shows the
+counts move for that reason and no other.
 """
 
 import json
@@ -70,9 +81,27 @@ LINTS = [
 ]
 
 
-def collect() -> tuple[dict[str, int], dict[str, list[str]]]:
+TOOLCHAIN_FILE = Path(".github/baselines/clippy_toolchain.txt")
+
+
+def pinned_toolchain() -> str:
+    try:
+        toolchain = TOOLCHAIN_FILE.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        toolchain = ""
+    if not toolchain:
+        print(
+            f"{TOOLCHAIN_FILE} must name the toolchain the baseline was "
+            "measured with (one line, e.g. `1.98.1`)"
+        )
+        raise SystemExit(2)
+    return toolchain
+
+
+def collect(toolchain: str) -> tuple[dict[str, int], dict[str, list[str]]]:
     cmd = [
         "cargo",
+        f"+{toolchain}",
         "clippy",
         "--workspace",
         "--all-targets",
@@ -84,6 +113,13 @@ def collect() -> tuple[dict[str, int], dict[str, list[str]]]:
 
     proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
     if proc.returncode != 0 and not proc.stdout.strip():
+        if "is not installed" in proc.stderr or "toolchain" in proc.stderr:
+            print(
+                f"toolchain {toolchain} is not installed; the baseline was "
+                f"measured with it, so install it:\n"
+                f"  rustup toolchain install {toolchain} --component clippy"
+            )
+            raise SystemExit(2)
         print("cargo clippy failed to run:\n" + proc.stderr[-4000:])
         raise SystemExit(2)
 
@@ -132,8 +168,9 @@ def main(argv: list[str]) -> int:
     # the world. CI has no such dir to protect and leaves this unset.
     if "CLIPPY_RATCHET_TARGET_DIR" in os.environ:
         os.environ["CARGO_TARGET_DIR"] = os.environ["CLIPPY_RATCHET_TARGET_DIR"]
-    findings, occurrences = collect()
-    title = "pedantic + nursery debt"
+    toolchain = pinned_toolchain()
+    findings, occurrences = collect(toolchain)
+    title = f"pedantic + nursery debt (clippy {toolchain})"
     regen = "just clippy-debt-record"
     rc = ratchet.ratchet(
         "clippy_pedantic", title, findings, occurrences, argv, regen=regen
