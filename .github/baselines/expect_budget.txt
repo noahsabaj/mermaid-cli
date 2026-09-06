@@ -29,7 +29,6 @@ expect|clippy::too_many_lines|src/app/recorder.rs 1
 expect|clippy::too_many_lines|src/app/replay.rs 1
 expect|clippy::too_many_lines|src/app/run.rs 1
 expect|clippy::too_many_lines|src/app/run_non_interactive.rs 1
-expect|clippy::too_many_lines|src/bin/mermaidd.rs 1
 expect|clippy::too_many_lines|src/cli/commands.rs 4
 expect|clippy::too_many_lines|src/clipboard.rs 1
 expect|clippy::too_many_lines|src/effect/compaction.rs 1
@@ -39,6 +38,7 @@ expect|clippy::too_many_lines|src/effect/model_call.rs 1
 expect|clippy::too_many_lines|src/effect/tool_call.rs 1
 expect|clippy::too_many_lines|src/mcp/client.rs 1
 expect|clippy::too_many_lines|src/mcp/transport.rs 1
+expect|clippy::too_many_lines|src/mermaidd/api.rs 1
 expect|clippy::too_many_lines|src/providers/factory.rs 1
 expect|clippy::too_many_lines|src/providers/tool/computer_use/driver.rs 1
 expect|clippy::too_many_lines|src/providers/tool/exec/capture.rs 1

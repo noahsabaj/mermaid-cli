@@ -4,6 +4,8 @@ pub mod clipboard;
 pub mod effect;
 pub mod engine;
 pub mod mcp;
+#[cfg(any(unix, windows))]
+pub mod mermaidd;
 pub mod ollama;
 pub mod providers;
 pub mod render;

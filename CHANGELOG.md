@@ -48,7 +48,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The fallback still passes the raw text through, but the parse error (most
   often "the argument cap fired") is logged instead of discarded.
 
-
 - **CI on `main` was red from 2026-08-13.** `h2` 0.4.15 carried RUSTSEC-2026-0258
   (unbounded empty DATA frames), so the required Security Audit job failed on every
   run; it is 0.4.19 now. The daemon and sandbox integration jobs still invoked
@@ -134,7 +133,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   emoji guard also bans the Misc Technical run (`⏩`..`⏺`, `⌚`, `⌛`), which
   sits below the dingbat block but renders as colour glyphs.
 
-
 - **Reads outside the project prompt in `ask` mode.** The approval names the
   file and offers "don't ask again" for its directory. Headless `ask` runs
   refuse them unless `--allow-untrusted-tools` is set, like other
@@ -146,7 +144,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provider. Five hand-written `ChatRequest -> ModelConfig` conversions, two of
   which had dropped the resolved context window and output cap, are one
   `From` impl beside `ChatRequest`.
-
 
 - **Unified cross-platform fail-closed sandbox enforcement.** Requesting `--sandbox`, `--no-network`, or `--confine-fs` on Windows now enforces kernel containment and strictly fails closed (exit code 126) if sandboxing cannot be applied, eliminating the unconfined fallback warning and achieving feature parity with Linux and macOS.
 
@@ -186,6 +183,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   filed under `meta`, which a prefix-less row has no way to contradict. The
   window now pays for headings as it walks up from the cursor, and a group
   that cannot fit its heading and its first row is not started.
+- **The daemon is a library module.** `src/bin/mermaidd.rs` had grown to
+  2,500 lines holding the whole server; it is now thirty lines over
+  `mermaid_cli::mermaidd` (`cli`, `scheduler`, `recovery`, `server`,
+  `subscribe`, `api`), with one `cfg(any(unix, windows))` gate on the module
+  in place of sixty per-item ones. A pure move: the unit and ignored
+  integration tests went with their functions and are unchanged.
 
 ## [0.25.0] - 2026-08-10
 
