@@ -856,25 +856,32 @@ mod tests {
             deny_network: false,
             allowed_writes: vec![dir.clone()],
         };
-        let stderr_path = dir.join("probe.txt");
+        let out_path = dir.join("probe.txt");
+        // One file for stdout and stderr of the whole group, plus a trailer
+        // saying how curl exited, so a failure names its cause: "not
+        // recognized" (curl not found), "Access is denied" (could not start
+        // it), a curl message (it ran), or no file at all (the redirect into
+        // the granted directory failed).
         let argv = vec![
             OsString::from("cmd.exe"),
             OsString::from("/c"),
             OsString::from(format!(
-                "curl.exe -sS --max-time 5 -o NUL http://1.1.1.1/ 2> \"{}\"",
-                stderr_path.display()
+                "(curl.exe -sS --max-time 5 -o NUL http://1.1.1.1/ && echo [curl ok] || echo [curl failed]) > \"{}\" 2>&1",
+                out_path.display()
             )),
         ];
         let code = run_in_appcontainer(&policy, &argv).expect("run in appcontainer");
-        let stderr = std::fs::read_to_string(&stderr_path).unwrap_or_default();
+        let output = std::fs::read_to_string(&out_path);
         let _ = std::fs::remove_dir_all(&dir);
+        let output =
+            output.unwrap_or_else(|err| panic!("no probe output file (exit {code}): {err}"));
         assert!(
-            code == 0 || stderr.contains("curl:"),
-            "the probe did not run (exit {code}): {stderr}"
+            output.contains("[curl ok]") || output.contains("curl:"),
+            "the probe did not run (exit {code}): {output}"
         );
         assert!(
-            !stderr.contains("Permission denied") && !stderr.contains("10013"),
-            "connect refused by capability omission (exit {code}): {stderr}"
+            !output.contains("Permission denied") && !output.contains("10013"),
+            "connect refused by capability omission (exit {code}): {output}"
         );
     }
 
