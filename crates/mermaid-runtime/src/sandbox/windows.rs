@@ -820,29 +820,41 @@ mod tests {
         assert_eq!(write_roots(&explicit), vec![std::env::temp_dir()]);
     }
 
-    /// With write confinement alone the network stays reachable: a connect
-    /// attempt may fail for lack of a route on the runner (exit 4), but never
-    /// with `WSAEACCES` (exit 3), which is the capability-omission signature.
-    /// Any other exit means the probe itself did not run.
+    /// With write confinement alone the network stays reachable. The probe is
+    /// `curl.exe` from System32 (readable by every AppContainer; the runner's
+    /// Python is not, and exits STATUS_DLL_NOT_FOUND before running a line),
+    /// with stderr captured into the granted temp directory. A connect may
+    /// fail for lack of a route on the runner; it must not fail with
+    /// `Permission denied` / `WSAEACCES` (10013), the capability-omission
+    /// signature.
     #[test]
     fn appcontainer_with_write_confinement_alone_keeps_the_network() {
+        let temp = std::env::temp_dir();
         let policy = SandboxPolicy {
             deny_network: false,
-            allowed_writes: vec![std::env::temp_dir()],
+            allowed_writes: vec![temp.clone()],
         };
-        let py_cmd = "import socket, sys\ns = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\ns.settimeout(3)\ntry:\n    s.connect(('8.8.8.8', 53))\nexcept OSError as e:\n    print(e, file=sys.stderr)\n    sys.exit(3 if e.errno == 10013 else 4)\nsys.exit(0)";
+        let stderr_path = temp.join(format!("mermaid-net-probe-{}.txt", std::process::id()));
+        let _ = std::fs::remove_file(&stderr_path);
         let argv = vec![
-            OsString::from("python.exe"),
-            OsString::from("-c"),
-            OsString::from(py_cmd),
+            OsString::from("cmd.exe"),
+            OsString::from("/c"),
+            OsString::from(format!(
+                "curl.exe -sS --max-time 5 -o NUL http://1.1.1.1/ 2> \"{}\"",
+                stderr_path.display()
+            )),
         ];
-        if resolve_executable(std::ffi::OsStr::new("python.exe")).is_file() {
-            let code = run_in_appcontainer(&policy, &argv).expect("run in appcontainer");
-            assert!(
-                code == 0 || code == 4,
-                "exit {code}: 3 is WSAEACCES (capabilities missing), anything else is the probe failing"
-            );
-        }
+        let code = run_in_appcontainer(&policy, &argv).expect("run in appcontainer");
+        let stderr = std::fs::read_to_string(&stderr_path).unwrap_or_default();
+        let _ = std::fs::remove_file(&stderr_path);
+        assert!(
+            code == 0 || stderr.contains("curl:"),
+            "the probe did not run (exit {code}): {stderr}"
+        );
+        assert!(
+            !stderr.contains("Permission denied") && !stderr.contains("10013"),
+            "connect refused by capability omission (exit {code}): {stderr}"
+        );
     }
 
     #[test]
