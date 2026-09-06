@@ -96,6 +96,7 @@ invent findings, sources, or citations.";
 const CHILD_TOOL_NAMES: &[&str] = &[
     "read_file",
     "write_file",
+    "edit_file",
     "apply_patch",
     "delete_file",
     "create_directory",

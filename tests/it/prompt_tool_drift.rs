@@ -5,7 +5,9 @@
 //! boundary — but this assertion needs both the prompt text and the real
 //! `ToolRegistry`. An integration test is the one place that sees both.
 
-use mermaid_cli::providers::tool::ToolRegistry;
+use std::sync::Arc;
+
+use mermaid_cli::providers::{ProviderFactory, ToolRegistry, TuiMode};
 
 /// Systematized version of the old `subagent` regression: every core
 /// tool name the prompt advertises must resolve in the registry, so the
@@ -13,7 +15,13 @@ use mermaid_cli::providers::tool::ToolRegistry;
 #[test]
 fn advertised_tools_exist_in_the_registry() {
     let prompt = mermaid_domain::prompts::get_system_prompt();
-    let registry = ToolRegistry::default();
+    // `build()` is the one factory production uses (`app::run`,
+    // `app::run_non_interactive`). Asserting against anything else is how
+    // `edit_file` shipped advertised-but-unregistered: a test-only registry
+    // had it, the real one did not, and this guard passed.
+    let config = mermaid_domain::Config::default();
+    let providers = Arc::new(ProviderFactory::new(config.clone()));
+    let registry = ToolRegistry::build(&config, TuiMode::Headless, providers);
     for name in [
         "read_file",
         "write_file",

@@ -166,6 +166,17 @@ impl ApprovalBroker {
 /// "always type anything" or "always run any MCP tool" — so they are
 /// non-allowlistable: an empty key, which the gate and modal treat as "no
 /// approve-always" (#6, #31).
+/// The filesystem tools whose external-path approvals are scoped to the
+/// target's directory (see [`allowlist_key`]).
+const FILE_TOOLS: &[&str] = &[
+    "read_file",
+    "write_file",
+    "edit_file",
+    "apply_patch",
+    "delete_file",
+    "create_directory",
+];
+
 const NON_ALLOWLISTABLE_TOOLS: &[&str] = &[
     "type_text",
     "press_key",
@@ -238,9 +249,20 @@ pub fn is_domain_allowed(allowed_domains: &[String], url_or_command: &str) -> bo
 /// - `web_search` keys on `"web_search"`.
 /// - Everything else keys per-tool.
 #[must_use]
-pub fn allowlist_key(tool: &str, command: Option<&str>) -> String {
+pub fn allowlist_key(tool: &str, command: Option<&str>, external_path: Option<&str>) -> String {
     if NON_ALLOWLISTABLE_TOOLS.contains(&tool) {
         return String::new();
+    }
+    // A file tool reaching outside the project is allowlisted per directory,
+    // never per tool: "don't ask again" for `read_file` on `~/notes/a.md` must
+    // not silently cover `~/.ssh/id_rsa` later in the session.
+    if let Some(path) = external_path
+        && FILE_TOOLS.contains(&tool)
+    {
+        let dir = std::path::Path::new(path)
+            .parent()
+            .map_or_else(|| path.to_string(), |d| d.display().to_string());
+        return format!("{tool}:{dir}");
     }
     if tool == "execute_command" {
         if let Some(cmd) = command {
@@ -271,36 +293,39 @@ mod tests {
 
     #[test]
     fn allowlist_key_is_per_tool_with_full_command() {
-        assert_eq!(allowlist_key("write_file", None), "write_file");
+        assert_eq!(allowlist_key("write_file", None, None), "write_file");
         // #6: execute_command keys on the FULL normalized command, so approving
         // one invocation can't clear a different-argument one.
         assert_eq!(
-            allowlist_key("execute_command", Some("ls -la")),
+            allowlist_key("execute_command", Some("ls -la"), None),
             "execute_command:ls -la"
         );
         // No command falls back to the bare tool key.
-        assert_eq!(allowlist_key("execute_command", None), "execute_command");
+        assert_eq!(
+            allowlist_key("execute_command", None, None),
+            "execute_command"
+        );
     }
 
     #[test]
     fn allowlist_key_distinguishes_argument_variants() {
         // #6: approving `curl https://safe` must NOT also clear `curl https://evil`.
         assert_ne!(
-            allowlist_key("execute_command", Some("curl https://safe.example")),
-            allowlist_key("execute_command", Some("curl https://evil.example")),
+            allowlist_key("execute_command", Some("curl https://safe.example"), None),
+            allowlist_key("execute_command", Some("curl https://evil.example"), None),
         );
         // Whitespace is normalized so trivial spacing differences still match.
         assert_eq!(
-            allowlist_key("execute_command", Some("cargo   build")),
-            allowlist_key("execute_command", Some("cargo build")),
+            allowlist_key("execute_command", Some("cargo   build"), None),
+            allowlist_key("execute_command", Some("cargo build"), None),
         );
         assert_eq!(
-            allowlist_key("execute_command", Some("npm test")),
+            allowlist_key("execute_command", Some("npm test"), None),
             "execute_command:npm test"
         );
         assert_ne!(
-            allowlist_key("execute_command", Some("npm test")),
-            allowlist_key("execute_command", Some("npm run build")),
+            allowlist_key("execute_command", Some("npm test"), None),
+            allowlist_key("execute_command", Some("npm run build"), None),
         );
     }
 
@@ -309,24 +334,29 @@ mod tests {
         assert_eq!(
             allowlist_key(
                 "web_fetch",
-                Some("web_fetch https://docs.x.ai/docs/overview")
+                Some("web_fetch https://docs.x.ai/docs/overview"),
+                None,
             ),
             "web_fetch:docs.x.ai"
         );
         assert_eq!(
-            allowlist_key("web_fetch", Some("https://DOCS.X.AI/api")),
+            allowlist_key("web_fetch", Some("https://DOCS.X.AI/api"), None),
             "web_fetch:docs.x.ai"
         );
         assert_eq!(
-            allowlist_key("web_fetch", Some("web_fetch http://localhost:8080/query")),
+            allowlist_key(
+                "web_fetch",
+                Some("web_fetch http://localhost:8080/query"),
+                None
+            ),
             "web_fetch:localhost:8080"
         );
-        assert_eq!(allowlist_key("web_fetch", None), "web_fetch");
+        assert_eq!(allowlist_key("web_fetch", None, None), "web_fetch");
         assert_eq!(
-            allowlist_key("web_search", Some("web_search rust documentation")),
+            allowlist_key("web_search", Some("web_search rust documentation"), None),
             "web_search"
         );
-        assert_eq!(allowlist_key("web_search", None), "web_search");
+        assert_eq!(allowlist_key("web_search", None, None), "web_search");
     }
 
     #[test]
@@ -359,7 +389,7 @@ mod tests {
             "mcp_proxy",
         ] {
             assert_eq!(
-                allowlist_key(tool, None),
+                allowlist_key(tool, None, None),
                 "",
                 "{tool} must be non-allowlistable"
             );
