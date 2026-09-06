@@ -20,7 +20,6 @@ pub mod serde_base64;
 mod sse;
 mod task;
 mod text;
-mod timestamp;
 
 // Public re-exports - the ONLY way to access utils functionality
 pub use auth::{
@@ -58,4 +57,3 @@ pub use text::{
     continuation_overlap, format_duration, truncate_content, truncate_middle,
     truncate_middle_bytes, truncate_web_content,
 };
-pub use timestamp::format_relative_timestamp;

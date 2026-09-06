@@ -1,4 +1,4 @@
- > read me the clipboard notes  <TIME>
+ > read me the clipboard notes
 
  ● Clipboard paste is wired for every backend, with prerequisites:
      • Windows — Clipboard::ContainsImage() misses a PNG-only clipboard, so No image data
@@ -10,8 +10,7 @@
    | Windows | PowerShell | 10s   |
    | macOS   | pngpaste   | 5s    |
 
-────────────────────────────────────────────────────────────────────────────────────────────────────
->
-────────────────────────────────────────────────────────────────────────────────────────────────────
-<USER>@<HOST>:<CWD>   <CONTEXT GAUGE>
-mermaid v<VERSION> · safety: ask · reasoning: medium                          anthropic/pty-visual-test
+╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ >                                                                                                │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+safety: ask · reasoning: medium                                            anthropic/pty-visual-test

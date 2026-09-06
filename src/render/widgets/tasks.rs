@@ -70,9 +70,7 @@ pub fn build_task_lines(
         return Vec::new();
     }
     let width = width as usize;
-    let meta_style = Style::new()
-        .fg(theme.colors.text_secondary.to_color())
-        .dim();
+    let meta_style = Style::new().fg(theme.colors.text_meta.to_color());
 
     if collapsed {
         return vec![collapsed_line(store, width, theme, meta_style)];

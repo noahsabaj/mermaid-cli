@@ -47,7 +47,7 @@ pub struct RenderCache {
     pub chat: ChatState,
     /// Shell label for `execute_command` rows (`Bash(...)`/`PowerShell(...)`).
     /// A field, not a `HostShell::current()` read at use sites, for the same
-    /// reason `hostname`/`username` are: the snapshot rig pins it (`Posix`)
+    /// reason `home_dir` is: the snapshot rig pins it (`Posix`)
     /// so one set of `.snap` files serves every platform.
     pub host_shell: mermaid_model::safety::HostShell,
     /// Per-message render cache: `(content, theme, width)` hash → fully wrapped,
@@ -73,10 +73,12 @@ pub struct RenderCache {
     /// the environment and passes the result to [`RenderCache::new`]; render
     /// itself never does, which is what keeps this module a pure function of
     /// its inputs.
-    pub hostname: String,
-    pub username: String,
+    /// The user's home directory, for the session header's `~` abbreviation.
+    /// Injected rather than read from the environment under `src/render`, so
+    /// the snapshot suite can pin it and the layering guard stays clean.
+    pub home_dir: Option<std::path::PathBuf>,
     /// App version for the status footer. Defaults to the compile-time crate
-    /// version; the snapshot suite pins it (like hostname/username) so pinned
+    /// version; the snapshot suite pins it (like `home_dir`) so pinned
     /// frames survive release bumps.
     pub version: String,
     /// F13: last `state.ui.mouse_scroll_accum` value we applied to
@@ -95,21 +97,20 @@ struct StitchedMemo {
 }
 
 impl RenderCache {
-    /// `hostname` and `username` are parameters rather than environment reads
+    /// `home_dir` is a parameter rather than an environment read
     /// because this module is covered by the layering guard: a `std::env` call
     /// anywhere under `src/render` is impurity in a tree that is supposed to be
     /// a pure function of `State`. The shell resolves them once at startup
     /// (`app::run::host_identity`); the snapshot and bench rigs pass pinned
     /// literals, which is how their frames stay byte-stable across machines.
     #[must_use]
-    pub fn new(hostname: String, username: String) -> Self {
+    pub fn new(home_dir: Option<std::path::PathBuf>) -> Self {
         Self {
             chat: ChatState::new(),
             host_shell: mermaid_model::safety::HostShell::current(),
             wrapped_line_cache: FxHashMap::default(),
             theme: theme::Theme::dark(),
-            hostname,
-            username,
+            home_dir,
             version: env!("CARGO_PKG_VERSION").to_string(),
             stitched: None,
             applied_theme: None,
@@ -187,7 +188,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
     // one of its inputs.
     let input_lines = widgets::rendered_row_count(
         &state.ui.input_buffer,
-        frame.area().width.saturating_sub(2) as usize,
+        frame.area().width.saturating_sub(4) as usize,
     )
     .min(5);
     let input_height = if question_modal_open {
@@ -208,8 +209,8 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         // State (Cause 3). Visually identical — both resolve to whole seconds.
         let now_sys = std::time::SystemTime::from(state.now);
         let elapsed_since =
-            |t: std::time::SystemTime| now_sys.duration_since(t).map(|d| d.as_secs()).unwrap_or(0);
-        let elapsed_secs = match &state.turn {
+            |t: std::time::SystemTime| now_sys.duration_since(t).unwrap_or_default();
+        let elapsed = match &state.turn {
             // A model run (generating + executing tools) anchors to the run start
             // so the timer spans the whole agentic loop, not just this step.
             TurnState::Generating { started, .. } | TurnState::ExecutingTools { started, .. } => {
@@ -220,7 +221,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             },
             TurnState::Compacting { started, .. } => elapsed_since(*started),
             TurnState::Cancelling { since, .. } => elapsed_since(*since),
-            TurnState::Idle => 0,
+            TurnState::Idle => std::time::Duration::ZERO,
         };
         let (agent_rows, status_override, bg_available) = agent_panel_data(state);
         // Claude Code parity: while a checklist task is in_progress its
@@ -238,23 +239,20 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         // and reconciles to the provider number at its `Done`. While tools
         // run, running subagents' throttled live counts ride on top the same
         // way so the counter keeps climbing instead of freezing for the whole
-        // child run (they reconcile when the child's real usage folds in).
-        // Marked `~` whenever any estimated component is included.
+        // child run. No estimate marker: the live count is an estimate on
+        // nearly every frame a user sees, so a marker that is always lit says
+        // nothing; the reconciled figure is in the run summary.
         let committed = state.runtime.run_tokens;
         let live_child_tokens: usize = state.ui.live_tool_status.values().map(|l| l.tokens).sum();
-        let (tokens_display, tokens_estimated) = match &state.turn {
-            TurnState::Generating { tokens, .. } => (committed.output_tokens + *tokens, true),
-            TurnState::ExecutingTools { .. } => (
-                committed.output_tokens + live_child_tokens,
-                committed.contains_estimate || live_child_tokens > 0,
-            ),
-            _ => (0, false),
+        let tokens_display = match &state.turn {
+            TurnState::Generating { tokens, .. } => Some(committed.output_tokens + *tokens),
+            TurnState::ExecutingTools { .. } => Some(committed.output_tokens + live_child_tokens),
+            TurnState::Compacting { .. } | TurnState::Cancelling { .. } | TurnState::Idle => None,
         };
         build_status_lines(
             GenerationStatus::from_turn(&state.turn),
-            elapsed_secs,
+            elapsed,
             tokens_display,
-            tokens_estimated,
             status_override.as_deref(),
             &agent_rows,
             bg_available,
@@ -271,9 +269,8 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         let (agent_rows, _, _) = agent_panel_data(state);
         build_status_lines(
             GenerationStatus::Idle,
-            0,
-            0,
-            false,
+            std::time::Duration::ZERO,
+            None,
             None,
             &agent_rows,
             false,
@@ -290,7 +287,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
     // Reserve the status zone's height to match its row count, but never so much
     // that it crowds the rest: keep room for a 10-row chat, the input box, and
     // the bottom bar (≥2) before granting the status zone anything.
-    let status_reserve = 10 + input_height + 2;
+    let status_reserve = 10 + input_height + 1;
     let status_line_height = (status_lines.len() as u16)
         .min(14)
         .min(frame.area().height.saturating_sub(status_reserve));
@@ -357,7 +354,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             (rows as u16) + 2
         },
         BottomPane::Palette(entries) => (entries.len().clamp(1, 8) as u16) + 2,
-        BottomPane::Status => 2,
+        BottomPane::Status => 1,
     };
 
     // 4-zone vertical layout: chat / status line / input / bottom. Pasted images
@@ -390,6 +387,9 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         horizontal: 1,
         vertical: 0,
     });
+    // An empty transcript opens with the two-line session header; it takes
+    // the top of the chat area and disappears with the first message.
+    let chat_area = render_session_header(frame, chat_area, state, rstate);
     // A live toast borrows the chat area's LAST row rather than claiming its
     // own layout slot: the zone above the input already stacks three
     // conditional bands, and a fourth that appears for two seconds would shove
@@ -441,7 +441,6 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         wrapped_line_cache: &mut rstate.wrapped_line_cache,
         show_reasoning: state.ui.show_reasoning,
         blink_on,
-        today: state.now.date_naive(),
     };
     frame.render_stateful_widget(chat_widget, chat_area, &mut rstate.chat);
 
@@ -503,13 +502,14 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
 
         // Cursor tracks the input caret.
         let input_area = chunks[3];
-        let content_width = input_area.width.saturating_sub(2) as usize;
+        let content_width = input_area.width.saturating_sub(4) as usize;
         let (cursor_row, cursor_col) = InputState::calculate_cursor_position(
             &state.ui.input_buffer,
             state.ui.input_cursor.min(state.ui.input_buffer.len()),
             content_width,
         );
-        frame.set_cursor_position((input_area.x + cursor_col + 2, input_area.y + 1 + cursor_row));
+        // Left border, one cell of padding, the `> ` prompt, then the caret.
+        frame.set_cursor_position((input_area.x + cursor_col + 4, input_area.y + 1 + cursor_row));
     }
 
     // Effective reasoning level. Per-model supported_reasoning cap
@@ -538,17 +538,17 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
                 // omit the "don't ask again" option so the user can't
                 // blanket-approve them (#6, #31).
                 let options = if item.allowlist_scope.is_empty() {
-                    vec!["1. Yes".to_string(), "2. No  (Esc)".to_string()]
+                    vec!["1. Yes".to_string(), "2. No (Esc)".to_string()]
                 } else {
                     vec![
                         "1. Yes".to_string(),
                         format!("2. Yes, and don't ask again for `{}`", item.allowlist_scope),
-                        "3. No  (Esc)".to_string(),
+                        "3. No (Esc)".to_string(),
                     ]
                 };
                 let widget = ApprovalModalWidget {
                     theme: &rstate.theme,
-                    title: format!("Approval required — {}  [{}]", item.tool, item.risk),
+                    title: format!("Approval required — {} [{}]", item.tool, item.risk),
                     body: item.prompt.as_str(),
                     options,
                     selected_index: Some(item.selected_option),
@@ -575,7 +575,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
                     theme: &rstate.theme,
                     title: "Confirm".to_string(),
                     body: confirm.prompt.as_str(),
-                    options: vec!["y. Yes".to_string(), "n. No  (Esc)".to_string()],
+                    options: vec!["y. Yes".to_string(), "n. No (Esc)".to_string()],
                     selected_index: None,
                     accent: rstate.theme.colors.warning.to_color(),
                 };
@@ -657,13 +657,8 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             frame.render_widget(palette_widget, chunks[4]);
         },
         BottomPane::Status => {
-            let cwd = state.cwd.display().to_string();
             let status_widget = StatusWidget {
                 theme: &rstate.theme,
-                working_dir: &cwd,
-                hostname: &rstate.hostname,
-                username: &rstate.username,
-                version: &rstate.version,
                 context_usage: state.session.context_usage.as_ref(),
                 model_name: &state.session.model_id,
                 reasoning_level: effective,
@@ -674,6 +669,38 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             };
             frame.render_widget(status_widget, chunks[4]);
         },
+    }
+}
+
+/// Draw the session header when the transcript is empty and hand back the
+/// chat area that remains. A helper so `render()` does not grow.
+fn render_session_header(
+    frame: &mut Frame,
+    chat_area: Rect,
+    state: &State,
+    rstate: &RenderCache,
+) -> Rect {
+    use widgets::{SESSION_HEADER_HEIGHT, build_session_header, session_header_visible};
+    if !session_header_visible(state) || chat_area.height < SESSION_HEADER_HEIGHT + 1 {
+        return chat_area;
+    }
+    let lines = build_session_header(
+        &rstate.version,
+        &state.session.model_id,
+        &state.cwd,
+        rstate.home_dir.as_deref(),
+        chat_area.width as usize,
+        &rstate.theme,
+    );
+    let header_area = Rect {
+        height: SESSION_HEADER_HEIGHT,
+        ..chat_area
+    };
+    frame.render_widget(ratatui::widgets::Paragraph::new(lines), header_area);
+    Rect {
+        y: chat_area.y + SESSION_HEADER_HEIGHT,
+        height: chat_area.height - SESSION_HEADER_HEIGHT,
+        ..chat_area
     }
 }
 
@@ -1169,7 +1196,7 @@ fn supported_reasoning_for(_state: &State) -> Option<ReasoningCapability> {
 /// Render one frame into a plain-text character grid at the given size.
 /// Test-only: shared by the unit tests below and the snapshot suite
 /// (`snapshots.rs`), which needs to control both the frame size and the
-/// `RenderCache` (pinned hostname/username).
+/// `RenderCache` (pinned home directory).
 #[cfg(test)]
 pub(crate) fn render_frame(
     state: &State,
@@ -1225,7 +1252,7 @@ mod tests {
     /// Pinned `user@host`, so a frame rendered here is the same on every
     /// machine — the reason `RenderCache::new` takes them as arguments.
     fn test_cache() -> RenderCache {
-        RenderCache::new("testhost".to_string(), "testuser".to_string())
+        RenderCache::new(None)
     }
 
     fn render_to_string(state: &State) -> String {

@@ -95,27 +95,6 @@ impl StepObserver for RecorderTap {
     }
 }
 
-/// Resolve `user@host` for the status bar, once, at startup.
-///
-/// Lives in the shell rather than beside the `RenderCache` fields it fills:
-/// `src/render` is covered by the layering guard, so an environment read
-/// anywhere under it is impurity in a tree that must stay a pure function of
-/// `State`. Reading here and passing the result down is the whole difference.
-///
-/// `HOSTNAME`/`HOST` and `USER`/`USERNAME` are checked in that order because
-/// the first of each pair is the Unix spelling and the second the Windows one;
-/// the final fallbacks keep the status bar rendering something sane when a
-/// stripped environment provides neither.
-fn host_identity() -> (String, String) {
-    let hostname = std::env::var("HOSTNAME")
-        .or_else(|_| std::env::var("HOST"))
-        .unwrap_or_else(|_| "localhost".to_string());
-    let username = std::env::var("USER")
-        .or_else(|_| std::env::var("USERNAME"))
-        .unwrap_or_else(|_| "user".to_string());
-    (hostname, username)
-}
-
 /// Interactive TUI main loop with explicit options. `recorder` (if
 /// provided) appends one JSONL line per reducer input to the file for
 /// debugging / replay.
@@ -221,8 +200,8 @@ pub async fn run_interactive_with(
     // reads them as injected data and never does the refresh I/O inline.
     runner.spawn_config_watcher(cwd.clone(), config.memory.clone());
     let mut terminal = Some(TerminalGuard::setup()?);
-    let (hostname, username) = host_identity();
-    let mut rstate = RenderCache::new(hostname, username);
+    let home_dir = directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf());
+    let mut rstate = RenderCache::new(home_dir);
     // `Option` because the $EDITOR compose round-trip must DROP the stream
     // (its reader thread holds crossterm's internal reader mutex) before
     // suspending, and build a fresh one after — same lifecycle dance as

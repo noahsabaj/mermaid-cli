@@ -2,7 +2,7 @@
 source: src/render/snapshots.rs
 expression: frame
 ---
- > audit the codebase (use agents)                                                                      Today at 3:04am 
+ > audit the codebase (use agents)                                                                                      
                                                                                                                         
                                                                                                                         
                                                                                                                         
@@ -32,13 +32,13 @@ expression: frame
                                                                                                                         
                                                                                                                         
                                                                                                                         
- • Running 3 agents... (esc to interrupt • ctrl+b to background • 45s • ↓ ~20400 tokens)                                
-   ◦ Map repo structure  read_file… · 45s · ↓ ~12.3k tokens                                                             
-   ◦ Audit source architecture  thinking · 45s · ↓ ~8.1k tokens                                                         
+                                                                                                                        
+ ◐ Running 3 agents... (esc to interrupt · ctrl+b to background · 45s · ↓ 20.4k tokens)                                 
+   ◦ Map repo structure  read_file… · 45s · ↓ 12.3k tokens                                                              
+   ◦ Audit source architecture  thinking · 45s · ↓ 8.1k tokens                                                          
    ◦ Audit security & secrets  45s                                                                                      
-   ◦ bg Audit docs and conventions  execute_command… · 90s · ↓ ~27.9k tokens                                            
-────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
->                                                                                                                       
-────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-snapuser@snaphost:/project/demo                                                                             context: n/a
-mermaid v0.0.0 · safety: ask · reasoning: medium                                                             ollama/test
+   ◦ bg Audit docs and conventions  execute_command… · 90s · ↓ 27.9k tokens                                             
+╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ >                                                                                                                    │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+safety: ask · reasoning: medium                                                                              ollama/test

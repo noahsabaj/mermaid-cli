@@ -2,6 +2,8 @@
 source: src/render/snapshots.rs
 expression: frame
 ---
+ mermaid v0.0.0 · ollama/test · /project/demo                                   
+ /help for commands · shift+tab cycles safety · esc interrupts                  
                                                                                 
                                                                                 
                                                                                 
@@ -17,11 +19,9 @@ expression: frame
                                                                                 
                                                                                 
                                                                                 
-                                                                                
-                                                                                
- Enter Command ─────────────────────────────────────────────────────────────────
-> /mo                                                                           
-────────────────────────────────────────────────────────────────────────────────
+╭ Enter Command ───────────────────────────────────────────────────────────────╮
+│ > /mo                                                                        │
+╰──────────────────────────────────────────────────────────────────────────────╯
 ┌ Commands (2)  ↑↓ navigate · Tab complete · Esc dismiss ──────────────────────┐
 │ /model [name]          Open the model picker, or switch directly with a name │
 │ /model-info <model>    Show provider/model capability information            │

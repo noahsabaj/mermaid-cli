@@ -43,26 +43,10 @@ use mermaid_model::models::{ChatMessage, ChatMessageKind};
 /// roomy modern terminal (exercises wrapping and layout at both extremes).
 const SIZES: [(u16, u16); 2] = [(80, 24), (120, 40)];
 
-/// Fixture clock: a fixed *local wall clock*.
-///
-/// Local, not a fixed instant: the frame prints this through
-/// `format_relative_timestamp`, which formats in local time. A fixed instant
-/// therefore renders a different date and time in every timezone; a fixed wall
-/// clock renders the same one everywhere, which is what lets the same `.snap`
-/// files serve every platform (#296). Scene-relative times are all derived by
-/// subtracting from this, so their differences stay invariant too.
-///
-/// It used to matter that this date was in the PAST: `format_relative_timestamp`
-/// read `Local::now()` internally, so a fixture date near today would have
-/// flipped scenes between "Today at ..." and an absolute date depending on the
-/// day the suite ran, and the fixed past date was what forced every user
-/// timestamp down the stable absolute-date branch.
-///
-/// That is no longer why it works. The formatter takes `today` as an argument
-/// and the widget derives it from `state.now` — this same fixture — so the
-/// branch is now pinned by construction and scenes render "Today at ...". The
-/// date being in the past is now merely conventional; any fixed date would be
-/// equally stable.
+/// Fixture clock: a fixed local wall clock. Every scene-relative time (the
+/// elapsed seconds on a spinner, the age of a checkpoint) is derived by
+/// subtracting from this, so their differences stay invariant, and nothing in
+/// a frame prints the clock itself any more.
 fn fixed_now() -> chrono::DateTime<chrono::Local> {
     use chrono::TimeZone;
     // `earliest` rather than `single`: a DST fold would make this ambiguous.
@@ -74,12 +58,11 @@ fn fixed_now() -> chrono::DateTime<chrono::Local> {
         .expect("fixture wall clock exists in the local timezone")
 }
 
-/// A `RenderCache` with the status bar's machine-dependent values pinned: it
-/// renders `user@host` and `mermaid v<version>`. `user@host` is pinned by
-/// construction now that `RenderCache::new` takes it; the version is still
+/// A `RenderCache` with the machine-dependent values pinned: the home
+/// directory (for the session header's `~`) by construction, and the version
 /// assigned over, which keeps the suite immune to release bumps.
 fn snapshot_cache() -> RenderCache {
-    let mut cache = RenderCache::new("snaphost".to_string(), "snapuser".to_string());
+    let mut cache = RenderCache::new(Some(std::path::PathBuf::from("/home/snapuser")));
     cache.version = "0.0.0".to_string();
     // Pin the exec-row shell label: frames must not vary by build platform.
     cache.host_shell = mermaid_model::safety::HostShell::Posix;
@@ -561,38 +544,140 @@ fn determinism_same_scene_twice() {
     assert_eq!(first, second, "render must be a pure function of State");
 }
 
-/// Harness self-check: the fixture clock renders the pinned wall clock.
-///
-/// This stamp is the single thing that made the suite unix-only (#296). The
-/// frame right-aligns it, so a timezone that shifts it also shifts the padding
-/// in front of it — one wrong character here is a diff in every scene carrying
-/// a user message. Asserting the string alone turns that into one legible
-/// failure instead.
-///
-/// This is the whole cross-timezone guard, and it is a real one: the `.snap`
-/// files were generated under UTC, so on any machine that is not UTC this test
-/// asserts agreement ACROSS zones. Verified by mutation — restore the old
-/// fixed-instant `fixed_now`, run under `TZ=Pacific/Kiritimati`, and this fails
-/// alongside every scene that carries a user message.
-///
-/// Note what cannot guard it: rendering twice under `temp_env::with_var("TZ",
-/// …)`. chrono resolves the local zone once and caches it, so both halves see
-/// whichever zone the process started in and the comparison passes no matter
-/// what. That is also why the `TZ=UTC` pinning this suite used to wrap each
-/// scene in was inert on unix too — the snapshots matched because CI runs in
-/// UTC, not because the pinning worked.
+// ---------------------------------------------------------------------------
+// The chrome rules behind the snapshots, asserted directly so a regression
+// reads as a sentence rather than a frame diff.
+// ---------------------------------------------------------------------------
+
+fn frame_lines(state: &State, width: u16, height: u16) -> Vec<String> {
+    render_frame(state, &mut snapshot_cache(), width, height)
+        .lines()
+        .map(|line| line.trim_end().to_string())
+        .collect()
+}
+
 #[test]
-fn fixture_clock_reads_the_pinned_wall_clock() {
-    // A date deliberately far from the fixture's, NOT `fixed_now().date_naive()`.
-    // This assertion exists to pin the rendered date and time, and the
-    // day-relative branches print neither: passing the fixture's own date would
-    // render "Today at 3:04am", and a `fixed_now()` that drifted across midnight
-    // would drag `today` with it and still say "Today". Forcing the
-    // absolute-date branch is what keeps the string diagnostic.
-    let far_future = chrono::NaiveDate::from_ymd_opt(2026, 3, 21).expect("real date");
-    assert_eq!(
-        mermaid_model::utils::format_relative_timestamp(fixed_now(), far_future),
-        "January 2nd, 2026 at 3:04am",
-        "the fixture clock must be a fixed LOCAL wall clock, not a fixed instant"
+fn session_header_only_on_an_empty_transcript() {
+    let empty = frame_lines(&scene_state(), 80, 24);
+    assert!(empty[0].contains("mermaid v0.0.0"), "{empty:?}");
+    assert!(empty[1].contains("/help for commands"), "{empty:?}");
+
+    // A system-only transcript (the startup capability notice on a degraded
+    // machine) keeps the header, so the frame is not environment-dependent.
+    let mut notice = scene_state();
+    notice.session.append(
+        ChatMessage::system("Web capabilities - fetch: native; search: none."),
+        notice.now,
     );
+    let with_notice = frame_lines(&notice, 80, 24);
+    assert!(with_notice[0].contains("mermaid v0.0.0"), "{with_notice:?}");
+
+    let mut chatted = scene_state();
+    chatted.session.append(ChatMessage::user("hi"), chatted.now);
+    let with_user = frame_lines(&chatted, 80, 24);
+    assert!(
+        !with_user.iter().any(|l| l.contains("/help for commands")),
+        "the first message hides the header: {with_user:?}"
+    );
+}
+
+#[test]
+fn footer_is_one_muted_line_with_no_host_or_cwd() {
+    let lines = frame_lines(&scene_state(), 80, 24);
+    let footer = lines.last().expect("frame has rows");
+    assert!(
+        footer.contains("safety:") && footer.contains("reasoning:"),
+        "{footer}"
+    );
+    assert!(
+        !footer.contains('@'),
+        "no user@host in the footer: {footer}"
+    );
+    assert!(
+        !footer.contains("context"),
+        "no gauge until usage is known: {footer}"
+    );
+    let above = &lines[lines.len() - 2];
+    assert!(
+        above.starts_with('╰'),
+        "one footer row, under the band: {above}"
+    );
+}
+
+#[test]
+fn chrome_never_uses_the_bullet_as_a_separator() {
+    let mut busy = scene_state();
+    busy.session.append(ChatMessage::user("explain"), busy.now);
+    busy.turn = TurnState::Generating {
+        id: TurnId(1),
+        started: std::time::SystemTime::from(fixed_now() - chrono::Duration::seconds(3)),
+        partial_text: "so far".to_string(),
+        partial_reasoning: String::new(),
+        tokens: 12,
+        phase: GenPhase::Streaming,
+        provider_continuation: None,
+        pending_tool_calls: Vec::new(),
+        continuation: false,
+    };
+    for state in [scene_state(), busy] {
+        for line in frame_lines(&state, 120, 40) {
+            assert!(!line.contains('\u{2022}'), "bullet used as chrome: {line}");
+        }
+    }
+}
+
+#[test]
+fn spinner_frame_is_a_pure_function_of_elapsed_time() {
+    use crate::render::widgets::spinner_glyph;
+    use std::time::Duration;
+    use unicode_width::UnicodeWidthStr;
+    let at = |ms: u64| spinner_glyph(Duration::from_millis(ms));
+    assert_eq!(at(0), at(0));
+    assert_eq!(
+        [at(0), at(150), at(300), at(450), at(600)],
+        ["◐ ", "◓ ", "◑ ", "◒ ", "◐ "]
+    );
+    assert_ne!(at(149), at(150));
+    for ms in [0, 150, 300, 450] {
+        assert_eq!(at(ms).width(), 2, "every frame is two cells wide");
+    }
+}
+
+#[test]
+fn streaming_meta_has_one_arrow_and_middots() {
+    let mut s = scene_state();
+    s.session.append(ChatMessage::user("explain"), s.now);
+    s.turn = TurnState::Generating {
+        id: TurnId(1),
+        started: std::time::SystemTime::from(fixed_now() - chrono::Duration::seconds(3)),
+        partial_text: "so far".to_string(),
+        partial_reasoning: String::new(),
+        tokens: 1_234,
+        phase: GenPhase::Streaming,
+        provider_continuation: None,
+        pending_tool_calls: Vec::new(),
+        continuation: false,
+    };
+    let lines = frame_lines(&s, 120, 40);
+    let row = lines
+        .iter()
+        .find(|l| l.contains("Streaming..."))
+        .expect("streaming row");
+    assert_eq!(row.matches('↓').count(), 1, "{row}");
+    assert!(!row.contains('↑') && !row.contains('~'), "{row}");
+    assert!(row.contains("· 3s · ↓ 1.2k tokens"), "{row}");
+}
+
+#[test]
+fn user_prompts_carry_no_timestamp() {
+    let mut s = scene_state();
+    s.session
+        .append(ChatMessage::user("what time is it"), s.now);
+    let lines = frame_lines(&s, 120, 40);
+    let row = lines
+        .iter()
+        .find(|l| l.contains("what time is it"))
+        .expect("user row");
+    assert!(!row.contains(" at "), "{row}");
+    assert_eq!(row.trim(), "> what time is it");
 }

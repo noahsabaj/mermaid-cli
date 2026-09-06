@@ -30,6 +30,21 @@ pub struct AgentPanelRow {
     pub backgrounded: bool,
 }
 
+/// The spinner's frames: a half disc walking clockwise. Geometric shapes,
+/// not dingbats (the no-pictograph rule); East-Asian-Width Ambiguous like the
+/// `●` already on screen, so every frame is one cell wide and the row never
+/// breathes.
+pub(crate) const SPINNER_FRAMES: [&str; 4] = ["◐ ", "◓ ", "◑ ", "◒ "];
+const SPINNER_FRAME_MS: u128 = 150;
+
+/// The frame for a given elapsed time. A pure function of the injected
+/// clock, so `--replay` reproduces every frame.
+#[must_use]
+pub fn spinner_glyph(elapsed: std::time::Duration) -> &'static str {
+    let index = (elapsed.as_millis() / SPINNER_FRAME_MS) % SPINNER_FRAMES.len() as u128;
+    SPINNER_FRAMES[index as usize]
+}
+
 /// Build the status-line rows: a generation/tool spinner followed by one row
 /// per queued message.
 ///
@@ -47,9 +62,8 @@ pub struct AgentPanelRow {
 #[must_use]
 pub fn build_status_lines(
     status: GenerationStatus,
-    elapsed_secs: u64,
-    tokens_received: usize,
-    tokens_estimated: bool,
+    elapsed: std::time::Duration,
+    tokens_received: Option<usize>,
     status_override: Option<&str>,
     agents: &[AgentPanelRow],
     bg_available: bool,
@@ -80,27 +94,25 @@ pub fn build_status_lines(
     };
 
     let info_style = Style::new().fg(theme.colors.info.to_color());
-    let meta_style = Style::new()
-        .fg(theme.colors.text_secondary.to_color())
-        .dim();
+    // The theme's one meta colour, undimmed: SGR faint over an RGB colour is
+    // terminal-dependent, so "dim secondary" and "meta gray" read as two greys
+    // on some terminals and one on others.
+    let meta_style = Style::new().fg(theme.colors.text_meta.to_color());
 
-    // Arrow indicates message direction; the parenthetical names the flow. Only
-    // the initial prompt upload is "upstream"; once the model is thinking or
-    // streaming we're receiving generated tokens, so the counter flows downstream.
-    let (arrow, flow_direction) = match status {
-        GenerationStatus::Sending => ("↑ ", "upstream"),
-        GenerationStatus::Thinking | GenerationStatus::Streaming => ("↓ ", "downstream"),
-        GenerationStatus::RunningTools => ("• ", "tools"),
-        GenerationStatus::Compacting => ("• ", "compaction"),
-        GenerationStatus::Cancelling => ("• ", "cleanup"),
-        GenerationStatus::Idle => ("", ""),
+    // One animated head glyph for every busy phase, from the injected clock.
+    // (The old `↑`/`↓`/`•` heads named the flow direction, and the streaming
+    // row then carried the same arrow twice.)
+    let arrow = if status == GenerationStatus::Idle {
+        ""
+    } else {
+        spinner_glyph(elapsed)
     };
 
     // While detachable tools run (shell commands, agents), advertise Ctrl+B.
     // Hidden when nothing running can actually background — the hint used to
     // render unconditionally and lie during read/edit-only turns.
     let bg_hint = if status == GenerationStatus::RunningTools && bg_available {
-        " • ctrl+b to background"
+        " · ctrl+b to background"
     } else {
         ""
     };
@@ -108,7 +120,7 @@ pub fn build_status_lines(
     // A first Ctrl+C armed the exit confirmation: lead the meta with the
     // second-press hint while the window is open.
     let exit_hint = if exit_armed {
-        "ctrl+c again to exit • "
+        "ctrl+c again to exit · "
     } else {
         ""
     };
@@ -117,19 +129,18 @@ pub fn build_status_lines(
     let parsed_head = parse_markdown_inline(&head_text, theme, info_style);
     let head_w: usize = parsed_head.spans.iter().map(|s| s.content.width()).sum();
 
+    // The counter is generated (received) tokens, so it reads downstream even
+    // while tools run — the run total just holds steady between model calls.
+    // Absent while compacting or cancelling, where there is no live count.
+    let tokens = tokens_received.map_or_else(String::new, |n| {
+        format!(
+            " · ↓ {} tokens",
+            mermaid_domain::compaction::format_compact_count(n)
+        )
+    });
     let meta = format!(
-        "({exit_hint}esc to interrupt{bg_hint} • {}s • {} {}{} tokens)",
-        elapsed_secs,
-        // The counter is generated (received) tokens, so it reads downstream even
-        // while tools run — the run total just holds steady between model calls.
-        match flow_direction {
-            "downstream" | "tools" => "↓",
-            "compaction" => "compact",
-            "cleanup" => "cleanup",
-            _ => "↑",
-        },
-        if tokens_estimated { "~" } else { "" },
-        tokens_received
+        "({exit_hint}esc to interrupt{bg_hint} · {}s{tokens})",
+        elapsed.as_secs()
     );
 
     let arrow_w = arrow.width();
@@ -176,7 +187,7 @@ pub fn build_status_lines(
         bits.push(format!("{}s", row.elapsed_secs));
         if row.tokens > 0 {
             bits.push(format!(
-                "↓ ~{} tokens",
+                "↓ {} tokens",
                 mermaid_domain::compaction::format_compact_count(row.tokens)
             ));
         }
@@ -230,9 +241,8 @@ mod tests {
         let queued = VecDeque::new();
         let lines = build_status_lines(
             GenerationStatus::RunningTools,
-            3,
-            0,
-            false,
+            std::time::Duration::from_secs(3),
+            Some(0),
             None,
             &[],
             true,
@@ -263,9 +273,8 @@ mod tests {
         let queued = VecDeque::new();
         let lines = build_status_lines(
             GenerationStatus::RunningTools,
-            11,
-            169,
-            false,
+            std::time::Duration::from_secs(11),
+            Some(169),
             None,
             &[],
             true,
@@ -297,9 +306,8 @@ mod tests {
         let queued = VecDeque::new();
         let lines = build_status_lines(
             GenerationStatus::Thinking,
-            7,
-            1_234,
-            true,
+            std::time::Duration::from_secs(7),
+            Some(1_234),
             None,
             &[],
             true,
@@ -313,7 +321,10 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect();
-        assert!(text.contains("1234"), "must show the live count: {text}");
+        assert!(
+            text.contains("1.2k"),
+            "must show the live count, compact: {text}"
+        );
         assert!(
             text.contains('↓'),
             "thinking receives tokens (downstream): {text}"
@@ -329,9 +340,8 @@ mod tests {
         let queued = VecDeque::new();
         let lines = build_status_lines(
             GenerationStatus::RunningTools,
-            1,
-            0,
-            false,
+            std::time::Duration::from_secs(1),
+            Some(0),
             None,
             &[],
             true,
@@ -356,9 +366,8 @@ mod tests {
         let queued = VecDeque::new();
         let lines = build_status_lines(
             GenerationStatus::Sending,
-            0,
-            0,
-            false,
+            std::time::Duration::from_secs(0),
+            Some(0),
             None,
             &[],
             true,
@@ -380,9 +389,8 @@ mod tests {
         let headline = Some("Running the full local gate across every workspace crate and target");
         let n0 = build_status_lines(
             GenerationStatus::RunningTools,
-            9,
-            99,
-            false,
+            std::time::Duration::from_secs(9),
+            Some(99),
             None,
             &[],
             true,
@@ -396,9 +404,8 @@ mod tests {
         for (elapsed, tokens) in [(10, 100), (999, 100000), (3600, 999999)] {
             let n = build_status_lines(
                 GenerationStatus::RunningTools,
-                elapsed,
-                tokens,
-                false,
+                std::time::Duration::from_secs(elapsed),
+                Some(tokens),
                 None,
                 &[],
                 true,
@@ -419,9 +426,8 @@ mod tests {
         let queued = VecDeque::new();
         let lines = build_status_lines(
             GenerationStatus::Streaming,
-            2,
-            10,
-            true,
+            std::time::Duration::from_secs(2),
+            Some(10),
             None,
             &[],
             true,
@@ -447,9 +453,8 @@ mod tests {
         let queued = VecDeque::new();
         let lines = build_status_lines(
             GenerationStatus::Idle,
-            0,
-            0,
-            false,
+            std::time::Duration::from_secs(0),
+            None,
             None,
             &[],
             true,

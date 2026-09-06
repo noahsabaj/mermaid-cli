@@ -1,8 +1,9 @@
 ---
 source: src/render/snapshots.rs
-assertion_line: 106
 expression: frame
 ---
+ mermaid v0.0.0 · ollama/test · /project/demo                                   
+ /help for commands · shift+tab cycles safety · esc interrupts                  
                                                                                 
                                                                                 
                                                                                 
@@ -10,11 +11,9 @@ expression: frame
                                                                                 
                                                                                 
                                                                                 
-                                                                                
-                                                                                
-────────────────────────────────────────────────────────────────────────────────
->                                                                               
-────────────────────────────────────────────────────────────────────────────────
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ >                                                                            │
+╰──────────────────────────────────────────────────────────────────────────────╯
 ┌Load conversation — ↑↓ navigate · Enter select · Esc cancel───────────────────┐
 │ > Fix the resolver panic  (14 msg · 2026-01-01 12:34)                        │
 │   Write release notes  (6 msg · 2025-12-31 09:15)                            │

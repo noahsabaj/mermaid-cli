@@ -1,5 +1,4 @@
 use crate::render::wrap::{wrap_styled_line, wrap_text_with_indent};
-use chrono::NaiveDate;
 use std::hash::{Hash, Hasher};
 
 use ratatui::{
@@ -20,7 +19,6 @@ use mermaid_domain::{
 use mermaid_model::diff::{DiffLineKind, parse_diff_line};
 use mermaid_model::models::ChatMessageKind;
 use mermaid_model::models::{ChatMessage, MessageRole};
-use mermaid_model::utils::format_relative_timestamp;
 
 /// Entry in the click map: maps a content line to an image in chat history
 #[derive(Debug, Clone)]
@@ -340,21 +338,6 @@ fn pad_to_cells(s: &str, cells: usize) -> String {
     out
 }
 
-/// First-line spacing for a user message: the run of spaces before the
-/// right-aligned timestamp. All inputs are display-cell widths so CJK/emoji
-/// align correctly (#104). Returns `min_gap` plus whatever slack remains to
-/// push the timestamp to `content_width`'s right edge.
-fn user_timestamp_padding(
-    role_prefix_width: usize,
-    text_width: usize,
-    timestamp_width: usize,
-    min_gap: usize,
-    content_width: usize,
-) -> usize {
-    let total_used = role_prefix_width + text_width + min_gap + timestamp_width;
-    min_gap + content_width.saturating_sub(total_used)
-}
-
 /// The plain text of a rendered line (spans concatenated, styles dropped).
 fn line_plain_text(line: &Line) -> String {
     line.spans.iter().map(|s| s.content.as_ref()).collect()
@@ -426,18 +409,6 @@ pub struct ChatWidget<'a> {
     /// by the frame memo — when no message carries a running action, so idle
     /// frames don't reassemble twice a second.
     pub blink_on: bool,
-    /// Today's date, from the injected `state.now` — the same route `blink_on`
-    /// takes, and for the same reason. A user timestamp renders as
-    /// "Today"/"Yesterday"/an absolute date *relative to this*, so it is a real
-    /// render input and belongs in the frame memo key; reading the wall clock
-    /// here instead would make `render()` a function of more than its
-    /// arguments.
-    ///
-    /// It keys the memo *and* produces the label: it is handed to
-    /// `format_relative_timestamp`, which no longer reads the clock either. Key
-    /// and label therefore agree by construction rather than by both happening
-    /// to call `Local::now()` a microsecond apart.
-    pub today: NaiveDate,
 }
 
 /// Render assistant message content (markdown) into wrapped, role-prefixed
@@ -527,8 +498,8 @@ impl<H: Hasher> std::fmt::Write for HashWrite<'_, H> {
 /// Fingerprint every input that determines the assembled chat lines + image
 /// click map: the message set (role, kind, content, thinking, actions, image
 /// count, timestamp, metadata), the theme identity, the content width, the
-/// reasoning toggle, and today's date — the only clock-dependent input, since a
-/// user timestamp renders as "Today"/"Yesterday"/an absolute date relative to it.
+/// reasoning toggle. Nothing here depends on the clock: user rows carry no
+/// timestamp, so a frame is a function of the transcript alone.
 ///
 /// Two frames with the same fingerprint assemble byte-identical lines, so the
 /// result can be memoized across frames (F31). Uses the same 64-bit-hash-keyed
@@ -543,17 +514,12 @@ pub(crate) fn frame_key(
     theme_seed: u64,
     content_width: u16,
     show_reasoning: bool,
-    today: NaiveDate,
 ) -> u64 {
     let mut h = rustc_hash::FxHasher::default();
     content_key.hash(&mut h);
     theme_seed.hash(&mut h);
     content_width.hash(&mut h);
     show_reasoning.hash(&mut h);
-    // The day-relative label ("Today"/"Yesterday"/date) on user timestamps
-    // changes only at midnight; fold today's date in so the memo refreshes then.
-    // Passed in rather than read here — see `ChatWidget::today`.
-    today.hash(&mut h);
     h.finish()
 }
 
@@ -605,8 +571,6 @@ pub(crate) fn frame_fingerprint(
     for msg in messages {
         msg.content.hash(&mut h);
         msg.thinking.hash(&mut h);
-        // The instant fully determines `format_time(msg.timestamp)`; the
-        // day-relative label is covered by today's date above.
         msg.timestamp.timestamp().hash(&mut h);
         msg.images
             .as_ref()
@@ -657,7 +621,6 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
             theme_seed,
             content_width,
             self.show_reasoning,
-            self.today,
         );
         // Cross-check the O(1) key against the full-content hash it replaced:
         // if the content changed, the key MUST have changed. The converse is
@@ -906,61 +869,32 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                         );
                     }
                 } else {
-                    // For User messages: format timestamp and display on right edge
-                    let formatted_timestamp = format_relative_timestamp(msg.timestamp, self.today);
-                    // Display cells, not bytes — a CJK/emoji timestamp (or message)
-                    // would otherwise mis-reserve space and push the right-aligned
-                    // timestamp off its column (#104).
-                    let timestamp_width = formatted_timestamp.width();
-                    let min_gap = 3; // minimum spaces between text and timestamp
-
-                    // Content is clean — timestamps are injected at API call time only
+                    // User messages: the `>` marker, the text, and nothing else on
+                    // the row. No timestamp -- Claude Code shows none, and a clock
+                    // on every prompt is per-turn clutter the transcript does not
+                    // need; the session picker still dates whole sessions.
                     let cleaned_content = &msg.content;
-
-                    // Reserve space on the first line for role prefix + gap + timestamp
-                    // so text wraps early enough to not overlap the timestamp
-                    let role_prefix_width = role_prefix.width() + 1; // "You " = prefix + space
-                    let first_line_reserved = role_prefix_width + min_gap + timestamp_width;
+                    let role_prefix_width = role_prefix.width() + 1; // "> " = prefix + space
 
                     // Manually wrap the user message with hanging indent (2 spaces)
                     let wrapped = wrap_text_with_indent(
                         cleaned_content,
                         content_width as usize,
-                        first_line_reserved, // reserve space for prefix + gap + timestamp on first line
-                        2,                   // continuation indent
+                        role_prefix_width, // reserve the prefix on the first line
+                        2,                 // continuation indent
                     );
 
                     let band_start = lines.len();
                     for (line_idx, wrapped_line) in wrapped.iter().enumerate() {
                         if line_idx == 0 {
-                            // First line: add role prefix and timestamp on right
                             let text_content = wrapped_line.trim_start(); // Remove the indent we added
-                            let text_width = text_content.width();
-
-                            let mut spans = vec![
+                            lines.push(Line::from(vec![
                                 Span::styled(
                                     format!("{role_prefix} "),
                                     Style::new().fg(role_color).bold(),
                                 ),
                                 Span::raw(text_content.to_string()),
-                            ];
-
-                            // Always add at least min_gap spaces, plus any extra from word-boundary slack.
-                            // Align the timestamp to the content's right edge.
-                            let pad = user_timestamp_padding(
-                                role_prefix_width,
-                                text_width,
-                                timestamp_width,
-                                min_gap,
-                                content_width as usize,
-                            );
-                            spans.push(Span::raw(" ".repeat(pad)));
-                            spans.push(Span::styled(
-                                formatted_timestamp.clone(),
-                                Style::new().fg(self.theme.colors.text_meta.to_color()),
-                            ));
-
-                            lines.push(Line::from(spans));
+                            ]));
                         } else {
                             // Continuation lines: already have 2-space margin from wrap_text_with_indent
                             lines.push(Line::from(wrapped_line.clone()));
@@ -1722,13 +1656,6 @@ fn format_action_duration(seconds: f64) -> String {
 mod tests {
     use super::*;
 
-    /// A pinned "today" for the widget's day-relative timestamp labels. Fixed
-    /// rather than `Local::now()` so a test that renders a user message asserts
-    /// the same glyphs whatever day it runs on.
-    fn fixed_today() -> NaiveDate {
-        NaiveDate::from_ymd_opt(2026, 1, 2).expect("2026-01-02 is a real date")
-    }
-
     #[test]
     fn question_answers_render_as_question_arrow_answer_block() {
         use mermaid_domain::{QuestionAnswer, ToolMetadata, ToolRunMetadata};
@@ -2076,7 +2003,6 @@ mod tests {
                     wrapped_line_cache: cache,
                     show_reasoning: true,
                     blink_on: true,
-                    today: fixed_today(),
                 };
                 f.render_stateful_widget(widget, Rect::new(0, 0, width, height), &mut state);
             })
@@ -2119,7 +2045,6 @@ mod tests {
                 wrapped_line_cache: &mut cache,
                 show_reasoning: true,
                 blink_on: true,
-                today: fixed_today(),
             };
             f.render_stateful_widget(widget, Rect::new(0, 0, width, height), &mut state);
         })
@@ -2185,18 +2110,6 @@ mod tests {
         // Already wide enough → unchanged (never truncates).
         assert_eq!(pad_to_cells("你好", 3), "你好");
         assert_eq!(pad_to_cells("", 0), "");
-    }
-
-    #[test]
-    fn user_timestamp_padding_aligns_on_display_cells() {
-        // ASCII: prefix(4) + text(5) + gap(3) + ts(8) = 20 used; content 40.
-        assert_eq!(user_timestamp_padding(4, 5, 8, 3, 40), 23);
-        // A wider (CJK) message shrinks the gap but the timestamp still lands at
-        // the content right edge: role + text + pad + ts == content_width (#104).
-        let pad = user_timestamp_padding(4, 10, 8, 3, 40);
-        assert_eq!(4 + 10 + pad + 8, 40);
-        // Overflow (text wider than the line) clamps to min_gap, never underflows.
-        assert_eq!(user_timestamp_padding(4, 100, 8, 3, 40), 3);
     }
 
     #[test]
@@ -2429,7 +2342,6 @@ mod tests {
                     wrapped_line_cache: cache,
                     show_reasoning: true,
                     blink_on: true,
-                    today: fixed_today(),
                 };
                 f.render_stateful_widget(widget, Rect::new(0, 0, width, height), state);
             })

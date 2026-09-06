@@ -3,6 +3,21 @@
 //! Each widget takes explicit props; the compose function in
 //! `render::mod` pulls those props from `State` per frame. No widget
 //! holds a reference to any god-object.
+//!
+//! The glyph vocabulary, one meaning each (no emoji, no dingbats -- CI bans
+//! them; geometric shapes and box drawing are below the banned ranges):
+//!
+//! - `>`  the user's prompt
+//! - `●`  the start of a block: an assistant reply, a tool call
+//! - `⎿`  the result or continuation under a block
+//! - `◦`  a live child row (a running agent)
+//! - `√ ■ □ ⊘`  checklist states: done, in progress, pending, blocked
+//! - `◐ ◓ ◑ ◒`  the spinner
+//! - `·`  the only separator inside meta text
+//!
+//! Every meta surface -- footer, session header, spinner meta, agent rows,
+//! checklist meta, run summary, system notices -- uses the theme's single
+//! `text_meta` colour, undimmed.
 
 mod approval;
 mod chat;
@@ -13,6 +28,7 @@ mod model_picker;
 mod plan_config;
 mod question;
 mod rewind_picker;
+mod session_header;
 mod slash_palette;
 mod status;
 mod status_line;
@@ -27,9 +43,12 @@ pub use model_picker::{MODEL_PICKER_HEIGHT, ModelPickerWidget};
 pub use plan_config::{PLAN_CONFIG_HEIGHT, PLAN_CONFIG_ROWS, PlanConfigWidget, plan_config_rows};
 pub use question::{QuestionModalWidget, question_modal_height};
 pub use rewind_picker::RewindPickerWidget;
+pub use session_header::{
+    SESSION_HEADER_HEIGHT, abbreviate_home, build_session_header, session_header_visible,
+};
 pub use slash_palette::SlashPaletteWidget;
 pub use status::StatusWidget;
-pub use status_line::{AgentPanelRow, build_status_lines};
+pub use status_line::{AgentPanelRow, build_status_lines, spinner_glyph};
 pub use tasks::{build_task_lines, tasks_height, tasks_visible};
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
