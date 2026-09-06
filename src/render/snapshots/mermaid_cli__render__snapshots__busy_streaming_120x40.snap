@@ -2,7 +2,7 @@
 source: src/render/snapshots.rs
 expression: frame
 ---
- > explain the plan                                                                                     Today at 3:04am 
+ > explain the plan                                                                                                     
                                                                                                                         
  ● The plan has three phases: first we                                                                                  
                                                                                                                         
@@ -36,9 +36,9 @@ expression: frame
                                                                                                                         
                                                                                                                         
                                                                                                                         
- ↓ Streaming... (esc to interrupt • 3s • ↓ ~12 tokens)                                                                  
-────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
->                                                                                                                       
-────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-snapuser@snaphost:/project/demo                                                                             context: n/a
-mermaid v0.0.0 · safety: ask · reasoning: medium                                                             ollama/test
+                                                                                                                        
+ ◐ Streaming... (esc to interrupt · 3s · ↓ 12 tokens)                                                                   
+╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ >                                                                                                                    │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+safety: ask · reasoning: medium                                                                              ollama/test

@@ -280,7 +280,7 @@ impl Terminal {
     #[must_use]
     pub fn footer(&self) -> Vec<String> {
         let frame = self.frame();
-        frame[frame.len().saturating_sub(2)..].to_vec()
+        frame[frame.len().saturating_sub(1)..].to_vec()
     }
 
     /// Repaint, settle, and read. Every snapshot goes through this so a frame
@@ -416,8 +416,7 @@ pub fn normalize(frame: &[String], sandbox: &Path) -> String {
                 }
             }
             line = redact_version(&line);
-            line = redact_cwd_line(&line);
-            line = redact_clock(&line);
+            line = redact_header_cwd(&line);
             line.trim_end().to_string()
         })
         .collect();
@@ -489,55 +488,17 @@ fn redact_version(line: &str) -> String {
 /// whether — the gauge is clipped. Normalizing the prefix alone leaves that
 /// length encoded in the snapshot, which would make it fail on a machine whose
 /// temp directory is a different width.
-fn redact_cwd_line(line: &str) -> String {
-    let Some(at) = line.find('@') else {
-        return line.to_string();
-    };
-    // Only the leading `user@host:` form, not an email inside prose.
-    if at == 0 || line[..at].contains(' ') {
-        return line.to_string();
-    }
-    "<USER>@<HOST>:<CWD>   <CONTEXT GAUGE>".to_string()
-}
-
-/// The right-aligned message timestamp → `<TIME>`.
-///
-/// It renders three ways — `Today at 7:00am`, `Yesterday at …`, and
-/// `January 1st, 2026 at 7:00am` for anything older — and the absolute form is
-/// LOCAL time, so a fixture stamped in UTC prints differently in every
-/// timezone. Matching the whole right-aligned tail covers all three and makes
-/// the snapshot timezone-independent.
-fn redact_clock(line: &str) -> String {
-    // The gutter right-aligns the stamp behind a run of padding.
-    let Some(pad) = line.rfind("  ") else {
-        return line.to_string();
-    };
-    let tail = line[pad..].trim();
-    if !looks_like_timestamp(tail) {
+/// The session header's directory, replaced whole: the sandbox path is already
+/// `<SANDBOX>`, but Windows prints the rest with backslashes where unix prints
+/// slashes, and the header keeps the tail after the last ` · `.
+fn redact_header_cwd(line: &str) -> String {
+    if !line.trim_start().starts_with("mermaid v") {
         return line.to_string();
     }
-    format!("{}  <TIME>", line[..pad].trim_end())
-}
-
-/// Does `text` end in a clock time and contain the ` at ` the renderer puts in
-/// front of it? Deliberately narrow — anything looser would start eating real
-/// content off the right edge of a frame.
-fn looks_like_timestamp(text: &str) -> bool {
-    let Some(time) = text.rsplit(" at ").next() else {
-        return false;
-    };
-    if !text.contains(" at ") {
-        return false;
+    match line.rfind(" · ") {
+        Some(at) => format!("{} · <CWD>", &line[..at]),
+        None => line.to_string(),
     }
-    let time = time.trim_end_matches(['a', 'p', 'm']);
-    let mut halves = time.split(':');
-    let (Some(hour), Some(minute), None) = (halves.next(), halves.next(), halves.next()) else {
-        return false;
-    };
-    !hour.is_empty()
-        && hour.chars().all(|c| c.is_ascii_digit())
-        && minute.len() == 2
-        && minute.chars().all(|c| c.is_ascii_digit())
 }
 
 fn squash(text: &str) -> String {

@@ -2,7 +2,7 @@
 source: src/render/snapshots.rs
 expression: frame
 ---
- > ship the feature                                             Today at 3:04am 
+ > ship the feature                                                             
                                                                                 
                                                                                 
                                                                                 
@@ -21,8 +21,8 @@ expression: frame
                                                                                 
                                                                                 
                                                                                 
-────────────────────────────────────────────────────────────────────────────────
->                                                                               
-────────────────────────────────────────────────────────────────────────────────
-snapuser@snaphost:/project/demo                                     context: n/a
-mermaid v0.0.0 · safety: ask · reasoning: medium                     ollama/test
+                                                                                
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ >                                                                            │
+╰──────────────────────────────────────────────────────────────────────────────╯
+safety: ask · reasoning: medium                                      ollama/test

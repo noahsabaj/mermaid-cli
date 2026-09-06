@@ -2,7 +2,7 @@
 source: src/render/snapshots.rs
 expression: frame
 ---
- > ship the feature                                                                                     Today at 3:04am 
+ > ship the feature                                                                                                     
                                                                                                                         
  ● Bash(cargo check)                                                                                                    
                                                                                                                         
@@ -35,10 +35,10 @@ expression: frame
                                                                                                                         
                                                                                                                         
                                                                                                                         
- • Wiring the broker through ExecContext... (esc to interrupt • ctrl+b to background • 3s • ↓ 0 tokens)                 
+                                                                                                                        
+ ◐ Wiring the broker through ExecContext... (esc to interrupt · ctrl+b to background · 3s · ↓ 0 tokens)                 
   ⎿ Next: Render the checklist band                                                                                     
-────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
->                                                                                                                       
-────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-snapuser@snaphost:/project/demo                                                                             context: n/a
-mermaid v0.0.0 · safety: ask · reasoning: medium                                                             ollama/test
+╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ >                                                                                                                    │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+safety: ask · reasoning: medium                                                                              ollama/test

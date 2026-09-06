@@ -2,7 +2,7 @@
 source: src/render/snapshots.rs
 expression: frame
 ---
- > start the server                                                                                     Today at 3:04am 
+ > start the server                                                                                                     
                                                                                                                         
  ● Bash(npm run dev)                                                                                                    
                                                                                                                         
@@ -35,10 +35,10 @@ expression: frame
                                                                                                                         
                                                                                                                         
                                                                                                                         
- • Running tools... (esc to interrupt • ctrl+b to background • 3s • ↓ 0 tokens)                                         
+                                                                                                                        
+ ◐ Running tools... (esc to interrupt · ctrl+b to background · 3s · ↓ 0 tokens)                                         
  > also check the logs afterwards                                                                                       
-────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
->                                                                                                                       
-────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-snapuser@snaphost:/project/demo                                                                             context: n/a
-mermaid v0.0.0 · safety: ask · reasoning: medium                                                             ollama/test
+╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ >                                                                                                                    │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+safety: ask · reasoning: medium                                                                              ollama/test

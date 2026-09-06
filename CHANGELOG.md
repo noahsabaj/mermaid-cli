@@ -114,6 +114,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   subcommands, are gone: it ran only by hand, compared no fields, and scanned
   the checkpoint file that stopped being the truth when the event log became
   it.
+- **Claude Code-style chrome for the TUI.** The composer is a rounded band
+  with the `>` prompt inside it. The footer is one muted line: `safety: ask ·
+  reasoning: medium` on the left, `<provider>/<model> · context 12%` on the
+  right, with `context` omitted until the provider reports usage (no more
+  `context: n/a`); `user@host`, the working directory and the version no longer
+  print there. An empty transcript opens with a two-line session header --
+  `mermaid v0.25.0 · <provider>/<model> · ~/project` and `/help for commands ·
+  shift+tab cycles safety · esc interrupts` -- that disappears with the first
+  message and returns on `/clear`. User prompts no longer carry a timestamp.
+  The spinner head is an animated `◐ ◓ ◑ ◒` in place of the static `↑`/`↓`/`•`
+  (which put the same arrow on a streaming row twice); its meta reads
+  `(esc to interrupt · 9s · ↓ 1.2k tokens)` with `·` as the only separator and
+  no `~` estimate marker, and there is no token count while compacting or
+  cancelling. Every meta surface -- footer, header, spinner, agent rows,
+  checklist, run summary, system notices -- uses the theme's one `text_meta`
+  colour, undimmed. The approval modal's double spaces are gone. The glyph
+  vocabulary is written down at the top of `src/render/widgets/mod.rs`; the
+  emoji guard also bans the Misc Technical run (`⏩`..`⏺`, `⌚`, `⌛`), which
+  sits below the dingbat block but renders as colour glyphs.
+
 
 - **Reads outside the project prompt in `ask` mode.** The approval names the
   file and offers "don't ask again" for its directory. Headless `ask` runs

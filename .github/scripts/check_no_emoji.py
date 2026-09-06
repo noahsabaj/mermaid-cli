@@ -24,6 +24,11 @@ def is_emoji(cp: int) -> bool:
         or 0x2600 <= cp <= 0x27BF  # miscellaneous symbols + dingbats
         or cp == 0xFE0F  # emoji variation selector
         or 0x1F1E6 <= cp <= 0x1F1FF  # regional indicators (flag letters)
+        # Misc Technical sits below the dingbat block, but this run carries
+        # Emoji=Yes and renders as colour glyphs on some terminals (⏩ .. ⏺, ⌚ ⌛).
+        # `⎿` (U+23BF) is outside it.
+        or 0x23E9 <= cp <= 0x23FA
+        or cp in (0x231A, 0x231B)
     )
 
 

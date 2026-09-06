@@ -1,2 +1,1 @@
-<USER>@<HOST>:<CWD>   <CONTEXT GAUGE>
-mermaid v<VERSION> · safety: read_only · reasoning: medium                    anthropic/pty-visual-test
+safety: read_only · reasoning: medium                                      anthropic/pty-visual-test

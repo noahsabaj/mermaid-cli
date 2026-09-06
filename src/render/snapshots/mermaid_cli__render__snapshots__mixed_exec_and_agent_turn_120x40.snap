@@ -2,7 +2,7 @@
 source: src/render/snapshots.rs
 expression: frame
 ---
- > run tests and audit in parallel                                                                      Today at 3:04am 
+ > run tests and audit in parallel                                                                                      
                                                                                                                         
  ● Bash(cargo test)                                                                                                     
                                                                                                                         
@@ -35,10 +35,10 @@ expression: frame
                                                                                                                         
                                                                                                                         
                                                                                                                         
- • Running tools... (esc to interrupt • ctrl+b to background • 9s • ↓ 0 tokens)                                         
+                                                                                                                        
+ ◐ Running tools... (esc to interrupt · ctrl+b to background · 9s · ↓ 0 tokens)                                         
    ◦ Audit deps  starting… · 9s                                                                                         
-────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
->                                                                                                                       
-────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-snapuser@snaphost:/project/demo                                                                             context: n/a
-mermaid v0.0.0 · safety: ask · reasoning: medium                                                             ollama/test
+╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ >                                                                                                                    │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+safety: ask · reasoning: medium                                                                              ollama/test

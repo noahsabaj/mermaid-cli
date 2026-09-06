@@ -2,7 +2,7 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::Style,
-    widgets::{Block, Borders, Paragraph, StatefulWidget, Widget},
+    widgets::{Block, BorderType, Borders, Padding, Paragraph, StatefulWidget, Widget},
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -111,7 +111,7 @@ impl<'a> StatefulWidget for InputWidget<'a> {
         // Continuation lines: "  text" (2 spaces to align with first line content)
         // Always show "> " prompt, even when input is empty
         let input_text = {
-            let width = area.width.saturating_sub(2) as usize; // Account for top/bottom borders
+            let width = area.width.saturating_sub(4) as usize; // inside the borders and padding
             wrap_input_with_prompt(self.input, width)
         };
 
@@ -128,22 +128,30 @@ impl<'a> StatefulWidget for InputWidget<'a> {
 
         let block = if self.showing_command_hints {
             Block::default()
-                .borders(Borders::TOP | Borders::BOTTOM)
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .padding(Padding::horizontal(1))
                 .border_style(Style::new().fg(border_color))
                 .title(" Enter Command ")
         } else if self.exit_armed {
             Block::default()
-                .borders(Borders::TOP | Borders::BOTTOM)
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .padding(Padding::horizontal(1))
                 .border_style(Style::new().fg(border_color))
                 .title(" press ctrl+c again to exit ")
         } else if self.rewind_armed {
             Block::default()
-                .borders(Borders::TOP | Borders::BOTTOM)
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .padding(Padding::horizontal(1))
                 .border_style(Style::new().fg(border_color))
                 .title(" esc again to rewind ")
         } else {
             Block::default()
-                .borders(Borders::TOP | Borders::BOTTOM)
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .padding(Padding::horizontal(1))
                 .border_style(Style::new().fg(border_color))
         };
 
