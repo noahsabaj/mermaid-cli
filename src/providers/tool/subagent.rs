@@ -414,8 +414,8 @@ impl ToolExecutor for SubagentTool {
                  ends with an [agent_id: …] trailer; pass that id back as `agent_id` to \
                  send a follow-up prompt to the same child with its context intact (the \
                  {MAX_CACHED_AGENTS} most recent children are kept). Breadth-capped at \
-                 {MAX_INFLIGHT} concurrent; subagents can't themselves spawn subagents \
-                 and never get GUI (screenshot/click/…) access. A child moved to the \
+                 {MAX_INFLIGHT} concurrent; subagents can't themselves spawn subagents. \
+                 A child moved to the \
                  background (the user detaches one with Ctrl+B) can be cancelled with \
                  action: \"kill\" plus its agent_id.",
             ),
@@ -1459,10 +1459,6 @@ fn apply_live_mcp(
 ///
 ///   - `agent` itself — subagents don't spawn subagents. This
 ///     exclusion is the guard (there is no depth counter).
-///   - All seven GUI / computer-use tools — the parent's
-///     `ComputerUseDriver` owns the screenshot coord registry; a
-///     subagent clicking would corrupt the parent's latest-capture
-///     pointer.
 ///
 /// The MCP proxy routes through the process-global `McpServerManager` —
 /// the child calls the SAME running servers as the parent (advertised via
@@ -1476,7 +1472,7 @@ fn build_child_registry(
     safety_mode: SafetyMode,
     web: &WebCapabilities,
 ) -> Arc<ToolRegistry> {
-    use super::{apply_patch, computer_use, exec, filesystem, mcp};
+    use super::{apply_patch, exec, filesystem, mcp};
     let allowed = |name: &str| tools.is_none_or(|t| t.iter().any(|x| x == name));
     let mut r = ToolRegistry::new();
     if allowed("read_file") {
@@ -1520,11 +1516,8 @@ fn build_child_registry(
             r.register(Arc::new(tool));
         }
     }
-    // NO computer_use::*  — GUI tools are parent-only.
     // NO subagent::SubagentTool — subagents can't spawn subagents; this
     // exclusion IS the guard (there is no depth counter).
-    // Silence unused-import if the above imports don't all resolve.
-    let _ = computer_use::probe;
     let _ = providers;
     note_absent_child_tools(&mut r, agent_type_name, tools, config, safety_mode, web);
     Arc::new(r)
@@ -1610,21 +1603,6 @@ fn note_absent_child_tools(
         "subagents cannot spawn subagents; do the work directly or report \
          what should be delegated back to the parent",
     );
-    for gui in [
-        "screenshot",
-        "click",
-        "type_text",
-        "press_key",
-        "scroll",
-        "mouse_move",
-        "list_windows",
-    ] {
-        r.note_unavailable(
-            gui,
-            "GUI / computer-use tools are parent-only; a subagent cannot drive \
-             the desktop",
-        );
-    }
 }
 
 /// Whether a headless child can get past policy for this web tool without an
@@ -2024,14 +2002,14 @@ mod tests {
         config.agents.types.insert(
             "bad-tool".to_string(),
             AgentTypeConfig {
-                tools: Some(vec!["screenshot".to_string()]),
+                tools: Some(vec!["not_a_tool".to_string()]),
                 ..AgentTypeConfig::default()
             },
         );
         assert!(
             resolve_agent_type(Some("bad-tool"), &config)
                 .unwrap_err()
-                .contains("screenshot")
+                .contains("not_a_tool")
         );
     }
 
@@ -2222,19 +2200,11 @@ mod tests {
     }
 
     #[test]
-    fn build_child_registry_excludes_gui_and_self() {
+    fn build_child_registry_excludes_self() {
         let config = mermaid_domain::Config::default();
         let providers = Arc::new(ProviderFactory::new(config.clone()));
         let web = WebCapabilities::resolve(&config.web);
         let r = build_child_registry(providers, "general", None, &config, SafetyMode::Ask, &web);
-        // GUI tools absent.
-        assert!(r.get("screenshot").is_none());
-        assert!(r.get("click").is_none());
-        assert!(r.get("type_text").is_none());
-        assert!(r.get("press_key").is_none());
-        assert!(r.get("scroll").is_none());
-        assert!(r.get("mouse_move").is_none());
-        assert!(r.get("list_windows").is_none());
         // Self absent — no recursion bootstrap.
         assert!(r.get("agent").is_none());
         // Core tools present.
@@ -2259,8 +2229,6 @@ mod tests {
         // Structural exclusions teach too.
         let agent = r.unavailable_reason("agent").expect("agent reason");
         assert!(agent.contains("cannot spawn subagents"), "{agent}");
-        let gui = r.unavailable_reason("screenshot").expect("gui reason");
-        assert!(gui.contains("parent-only"), "{gui}");
         // A name the registry never considered stays a plain unknown tool.
         assert!(r.unavailable_reason("not_a_tool").is_none());
         let outcome = r.unknown_tool_outcome("not_a_tool", "not_a_tool");

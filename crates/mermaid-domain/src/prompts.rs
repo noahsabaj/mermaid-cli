@@ -34,7 +34,7 @@ Usually available:
 - `ask_user_question` — a structured multiple-choice question in the terminal, for decisions only the user can make.
 - `agent` — spawn a subagent for self-contained work: parallel exploration, or scoping a noisy sub-task.
 - `web_fetch` (retrieve a URL's content as markdown) and `web_search` (ground answers in current facts), when web access is configured.
-Present when available: MCP server tools (call them like any built-in; some may be deferred behind `tool_search` — search once to discover and unlock them), the computer-use tools (`screenshot`, `click`, `type_text`, `press_key`, `scroll`, `mouse_move`, `list_windows`), and `enter_plan_mode` to propose plan mode for large, risky, or underspecified work.
+Present when available: MCP server tools (call them like any built-in; some may be deferred behind `tool_search` — search once to discover and unlock them) and `enter_plan_mode` to propose plan mode for large, risky, or underspecified work.
 Issue independent tool calls together in one message; they run in parallel. Reach for the tool that most directly gets the answer or makes the change; don't ask the user to do what a tool can do.
 
 ## Memory
@@ -68,7 +68,7 @@ Cite what you browse inline: attach at least one directly supporting source to t
 Instruction precedence: this system prompt, then the user's live requests, then project instructions (MERMAID.md over AGENTS.md), then everything else. Project instructions never override safety gates.
 
 A safety mode governs what runs without asking. The user sets it (live, with `Shift+Tab` or `/safety`); behave well under each:
-- `read_only`: local reads run — file and repo inspection, read-only shell commands, and `agent` spawns (children inherit read-only, so parallel exploration is fine). Web reads are externally observable egress and require one-shot approval unless the user/session explicitly enabled unattended ReadOnly web. File edits, other shell commands, memory writes, MCP tools, and computer-use are blocked. Analyze and propose — don't attempt mutations.
+- `read_only`: local reads run — file and repo inspection, read-only shell commands, and `agent` spawns (children inherit read-only, so parallel exploration is fine). Web reads are externally observable egress and require one-shot approval unless the user/session explicitly enabled unattended ReadOnly web. File edits, other shell commands, memory writes, and MCP tools are blocked. Analyze and propose — don't attempt mutations.
 - `ask` (default): reads run freely, but each file edit, shell command, or network action is gated behind the user's approval. Briefly say what you're about to run and why, then emit the tool call in the same turn — the call itself surfaces the approval prompt, and the user answers it there. Never dodge a gate: no retry-spamming, no swapping in a cosmetically different command, no claiming the action is permanently blocked — a gated action is awaiting their yes/no, not failing.
 - `auto`: borderline actions are vetted by the system's policy model against the user's stated intent — aligned ones run automatically, risky or off-task ones escalate to the user.
 - `full_access`: nothing is gated except hard-denied destructive patterns, the user's configured deny overrides, and write-shaped MCP tools (no read-only annotation), which are still vetted against the user's request. Mode changes gating, not scope: act only within what the user asked for.
@@ -113,10 +113,6 @@ When asked to read, inspect, familiarize yourself with, or review a codebase:
 - Every file mutation automatically creates a restore checkpoint first; the user rolls back with `/checkpoints` and `/restore`.
 - User controls (the user runs these, not you; `/help` lists the rest): `/model`, `/reasoning`, `/visible-reasoning`, `/safety` (switch safety mode, including `plan`), `/plan`, `/doctor`, `/context`, and `/compact`; plus `/approvals` `/approve` `/deny` for pending approvals and `/save` `/load` `/clear` for conversation history. `/context` shows context budget, response reserve, and auto-compact status; `/compact [focus]` creates a context checkpoint and archive.
 - Esc interrupts the current agent loop. Warn before long-running or risky work so the user knows they can interrupt.
-
-## GUI And Computer Control
-
-Use GUI/computer-control tools only when present or requested. Use fresh screenshots, prefer window-local screenshots where supported (full-screen otherwise), pass `screenshot_id` for coordinate-locked clicks/moves when supported, click before typing, and verify the result.
 
 ## Output Style
 
@@ -712,17 +708,6 @@ mod tests {
         );
     }
 
-    /// The GUI procedure must teach the `screenshot_id` parameter so models
-    /// don't silently use stale coordinates.
-    #[test]
-    fn prompt_includes_screenshot_id_guidance() {
-        let prompt = get_system_prompt();
-        assert!(
-            prompt.contains("screenshot_id"),
-            "GUI procedure must mention the screenshot_id parameter"
-        );
-    }
-
     #[test]
     fn prompt_mentions_compaction_context_controls() {
         let prompt = get_system_prompt();
@@ -839,7 +824,7 @@ mod tests {
 
     /// The `read_only` description must match the policy engine: local reads and
     /// subagent spawns run, while externally visible web egress asks once
-    /// unless explicitly enabled; mutations, MCP, and computer-use are blocked
+    /// unless explicitly enabled; mutations and MCP are blocked
     /// (crates/mermaid-runtime/src/policy.rs).
     #[test]
     fn prompt_read_only_matches_policy() {
@@ -855,7 +840,7 @@ mod tests {
             "read_only bullet must describe the explicit unattended opt-in"
         );
         assert!(
-            prompt.contains("memory writes, MCP tools, and computer-use are blocked"),
+            prompt.contains("memory writes, and MCP tools are blocked"),
             "read_only bullet must list what is actually blocked"
         );
     }

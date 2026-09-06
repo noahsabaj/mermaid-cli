@@ -921,8 +921,8 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                 // Show image indicators under user and assistant messages.
                 // User images come from clipboard paste (`Attachment`); assistant
                 // images come from tool executions that emitted `ProgressEvent::
-                // Artifact` during their run — screenshot captures, inline
-                // previews from computer-use, etc. Both land in `msg.images` as
+                // Artifact` during their run — an MCP tool's image content.
+                // Both land in `msg.images` as
                 // base64 strings and render the same way.
                 if matches!(msg.role, MessageRole::User | MessageRole::Assistant)
                     && let Some(ref images) = msg.images

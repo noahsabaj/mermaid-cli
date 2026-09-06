@@ -37,7 +37,7 @@ pub use model::{
 };
 pub use questions::QuestionBroker;
 pub use tasks::TaskBroker;
-pub use tool::{ToolExecutor, ToolRegistry, TuiMode};
+pub use tool::{ToolExecutor, ToolRegistry};
 
 #[cfg(test)]
 mod tests {

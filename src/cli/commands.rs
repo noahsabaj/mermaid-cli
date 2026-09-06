@@ -20,7 +20,7 @@ use crate::{
     session::ConversationManager,
 };
 
-use super::{Commands, GitHost, OutputFormat, PairCommand, PluginCommand, PrCommand, QaCommand};
+use super::{Commands, OutputFormat, PairCommand, PluginCommand, QaCommand};
 
 /// Handle CLI subcommands
 /// Returns Ok(true) if the command was handled and we should exit
@@ -60,10 +60,6 @@ pub async fn handle_command(
         },
         Commands::ModelInfo { model } => {
             show_model_info(model, config).await?;
-            Ok(true)
-        },
-        Commands::Version => {
-            show_version();
             Ok(true)
         },
         Commands::Update { check, force } => {
@@ -204,10 +200,6 @@ pub async fn handle_command(
             crate::mcp::remove_server(name).await?;
             Ok(true)
         },
-        Commands::Pr { command } => {
-            handle_pr(command)?;
-            Ok(true)
-        },
         Commands::Mcp => {
             show_mcp_servers();
             Ok(true)
@@ -227,7 +219,6 @@ pub async fn handle_command(
             let _ = crate::ollama::setup_cloud_interactive();
             Ok(true)
         },
-        Commands::Chat => Ok(false),       // Continue to chat interface
         Commands::Run { .. } => Ok(false), // Handled by main.rs
     }
 }
@@ -2333,12 +2324,6 @@ pub async fn list_models(config: &Config) -> Result<()> {
     Ok(())
 }
 
-/// Show version information
-pub fn show_version() {
-    println!("Mermaid v{}", env!("CARGO_PKG_VERSION"));
-    println!("   An open-source, model-agnostic AI pair programmer");
-}
-
 const RELEASE_LATEST_API: &str =
     "https://api.github.com/repos/noahsabaj/mermaid-cli/releases/latest";
 const INSTALL_SH_URL: &str = "https://noahsabaj.github.io/mermaid-cli/install.sh";
@@ -2743,199 +2728,6 @@ async fn show_status(config: &Config) -> Result<()> {
     Ok(())
 }
 
-/// Dispatch `mermaid pr` subcommands.
-fn handle_pr(command: &PrCommand) -> Result<()> {
-    match command {
-        PrCommand::Create {
-            title,
-            body,
-            summary,
-            base,
-            draft,
-            web,
-            provider,
-        } => create_pr(CreatePrArgs {
-            title: title.as_deref(),
-            body: body.as_deref(),
-            summary: summary.as_deref(),
-            base: base.as_deref(),
-            draft: *draft,
-            web: *web,
-            provider: *provider,
-        }),
-    }
-}
-
-struct CreatePrArgs<'a> {
-    title: Option<&'a str>,
-    body: Option<&'a str>,
-    summary: Option<&'a Path>,
-    base: Option<&'a str>,
-    draft: bool,
-    web: bool,
-    provider: Option<GitHost>,
-}
-
-/// Create a PR/MR by driving the host's official CLI (`gh`/`glab`), reusing
-/// its authentication. We wrap the platform CLI rather than reimplementing
-/// per-provider REST clients (issue #2): it reuses existing `gh auth` /
-/// `glab auth`, handles each host's quirks, and keeps the surface tiny.
-fn create_pr(args: CreatePrArgs) -> Result<()> {
-    // Body precedence: --summary <file> wins over inline --body.
-    let body = match args.summary {
-        Some(path) => Some(
-            std::fs::read_to_string(path)
-                .with_context(|| format!("failed to read summary file {}", path.display()))?,
-        ),
-        None => args.body.map(str::to_string),
-    };
-
-    let host = match args.provider {
-        Some(host) => host,
-        None => detect_git_host()?,
-    };
-
-    let (cli, install_hint) = match host {
-        GitHost::Github => (
-            "gh",
-            "Install the GitHub CLI (https://cli.github.com) and run `gh auth login`.",
-        ),
-        GitHost::Gitlab => (
-            "glab",
-            "Install the GitLab CLI (https://gitlab.com/gitlab-org/cli) and run `glab auth login`.",
-        ),
-    };
-    if which::which(cli).is_err() {
-        anyhow::bail!("`{cli}` was not found on your PATH. {install_hint}");
-    }
-
-    let argv = build_pr_argv(
-        host,
-        args.title,
-        body.as_deref(),
-        args.base,
-        args.draft,
-        args.web,
-    );
-
-    println!("Creating pull/merge request via `{cli}`…");
-    let status = std::process::Command::new(cli)
-        .args(&argv)
-        .status()
-        .with_context(|| format!("failed to run `{cli}`"))?;
-    anyhow::ensure!(status.success(), "`{cli}` exited unsuccessfully ({status})");
-    Ok(())
-}
-
-/// Auto-detect the host: prefer the `origin` remote URL, else fall back to
-/// whichever provider CLI is installed.
-fn detect_git_host() -> Result<GitHost> {
-    if let Some(host) = git_origin_host() {
-        return Ok(host);
-    }
-    if which::which("gh").is_ok() {
-        return Ok(GitHost::Github);
-    }
-    if which::which("glab").is_ok() {
-        return Ok(GitHost::Gitlab);
-    }
-    anyhow::bail!(
-        "could not detect a Git host from the `origin` remote. Pass `--provider github|gitlab` and install the matching CLI (`gh`/`glab`)."
-    )
-}
-
-fn git_origin_host() -> Option<GitHost> {
-    let output = std::process::Command::new("git")
-        .args(["config", "--get", "remote.origin.url"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    host_from_remote_url(String::from_utf8_lossy(&output.stdout).trim())
-}
-
-fn host_from_remote_url(url: &str) -> Option<GitHost> {
-    let lower = url.to_ascii_lowercase();
-    if lower.contains("github.com") {
-        Some(GitHost::Github)
-    } else if lower.contains("gitlab") {
-        Some(GitHost::Gitlab)
-    } else {
-        None
-    }
-}
-
-/// Build the argv passed to the host CLI. Pure (no I/O), so it's unit-tested.
-fn build_pr_argv(
-    host: GitHost,
-    title: Option<&str>,
-    body: Option<&str>,
-    base: Option<&str>,
-    draft: bool,
-    web: bool,
-) -> Vec<String> {
-    let s = |v: &str| v.to_string();
-    let has_content = title.is_some() || body.is_some();
-    let mut argv = Vec::new();
-    match host {
-        GitHost::Github => {
-            argv.push(s("pr"));
-            argv.push(s("create"));
-            if web {
-                argv.push(s("--web"));
-            }
-            if draft {
-                argv.push(s("--draft"));
-            }
-            if let Some(title) = title {
-                argv.push(s("--title"));
-                argv.push(s(title));
-            }
-            if let Some(body) = body {
-                argv.push(s("--body"));
-                argv.push(s(body));
-            }
-            // No explicit content (and not the web form) → let gh fill the
-            // title/body from the branch's commits rather than blocking on an
-            // interactive prompt.
-            if !has_content && !web {
-                argv.push(s("--fill"));
-            }
-            if let Some(base) = base {
-                argv.push(s("--base"));
-                argv.push(s(base));
-            }
-        },
-        GitHost::Gitlab => {
-            argv.push(s("mr"));
-            argv.push(s("create"));
-            if web {
-                argv.push(s("--web"));
-            }
-            if draft {
-                argv.push(s("--draft"));
-            }
-            if let Some(title) = title {
-                argv.push(s("--title"));
-                argv.push(s(title));
-            }
-            if let Some(body) = body {
-                argv.push(s("--description"));
-                argv.push(s(body));
-            }
-            if !has_content && !web {
-                argv.push(s("--fill"));
-            }
-            if let Some(base) = base {
-                argv.push(s("--target-branch"));
-                argv.push(s(base));
-            }
-        },
-    }
-    argv
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3095,67 +2887,6 @@ mod tests {
         assert_eq!(parse_semver("0.10"), Some((0, 10, 0)));
         // Garbage never falsely reports up-to-date unless identical.
         assert!(!version_at_least("0.10.2", "not-a-version"));
-    }
-
-    #[test]
-    fn host_from_remote_url_detects_provider() {
-        assert_eq!(
-            host_from_remote_url("https://github.com/foo/bar.git"),
-            Some(GitHost::Github)
-        );
-        assert_eq!(
-            host_from_remote_url("git@github.com:foo/bar.git"),
-            Some(GitHost::Github)
-        );
-        assert_eq!(
-            host_from_remote_url("https://gitlab.com/foo/bar.git"),
-            Some(GitHost::Gitlab)
-        );
-        assert_eq!(
-            host_from_remote_url("git@gitlab.example.com:foo/bar.git"),
-            Some(GitHost::Gitlab)
-        );
-        assert_eq!(host_from_remote_url("https://bitbucket.org/foo/bar"), None);
-    }
-
-    #[test]
-    fn build_pr_argv_github_with_content() {
-        let argv = build_pr_argv(
-            GitHost::Github,
-            Some("T"),
-            Some("B"),
-            Some("main"),
-            true,
-            false,
-        );
-        assert_eq!(
-            argv,
-            vec![
-                "pr", "create", "--draft", "--title", "T", "--body", "B", "--base", "main"
-            ]
-        );
-    }
-
-    #[test]
-    fn build_pr_argv_github_fills_without_content() {
-        let argv = build_pr_argv(GitHost::Github, None, None, None, false, false);
-        assert!(argv.contains(&"--fill".to_string()));
-        assert!(!argv.contains(&"--title".to_string()));
-    }
-
-    #[test]
-    fn build_pr_argv_web_skips_fill() {
-        let argv = build_pr_argv(GitHost::Github, None, None, None, false, true);
-        assert!(argv.contains(&"--web".to_string()));
-        assert!(!argv.contains(&"--fill".to_string()));
-    }
-
-    #[test]
-    fn build_pr_argv_gitlab_uses_mr_and_target_branch() {
-        let argv = build_pr_argv(GitHost::Gitlab, Some("T"), None, Some("main"), false, false);
-        assert_eq!(&argv[0..2], &["mr", "create"]);
-        assert!(argv.windows(2).any(|w| w == ["--target-branch", "main"]));
-        assert!(argv.contains(&"--title".to_string()));
     }
 
     #[test]

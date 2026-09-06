@@ -19,25 +19,6 @@ Inspect an existing `web_fetch` snapshot with Unicode-caseless `pattern` matchin
 Backend selection, redirect and provenance rules, and the transfer budgets are in
 [configuration.md](configuration.md#web-tool-backends).
 
-## Computer use
-
-Computer-use tools are advertised only in interactive TUI sessions when a usable GUI backend is detected.
-
-| Platform | Screenshot | Click / type / scroll | Clipboard image paste |
-| --- | --- | --- | --- |
-| Linux / X11 | `scrot` | `xdotool` | `xclip` |
-| Linux / Wayland | `grim` | `ydotool`, `wtype` | `wl-clipboard` |
-| macOS | `screencapture` | not yet ported | `pngpaste` / `osascript` |
-| Windows | not wired yet | not wired yet | PowerShell |
-
-```bash
-sudo apt install scrot xdotool xclip                 # X11
-sudo apt install grim ydotool wtype wl-clipboard     # Wayland
-sudo apt install imagemagick                         # optional: screenshot downscaling
-```
-
-See `src/providers/tool/computer_use/` for the implementation matrix.
-
 ## Inline approvals
 
 In `ask` mode — and on an `auto` escalation — a gated action pauses and prompts inline

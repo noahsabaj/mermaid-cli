@@ -174,11 +174,7 @@ pub async fn run_interactive_with(
             .push_back(Msg::TransientStatus { text: warning });
     }
     let providers = std::sync::Arc::new(crate::providers::ProviderFactory::new(config.clone()));
-    let tools = ToolRegistry::build(
-        &config,
-        crate::providers::TuiMode::Interactive,
-        providers.clone(),
-    );
+    let tools = ToolRegistry::build(&config, providers.clone());
     if let Some(capabilities) = tools.web_capabilities()
         && let Some(text) = web_capabilities_notice(&config, capabilities)
     {

@@ -2,8 +2,8 @@
 //! workspace, touch the network, drive the desktop, or spawn work.
 //!
 //! Before v0.7.x the `PolicyEngine` was only consulted by `execute_command`
-//! and the filesystem mutators; `web_*`, `mcp`, `subagent`, and the
-//! computer-use tools ran their bodies with no policy check at all, so
+//! and the filesystem mutators; `web_*`, `mcp`, and `subagent` ran their
+//! bodies with no policy check at all, so
 //! `SafetyMode::ReadOnly` silently failed to block them. This module is the
 //! single choke point: every dangerous tool builds an [`ActionRequest`] and
 //! calls [`gate`] before acting.
@@ -14,7 +14,7 @@
 //!   escalated Auto-mode `Classify`) decision creates a checkpoint + an
 //!   approval row and BLOCKS, returning an "approval required" outcome. The
 //!   action is later re-run out-of-band by [`mermaid_runtime::approve_and_replay`].
-//! - **Non-replayable tools** (`web_*`, `mcp`, `subagent`, computer-use):
+//! - **Non-replayable tools** (`web_*`, `mcp`, `subagent`):
 //!   there is no checkpoint/replay path, so an `Ask` decision resolves
 //!   inline when an approval broker is bound and otherwise fails closed
 //!   unless the run opted in via `--allow-untrusted-tools`. `ReadOnly` denies
@@ -51,8 +51,8 @@ pub enum Gate {
     Block(ToolOutcome),
 }
 
-/// Convenience for non-replayable tools (`web_*`, `mcp`, `subagent`,
-/// computer-use): consult the policy and return `Some(outcome)` when the
+/// Convenience for non-replayable tools (`web_*`, `mcp`, `subagent`):
+/// consult the policy and return `Some(outcome)` when the
 /// action is blocked (e.g. `ReadOnly`/`Deny` override), or `None` to proceed.
 /// These tools have no checkpoint/replay path: an `Ask` decision resolves
 /// inline when an approval broker is bound and otherwise fails closed unless
@@ -297,7 +297,7 @@ pub async fn gate(
                 // old non-replayable bypass).
                 inline_decision(ctx, broker, &request, risk, None).await
             } else if !replayable {
-                // Headless non-replayable (web/mcp/subagent/computer_use): no
+                // Headless non-replayable (web/mcp/subagent): no
                 // checkpoint/replay path, so an Ask can't be satisfied
                 // out-of-band. Fail closed by default — only proceed when the
                 // run explicitly opted in via `--allow-untrusted-tools`.
@@ -618,8 +618,8 @@ fn format_approval_body(request: &ActionRequest, classifier_reason: Option<&str>
     let modal_detail = redacted_detail.as_ref().or(request.command.as_ref());
     let mut body = if let Some(cmd) = modal_detail {
         // A prompt sigil reads as "shell command"; only use it for actual
-        // shell categories. Computer-use / MCP details (`type_text "…"`,
-        // `mcp s__t(…)`) render verbatim so the prompt isn't misleading
+        // shell categories. MCP details (`mcp s__t(…)`) render verbatim
+        // so the prompt isn't misleading
         // (#30, #31). The sigil is the HOST shell's (`$ ` / `PS> `): telling
         // the reader they are approving a POSIX command when PowerShell will
         // run it is the same lie the `Bash(...)` transcript label told.
@@ -802,7 +802,7 @@ mod tests {
 
     #[tokio::test]
     async fn headless_ask_blocks_non_replayable_unless_opted_in() {
-        // #3: web/mcp/subagent/computer_use on an Ask decision with no approval
+        // #3: web/mcp/subagent on an Ask decision with no approval
         // UI is blocked by default, allowed only with the opt-in flag.
         let req = || ActionRequest::new("web_fetch", ToolCategory::Web, "web_fetch https://x");
 
@@ -860,7 +860,6 @@ mod tests {
         let ctx = ctx(SafetyMode::ReadOnly);
         for (tool, cat) in [
             ("mcp_proxy", ToolCategory::Mcp),
-            ("click", ToolCategory::ComputerUse),
             ("memory", ToolCategory::Memory),
         ] {
             assert!(

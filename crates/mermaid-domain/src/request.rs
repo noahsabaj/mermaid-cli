@@ -1,7 +1,7 @@
 //! Building the outgoing `ChatRequest` from `State`.
 //!
 //! `build_chat_request` plus the four helpers only it uses: the system prompt,
-//! the plan-capabilities line, stale-screenshot eviction, and neutralising
+//! the plan-capabilities line, stale tool-image eviction, and neutralising
 //! superseded policy denials so a `grep` hit that once tripped read-only mode
 //! does not keep tripping it.
 
@@ -108,7 +108,7 @@ pub fn build_chat_request(state: &State) -> ChatRequest {
     // over the CLONED request messages (never state.session): a session persisted
     // or hand-edited mid-tool would otherwise send a dangling tool_use and hit an
     // unrecoverable 400.
-    let mut messages = evict_stale_screenshots(
+    let mut messages = evict_stale_tool_images(
         state
             .session
             .messages()
@@ -293,20 +293,20 @@ pub(crate) fn plan_capabilities_line(perms: &crate::PlanPermissions) -> String {
     line
 }
 
-/// Walk the message log and retain only the `MAX_RETAINED_SCREENSHOTS`
+/// Walk the message log and retain only the `MAX_RETAINED_TOOL_IMAGES`
 /// most recent images across the whole conversation. Older messages
 /// that had images get `images: None` AND an appended
-/// `[Image elided — superseded by newer screenshot]` marker in
+/// `[Image elided — superseded by newer image]` marker in
 /// `content`, so the model still knows something visual was there.
 ///
-/// Why: an agentic GUI loop can generate 10+ screenshots in a single
-/// session. At 2MB/PNG that's 20MB uncompressed in every outgoing
-/// request body — request bloat compounds across turns and slows the
-/// model. The on-screen chat history still shows all images (this
-/// transformation is on the CLONED Vec passed to the provider); only
-/// the wire payload is slimmed.
-pub(crate) fn evict_stale_screenshots(mut messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
-    use mermaid_model::constants::MAX_RETAINED_SCREENSHOTS;
+/// Why: a loop over an image-returning MCP tool (a browser or renderer)
+/// can produce 10+ images in a single session. At 2MB/PNG that's 20MB
+/// uncompressed in every outgoing request body — request bloat compounds
+/// across turns and slows the model. The on-screen chat history still
+/// shows all images (this transformation is on the CLONED Vec passed to
+/// the provider); only the wire payload is slimmed.
+pub(crate) fn evict_stale_tool_images(mut messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
+    use mermaid_model::constants::MAX_RETAINED_TOOL_IMAGES;
     let mut seen = 0usize;
     for msg in messages.iter_mut().rev() {
         let Some(imgs) = msg.images.as_ref() else {
@@ -315,7 +315,7 @@ pub(crate) fn evict_stale_screenshots(mut messages: Vec<ChatMessage>) -> Vec<Cha
         if imgs.is_empty() {
             continue;
         }
-        if seen < MAX_RETAINED_SCREENSHOTS {
+        if seen < MAX_RETAINED_TOOL_IMAGES {
             seen += imgs.len();
             continue;
         }
@@ -323,9 +323,9 @@ pub(crate) fn evict_stale_screenshots(mut messages: Vec<ChatMessage>) -> Vec<Cha
         let elided_count = imgs.len();
         msg.images = None;
         let marker = if elided_count == 1 {
-            "\n[Image elided — superseded by newer screenshot]"
+            "\n[Image elided — superseded by newer image]"
         } else {
-            "\n[Images elided — superseded by newer screenshots]"
+            "\n[Images elided — superseded by newer images]"
         };
         if !msg.content.ends_with(marker) {
             msg.content.push_str(marker);
@@ -351,7 +351,7 @@ pub(crate) fn evict_stale_screenshots(mut messages: Vec<ChatMessage>) -> Vec<Cha
 /// - it is a no-op in `read_only` (the denials still apply) and self-corrects if
 ///   the user toggles back down.
 ///
-/// Runs on the CLONED request vec (like [`evict_stale_screenshots`]); the
+/// Runs on the CLONED request vec (like [`evict_stale_tool_images`]); the
 /// on-screen transcript is untouched, and only `content` changes so the
 /// `tool_use/tool_result` pairing is preserved.
 pub(crate) fn neutralize_superseded_policy_denials(

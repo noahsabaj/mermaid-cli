@@ -139,11 +139,7 @@ pub async fn run_non_interactive_with(
     let tools = if opts.no_execute {
         std::sync::Arc::new(ToolRegistry::new())
     } else {
-        ToolRegistry::build(
-            &config,
-            crate::providers::TuiMode::Headless,
-            providers.clone(),
-        )
+        ToolRegistry::build(&config, providers.clone())
     };
     let (mut runner, mut msg_rx) =
         EffectRunner::pair_from_with_task(cwd.clone(), providers, tools, opts.task_id.clone());

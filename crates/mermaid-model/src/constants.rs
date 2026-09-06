@@ -182,54 +182,12 @@ pub const MAX_WEB_SEARCH_CONCURRENCY: usize = 4;
 /// Maximum entries in the markdown parse cache before eviction
 pub const MARKDOWN_CACHE_MAX_ENTRIES: usize = 200;
 
-// Computer Use
-/// Maximum width for screenshots sent to models (pixels)
-pub const SCREENSHOT_MAX_WIDTH: u32 = 1280;
-
-// Computer-use timing — empirically tuned for typical GUI response.
-// Slow systems (high-load WMs, remote X displays) may need higher values;
-// the right place to make these tunable later is via env vars on
-// `app::Config`, alongside the rest of the configurable surface.
-/// Delay after `xdotool windowactivate --sync` so the window manager has
-/// time to actually move focus before the next action.
-pub const WINDOW_FOCUS_DELAY_MS: u64 = 200;
-/// Delay after a click for the window manager to process focus + UI update,
-/// before we take the auto-screenshot the model uses to decide its next move.
-pub const POST_CLICK_DELAY_MS: u64 = 500;
-/// Delay after typing for the target application to settle (validate input,
-/// re-render) before the auto-screenshot.
-pub const POST_TYPE_DELAY_MS: u64 = 500;
-/// Delay after a key press / shortcut for the target app to react before
-/// the auto-screenshot.
-pub const POST_KEY_DELAY_MS: u64 = 500;
-/// Delay between simulated keystrokes when typing text. The previous
-/// 12ms default lost characters on slow Electron / web targets; 25ms
-/// is a safer default that still types ~40 chars/sec.
-pub const TYPE_KEY_DELAY_MS: u64 = 25;
-/// Maximum scroll wheel ticks in a single `scroll` call. Clamps the
-/// model's `amount` parameter so a runaway model can't request a
-/// million ticks (would exceed `ARG_MAX` building xdotool argv).
-pub const MAX_SCROLL_AMOUNT: i32 = 100;
-/// Capacity of the per-screenshot metadata ring buffer in
-/// `computer_use`. Each call to `screenshot` registers metadata under
-/// a new id; older entries are LRU-evicted past this cap. Sized to
-/// cover any realistic agentic loop without unbounded growth.
-pub const SCREENSHOT_REGISTRY_CAPACITY: usize = 16;
-/// Maximum number of screenshot images retained in the per-call
-/// message history sent to the model. Older messages keep their text
-/// content (with a placeholder noting where the image was elided) so
-/// the model knows what was dropped from context.
-pub const MAX_RETAINED_SCREENSHOTS: usize = 3;
-/// Per-command wall-clock cap for the synchronous geometry/probe helpers
-/// (xdotool getactivewindow/getwindowgeometry, xrandr --query, the `list_windows`
-/// search). These return in tens of ms; a wedged display (dead X socket,
-/// detached SSH) must not hang the agent loop (#97).
-pub const COMPUTER_USE_CMD_TIMEOUT_SECS: u64 = 5;
-/// Wall-clock cap for the screenshot downscale step (ImageMagick `convert` /
-/// `ffmpeg`). Larger than the probe cap — re-encoding a 4K PNG is legitimately
-/// slower than a geometry query. On timeout we fall through to the next encoder,
-/// then to sending the full-resolution capture (#97).
-pub const SCREENSHOT_DOWNSCALE_TIMEOUT_SECS: u64 = 15;
+// Tool-returned images
+/// Maximum number of tool-returned images (MCP tools can answer with image
+/// content) retained in the per-call message history sent to the model.
+/// Older messages keep their text content, with a placeholder noting where
+/// the image was elided, so the model knows what was dropped from context.
+pub const MAX_RETAINED_TOOL_IMAGES: usize = 3;
 
 // Project instructions (Step 5h)
 /// Maximum bytes loaded from project instruction files before truncation. ~10k

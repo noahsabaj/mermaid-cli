@@ -36,7 +36,7 @@ structural:
 
 - Only these top-level sections are honored: `default_model`, `model_aliases`,
   `reasoning_per_model`, `ollama`, `ollama_num_ctx_per_model`, `compaction`,
-  `computer_use`, `memory`, `non_interactive`, `ui`, and a `safety` subset. Anything else —
+  `memory`, `ui`, and a `safety` subset. Anything else —
   including `web` (selects egress routing), `mcp_servers` (spawns commands), `providers`
   (redirects traffic/credentials), `agents`, and `daemon` — is ignored with a warning.
   `ollama.host`/`port` are also denied inside the otherwise-allowed `ollama` table.
@@ -126,15 +126,6 @@ checkpoint_on_mutation = true
 # variable (any non-empty value) disables colors entirely, regardless of
 # this value.
 theme = "dark"
-
-[non_interactive]
-# Run behavior is controlled by CLI flags:
-#   mermaid run "prompt" --format json --max-tokens 4096 --no-execute
-# These fields remain in the schema for compatibility but are not the
-# source of truth for `mermaid run`.
-output_format = "text"
-max_tokens = 0        # 0 = auto (model-scaled); positive = hard cap
-no_execute = false
 
 # Durable agent memory (the `memory` tool, the always-loaded index, and
 # /remember & friends). On by default.

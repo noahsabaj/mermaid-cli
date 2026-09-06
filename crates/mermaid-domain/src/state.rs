@@ -1615,7 +1615,6 @@ pub enum ApprovalKind {
     Web,
     Mcp,
     Subagent,
-    ComputerUse,
     Classify,
 }
 
@@ -1628,7 +1627,6 @@ impl From<mermaid_model::safety::ToolCategory> for ApprovalKind {
             C::Web | C::Network | C::ExternalDirectory => Self::Web,
             C::Mcp => Self::Mcp,
             C::Subagent => Self::Subagent,
-            C::ComputerUse => Self::ComputerUse,
             // `Read` and `Memory` resolve to Allow/Deny in `decide`, so neither
             // reaches an approval prompt; the arm exists to keep the match
             // total. The label is a poor fit and would read wrong if one ever

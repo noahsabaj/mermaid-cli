@@ -1,11 +1,10 @@
 # Mermaid
 
-An open-source AI coding assistant for the terminal. Multi-provider — Ollama (local), Anthropic, Gemini, Meta, OpenAI, Groq, OpenRouter, and any OpenAI-compatible endpoint — with native tool calling, subagents, computer use, and a clean TUI.
+An open-source AI coding assistant for the terminal. Multi-provider — Ollama (local), Anthropic, Gemini, Meta, OpenAI, Groq, OpenRouter, and any OpenAI-compatible endpoint — with native tool calling, subagents, and a clean TUI.
 
 ## Features
 
 - **Native tool calling** — read, write, edit, delete, run commands, search the web, spawn subagents, call MCP tools
-- **Computer use** — screenshot, click, type, press keys, scroll, move the mouse, list windows
 - **Subagents** — spawn parallel autonomous agents; built-in `general` and read-only `explore` types, per-call model override, continuation handles
 - **Worktree isolation** — give a writing subagent its own git checkout, seeded with your uncommitted state. Its changes land as one patch, serialized against other children, so parallel writers report a conflict instead of interleaving
 - **Safety modes** — `plan`/`read_only`/`ask`/`auto`/`full_access`, cycled live with Shift+Tab; `auto` is classifier-backed, and gated actions prompt inline rather than erroring out
@@ -89,7 +88,6 @@ mermaid list                               # List available models across provid
 mermaid doctor                             # First-run readiness check
 mermaid init                               # Create default config file
 mermaid add <name>                         # Add an MCP server (e.g., context7, git)
-mermaid pr create                          # Open a PR/MR from the current branch (wraps gh/glab)
 
 mermaid run "fix the tests"                # Non-interactive mode
 mermaid run "explain main.rs" -f json      # JSON output (or -f ndjson to stream events)
@@ -134,8 +132,6 @@ The model calls these autonomously:
 | `web_search` | Search the web (managed local SearXNG by default) |
 | `web_fetch` | Fetch a URL into a bounded session snapshot (in-process, no key) |
 | `agent` | Spawn an autonomous subagent for parallel tasks |
-
-Plus seven computer-use tools — `screenshot`, `list_windows`, `click`, `type_text`, `press_key`, `scroll`, `mouse_move` — advertised only in interactive sessions with a usable GUI backend. Linux/X11 and Linux/Wayland are full-control; macOS does screenshots and clipboard paste but not click/type/scroll; Windows is not wired yet. Helpers and the full matrix: [docs/tools.md](docs/tools.md).
 
 MCP servers contribute tools under the `mcp__<server>__<tool>` prefix, **deferred** by default: one `tool_search` tool promotes matches for the rest of the session, so unpromoted schemas never count against `/context`. Opt out with `mcp_defer_tools = false`.
 
@@ -200,7 +196,7 @@ Mermaid's runtime is an Elm/MVU pattern: one pure reducer (`fn update(State, Msg
 
 - [docs/cli-reference.md](docs/cli-reference.md) — every flag, shortcut, and slash command
 - [docs/configuration.md](docs/configuration.md) — full config schema, layering, providers, web backends
-- [docs/tools.md](docs/tools.md) — MCP naming and deferral, web tools, computer-use backends
+- [docs/tools.md](docs/tools.md) — MCP naming and deferral, web tools, inline approvals
 - [docs/sandbox.md](docs/sandbox.md) — OS confinement, per platform
 - [docs/plugins.md](docs/plugins.md) — skills, hooks, and plugin bundles
 - [docs/runtime.md](docs/runtime.md) — the optional `mermaidd` service, logging, diagnostics

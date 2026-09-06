@@ -49,7 +49,6 @@ mermaid --sandbox run "refactor this"           # Also confine writes to the pro
 mermaid add <name>                              # Add an MCP server (e.g., context7, git)
 mermaid remove <name>                           # Remove a configured MCP server
 mermaid mcp                                     # List configured MCP servers
-mermaid pr create                               # Open a PR/MR from the current branch (wraps gh/glab)
 ```
 
 `mermaid tasks`, `mermaid processes`, `mermaid plugin`, and the other durable-runtime verbs are
@@ -91,6 +90,20 @@ clipboard shapes work on every backend: a raster copy (screenshot tools, "Copy i
 encoded blob with no raster form (GIMP, Figma — `PNG` with no `CF_BITMAP`), and a file reference
 from a file manager's Copy (Explorer / Finder / Nautilus). File-reference pastes accept
 png/jpeg/gif/webp/bmp/tiff up to 32 MB.
+
+The paste reads the clipboard through the platform's own helper:
+
+| Platform | Helper |
+| --- | --- |
+| Linux / X11 | `xclip` |
+| Linux / Wayland | `wl-clipboard` (`wl-paste`) |
+| macOS | `pngpaste` / `osascript` |
+| Windows | PowerShell |
+
+```bash
+sudo apt install xclip           # X11
+sudo apt install wl-clipboard    # Wayland
+```
 
 ### @-mentions
 

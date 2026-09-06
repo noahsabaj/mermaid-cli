@@ -185,10 +185,6 @@ pub enum ToolMetadata {
         #[serde(default)]
         denied_by_sandbox: bool,
     },
-    ComputerUse {
-        action: String,
-        params: Value,
-    },
     Mcp {
         server: String,
         tool: String,

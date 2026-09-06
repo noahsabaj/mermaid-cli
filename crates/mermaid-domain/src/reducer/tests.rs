@@ -631,10 +631,10 @@ fn help_text_lists_keyboard_shortcuts() {
 }
 
 #[test]
-fn evict_stale_screenshots_retains_most_recent_and_elides_rest() {
-    use mermaid_model::constants::MAX_RETAINED_SCREENSHOTS;
+fn evict_stale_tool_images_retains_most_recent_and_elides_rest() {
+    use mermaid_model::constants::MAX_RETAINED_TOOL_IMAGES;
     let mut msgs = Vec::new();
-    for i in 0..(MAX_RETAINED_SCREENSHOTS + 3) {
+    for i in 0..(MAX_RETAINED_TOOL_IMAGES + 3) {
         msgs.push(ChatMessage {
             role: MessageRole::Assistant,
             content: format!("turn {i}"),
@@ -651,13 +651,13 @@ fn evict_stale_screenshots_retains_most_recent_and_elides_rest() {
             provider_continuation: None,
         });
     }
-    let out = crate::request::evict_stale_screenshots(msgs);
-    // Last MAX_RETAINED_SCREENSHOTS entries still carry images.
-    for m in out.iter().rev().take(MAX_RETAINED_SCREENSHOTS) {
+    let out = crate::request::evict_stale_tool_images(msgs);
+    // Last MAX_RETAINED_TOOL_IMAGES entries still carry images.
+    for m in out.iter().rev().take(MAX_RETAINED_TOOL_IMAGES) {
         assert!(m.images.is_some(), "most-recent images must survive");
     }
     // Everything before the cap is elided.
-    for m in out.iter().rev().skip(MAX_RETAINED_SCREENSHOTS) {
+    for m in out.iter().rev().skip(MAX_RETAINED_TOOL_IMAGES) {
         assert!(m.images.is_none(), "older images must be elided");
         assert!(
             m.content.contains("elided"),
@@ -667,8 +667,8 @@ fn evict_stale_screenshots_retains_most_recent_and_elides_rest() {
 }
 
 #[test]
-fn evict_stale_screenshots_preserves_messages_without_images() {
-    use mermaid_model::constants::MAX_RETAINED_SCREENSHOTS;
+fn evict_stale_tool_images_preserves_messages_without_images() {
+    use mermaid_model::constants::MAX_RETAINED_TOOL_IMAGES;
     // 5 text-only + 2 with images (under the cap) — nothing should
     // be elided.
     let mut msgs = Vec::new();
@@ -706,8 +706,8 @@ fn evict_stale_screenshots_preserves_messages_without_images() {
             provider_continuation: None,
         });
     }
-    const { assert!(2 < MAX_RETAINED_SCREENSHOTS, "test premise") };
-    let out = crate::request::evict_stale_screenshots(msgs);
+    const { assert!(2 < MAX_RETAINED_TOOL_IMAGES, "test premise") };
+    let out = crate::request::evict_stale_tool_images(msgs);
     // All 7 messages unchanged.
     let with_images = out.iter().filter(|m| m.images.is_some()).count();
     assert_eq!(with_images, 2);

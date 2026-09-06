@@ -534,7 +534,6 @@ fn tool_name(detail: &ToolMetadata) -> String {
         ToolMetadata::WebSearch { .. } => "web_search".to_string(),
         ToolMetadata::WebFetch { .. } => "web_fetch".to_string(),
         ToolMetadata::ExecuteCommand { .. } => "execute_command".to_string(),
-        ToolMetadata::ComputerUse { .. } => "computer_use".to_string(),
         ToolMetadata::Mcp { server, tool } => format!("{server}/{tool}"),
         ToolMetadata::Subagent { .. } => "agent".to_string(),
         ToolMetadata::Tasks { action, .. } => format!("task_{action}"),
