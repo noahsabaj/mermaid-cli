@@ -823,19 +823,28 @@ mod tests {
     /// With write confinement alone the network stays reachable. The probe is
     /// `curl.exe` from System32 (readable by every AppContainer; the runner's
     /// Python is not, and exits STATUS_DLL_NOT_FOUND before running a line),
-    /// with stderr captured into the granted temp directory. A connect may
-    /// fail for lack of a route on the runner; it must not fail with
-    /// `Permission denied` / `WSAEACCES` (10013), the capability-omission
-    /// signature.
+    /// with stderr captured into the granted directory. That directory is a
+    /// fresh one under temp, not temp itself: grants restore the previous DACL
+    /// on drop, so two tests granting the same directory concurrently wipe
+    /// each other's grant. A connect may fail for lack of a route on the
+    /// runner; it must not fail with `Permission denied` / `WSAEACCES`
+    /// (10013), the capability-omission signature.
     #[test]
     fn appcontainer_with_write_confinement_alone_keeps_the_network() {
-        let temp = std::env::temp_dir();
+        let dir = std::env::temp_dir().join(format!(
+            "mermaid-appcontainer-net-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
         let policy = SandboxPolicy {
             deny_network: false,
-            allowed_writes: vec![temp.clone()],
+            allowed_writes: vec![dir.clone()],
         };
-        let stderr_path = temp.join(format!("mermaid-net-probe-{}.txt", std::process::id()));
-        let _ = std::fs::remove_file(&stderr_path);
+        let stderr_path = dir.join("probe.txt");
         let argv = vec![
             OsString::from("cmd.exe"),
             OsString::from("/c"),
@@ -846,7 +855,7 @@ mod tests {
         ];
         let code = run_in_appcontainer(&policy, &argv).expect("run in appcontainer");
         let stderr = std::fs::read_to_string(&stderr_path).unwrap_or_default();
-        let _ = std::fs::remove_file(&stderr_path);
+        let _ = std::fs::remove_dir_all(&dir);
         assert!(
             code == 0 || stderr.contains("curl:"),
             "the probe did not run (exit {code}): {stderr}"
