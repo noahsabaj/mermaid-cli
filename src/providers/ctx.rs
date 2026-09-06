@@ -379,6 +379,7 @@ pub fn clone_messages(msgs: &[ChatMessage]) -> Vec<ChatMessage> {
 /// Builder that lets tests construct a pair of `StreamContext` +
 /// receiver without needing a runtime. Used by provider unit tests
 /// and by integration harnesses in C9.
+#[cfg(any(test, feature = "test-support"))]
 #[must_use]
 pub fn test_stream_context(turn: TurnId) -> (StreamContext, mpsc::Receiver<StreamEvent>) {
     let token = CancellationToken::new();
@@ -391,6 +392,7 @@ pub fn test_stream_context(turn: TurnId) -> (StreamContext, mpsc::Receiver<Strea
 /// unit tests exercise the tool's own behavior rather than the approval
 /// gate. Tests that specifically exercise policy gating should construct
 /// `ExecContext::assemble` directly with their chosen safety mode.
+#[cfg(any(test, feature = "test-support"))]
 #[must_use]
 pub fn test_exec_context(
     turn: TurnId,
@@ -406,6 +408,7 @@ pub fn test_exec_context(
 /// to pin the pipe spawn path, or a `safety.mode` other than `FullAccess`).
 /// The context's safety mode follows `config.safety.mode`, so gate tests can
 /// pick a mode without hand-rolling `ExecContext::assemble`.
+#[cfg(any(test, feature = "test-support"))]
 #[must_use]
 pub fn test_exec_context_with_config(
     turn: TurnId,

@@ -69,15 +69,26 @@ pub fn drain_sse_events(buf: &mut Vec<u8>) -> Vec<String> {
 /// `\r\n\r\n`. Returns `None` if no complete event is buffered yet.
 fn find_event_boundary(buf: &[u8]) -> Option<usize> {
     // `\n\n` is the common Linux/macOS shape; `\r\n\r\n` is the spec-
-    // canonical shape some servers emit. Find the earliest of the two.
-    let lf_lf = find_subsequence(buf, b"\n\n");
-    let crlf_crlf = find_subsequence(buf, b"\r\n\r\n");
-    match (lf_lf, crlf_crlf) {
-        (Some(a), Some(b)) => Some(std::cmp::min(a + 2, b + 4)),
-        (Some(a), None) => Some(a + 2),
-        (None, Some(b)) => Some(b + 4),
-        (None, None) => None,
+    // canonical shape some servers emit. One pass, keyed on the newline
+    // byte, rather than two `windows()` scans of the whole buffer per chunk:
+    // against a stream that withholds its separator the scans were quadratic
+    // in the buffered size.
+    let mut i = 0;
+    while let Some(off) = buf[i..].iter().position(|&b| b == b'\n') {
+        let at = i + off;
+        if buf.get(at + 1) == Some(&b'\n') {
+            return Some(at + 2);
+        }
+        if at >= 1
+            && buf[at - 1] == b'\r'
+            && buf.get(at + 1) == Some(&b'\r')
+            && buf.get(at + 2) == Some(&b'\n')
+        {
+            return Some(at + 3);
+        }
+        i = at + 1;
     }
+    None
 }
 
 /// Strip the trailing `\n\n` or `\r\n\r\n` separator from a drained event.
@@ -89,12 +100,6 @@ fn strip_trailing_separator(raw: &[u8]) -> &[u8] {
     } else {
         raw
     }
-}
-
-fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
 }
 
 #[cfg(test)]

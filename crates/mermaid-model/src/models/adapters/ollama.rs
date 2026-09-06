@@ -291,7 +291,10 @@ impl OllamaAdapter {
     /// array (e.g. `["completion", "tools", "thinking"]`). `None` on any error.
     async fn probe_capabilities(&self) -> Option<Vec<String>> {
         let url = format!("{}/api/show", self.base_url);
-        let resp = self
+        // Each failure is logged before the caller assumes "supported":
+        // "probe failed" and "probe said yes" used to be indistinguishable,
+        // and the wrong guess is a 400 from a model that lacks `thinking`.
+        let resp = match self
             .client
             .post(&url)
             .json(&json!({ "model": self.model_name }))
@@ -300,12 +303,24 @@ impl OllamaAdapter {
             ))
             .send()
             .await
-            .ok()?;
+        {
+            Ok(resp) => resp,
+            Err(error) => {
+                tracing::warn!(model = %self.model_name, %error, "ollama capability probe failed; assuming support");
+                return None;
+            },
+        };
         if !resp.status().is_success() {
+            tracing::warn!(model = %self.model_name, status = resp.status().as_u16(), "ollama capability probe rejected; assuming support");
             return None;
         }
-        let show: OllamaShowResponse = resp.json().await.ok()?;
-        Some(show.capabilities)
+        match resp.json::<OllamaShowResponse>().await {
+            Ok(show) => Some(show.capabilities),
+            Err(error) => {
+                tracing::warn!(model = %self.model_name, %error, "ollama capability probe returned an unreadable body; assuming support");
+                None
+            },
+        }
     }
 
     /// Probe `/api/show` for the model's real context window + architecture

@@ -48,7 +48,8 @@ pub use daemon::{
 pub use edit::{ReplaceError, replace_content};
 
 pub use pathguard::{
-    OpenIntent, create_dir_all_beneath, open_beneath, remove_file_beneath, write_atomic_beneath,
+    OpenIntent, create_dir_all_beneath, normalize_lexical, open_beneath, remove_file_beneath,
+    write_atomic_beneath,
 };
 pub use plugin::{
     HookDecision, HookGate, HookResponse, PluginCapabilityPreview, PluginManifest,

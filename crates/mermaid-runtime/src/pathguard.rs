@@ -87,9 +87,13 @@ pub(crate) fn relative_within(root: &Path, raw: &str) -> Result<PathBuf> {
     Ok(rel.to_path_buf())
 }
 
-/// Collapse `.` and `..` components lexically (no filesystem access, no symlink
-/// resolution).
-fn normalize_lexical(path: &Path) -> PathBuf {
+/// Collapse `.` and `..` components lexically: no filesystem access, no
+/// symlink resolution. Callers pass paths already joined onto an absolute
+/// root; a `..` that has nothing left to pop is dropped, since `/..` is `/`.
+/// The one normalizer for both crates -- the file tools used to carry a copy
+/// that kept an unpoppable `..`, and the two disagreed on that edge.
+#[must_use]
+pub fn normalize_lexical(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for component in path.components() {
         match component {
@@ -709,5 +713,17 @@ mod confined_tests {
             "via-symlink"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn normalize_lexical_table() {
+        use std::path::Path;
+        let n = |p: &str| normalize_lexical(Path::new(p));
+        assert_eq!(n("/a/b/../c"), Path::new("/a/c"));
+        assert_eq!(n("/a/./b"), Path::new("/a/b"));
+        assert_eq!(n("/a/b/../../c"), Path::new("/c"));
+        // A `..` with nothing left to pop is dropped: `/..` is `/`.
+        assert_eq!(n("/../etc"), Path::new("/etc"));
+        assert_eq!(n("/a/b/c/"), Path::new("/a/b/c"));
     }
 }

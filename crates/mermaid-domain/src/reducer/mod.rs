@@ -615,10 +615,31 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
 
         // ── Housekeeping ────────────────────────────────────────────
         Msg::Tick => {
-            // No state change here. The driver stamps `state.now` before every
-            // tick (Cause 3), and render derives the elapsed-time spinner from
-            // `state.now` — so a 60 Hz Tick advances the display without the
-            // reducer or render ever reading the wall clock.
+            // The driver stamps `state.now` before every tick (Cause 3), and
+            // render derives the elapsed-time spinner from `state.now` — so a
+            // 60 Hz Tick advances the display without the reducer or render
+            // ever reading the wall clock.
+            //
+            // The one thing a tick does change: a cancel the effect runner
+            // never finished. `Cancelling` waits for `TurnCancelled`; if a
+            // wedged child process or a panicked task means that never comes,
+            // the session would be stranded until the process is killed. Off
+            // `state.now`, so `--replay` reproduces it.
+            if let TurnState::Cancelling { id, since } = state.turn
+                && std::time::SystemTime::from(state.now)
+                    .duration_since(since)
+                    .is_ok_and(|waited| waited >= crate::state::CANCEL_WATCHDOG)
+            {
+                slash::push_system(
+                    &mut state,
+                    &mut cmds,
+                    format!(
+                        "cancel did not complete within {}s; the turn was abandoned",
+                        crate::state::CANCEL_WATCHDOG.as_secs()
+                    ),
+                );
+                lifecycle::handle_turn_cancelled(&mut state, &mut cmds, id);
+            }
         },
         Msg::Resize { .. } => {
             // Render layer recomputes layout from the new area — no

@@ -10,7 +10,6 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use mermaid_domain::Config;
-use mermaid_model::models::config::BackendConfig;
 use mermaid_model::models::{ModelError, Result, lookup_provider};
 use mermaid_model::utils::{
     resolve_api_key, resolve_provider_key, resolve_provider_key_with_fallback,
@@ -466,7 +465,7 @@ async fn build_provider(config: &Config, model_id: &str) -> Result<Box<dyn Model
     // 1. Ollama (and bare names). F11: pass Arc<Config> so the wrapper
     // can forward Ollama hardware options to the adapter.
     if provider_lc == "ollama" {
-        let backend = ollama_backend_config(config);
+        let backend = crate::ollama::backend_config(config);
         let p = OllamaProvider::with_app_config(
             model_name,
             Arc::new(backend),
@@ -588,17 +587,6 @@ fn parse_model_id(model_id: &str) -> (String, &str) {
 pub fn model_provider_resolves(config: &Config, model_id: &str) -> bool {
     let (provider, _) = parse_model_id(model_id);
     provider.eq_ignore_ascii_case("ollama") || resolve_provider_endpoint(config, &provider).is_ok()
-}
-
-pub(crate) fn ollama_backend_config(config: &Config) -> BackendConfig {
-    BackendConfig {
-        // Scheme-less: `normalize_url` in the adapter picks http (loopback/LAN)
-        // vs https (public) by host class (#86).
-        ollama_url: config.ollama.base_url(),
-        max_idle_per_host: 10,
-        timeout_secs: 10,
-        ollama_autostart: config.ollama.auto_start,
-    }
 }
 
 /// Process-wide memo of leaked custom-provider profiles, keyed by the
