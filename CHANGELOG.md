@@ -207,6 +207,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in place of sixty per-item ones. A pure move: the unit and ignored
   integration tests went with their functions and are unchanged.
 
+- **Internal: the `hide_reasoning_trace` adapter flag is gone.** Nothing ever
+  set it; the UI's `/visible-reasoning` toggle hides the trace at render time
+  and keeps it in the transcript, which is the design. The adapters always emit
+  reasoning now, and Anthropic's `thinking.display` is always `summarized`.
+
 ## [0.25.0] - 2026-08-10
 
 ### Added

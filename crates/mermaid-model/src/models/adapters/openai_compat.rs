@@ -490,14 +490,13 @@ impl OpenAICompatAdapter {
         &self,
         response: reqwest::Response,
         sink: Option<&StreamSink>,
-        hide_reasoning_trace: bool,
     ) -> Result<ModelResponse> {
         if !response.status().is_success() {
             return Err(plain_http_error(response).await);
         }
         drive_stream(
             response.bytes_stream(),
-            OpenAICompatStream::new(self.profile, self.model_name.clone(), hide_reasoning_trace),
+            OpenAICompatStream::new(self.profile, self.model_name.clone()),
             sink,
         )
         .await
@@ -516,7 +515,6 @@ impl OpenAICompatAdapter {
 pub(crate) struct OpenAICompatStream {
     profile: &'static ProviderProfile,
     model_name: String,
-    hide_reasoning_trace: bool,
     content_acc: CappedText,
     thinking_acc: CappedText,
     tool_calls_partial: Vec<PartialToolCall>,
@@ -533,15 +531,10 @@ pub(crate) struct OpenAICompatStream {
 }
 
 impl OpenAICompatStream {
-    pub(crate) fn new(
-        profile: &'static ProviderProfile,
-        model_name: String,
-        hide_reasoning_trace: bool,
-    ) -> Self {
+    pub(crate) fn new(profile: &'static ProviderProfile, model_name: String) -> Self {
         Self {
             profile,
             model_name,
-            hide_reasoning_trace,
             content_acc: CappedText::default(),
             thinking_acc: CappedText::default(),
             tool_calls_partial: Vec::new(),
@@ -635,9 +628,7 @@ impl StreamProtocol for OpenAICompatStream {
         if let Some(chunk) = reasoning_chunk
             && self.thinking_acc.accepting()
         {
-            if !self.hide_reasoning_trace {
-                out.push(StreamEvent::Reasoning(chunk.clone()));
-            }
+            out.push(StreamEvent::Reasoning(chunk.clone()));
             self.thinking_acc.push(&chunk.text);
         }
 
@@ -657,12 +648,10 @@ impl StreamProtocol for OpenAICompatStream {
                     self.content_acc.push(&text_part);
                 }
                 if !reasoning_part.is_empty() && self.thinking_acc.accepting() {
-                    if !self.hide_reasoning_trace {
-                        out.push(StreamEvent::Reasoning(ReasoningChunk {
-                            text: reasoning_part.clone(),
-                            signature: None,
-                        }));
-                    }
+                    out.push(StreamEvent::Reasoning(ReasoningChunk {
+                        text: reasoning_part.clone(),
+                        signature: None,
+                    }));
                     self.thinking_acc.push(&reasoning_part);
                 }
             } else if self.content_acc.accepting() {
@@ -705,12 +694,10 @@ impl StreamProtocol for OpenAICompatStream {
                 self.content_acc.push(&text_tail);
             }
             if !reasoning_tail.is_empty() && self.thinking_acc.accepting() {
-                if !self.hide_reasoning_trace {
-                    out.push(StreamEvent::Reasoning(ReasoningChunk {
-                        text: reasoning_tail.clone(),
-                        signature: None,
-                    }));
-                }
+                out.push(StreamEvent::Reasoning(ReasoningChunk {
+                    text: reasoning_tail.clone(),
+                    signature: None,
+                }));
                 self.thinking_acc.push(&reasoning_tail);
             }
         }
@@ -999,8 +986,7 @@ impl Model for OpenAICompatAdapter {
         let response = self.send_chat(&body).await?;
 
         if let Some(sink) = sink {
-            self.handle_stream(response, Some(&sink), config.hide_reasoning_trace)
-                .await
+            self.handle_stream(response, Some(&sink)).await
         } else {
             self.decode_non_streaming(response).await
         }
