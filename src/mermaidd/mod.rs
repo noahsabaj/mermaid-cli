@@ -36,12 +36,18 @@ use subscribe::{catch_up_events, handle_subscribe_stream};
 ///
 /// Errors if the runtime store cannot be opened, or the listener cannot bind.
 pub async fn run() -> Result<()> {
-    // The same redacted, owner-only log file the CLI writes (`mermaid
-    // feedback` tails it); `RUST_LOG` sets the level. Without a subscriber
+    // The daemon holds the same secrets the TUI does (provider keys in its
+    // config, transcripts in its store), so it gets the same hardening, and
+    // the same redacted, owner-only log file the CLI writes (`mermaid
+    // feedback` tails it; `RUST_LOG` sets the level). Without a subscriber
     // every `tracing::warn!` in the server -- a rejected client, a failed
     // accept, a task that could not be reconciled -- was dropped on the floor.
+    let hardening = mermaid_runtime::hardening::harden_process();
     mermaid_model::utils::init_logger(false);
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "mermaidd starting");
+    if hardening.is_empty() {
+        tracing::warn!("no process hardening applied: a crash may write a core file");
+    }
 
     // Open (and thereby create/validate) the runtime store up front on every
     // platform: a broken DB should fail the daemon fast, not its first client.

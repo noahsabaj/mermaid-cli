@@ -59,7 +59,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (there is no per-process switch for WER dump collection, and the module
   doc says so). The function returns what took effect, and `mermaid` logs a
   warning at startup when nothing did instead of assuming the protection is
-  there.
+  there. `mermaidd` applies it too; it had applied none.
 - **The Windows sandbox honours the half of the policy it was not asked to
   enforce.** An AppContainer denies both axes by default, so `--confine-fs`
   alone had also cut the network (no capability SIDs were attached) and
