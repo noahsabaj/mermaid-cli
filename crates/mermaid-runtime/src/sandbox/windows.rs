@@ -2,6 +2,17 @@
 //!
 //! Enforces network kill-switch and filesystem write-confinement via
 //! native Windows AppContainers (LowBox tokens) and Job Objects.
+//!
+//! An AppContainer denies by default on both axes, so each half of the
+//! policy that is NOT requested has to be granted back explicitly:
+//!
+//! - network: the three well-known network capability SIDs are attached to
+//!   the container unless `deny_network` is set (without them a
+//!   `--confine-fs`-only run could not reach the network at all);
+//! - writes: with no `allowed_writes` the container is granted the current
+//!   directory and the temp directory (without that a `--no-network`-only
+//!   run could not write its own project). An AppContainer cannot be told
+//!   "writes unconfined", so this is the documented floor.
 
 use std::ffi::{OsStr, OsString};
 use std::os::windows::ffi::OsStrExt;
@@ -316,14 +327,86 @@ const WRITE_PERMISSIONS: u32 =
 const PROC_THREAD_ATTRIBUTE_HANDLE_LIST_ID: usize = 0x00020002;
 const PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES_ID: usize = 0x00020009;
 
+/// The roots a container may write when the policy confines nothing: the
+/// working directory and the temp directory. An AppContainer has no "writes
+/// unconfined" setting -- it can only be granted paths -- so a policy that
+/// asks for the network kill-switch alone still has to name what the child
+/// may write, and these two are what an unconfined command would touch.
+fn implicit_write_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        roots.push(cwd);
+    }
+    roots.push(std::env::temp_dir());
+    roots
+}
+
+fn write_roots(policy: &SandboxPolicy) -> Vec<PathBuf> {
+    if policy.allowed_writes.is_empty() {
+        implicit_write_roots()
+    } else {
+        policy.allowed_writes.clone()
+    }
+}
+
 fn setup_dacl_guards(policy: &SandboxPolicy, app_sid: PSID) -> anyhow::Result<Vec<DaclGuard>> {
     let mut guards = Vec::new();
-    for dir in &policy.allowed_writes {
-        if let Some(guard) = grant_path_access(dir, app_sid, WRITE_PERMISSIONS)? {
+    for dir in write_roots(policy) {
+        if let Some(guard) = grant_path_access(&dir, app_sid, WRITE_PERMISSIONS)? {
             guards.push(guard);
         }
     }
     Ok(guards)
+}
+
+/// `SE_GROUP_ENABLED` from `winnt.h`. `windows-sys` files it under
+/// `Win32_System_SystemServices`, a feature that drags in thousands of
+/// unrelated constants for one flag; the value has been 0x4 since NT.
+const SE_GROUP_ENABLED: u32 = 0x0000_0004;
+
+/// A well-known capability SID, owned, for a `SECURITY_CAPABILITIES` list.
+struct CapabilitySid {
+    buf: Vec<u8>,
+}
+
+impl CapabilitySid {
+    fn well_known(kind: WELL_KNOWN_SID_TYPE) -> anyhow::Result<Self> {
+        let mut buf = vec![0u8; SECURITY_MAX_SID_SIZE as usize];
+        let mut len = buf.len() as u32;
+        let ok = unsafe { CreateWellKnownSid(kind, null_mut(), buf.as_mut_ptr().cast(), &mut len) };
+        if ok == 0 {
+            let err = unsafe { GetLastError() };
+            anyhow::bail!("CreateWellKnownSid({kind}) failed (error code {err})");
+        }
+        buf.truncate(len as usize);
+        Ok(Self { buf })
+    }
+
+    fn as_psid(&self) -> PSID {
+        self.buf.as_ptr().cast_mut().cast()
+    }
+}
+
+/// The capability SIDs that let an AppContainer open network sockets:
+/// internet client, internet client+server, private-network client+server.
+/// A container without them has no network at all (the loopback exemption
+/// aside), which is the kill-switch; a container with all three has what a
+/// normal process has.
+const NETWORK_CAPABILITIES: [WELL_KNOWN_SID_TYPE; 3] = [
+    WinCapabilityInternetClientSid,
+    WinCapabilityInternetClientServerSid,
+    WinCapabilityPrivateNetworkClientServerSid,
+];
+
+/// Empty under `deny_network`; the three network capabilities otherwise.
+fn network_capabilities(policy: &SandboxPolicy) -> anyhow::Result<Vec<CapabilitySid>> {
+    if policy.deny_network {
+        return Ok(Vec::new());
+    }
+    NETWORK_CAPABILITIES
+        .iter()
+        .map(|kind| CapabilitySid::well_known(*kind))
+        .collect()
 }
 
 fn collect_stdio_handles(app_sid: PSID) -> (Vec<HANDLE>, HANDLE, HANDLE, HANDLE) {
@@ -543,10 +626,22 @@ pub(crate) fn run_in_appcontainer(
 
     let _dacl_guards = setup_dacl_guards(policy, app_sid.as_psid())?;
 
+    let capabilities = network_capabilities(policy)?;
+    let mut capability_attrs: Vec<SID_AND_ATTRIBUTES> = capabilities
+        .iter()
+        .map(|sid| SID_AND_ATTRIBUTES {
+            Sid: sid.as_psid(),
+            Attributes: SE_GROUP_ENABLED,
+        })
+        .collect();
     let mut sec_cap: SECURITY_CAPABILITIES = unsafe { std::mem::zeroed() };
     sec_cap.AppContainerSid = app_sid.as_psid();
-    sec_cap.Capabilities = null_mut();
-    sec_cap.CapabilityCount = 0;
+    sec_cap.Capabilities = if capability_attrs.is_empty() {
+        null_mut()
+    } else {
+        capability_attrs.as_mut_ptr()
+    };
+    sec_cap.CapabilityCount = capability_attrs.len() as u32;
 
     let (mut handles, h_stdin, h_stdout, h_stderr) = collect_stdio_handles(app_sid.as_psid());
     let (_attr_buf, attr_list) = setup_proc_attributes(&mut sec_cap, &mut handles)?;
@@ -678,6 +773,73 @@ mod tests {
         assert!(!out_file.exists());
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// `deny_network` strips every capability; otherwise the three network
+    /// capabilities are attached, each a valid SID.
+    #[test]
+    fn network_capabilities_follow_the_policy() {
+        let denied = network_capabilities(&SandboxPolicy {
+            deny_network: true,
+            allowed_writes: Vec::new(),
+        })
+        .expect("capabilities");
+        assert!(denied.is_empty());
+
+        let allowed = network_capabilities(&SandboxPolicy::default()).expect("capabilities");
+        assert_eq!(allowed.len(), NETWORK_CAPABILITIES.len());
+        for sid in &allowed {
+            assert_ne!(unsafe { IsValidSid(sid.as_psid()) }, 0);
+        }
+    }
+
+    /// A policy that names no write roots is `--no-network` alone: the child
+    /// must still be able to write where an unconfined command would (the
+    /// temp directory here; the working directory is the other implicit root).
+    #[test]
+    fn appcontainer_without_write_roots_grants_the_temp_directory() {
+        let policy = SandboxPolicy {
+            deny_network: true,
+            allowed_writes: Vec::new(),
+        };
+        assert!(write_roots(&policy).contains(&std::env::temp_dir()));
+        let file = std::env::temp_dir().join(format!(
+            "mermaid-appcontainer-implicit-{}.txt",
+            std::process::id()
+        ));
+        let argv = vec![
+            OsString::from("cmd.exe"),
+            OsString::from("/c"),
+            OsString::from(format!("echo hello > {}", file.display())),
+        ];
+        let code = run_in_appcontainer(&policy, &argv).expect("run in appcontainer");
+        assert_eq!(code, 0);
+        assert!(file.exists(), "{}", file.display());
+        let _ = std::fs::remove_file(&file);
+    }
+
+    /// With write confinement alone the network stays reachable: a connect
+    /// attempt may fail for lack of a route on the runner, but never with
+    /// `WSAEACCES` (10013), which is the capability-omission signature.
+    #[test]
+    fn appcontainer_with_write_confinement_alone_keeps_the_network() {
+        let policy = SandboxPolicy {
+            deny_network: false,
+            allowed_writes: vec![std::env::temp_dir()],
+        };
+        let py_cmd = "import socket\ns = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\ns.settimeout(2)\ntry:\n    s.connect(('8.8.8.8', 53))\nexcept OSError as e:\n    raise SystemExit(1 if e.errno == 10013 else 0)";
+        let argv = vec![
+            OsString::from("python.exe"),
+            OsString::from("-c"),
+            OsString::from(py_cmd),
+        ];
+        if resolve_executable(std::ffi::OsStr::new("python.exe")).is_file() {
+            let code = run_in_appcontainer(&policy, &argv).expect("run in appcontainer");
+            assert_eq!(
+                code, 0,
+                "connect failed with WSAEACCES: capabilities missing"
+            );
+        }
     }
 
     #[test]

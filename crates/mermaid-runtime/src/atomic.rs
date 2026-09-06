@@ -37,15 +37,19 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     write_atomic_inner(path, bytes, None)
 }
 
-/// Like [`write_atomic`], but create the temp file with the given Unix
-/// permission `mode` (e.g. `0o600`) so the renamed destination is never even
-/// briefly world-readable. `mode` is ignored on non-Unix, where directory ACLs
-/// scope the file. Use this for secret-bearing files such as the config.
+/// Like [`write_atomic`], but create the temp file owner-only so the renamed
+/// destination is never even briefly readable by another user. On Unix that
+/// is the given permission `mode` (e.g. `0o600`); on Windows, where there is
+/// no mode, it is a protected DACL granting the owning user and `SYSTEM` and
+/// no one else -- the same descriptor the daemon puts on its pipe. Any other
+/// platform creates the file at the default permissions. Use this for
+/// secret-bearing files such as the config.
 ///
 /// # Errors
 ///
 /// Exactly [`write_atomic`]'s, plus the `mode` being rejected when the temp
-/// file is created on Unix.
+/// file is created on Unix, or the security descriptor failing to build on
+/// Windows.
 pub fn write_atomic_with_mode(path: &Path, bytes: &[u8], mode: u32) -> std::io::Result<()> {
     write_atomic_inner(path, bytes, Some(mode))
 }
@@ -104,7 +108,51 @@ fn create_temp(tmp: &Path, mode: Option<u32>) -> std::io::Result<File> {
     }
 }
 
-#[cfg(not(unix))]
+/// Create the temp file with an owner-only DACL when a mode was asked for:
+/// Windows has no permission bits, so "0600" means a protected descriptor
+/// naming the owning user and `SYSTEM`. `CreateFileW` takes the descriptor at
+/// creation, so there is no window in which the file carries the directory's
+/// inherited ACL; the rename that follows keeps the object's own descriptor.
+#[cfg(windows)]
+fn create_temp(tmp: &Path, mode: Option<u32>) -> std::io::Result<File> {
+    if mode.is_none() {
+        return File::create(tmp);
+    }
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::FromRawHandle;
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        CREATE_ALWAYS, CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_WRITE,
+    };
+
+    let mut security = crate::daemon::PipeSecurity::owner_only().map_err(std::io::Error::other)?;
+    let wide: Vec<u16> = tmp
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: `wide` is null-terminated and outlives the call; the security
+    // attributes point at a descriptor that `security` keeps alive until it
+    // drops, after the handle exists.
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            FILE_GENERIC_WRITE,
+            0,
+            security.attributes_ptr().cast(),
+            CREATE_ALWAYS,
+            FILE_ATTRIBUTE_NORMAL,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: a freshly created, owned file handle that nothing else closes.
+    Ok(unsafe { File::from_raw_handle(handle.cast()) })
+}
+
+#[cfg(not(any(unix, windows)))]
 fn create_temp(tmp: &Path, _mode: Option<u32>) -> std::io::Result<File> {
     File::create(tmp)
 }
@@ -215,6 +263,83 @@ mod tests {
 
         assert!(fresh.exists(), "a fresh/in-flight temp must not be swept");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The written file's DACL is protected (no inherited ACEs) and names
+    /// only the owning user and `SYSTEM`: none of the directory's inherited
+    /// grants to Users, Authenticated Users or Everyone survive.
+    #[test]
+    #[cfg(windows)]
+    fn write_atomic_with_mode_gives_the_file_an_owner_only_dacl() {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Foundation::LocalFree;
+        use windows_sys::Win32::Security::Authorization::{
+            ConvertSecurityDescriptorToStringSecurityDescriptorW, GetNamedSecurityInfoW,
+            SDDL_REVISION_1, SE_FILE_OBJECT,
+        };
+        use windows_sys::Win32::Security::{DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR};
+
+        let dir = std::env::temp_dir().join(format!("mermaid-atomic-dacl-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("config.toml");
+        write_atomic_with_mode(&target, b"secret = true", 0o600).unwrap();
+
+        let wide: Vec<u16> = target
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        let rc = unsafe {
+            GetNamedSecurityInfoW(
+                wide.as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut descriptor,
+            )
+        };
+        assert_eq!(rc, 0, "GetNamedSecurityInfoW");
+        let mut sddl_w: *mut u16 = std::ptr::null_mut();
+        let ok = unsafe {
+            ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                descriptor,
+                SDDL_REVISION_1,
+                DACL_SECURITY_INFORMATION,
+                &mut sddl_w,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_ne!(
+            ok, 0,
+            "ConvertSecurityDescriptorToStringSecurityDescriptorW"
+        );
+        let mut len = 0;
+        while unsafe { *sddl_w.add(len) } != 0 {
+            len += 1;
+        }
+        let sddl = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(sddl_w, len) });
+        unsafe {
+            LocalFree(sddl_w.cast());
+            LocalFree(descriptor.cast());
+        }
+        let _ = fs::remove_dir_all(&dir);
+
+        let sid = crate::daemon::current_user_sid().unwrap();
+        assert!(sddl.starts_with("D:P"), "not protected: {sddl}");
+        assert!(
+            sddl.contains(&format!(";;;{sid})")),
+            "owner missing: {sddl}"
+        );
+        for inherited in [";;;BU)", ";;;AU)", ";;;WD)", ";;;BA)"] {
+            assert!(
+                !sddl.contains(inherited),
+                "inherited grant {inherited} survives: {sddl}"
+            );
+        }
     }
 
     #[test]

@@ -18,8 +18,9 @@ use mermaid_cli::{
 fn main() -> Result<()> {
     // Best-effort process hardening (no core dumps, no ptrace attach) before we
     // parse args or touch config — a crash must not write a core file carrying
-    // secrets, and the process shouldn't be trivially attachable.
-    mermaid_runtime::hardening::harden_process();
+    // secrets, and the process shouldn't be trivially attachable. What applied
+    // is logged once the logger exists; a process that got none of it says so.
+    let hardening = mermaid_runtime::hardening::harden_process();
 
     // The `__sandbox-exec` launcher applies OS confinement to this process and
     // execve's the wrapped command. It must run before the async runtime spawns
@@ -33,12 +34,17 @@ fn main() -> Result<()> {
         .enable_all()
         .build()
         .context("failed to build the async runtime")?
-        .block_on(async_main())
+        .block_on(async_main(hardening))
 }
 
-async fn async_main() -> Result<()> {
+async fn async_main(hardening: mermaid_runtime::hardening::Hardening) -> Result<()> {
     let cli = Cli::parse();
     init_logger(cli.verbose);
+    if hardening.is_empty() {
+        tracing::warn!("no process hardening applied: a crash may write a core file");
+    } else {
+        tracing::debug!(applied = ?hardening.applied, "process hardening");
+    }
 
     // `--replay` is fully self-contained (the recording embeds its config
     // snapshot), so it dispatches before any config/model resolution. A
