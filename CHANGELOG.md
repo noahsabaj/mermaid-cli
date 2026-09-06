@@ -186,6 +186,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   filed under `meta`, which a prefix-less row has no way to contradict. The
   window now pays for headings as it walks up from the cursor, and a group
   that cannot fit its heading and its first row is not started.
+- **The daemon is a library module.** `src/bin/mermaidd.rs` had grown to
+  2,500 lines holding the whole server; it is now thirty lines over
+  `mermaid_cli::mermaidd` (`cli`, `scheduler`, `recovery`, `server`,
+  `subscribe`, `api`), with one `cfg(any(unix, windows))` gate on the module
+  in place of sixty per-item ones. A pure move: the unit and ignored
+  integration tests went with their functions and are unchanged.
 
 ## [0.25.0] - 2026-08-10
 
