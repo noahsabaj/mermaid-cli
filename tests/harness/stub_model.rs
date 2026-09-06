@@ -68,6 +68,7 @@ pub enum Turn {
 
 impl Turn {
     /// A turn requesting a single tool call.
+    #[must_use]
     pub fn tool(name: &str, args: serde_json::Value) -> Self {
         Self::Tools(vec![(name.to_string(), args)])
     }
@@ -79,11 +80,13 @@ impl Turn {
     }
 
     /// A turn that ends the run with `text`.
+    #[must_use]
     pub fn say(text: &str) -> Self {
         Self::Say(text.to_string(), None)
     }
 
     /// A turn that only emits reasoning and no final plain text.
+    #[must_use]
     pub fn reasoning_only(reasoning: &str) -> Self {
         Self::Stream {
             reasoning: Some(reasoning.to_string()),
@@ -103,6 +106,7 @@ impl Turn {
 
     /// Hand back a continuation blob alongside this turn's text, so a test
     /// can check the loop carries it into the next request.
+    #[must_use]
     pub fn with_continuation(self, c: mermaid_model::models::ProviderContinuation) -> Self {
         match self {
             Self::Say(text, _) => Self::Say(text, Some(c)),
@@ -111,11 +115,13 @@ impl Turn {
     }
 
     /// A turn that fails with `reason`.
+    #[must_use]
     pub fn fail(reason: &str) -> Self {
         Self::Fail(reason.to_string())
     }
 
     /// A turn that hangs for `secs` before answering.
+    #[must_use]
     pub fn stall(secs: u64) -> Self {
         Self::Stall(std::time::Duration::from_secs(secs))
     }

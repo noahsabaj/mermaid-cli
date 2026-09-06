@@ -5,7 +5,7 @@ use unicode_width::UnicodeWidthStr;
 
 use super::{GenerationStatus, truncate_line_to_cells, truncate_to_cells};
 use crate::render::markdown::parse_markdown_inline;
-use crate::render::theme::{ColorValueExt, Theme};
+use crate::render::theme::Theme;
 use mermaid_domain::QueuedMessage;
 
 /// How many queued-message rows to show under the spinner before stopping.

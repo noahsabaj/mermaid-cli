@@ -15,7 +15,6 @@ const ROOT: &str = include_str!("../../Cargo.toml");
 const DOMAIN: &str = include_str!("../../crates/mermaid-domain/Cargo.toml");
 const MODEL: &str = include_str!("../../crates/mermaid-model/Cargo.toml");
 const RUNTIME: &str = include_str!("../../crates/mermaid-runtime/Cargo.toml");
-const UI: &str = include_str!("../../crates/mermaid-ui/Cargo.toml");
 
 /// The `[lints.clippy]` table body: everything from the header to the next
 /// table header, comments included. Comments are part of the comparison on
@@ -52,11 +51,6 @@ fn every_crate_carries_the_same_lint_policy() {
         lints_table(RUNTIME),
         "mermaid-runtime's [lints.clippy] table drifted from the root's"
     );
-    assert_eq!(
-        root,
-        lints_table(UI),
-        "mermaid-ui's [lints.clippy] table drifted from the root's"
-    );
 }
 
 /// The cap AGENTS.md names by number. It went years configured-but-unenforced:
@@ -74,7 +68,6 @@ fn the_hundred_line_cap_is_both_configured_and_enabled() {
         ("domain", DOMAIN),
         ("model", MODEL),
         ("runtime", RUNTIME),
-        ("ui", UI),
     ] {
         assert!(
             lints_table(manifest).contains("too_many_lines = \"deny\""),

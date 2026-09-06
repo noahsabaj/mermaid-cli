@@ -21,6 +21,7 @@ pub const PLAN_SLUG_NOUNS: &[&str] = &[
 
 /// FNV-1a — tiny, dependency-free, deterministic across runs (unlike
 /// `DefaultHasher`, whose seed is unspecified).
+#[must_use]
 pub fn fnv1a(bytes: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in bytes {
@@ -34,6 +35,7 @@ pub fn fnv1a(bytes: &[u8]) -> u64 {
 /// <noun>.md` under the project root. The topic comes from the latest user
 /// message (what the plan is about); the word-pair suffix keeps concurrent
 /// sessions in one repo from colliding.
+#[must_use]
 pub fn plan_path_for(state: &State) -> std::path::PathBuf {
     let topic_src = latest_user_intent(&state.session).unwrap_or_default();
     let words: Vec<String> = topic_src
@@ -71,6 +73,7 @@ pub fn plan_path_for(state: &State) -> std::path::PathBuf {
 
 /// The plan-file path shown to the user: relative to the project root when it
 /// is inside it (it always is today), absolute otherwise.
+#[must_use]
 pub fn plan_path_display(state: &State, path: &std::path::Path) -> String {
     path.strip_prefix(&state.cwd)
         .unwrap_or(path)
@@ -244,6 +247,7 @@ pub fn apply_safety_mode(
 ///
 /// There is deliberately no remembered per-session restore target: plan is a
 /// safety mode like the others, and a mode does not carry the mode before it.
+#[must_use]
 pub fn mode_after_plan(state: &State) -> mermaid_model::safety::SafetyMode {
     let configured = state.settings.safety.mode;
     if configured.is_planning() {
@@ -384,6 +388,7 @@ pub fn retract_plan_reminder(state: &mut State) {
 /// The `content` infix that marks a persisted **plan-mode** policy denial.
 /// Sibling of [`readonly_denial_signature`], keyed on
 /// [`mermaid_model::safety::PLAN_DENIAL_MARKER`].
+#[must_use]
 pub fn plan_denial_signature() -> String {
     format!(
         "blocked by policy: {}",
@@ -392,6 +397,7 @@ pub fn plan_denial_signature() -> String {
 }
 
 /// True if the conversation still carries a plan-mode policy denial.
+#[must_use]
 pub fn history_has_plan_denial(messages: &[ChatMessage]) -> bool {
     let signature = plan_denial_signature();
     messages

@@ -92,6 +92,7 @@ impl Drop for Terminal {
 }
 
 impl Terminal {
+    #[must_use]
     pub fn launch(tag: &str) -> Self {
         Self::spawn(tag, &[])
     }
@@ -101,6 +102,7 @@ impl Terminal {
     /// This is what makes chat rendering snapshot-able at all: the assistant
     /// content is fixed by the test rather than produced by a model, so the
     /// frame is deterministic and no network call happens.
+    #[must_use]
     pub fn launch_with_transcript(tag: &str, prompt: &str, reply: &str) -> Self {
         // Ids are `YYYYMMDD_HHMMSS_mmm` and validated on load; a fixed one
         // keeps the frame stable.
@@ -254,6 +256,7 @@ impl Terminal {
     ///
     /// Parsed fresh from the whole byte stream each call. Re-parsing is cheap
     /// at test sizes and avoids sharing a parser with the reader thread.
+    #[must_use]
     pub fn frame(&self) -> Vec<String> {
         let bytes = self.output.lock().expect("output lock").clone();
         let mut parser = vt100::Parser::new(self.rows, self.cols, 0);
@@ -268,11 +271,13 @@ impl Terminal {
     }
 
     /// The frame as one string, for assertion messages.
+    #[must_use]
     pub fn frame_text(&self) -> String {
         self.frame().join("\n")
     }
 
     /// The two footer lines — the persistent mode band at the bottom.
+    #[must_use]
     pub fn footer(&self) -> Vec<String> {
         let frame = self.frame();
         frame[frame.len().saturating_sub(2)..].to_vec()
@@ -394,6 +399,7 @@ impl Terminal {
 ///
 /// Each entry is a deliberate blind spot, so the list is kept short: a frame
 /// cannot catch a regression in something it redacts.
+#[must_use]
 pub fn normalize(frame: &[String], sandbox: &Path) -> String {
     // Longest-first so a nested path is replaced before its parent.
     let sandbox_str = sandbox.display().to_string();
@@ -608,6 +614,7 @@ fn line_diff(expected: &str, actual: &str) -> String {
 
 // ── Sandbox ─────────────────────────────────────────────────────────────
 
+#[must_use]
 pub fn test_sandbox(tag: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)

@@ -801,6 +801,7 @@ pub fn emit_title_if_changed(state: &mut State, cmds: &mut Vec<Cmd>) {
 /// The terminal title, reflecting run state: `mermaid · working` while a turn is
 /// in flight, else `mermaid · <conversation title>` (or just `mermaid`). Plain
 /// text with a middot separator — no emoji.
+#[must_use]
 pub fn desired_title(state: &State) -> String {
     if !matches!(state.turn, TurnState::Idle) {
         return "mermaid · working".to_string();

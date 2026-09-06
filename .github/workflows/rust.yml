@@ -282,7 +282,7 @@ jobs:
           ISO="$RUNNER_TEMP/isolated"
           mkdir -p "$ISO"
           cp -r crates/. "$ISO/"
-          for crate in mermaid-runtime mermaid-model mermaid-domain mermaid-ui; do
+          for crate in mermaid-runtime mermaid-model mermaid-domain; do
             echo "::group::$crate (standalone)"
             ( cd "$ISO/$crate" && cargo build --all-targets )
             echo "::endgroup::"

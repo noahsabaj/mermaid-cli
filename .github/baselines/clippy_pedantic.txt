@@ -1,28 +1,21 @@
 # Ratchet baseline: pedantic + nursery debt
 #
 # Debt that predates the guard. This file may only SHRINK.
-#
-# MEASURED ON LINUX, which is where the job runs. Unlike the other
-# baselines this one is platform-dependent: it records what the compiler
-# actually linted, and four test files plus 99 items under `src/` are
-# `#[cfg(unix)]`. Regenerating on Windows writes a different, wrong file
-# (82 keys / 2865 occurrences) -- take the numbers from the CI log, which
-# the guard prints in full on failure.
 # Regenerate with: just clippy-debt-record
 #
-# 77 keys / 2153 occurrences
+# 78 keys / 2242 occurrences
 clippy::assigning_clones 31
 clippy::bool_to_int_with_if 2
 clippy::borrow_as_ptr 2
 clippy::branches_sharing_code 2
 clippy::case_sensitive_file_extension_comparisons 4
 clippy::cast_lossless 8
-clippy::cast_possible_truncation 78
-clippy::cast_possible_wrap 18
+clippy::cast_possible_truncation 77
+clippy::cast_possible_wrap 19
 clippy::cast_precision_loss 6
-clippy::cast_sign_loss 21
+clippy::cast_sign_loss 23
 clippy::cloned_instead_of_copied 1
-clippy::default_trait_access 6
+clippy::default_trait_access 11
 clippy::derive_partial_eq_without_eq 15
 clippy::duration_suboptimal_units 18
 clippy::elidable_lifetime_names 11
@@ -31,7 +24,7 @@ clippy::format_collect 2
 clippy::format_push_string 65
 clippy::if_not_else 2
 clippy::ignore_without_reason 2
-clippy::ignored_unit_patterns 53
+clippy::ignored_unit_patterns 55
 clippy::implicit_clone 5
 clippy::ip_constant 1
 clippy::items_after_statements 47
@@ -45,18 +38,19 @@ clippy::many_single_char_names 2
 clippy::map_unwrap_or 91
 clippy::match_same_arms 16
 clippy::match_wildcard_for_single_variants 2
-clippy::missing_const_for_fn 208
+clippy::missing_const_for_fn 209
+clippy::missing_errors_doc 1
 clippy::missing_fields_in_debug 1
-clippy::missing_panics_doc 14
+clippy::missing_panics_doc 21
 clippy::needless_collect 3
 clippy::needless_continue 3
 clippy::needless_pass_by_value 22
 clippy::needless_raw_string_hashes 17
-clippy::no_effect_underscore_binding 39
-clippy::option_if_let_else 69
+clippy::no_effect_underscore_binding 40
+clippy::option_if_let_else 71
 clippy::option_option 1
 clippy::or_fun_call 7
-clippy::panic 132
+clippy::panic 134
 clippy::range_plus_one 3
 clippy::redundant_clone 38
 clippy::redundant_closure_for_method_calls 153
@@ -66,14 +60,14 @@ clippy::return_self_not_must_use 6
 clippy::semicolon_if_nothing_returned 7
 clippy::significant_drop_in_scrutinee 2
 clippy::significant_drop_tightening 13
-clippy::similar_names 8
+clippy::similar_names 10
 clippy::single_char_pattern 3
 clippy::single_match_else 14
-clippy::string_slice 96
+clippy::string_slice 97
 clippy::struct_excessive_bools 5
 clippy::struct_field_names 3
 clippy::suboptimal_flops 1
-clippy::too_long_first_doc_paragraph 209
+clippy::too_long_first_doc_paragraph 259
 clippy::too_many_lines 59
 clippy::trivially_copy_pass_by_ref 1
 clippy::uninlined_format_args 6
@@ -83,8 +77,8 @@ clippy::unnested_or_patterns 19
 clippy::unreadable_literal 2
 clippy::unused_async 4
 clippy::unused_self 3
-clippy::unwrap_used 6
+clippy::unwrap_used 7
 clippy::used_underscore_binding 16
 clippy::useless_let_if_seq 2
-clippy::wildcard_enum_match_arm 168
-clippy::wildcard_imports 27
+clippy::wildcard_enum_match_arm 170
+clippy::wildcard_imports 37

@@ -9,8 +9,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Accelerated test iteration and consolidated integration tests.** Restructured 23 separate integration test binaries into a unified integration test runner (`tests/integration.rs` with submodules under `tests/it/`), reducing link steps from 23 down to 1. Configured `rust-lld` fast linker for Windows MSVC via `.cargo/config.toml`, enabled `debug = 1` (line-tables-only) in dev/test profiles to cut debug symbol overhead by ~60%, compiled dev/test dependencies with `opt-level = 2` for faster test execution, and added `just test` recipe for nextest.
 
-- **Decoupled View Layer into `mermaid-ui` Pure Presentation Crate.** Introduced `crates/mermaid-ui`, a pure Model-View-Update presentation crate between the domain model and terminal/graphical frontends. Contains declarative virtual UI node trees (`UiNode`), pure text wrapping and markdown engines with CJK and unicode-width accuracy, semantic theme tokens (`ThemeToken`), and presentation cache structures (`UiCache`). `src/render/` now consumes `mermaid-ui` through a thin backend adapter (`src/render/adapter.rs`) while preserving complete visual parity and passing all tests and source guard ratchets.
-
 - **Native Windows OS Sandboxing (AppContainer & Job Objects).** `--no-network`, `--confine-fs`, and `--sandbox` now confine model-run shell commands on Windows via native Windows AppContainers (LowBox tokens) and Job Objects. Omits network capabilities while sparing `127.0.0.1` localhost loopback for local dev tooling, and applies transient SID ACLs to restrict filesystem writes strictly to project, workdir, and temp roots with automatic RAII cleanup and kill-on-close process tree containment.
 
 - **Unified storage coordinator and `mermaid storage` CLI commands.** Introduced `StorageCoordinator` in `mermaid-runtime` to resolve dual-storage tension between SQLite (`runtime.sqlite3`) and append-only JSONL files (`.mermaid/conversations/`). Automatically backfills task-to-session linkages on completion/start, provides atomic cascade deletion across both databases and filesystem logs, and adds `mermaid storage reconcile`, `mermaid storage gc`, and `mermaid storage delete <id>` subcommands.
@@ -67,6 +65,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `-294,28 +294,56 @@` in the target file.
 
 - **Auto-mode safety classifier handles reasoning models without failing on empty responses.** Models with mandatory or internal reasoning (e.g. Gemini 3.7 Flash, DeepSeek R1, Claude thinking, and OpenAI o-series) could exhaust the classifier's prior 150-token output limit before emitting plain text, surfacing as `Auto-review flagged this: classifier returned an empty response`. The classifier now uses 2048 tokens of headroom, supports fallback extraction of verdicts from reasoning traces when plain text is empty, and reports actionable diagnostics (e.g. token limits exceeded) on stream truncation.
+
+### Removed
+
+- **`crates/mermaid-ui`.** A second copy of the render layer — its own markdown
+  parser, wrapper, theme and every widget as `UiNode` builders — landed inside
+  an unrelated commit on 2026-08-16 and was never called: `render()` kept using
+  `src/render`, the only live piece was a re-export of the theme, and the
+  release workflow never published the crate, so the next release would have
+  failed at `cargo publish`. Deleted, with the theme back in
+  `src/render/theme.rs` where it was. No frame changes.
 
 ### Changed
 

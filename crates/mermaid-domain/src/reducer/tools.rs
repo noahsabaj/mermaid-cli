@@ -328,6 +328,7 @@ pub fn advertise_context_changes(state: &mut State, cmds: &mut Vec<Cmd>) {
 /// contexts. Plan entry with a `[plan]` model override yields ONE message
 /// covering both; plan exit already names the live safety mode, so a safety
 /// sentence is added only when the mode changed without a plan flip.
+#[must_use]
 pub fn context_delta_text(
     prev: &crate::state::AdvertisedContext,
     live: &crate::state::AdvertisedContext,
@@ -458,6 +459,7 @@ pub fn push_plan_reminder(state: &mut State, cmds: &mut Vec<Cmd>) {
 /// since only a successful update resets the counter, the contradiction
 /// re-injected itself every `TASK_STALENESS_CALLS` dispatches for the whole
 /// planning session.
+#[must_use]
 pub fn checklist_writers_suppressed(state: &State) -> bool {
     state.session.safety_mode.is_planning()
         && state.settings.plan.permissions.tasks != crate::PlanPermLevel::Allow
@@ -509,6 +511,7 @@ pub const SAFETY_NUDGE_PREFIX: &str = "Safety mode is now ";
 /// request it steers has gone out. Pairs with
 /// `neutralize_superseded_policy_denials`, which rewrites the denials
 /// themselves on every request.
+#[must_use]
 pub fn safety_loosened_note(mode: mermaid_model::safety::SafetyMode) -> String {
     format!(
         "{SAFETY_NUDGE_PREFIX}{}; earlier read-only policy blocks no longer apply. \
