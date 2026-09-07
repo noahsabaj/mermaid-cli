@@ -310,10 +310,6 @@ fn push_rank_lines(
 
 /// Build the modal's content lines. Shared by the widget and the height
 /// estimator so the reserved bottom-zone height always matches what's drawn.
-#[expect(
-    clippy::too_many_lines,
-    reason = "predates the lint; see .github/baselines/expect_budget.txt"
-)]
 pub fn build_question_lines(
     set: &PendingQuestionSet,
     theme: &Theme,
@@ -326,100 +322,12 @@ pub fn build_question_lines(
     let has_memory = set.questions.iter().any(|q| q.memory_key.is_some());
     let mut lines: Vec<Line<'static>> = Vec::new();
 
-    // Tab strip for batched questions: chips for each question plus a trailing
-    // Submit; the active one is highlighted.
     if nq > 1 {
-        let mut spans: Vec<Span<'static>> = vec![Span::styled("< ", Style::default().fg(dim))];
-        for (qi, q) in set.questions.iter().enumerate() {
-            let label = truncate_to_cells(&q.header, 12);
-            if qi == set.active {
-                spans.push(chip(&label, theme.colors.background.to_color(), brand));
-            } else {
-                spans.push(Span::styled(format!(" {label} "), Style::default().fg(dim)));
-            }
-            spans.push(Span::raw(" "));
-        }
-        if set.active >= nq {
-            spans.push(chip("Submit", theme.colors.background.to_color(), brand));
-        } else {
-            spans.push(Span::styled(" Submit ", Style::default().fg(dim)));
-        }
-        spans.push(Span::styled(" >", Style::default().fg(dim)));
-        lines.push(Line::from(spans));
-        lines.push(Line::from(""));
+        push_tab_strip(&mut lines, set, theme);
     }
 
-    // Review screen.
     if set.active >= nq {
-        lines.push(Line::from(Span::styled(
-            "Review your answers",
-            Style::default().fg(white).add_modifier(Modifier::BOLD),
-        )));
-        lines.push(Line::from(""));
-        for (q, ans) in set.questions.iter().zip(set.build_answers()) {
-            push_wrapped(
-                &mut lines,
-                Line::from(Span::styled(
-                    format!("- {}", q.question),
-                    Style::default().fg(white),
-                )),
-                width,
-                2,
-            );
-            let value = if ans.selected.is_empty() {
-                "(no selection)".to_string()
-            } else {
-                ans.selected.join(", ")
-            };
-            push_wrapped(
-                &mut lines,
-                Line::from(Span::styled(
-                    format!("   -> {value}"),
-                    Style::default().fg(brand),
-                )),
-                width,
-                6,
-            );
-        }
-        if has_memory {
-            let mark = if set.remember { "[x]" } else { "[ ]" };
-            lines.push(Line::from(Span::styled(
-                format!("{mark} Remember my answers across sessions (r)"),
-                Style::default().fg(if set.remember { brand } else { dim }),
-            )));
-        }
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "Ready to submit your answers?",
-            Style::default().fg(dim),
-        )));
-        for (i, opt) in ["1. Submit answers", "2. Cancel"].iter().enumerate() {
-            let focused = set.review_cursor == i;
-            let style = if focused {
-                Style::default().fg(brand).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(white)
-            };
-            lines.push(Line::from(vec![
-                Span::styled(
-                    if focused { "> " } else { "  " },
-                    Style::default().fg(brand),
-                ),
-                Span::styled((*opt).to_string(), style),
-            ]));
-        }
-        lines.push(Line::from(""));
-        let mut foot = String::from("Enter to select | Up/Down to navigate | c: chat");
-        if has_memory {
-            foot.push_str(" | r: remember");
-        }
-        foot.push_str(" | Esc to cancel");
-        push_wrapped(
-            &mut lines,
-            Line::from(Span::styled(foot, Style::default().fg(dim))),
-            width,
-            0,
-        );
+        push_review_lines(&mut lines, set, theme, width);
         return lines;
     }
 
@@ -458,38 +366,177 @@ pub fn build_question_lines(
 
     // Notes line (choice kinds only — input kinds capture every keystroke).
     if q.is_choice() {
-        lines.push(Line::from(""));
-        if set.editing_note {
-            push_wrapped(
-                &mut lines,
-                Line::from(vec![
-                    Span::styled("Notes: ", Style::default().fg(brand)),
-                    Span::styled(sel.note.clone(), Style::default().fg(white)),
-                    Span::styled("_", Style::default().fg(brand)),
-                ]),
-                width,
-                7,
-            );
-        } else if !sel.note.trim().is_empty() {
-            push_wrapped(
-                &mut lines,
-                Line::from(vec![
-                    Span::styled("Notes: ", Style::default().fg(dim)),
-                    Span::styled(sel.note.clone(), Style::default().fg(white)),
-                ]),
-                width,
-                7,
-            );
-        } else {
-            lines.push(Line::from(Span::styled(
-                "Notes: press n to add notes",
-                Style::default().fg(dim),
-            )));
-        }
+        push_notes_line(&mut lines, set, theme, width);
     }
 
     // Footer hints, tailored to the kind.
     lines.push(Line::from(""));
+    push_wrapped(
+        &mut lines,
+        Line::from(Span::styled(
+            footer_hint(q, nq > 1, has_memory),
+            Style::default().fg(dim),
+        )),
+        width,
+        0,
+    );
+
+    lines
+}
+
+/// Tab strip for batched questions: chips for each question plus a trailing
+/// Submit; the active one is highlighted.
+fn push_tab_strip(lines: &mut Vec<Line<'static>>, set: &PendingQuestionSet, theme: &Theme) {
+    let brand = theme.colors.brand.to_color();
+    let dim = theme.colors.text_disabled.to_color();
+    let nq = set.questions.len();
+    let mut spans: Vec<Span<'static>> = vec![Span::styled("< ", Style::default().fg(dim))];
+    for (qi, q) in set.questions.iter().enumerate() {
+        let label = truncate_to_cells(&q.header, 12);
+        if qi == set.active {
+            spans.push(chip(&label, theme.colors.background.to_color(), brand));
+        } else {
+            spans.push(Span::styled(format!(" {label} "), Style::default().fg(dim)));
+        }
+        spans.push(Span::raw(" "));
+    }
+    if set.active >= nq {
+        spans.push(chip("Submit", theme.colors.background.to_color(), brand));
+    } else {
+        spans.push(Span::styled(" Submit ", Style::default().fg(dim)));
+    }
+    spans.push(Span::styled(" >", Style::default().fg(dim)));
+    lines.push(Line::from(spans));
+    lines.push(Line::from(""));
+}
+
+/// The review screen: every question with its answer, the remember toggle
+/// when any question persists, and the Submit/Cancel rows.
+fn push_review_lines(
+    lines: &mut Vec<Line<'static>>,
+    set: &PendingQuestionSet,
+    theme: &Theme,
+    width: usize,
+) {
+    let brand = theme.colors.brand.to_color();
+    let dim = theme.colors.text_disabled.to_color();
+    let white = theme.colors.text_primary.to_color();
+    let has_memory = set.questions.iter().any(|q| q.memory_key.is_some());
+    lines.push(Line::from(Span::styled(
+        "Review your answers",
+        Style::default().fg(white).add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(""));
+    for (q, ans) in set.questions.iter().zip(set.build_answers()) {
+        push_wrapped(
+            lines,
+            Line::from(Span::styled(
+                format!("- {}", q.question),
+                Style::default().fg(white),
+            )),
+            width,
+            2,
+        );
+        let value = if ans.selected.is_empty() {
+            "(no selection)".to_string()
+        } else {
+            ans.selected.join(", ")
+        };
+        push_wrapped(
+            lines,
+            Line::from(Span::styled(
+                format!("   -> {value}"),
+                Style::default().fg(brand),
+            )),
+            width,
+            6,
+        );
+    }
+    if has_memory {
+        let mark = if set.remember { "[x]" } else { "[ ]" };
+        lines.push(Line::from(Span::styled(
+            format!("{mark} Remember my answers across sessions (r)"),
+            Style::default().fg(if set.remember { brand } else { dim }),
+        )));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Ready to submit your answers?",
+        Style::default().fg(dim),
+    )));
+    for (i, opt) in ["1. Submit answers", "2. Cancel"].iter().enumerate() {
+        let focused = set.review_cursor == i;
+        let style = if focused {
+            Style::default().fg(brand).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(white)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(
+                if focused { "> " } else { "  " },
+                Style::default().fg(brand),
+            ),
+            Span::styled((*opt).to_string(), style),
+        ]));
+    }
+    lines.push(Line::from(""));
+    let mut foot = String::from("Enter to select | Up/Down to navigate | c: chat");
+    if has_memory {
+        foot.push_str(" | r: remember");
+    }
+    foot.push_str(" | Esc to cancel");
+    push_wrapped(
+        lines,
+        Line::from(Span::styled(foot, Style::default().fg(dim))),
+        width,
+        0,
+    );
+}
+
+/// The Notes row under a choice question: the note being edited (with a
+/// caret), a saved note, or the hint to add one.
+fn push_notes_line(
+    lines: &mut Vec<Line<'static>>,
+    set: &PendingQuestionSet,
+    theme: &Theme,
+    width: usize,
+) {
+    let brand = theme.colors.brand.to_color();
+    let dim = theme.colors.text_disabled.to_color();
+    let white = theme.colors.text_primary.to_color();
+    let sel = &set.selections[set.active];
+    lines.push(Line::from(""));
+    if set.editing_note {
+        push_wrapped(
+            lines,
+            Line::from(vec![
+                Span::styled("Notes: ", Style::default().fg(brand)),
+                Span::styled(sel.note.clone(), Style::default().fg(white)),
+                Span::styled("_", Style::default().fg(brand)),
+            ]),
+            width,
+            7,
+        );
+    } else if !sel.note.trim().is_empty() {
+        push_wrapped(
+            lines,
+            Line::from(vec![
+                Span::styled("Notes: ", Style::default().fg(dim)),
+                Span::styled(sel.note.clone(), Style::default().fg(white)),
+            ]),
+            width,
+            7,
+        );
+    } else {
+        lines.push(Line::from(Span::styled(
+            "Notes: press n to add notes",
+            Style::default().fg(dim),
+        )));
+    }
+}
+
+/// The key-hint footer for one question tab, tailored to its kind.
+fn footer_hint(q: &mermaid_domain::Question, batched: bool, has_memory: bool) -> String {
     let mut hint = if q.is_input() {
         let mut h = String::from("Type to edit");
         if matches!(q.kind, mermaid_domain::QuestionKind::Number { .. }) {
@@ -502,7 +549,7 @@ pub fn build_question_lines(
     } else {
         String::from("Enter to select | Up/Down to navigate")
     };
-    if nq > 1 {
+    if batched {
         hint.push_str(" | Tab to switch");
     }
     if q.is_choice() {
@@ -512,14 +559,7 @@ pub fn build_question_lines(
         }
     }
     hint.push_str(" | Esc to cancel");
-    push_wrapped(
-        &mut lines,
-        Line::from(Span::styled(hint, Style::default().fg(dim))),
-        width,
-        0,
-    );
-
-    lines
+    hint
 }
 
 /// The preview to show in the right pane: the focused option's preview on the

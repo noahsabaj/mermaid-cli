@@ -264,7 +264,9 @@ pub fn append_runtime_note(state: &mut State, cmds: &mut Vec<Cmd>, text: String)
 
 #[expect(
     clippy::too_many_lines,
-    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+    reason = "one arm per SlashCmd variant, most a few lines; the bulky ones already delegate to \
+     named helpers, and what is left is the command table itself, which shrinks only when \
+     commands do"
 )]
 pub fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
     match cmd {

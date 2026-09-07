@@ -314,10 +314,6 @@ pub struct WebSearchTool {
 
 const MAX_WEB_SEARCH_FAILURE_BYTES: usize = 1024;
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "predates the lint; see .github/baselines/expect_budget.txt"
-)]
 #[async_trait]
 impl ToolExecutor for WebSearchTool {
     fn name(&self) -> &'static str {
@@ -359,6 +355,14 @@ impl ToolExecutor for WebSearchTool {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the fan-out search: gate, run the queries concurrently, fold each result or \
+         failure into the combined text, then the all-failed error and the success both build the \
+         same ten-field WebSearch metadata from the query list and the failure list; a helper for \
+         the fold would return that pair of lists and the sources, and the outcome builders would \
+         still need everything else"
+    )]
     async fn execute(&self, args: serde_json::Value, ctx: ExecContext) -> ToolOutcome {
         let queries = match parse_queries(&args) {
             Ok(q) => q,
@@ -791,10 +795,6 @@ where
     .map_err(|error| format!("web snapshot renderer failed: {error}"))
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "predates the lint; see .github/baselines/expect_budget.txt"
-)]
 #[async_trait]
 impl ToolExecutor for WebFetchTool {
     fn name(&self) -> &'static str {
@@ -857,6 +857,13 @@ impl ToolExecutor for WebFetchTool {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "fetch-then-format: resolve a snapshot or gate and fetch a URL, then render the \
+         page and build the WebFetch metadata; both halves share the parsed request, the timer \
+         and the backend name, and the metadata literal alone is thirty lines of fields taken \
+         from the page and the format result"
+    )]
     async fn execute(&self, args: serde_json::Value, ctx: ExecContext) -> ToolOutcome {
         let request = match parse_fetch_args(&args) {
             Ok(request) => request,

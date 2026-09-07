@@ -216,10 +216,6 @@ async fn handoff_model_candidates(ctx: &ExecContext) -> Vec<String> {
     out
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "predates the lint; see .github/baselines/expect_budget.txt"
-)]
 #[async_trait]
 impl ToolExecutor for ExitPlanModeTool {
     fn name(&self) -> &'static str {
@@ -236,6 +232,13 @@ impl ToolExecutor for ExitPlanModeTool {
         true
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the plan approval dialog end to end: read the plan, build the option list for \
+         the pinned and unpinned configs, ask, then map each answer label back to its outcome; \
+         the answer arms all need the path, body and timer, and they key on the same labels the \
+         options were built from, so the two halves belong together"
+    )]
     async fn execute(&self, _args: serde_json::Value, ctx: ExecContext) -> ToolOutcome {
         let start_t = Instant::now();
         let secs = || start_t.elapsed().as_secs_f64();

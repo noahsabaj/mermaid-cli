@@ -802,10 +802,6 @@ impl StreamState {
 /// Process one SSE event payload (already JSON-decoded). Mutates `state`
 /// and pushes `StreamEvent`s onto `out`. Returns Err on mid-stream
 /// error payloads or JSON parse failure.
-#[expect(
-    clippy::too_many_lines,
-    reason = "predates the lint; see .github/baselines/expect_budget.txt"
-)]
 fn process_chunk_payload(
     payload: &str,
     state: &mut StreamState,
@@ -853,22 +849,7 @@ fn process_chunk_payload(
 
     // Usage: any chunk may carry it; the last chunk is final.
     if let Some(usage) = parsed.get("usageMetadata") {
-        state.saw_usage = true;
-        if let Some(p) = usage.get("promptTokenCount").and_then(|v| v.as_u64()) {
-            state.prompt_tokens = p as usize;
-        }
-        if let Some(c) = usage.get("candidatesTokenCount").and_then(|v| v.as_u64()) {
-            state.completion_tokens = c as usize;
-        }
-        if let Some(cached) = usage
-            .get("cachedContentTokenCount")
-            .and_then(|v| v.as_u64())
-        {
-            state.cached_input_tokens = cached as usize;
-        }
-        if let Some(thoughts) = usage.get("thoughtsTokenCount").and_then(|v| v.as_u64()) {
-            state.reasoning_output_tokens = thoughts as usize;
-        }
+        record_usage(state, usage);
     }
 
     // Terminal finishReason rides on the candidate (may co-arrive with the
@@ -907,62 +888,90 @@ fn process_chunk_payload(
     };
 
     for part in parts_arr {
-        // Function call part — emit immediately. Args arrive as a full
-        // Value object, not fragmented JSON strings (unlike OpenAI).
-        if let Some(fc) = part.get("functionCall") {
-            let name = fc
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let args = fc.get("args").cloned().unwrap_or_else(|| json!({}));
-            if name.is_empty() {
-                continue;
-            }
-            let id = format!("call_{}", state.tool_calls_done.len());
-            let tc = ToolCall {
-                id: Some(id),
-                function: FunctionCall {
-                    name,
-                    arguments: args,
-                },
-            };
-            out.push(StreamEvent::ToolCall(tc.clone()));
-            state.tool_calls_done.push(tc);
-            continue;
-        }
-
-        // Text part — possibly with thought: true flag.
-        let Some(text) = part.get("text").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        if text.is_empty() {
-            continue;
-        }
-        let is_thought = part
-            .get("thought")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        if is_thought {
-            // Each buffer carries its own cap: a long thought must not stop
-            // the answer's text from accumulating.
-            if !state.thinking_acc.accepting() {
-                continue;
-            }
-            out.push(StreamEvent::Reasoning(ReasoningChunk {
-                text: text.to_string(),
-                signature: None,
-            }));
-            state.thinking_acc.push(text);
-        } else {
-            if !state.text_acc.accepting() {
-                continue;
-            }
-            out.push(StreamEvent::Text(text.to_string()));
-            state.text_acc.push(text);
-        }
+        process_part(part, state, out);
     }
     Ok(())
+}
+
+/// Fold a chunk's `usageMetadata` into the stream state. Any chunk may
+/// carry it; the last one is final, so each field simply overwrites.
+fn record_usage(state: &mut StreamState, usage: &Value) {
+    state.saw_usage = true;
+    if let Some(p) = usage.get("promptTokenCount").and_then(|v| v.as_u64()) {
+        state.prompt_tokens = p as usize;
+    }
+    if let Some(c) = usage.get("candidatesTokenCount").and_then(|v| v.as_u64()) {
+        state.completion_tokens = c as usize;
+    }
+    if let Some(cached) = usage
+        .get("cachedContentTokenCount")
+        .and_then(|v| v.as_u64())
+    {
+        state.cached_input_tokens = cached as usize;
+    }
+    if let Some(thoughts) = usage.get("thoughtsTokenCount").and_then(|v| v.as_u64()) {
+        state.reasoning_output_tokens = thoughts as usize;
+    }
+}
+
+/// Handle one part of a chunk: a function call is emitted whole, a text part
+/// goes to the answer or (with `thought: true`) the reasoning buffer, and
+/// anything else is skipped.
+fn process_part(part: &Value, state: &mut StreamState, out: &mut Vec<StreamEvent>) {
+    // Function call part — emit immediately. Args arrive as a full
+    // Value object, not fragmented JSON strings (unlike OpenAI).
+    if let Some(fc) = part.get("functionCall") {
+        let name = fc
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let args = fc.get("args").cloned().unwrap_or_else(|| json!({}));
+        if name.is_empty() {
+            return;
+        }
+        let id = format!("call_{}", state.tool_calls_done.len());
+        let tc = ToolCall {
+            id: Some(id),
+            function: FunctionCall {
+                name,
+                arguments: args,
+            },
+        };
+        out.push(StreamEvent::ToolCall(tc.clone()));
+        state.tool_calls_done.push(tc);
+        return;
+    }
+
+    // Text part — possibly with thought: true flag.
+    let Some(text) = part.get("text").and_then(|v| v.as_str()) else {
+        return;
+    };
+    if text.is_empty() {
+        return;
+    }
+    let is_thought = part
+        .get("thought")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if is_thought {
+        // Each buffer carries its own cap: a long thought must not stop
+        // the answer's text from accumulating.
+        if !state.thinking_acc.accepting() {
+            return;
+        }
+        out.push(StreamEvent::Reasoning(ReasoningChunk {
+            text: text.to_string(),
+            signature: None,
+        }));
+        state.thinking_acc.push(text);
+    } else {
+        if !state.text_acc.accepting() {
+            return;
+        }
+        out.push(StreamEvent::Text(text.to_string()));
+        state.text_acc.push(text);
+    }
 }
 
 #[async_trait]

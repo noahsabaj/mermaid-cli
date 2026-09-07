@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, anyhow, bail};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use mermaid_runtime::{NewProviderProbe, RuntimeStore, TaskRecord};
 
@@ -35,7 +35,8 @@ use super::{Commands, OutputFormat, PairCommand, PluginCommand, QaCommand};
 /// verb that could not do its job, and it becomes the process exit code.
 #[expect(
     clippy::too_many_lines,
-    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+    reason = "the clap dispatch: one arm per subcommand, nearly all a call plus Ok(true); a \
+     helper per arm adds nothing and the table is how a reader finds which function a verb runs"
 )]
 pub async fn handle_command(
     command: &Commands,
@@ -336,10 +337,6 @@ async fn show_doctor(
 
 /// Assemble the full readiness report without printing — shared by
 /// `mermaid doctor` and the `mermaid feedback` diagnostic bundle.
-#[expect(
-    clippy::too_many_lines,
-    reason = "predates the lint; see .github/baselines/expect_budget.txt"
-)]
 pub(crate) async fn build_doctor_report(
     config: &Config,
     cwd: &Path,
@@ -374,41 +371,7 @@ pub(crate) async fn build_doctor_report(
     } else {
         LocalModelListing::Unreachable
     };
-    let ollama = if !is_ollama_installed() {
-        DoctorCheck {
-            status: "warning",
-            message: "Ollama is not installed; remote providers can still work if configured."
-                .to_string(),
-        }
-    } else {
-        match &ollama_models {
-            LocalModelListing::Unreachable => DoctorCheck {
-                status: "warning",
-                message: "Ollama is installed but not running; mermaid starts it \
-                          automatically when an Ollama model is used."
-                    .to_string(),
-            },
-            LocalModelListing::Live(models) if models.is_empty() => DoctorCheck {
-                status: "warning",
-                message: "Ollama is running but no local/cloud models were listed.".to_string(),
-            },
-            LocalModelListing::Live(models) => DoctorCheck {
-                status: "ok",
-                message: format!("Ollama reachable with {} models.", models.len()),
-            },
-            // Not running is not a fault: the models are installed and the
-            // server starts on first use, so this machine has a working
-            // local backend.
-            LocalModelListing::FromDisk(models) => DoctorCheck {
-                status: "ok",
-                message: format!(
-                    "Ollama installed, not running — {} model(s) on disk; starts \
-                     automatically when used.",
-                    models.len()
-                ),
-            },
-        }
-    };
+    let ollama = ollama_check(&ollama_models);
 
     let remote_providers = configured_remote_provider_names(config);
     let provider_problems = crate::providers::provider_problems(config)
@@ -419,68 +382,11 @@ pub(crate) async fn build_doctor_report(
         })
         .collect::<Vec<_>>();
     let instruction_paths = crate::app::instructions::find_instruction_files(cwd);
-    let project_instructions = if instruction_paths.is_empty() {
-        DoctorCheck {
-            status: "info",
-            message: "No AGENTS.md or MERMAID.md found.".to_string(),
-        }
-    } else if let Some(loaded) = crate::app::instructions::load_from_paths(&instruction_paths) {
-        DoctorCheck {
-            status: "ok",
-            message: format!(
-                "{} bytes loaded from {} source(s){}.",
-                loaded.byte_len,
-                loaded.sources.len(),
-                if loaded.truncated { " (truncated)" } else { "" }
-            ),
-        }
-    } else {
-        DoctorCheck {
-            status: "warning",
-            message: "Instruction files were found but could not be loaded.".to_string(),
-        }
-    };
+    let project_instructions = project_instructions_check(&instruction_paths);
 
-    let daemon = match RuntimeClient::daemon().health() {
-        Ok(read) => DoctorCheck {
-            status: "ok",
-            message: format!("daemon attached; database {}", read.value.database),
-        },
-        Err(err) => DoctorCheck {
-            status: "info",
-            message: format!("daemon not attached; CLI will use local runtime store ({err})"),
-        },
-    };
-    let local_store = match RuntimeClient::local().health() {
-        Ok(read) => DoctorCheck {
-            status: "ok",
-            message: format!("local runtime store ready at {}", read.value.database),
-        },
-        Err(err) => DoctorCheck {
-            status: "warning",
-            message: format!("local runtime store unavailable: {err}"),
-        },
-    };
+    let runtime = runtime_checks();
 
-    let mut tools = vec![
-        "read/edit/write files".to_string(),
-        "run shell commands".to_string(),
-        "create checkpoints before risky mutations".to_string(),
-    ];
-    let (web_tools, web_next_steps) = web_doctor_entries(config);
-    tools.extend(web_tools);
-    if !config.mcp_servers.is_empty() {
-        tools.push(format!(
-            "{} configured MCP server(s)",
-            config.mcp_servers.len()
-        ));
-    }
-    if let Some(skills) = crate::app::skills::load(cwd) {
-        tools.push(format!(
-            "{} skill(s) discovered (SKILL.md playbooks)",
-            skills.entries.len()
-        ));
-    }
+    let (tools, web_next_steps) = doctor_tools(config, cwd);
 
     let mut next_steps = web_next_steps;
     if active_model.is_none() {
@@ -507,7 +413,7 @@ pub(crate) async fn build_doctor_report(
     let session_logs = session_log_drift(cwd);
 
     let ok = active_model.is_some()
-        && local_store.status != "warning"
+        && runtime.local_store.status != "warning"
         && (ollama.status == "ok" || !remote_providers.is_empty());
     DoctorReport {
         ok,
@@ -524,13 +430,126 @@ pub(crate) async fn build_doctor_report(
         provider_problems,
         project_instructions,
         tools,
-        runtime: DoctorRuntime {
-            daemon,
-            local_store,
-        },
+        runtime,
         session_logs,
         next_steps,
     }
+}
+
+/// The Ollama line of the report, from what the observe path found.
+fn ollama_check(ollama_models: &LocalModelListing) -> DoctorCheck {
+    if !is_ollama_installed() {
+        DoctorCheck {
+            status: "warning",
+            message: "Ollama is not installed; remote providers can still work if configured."
+                .to_string(),
+        }
+    } else {
+        match ollama_models {
+            LocalModelListing::Unreachable => DoctorCheck {
+                status: "warning",
+                message: "Ollama is installed but not running; mermaid starts it \
+                          automatically when an Ollama model is used."
+                    .to_string(),
+            },
+            LocalModelListing::Live(models) if models.is_empty() => DoctorCheck {
+                status: "warning",
+                message: "Ollama is running but no local/cloud models were listed.".to_string(),
+            },
+            LocalModelListing::Live(models) => DoctorCheck {
+                status: "ok",
+                message: format!("Ollama reachable with {} models.", models.len()),
+            },
+            // Not running is not a fault: the models are installed and the
+            // server starts on first use, so this machine has a working
+            // local backend.
+            LocalModelListing::FromDisk(models) => DoctorCheck {
+                status: "ok",
+                message: format!(
+                    "Ollama installed, not running — {} model(s) on disk; starts \
+                     automatically when used.",
+                    models.len()
+                ),
+            },
+        }
+    }
+}
+
+/// The project-instructions line: found nothing, loaded, or found-but-broken.
+fn project_instructions_check(instruction_paths: &[PathBuf]) -> DoctorCheck {
+    if instruction_paths.is_empty() {
+        DoctorCheck {
+            status: "info",
+            message: "No AGENTS.md or MERMAID.md found.".to_string(),
+        }
+    } else if let Some(loaded) = crate::app::instructions::load_from_paths(instruction_paths) {
+        DoctorCheck {
+            status: "ok",
+            message: format!(
+                "{} bytes loaded from {} source(s){}.",
+                loaded.byte_len,
+                loaded.sources.len(),
+                if loaded.truncated { " (truncated)" } else { "" }
+            ),
+        }
+    } else {
+        DoctorCheck {
+            status: "warning",
+            message: "Instruction files were found but could not be loaded.".to_string(),
+        }
+    }
+}
+
+/// The daemon and local-store lines, each from one health probe.
+fn runtime_checks() -> DoctorRuntime {
+    let daemon = match RuntimeClient::daemon().health() {
+        Ok(read) => DoctorCheck {
+            status: "ok",
+            message: format!("daemon attached; database {}", read.value.database),
+        },
+        Err(err) => DoctorCheck {
+            status: "info",
+            message: format!("daemon not attached; CLI will use local runtime store ({err})"),
+        },
+    };
+    let local_store = match RuntimeClient::local().health() {
+        Ok(read) => DoctorCheck {
+            status: "ok",
+            message: format!("local runtime store ready at {}", read.value.database),
+        },
+        Err(err) => DoctorCheck {
+            status: "warning",
+            message: format!("local runtime store unavailable: {err}"),
+        },
+    };
+    DoctorRuntime {
+        daemon,
+        local_store,
+    }
+}
+
+/// The "tools" list plus the web-backend next steps the web entries suggest.
+fn doctor_tools(config: &Config, cwd: &Path) -> (Vec<String>, Vec<String>) {
+    let mut tools = vec![
+        "read/edit/write files".to_string(),
+        "run shell commands".to_string(),
+        "create checkpoints before risky mutations".to_string(),
+    ];
+    let (web_tools, web_next_steps) = web_doctor_entries(config);
+    tools.extend(web_tools);
+    if !config.mcp_servers.is_empty() {
+        tools.push(format!(
+            "{} configured MCP server(s)",
+            config.mcp_servers.len()
+        ));
+    }
+    if let Some(skills) = crate::app::skills::load(cwd) {
+        tools.push(format!(
+            "{} skill(s) discovered (SKILL.md playbooks)",
+            skills.entries.len()
+        ));
+    }
+    (tools, web_next_steps)
 }
 
 /// Fold every session's log from zero and compare it against what a resume
@@ -1054,7 +1073,10 @@ impl QaCompactSmokeReport {
 
 #[expect(
     clippy::too_many_lines,
-    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+    reason = "an in-binary smoke test with a test's shape: build a synthetic session, drive a \
+     manual compaction through the reducer, replay the save commands, then assert on the files \
+     and record each check for the report; the arrange/act/assert steps read as one scenario and \
+     would lose their sequence split across helpers"
 )]
 fn run_qa_compact_smoke(
     config: &Config,
@@ -2558,10 +2580,6 @@ fn show_mcp_servers() {
 }
 
 /// Show status of all dependencies
-#[expect(
-    clippy::too_many_lines,
-    reason = "predates the lint; see .github/baselines/expect_budget.txt"
-)]
 async fn show_status(config: &Config) -> Result<()> {
     println!("Mermaid Status:");
     println!();
@@ -2600,6 +2618,54 @@ async fn show_status(config: &Config) -> Result<()> {
         }
     }
 
+    print_ollama_status(config, !available.is_empty()).await;
+
+    // Check configuration (uses platform-specific path via ProjectDirs)
+    if let Ok(config_dir) = get_config_dir() {
+        let config_path = config_dir.join("config.toml");
+        if config_path.exists() {
+            println!("  [OK] Configuration: {}", config_path.display());
+        } else {
+            println!("  [WARNING] Configuration: Not found (using defaults)");
+        }
+    }
+
+    // MCP Servers
+    if config.mcp_servers.is_empty() {
+        println!("  [INFO] MCP Servers: None configured (use 'mermaid add <name>')");
+    } else {
+        println!(
+            "  [OK] MCP Servers: {} configured",
+            config.mcp_servers.len()
+        );
+        for (name, server_cfg) in &config.mcp_servers {
+            let target: &str = match &server_cfg.url {
+                Some(url) => url,
+                None => server_cfg
+                    .args
+                    .get(1)
+                    .map(String::as_str)
+                    .unwrap_or(server_cfg.command.as_str()),
+            };
+            println!("      - {name} ({target})");
+        }
+    }
+
+    print_project_instructions_status();
+
+    // Environment variables (for API providers)
+    println!("\n  Environment:");
+    if std::env::var("OLLAMA_API_KEY").is_ok() {
+        println!("    - OLLAMA_API_KEY: Set (for Ollama Cloud)");
+    }
+
+    println!();
+    Ok(())
+}
+
+/// The Ollama line(s) of `mermaid status`. `has_remote` softens a missing
+/// install to INFO: remote providers cover every model this machine needs.
+async fn print_ollama_status(config: &Config, has_remote: bool) {
     // Check Ollama (via HTTP, so remote deployments are honored).
     // Diagnostics observe, they don't heal: the shared observe path keeps
     // autostart off, otherwise a status check would start the server and then
@@ -2635,97 +2701,57 @@ async fn show_status(config: &Config) -> Result<()> {
                 preview(&models);
             },
         }
-    } else if available.is_empty() {
+    } else if !has_remote {
         println!("  [WARNING] Ollama: Not installed (and no remote provider configured)");
     } else {
         // Not a failure: the configured remote providers cover every model
         // this machine needs. Ollama is only required for local models.
         println!("  [INFO] Ollama: Not installed (only needed for local models)");
     }
+}
 
-    // Check configuration (uses platform-specific path via ProjectDirs)
-    if let Ok(config_dir) = get_config_dir() {
-        let config_path = config_dir.join("config.toml");
-        if config_path.exists() {
-            println!("  [OK] Configuration: {}", config_path.display());
-        } else {
-            println!("  [WARNING] Configuration: Not found (using defaults)");
-        }
-    }
-
-    // MCP Servers
-    if config.mcp_servers.is_empty() {
-        println!("  [INFO] MCP Servers: None configured (use 'mermaid add <name>')");
+/// Project instructions (Step 5h). Walks UP from cwd to git root or
+/// $HOME to find the nearest supported instruction files.
+fn print_project_instructions_status() {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let paths = crate::app::instructions::find_instruction_files(&cwd);
+    if paths.is_empty() {
+        println!("  [INFO] Project instructions: not found (AGENTS.md, MERMAID.md)");
     } else {
-        println!(
-            "  [OK] MCP Servers: {} configured",
-            config.mcp_servers.len()
-        );
-        for (name, server_cfg) in &config.mcp_servers {
-            let target: &str = match &server_cfg.url {
-                Some(url) => url,
-                None => server_cfg
-                    .args
-                    .get(1)
-                    .map(String::as_str)
-                    .unwrap_or(server_cfg.command.as_str()),
-            };
-            println!("      - {name} ({target})");
-        }
-    }
-
-    // Project instructions (Step 5h). Walks UP from cwd to git root or
-    // $HOME to find the nearest supported instruction files.
-    {
-        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        let paths = crate::app::instructions::find_instruction_files(&cwd);
-        if paths.is_empty() {
-            println!("  [INFO] Project instructions: not found (AGENTS.md, MERMAID.md)");
-        } else {
-            match crate::app::instructions::load_from_paths(&paths) {
-                Some(loaded) => {
-                    let files = loaded
-                        .sources
+        match crate::app::instructions::load_from_paths(&paths) {
+            Some(loaded) => {
+                let files = loaded
+                    .sources
+                    .iter()
+                    .map(|source| {
+                        source
+                            .path
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("instructions")
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                println!(
+                    "  [OK] Project instructions: {} at {} ({} bytes{})",
+                    files,
+                    loaded.path.display(),
+                    loaded.byte_len,
+                    if loaded.truncated { ", truncated" } else { "" }
+                );
+            },
+            None => {
+                println!(
+                    "  [WARNING] Project instructions: found but unreadable ({})",
+                    paths
                         .iter()
-                        .map(|source| {
-                            source
-                                .path
-                                .file_name()
-                                .and_then(|name| name.to_str())
-                                .unwrap_or("instructions")
-                        })
+                        .map(|path| path.display().to_string())
                         .collect::<Vec<_>>()
-                        .join(", ");
-                    println!(
-                        "  [OK] Project instructions: {} at {} ({} bytes{})",
-                        files,
-                        loaded.path.display(),
-                        loaded.byte_len,
-                        if loaded.truncated { ", truncated" } else { "" }
-                    );
-                },
-                None => {
-                    println!(
-                        "  [WARNING] Project instructions: found but unreadable ({})",
-                        paths
-                            .iter()
-                            .map(|path| path.display().to_string())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    );
-                },
-            }
+                        .join(", ")
+                );
+            },
         }
     }
-
-    // Environment variables (for API providers)
-    println!("\n  Environment:");
-    if std::env::var("OLLAMA_API_KEY").is_ok() {
-        println!("    - OLLAMA_API_KEY: Set (for Ollama Cloud)");
-    }
-
-    println!();
-    Ok(())
 }
 
 #[cfg(test)]

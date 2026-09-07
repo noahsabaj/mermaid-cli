@@ -94,10 +94,6 @@ impl StdioTransport {
     ///
     /// The command is executed with piped stdin/stdout. Stderr is read
     /// in a background task and forwarded to tracing.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "predates the lint; see .github/baselines/expect_budget.txt"
-    )]
     pub async fn spawn(
         command: &str,
         args: &[String],
@@ -165,111 +161,14 @@ impl StdioTransport {
         let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Value>>>> =
             Arc::new(Mutex::new(HashMap::new()));
 
-        // Background task: read stdout for JSON-RPC responses
-        let pending_clone = Arc::clone(&pending);
-        let stdin_for_reader = Arc::clone(&stdin);
-        let reader_task = tokio::spawn(async move {
-            let mut reader = BufReader::new(stdout);
-            loop {
-                let line = match read_line_capped(&mut reader, MAX_MCP_FRAME_BYTES).await {
-                    Ok(CappedLine::Line(bytes)) => match String::from_utf8(bytes) {
-                        Ok(s) => s,
-                        // A non-UTF-8 frame can't be a JSON-RPC message — JSON is
-                        // UTF-8 by RFC 8259 §8.1 and serde_json needs a &str — so it
-                        // carries nothing to route. Skip it and resync on the next
-                        // frame instead of tearing down the reader (#36).
-                        Err(_) => {
-                            tracing::warn!("MCP: dropping non-UTF-8 stdout frame");
-                            continue;
-                        },
-                    },
-                    Ok(CappedLine::TooLong) => {
-                        tracing::warn!("MCP: dropping oversize stdout frame (exceeds cap)");
-                        continue;
-                    },
-                    Ok(CappedLine::Eof) | Err(_) => break,
-                };
-                if line.trim().is_empty() {
-                    continue;
-                }
-                let Ok(msg) = serde_json::from_str::<Value>(&line) else {
-                    // Slice on a char boundary — MCP stdout may contain
-                    // non-ASCII text, and a raw byte slice at offset 200
-                    // could fall inside a multi-byte codepoint and panic.
-                    let end = line.floor_char_boundary(200);
-                    tracing::warn!("MCP: unparseable stdout line: {}", &line[..end]);
-                    continue;
-                };
-
-                // Only a true JSON-RPC *response* (an id, no method) completes a
-                // pending request. A server-initiated *request* also carries an id
-                // but ALSO a method; its id can collide with one of ours, and
-                // routing it to `pending` would wrongly complete a caller's oneshot
-                // (#89). Notifications (method, no id) are likewise not responses.
-                if is_response(&msg) {
-                    if let Some(id) = msg.get("id").and_then(parse_response_id) {
-                        let mut pending = pending_clone.lock().await;
-                        if let Some(sender) = pending.remove(&id) {
-                            let _ = sender.send(msg);
-                        }
-                    }
-                } else if msg.get("method").is_some() {
-                    // Has a `method`: either a server-initiated REQUEST (also
-                    // carries an `id`) or a NOTIFICATION (no `id`). We implement
-                    // neither, but they need different handling.
-                    match msg.get("id") {
-                        // Server request: it BLOCKS until it gets a response. Reply
-                        // with a JSON-RPC "method not supported" error rather than
-                        // dropping it and letting the server stall forever (F79).
-                        Some(id) if !id.is_null() => {
-                            tracing::debug!(
-                                method = msg.get("method").and_then(|m| m.as_str()).unwrap_or(""),
-                                "MCP: replying method-not-supported to unsupported server request"
-                            );
-                            reply_method_not_supported(&stdin_for_reader, id).await;
-                        },
-                        // Notification: no `id`, no reply expected. Ignore it.
-                        _ => {
-                            tracing::trace!(
-                                method = msg.get("method").and_then(|m| m.as_str()).unwrap_or(""),
-                                "MCP: ignoring server notification (no reply expected)"
-                            );
-                        },
-                    }
-                } else {
-                    // Neither a response nor a request/notification we recognize
-                    // (e.g. an `id` that isn't a parseable number, with no method).
-                    tracing::trace!("MCP: ignoring unrecognized stdout message");
-                }
-            }
-
-            // Reader loop exited: stdout hit EOF (child closed it) or a fatal read
-            // error. No further responses can arrive, so fail every still-pending
-            // request NOW rather than letting each caller burn REQUEST_TIMEOUT_SECS.
-            // Dropping each oneshot::Sender closes its channel; the caller's
-            // `timeout(.., rx)` then resolves immediately via its channel-closed arm
-            // (#94). `clear()` drops all senders.
-            pending_clone.lock().await.clear();
-        });
-
-        // Background task: read stderr for logging (not JSON-RPC)
-        tokio::spawn(async move {
-            let mut reader = BufReader::new(stderr);
-            loop {
-                match read_line_capped(&mut reader, MAX_MCP_FRAME_BYTES).await {
-                    Ok(CappedLine::Line(bytes)) => {
-                        // Redact — servers sometimes echo secrets on stderr (#93).
-                        let line = String::from_utf8_lossy(&bytes);
-                        tracing::debug!(
-                            "MCP stderr: {}",
-                            mermaid_model::utils::redact_secrets(&line)
-                        );
-                    },
-                    Ok(CappedLine::TooLong) => continue,
-                    Ok(CappedLine::Eof) | Err(_) => break,
-                }
-            }
-        });
+        // Background task: read stdout for JSON-RPC responses.
+        let reader_task = tokio::spawn(read_stdout_frames(
+            stdout,
+            Arc::clone(&pending),
+            Arc::clone(&stdin),
+        ));
+        // Background task: read stderr for logging (not JSON-RPC).
+        tokio::spawn(log_stderr(stderr));
 
         Ok(Self {
             stdin,
@@ -595,6 +494,117 @@ pub(super) fn parse_response_id(v: &Value) -> Option<u64> {
 /// oneshot — see #89.
 pub(super) fn is_response(msg: &Value) -> bool {
     msg.get("id").and_then(parse_response_id).is_some() && msg.get("method").is_none()
+}
+
+/// The stdout reader: routes each JSON-RPC frame the server writes — a
+/// response completes its pending request, a server-initiated request gets a
+/// method-not-supported reply, a notification is ignored — and, when stdout
+/// closes, fails every still-pending request at once.
+async fn read_stdout_frames(
+    stdout: tokio::process::ChildStdout,
+    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Value>>>>,
+    stdin: Arc<Mutex<tokio::process::ChildStdin>>,
+) {
+    let mut reader = BufReader::new(stdout);
+    loop {
+        let line = match read_line_capped(&mut reader, MAX_MCP_FRAME_BYTES).await {
+            Ok(CappedLine::Line(bytes)) => match String::from_utf8(bytes) {
+                Ok(s) => s,
+                // A non-UTF-8 frame can't be a JSON-RPC message — JSON is
+                // UTF-8 by RFC 8259 §8.1 and serde_json needs a &str — so it
+                // carries nothing to route. Skip it and resync on the next
+                // frame instead of tearing down the reader (#36).
+                Err(_) => {
+                    tracing::warn!("MCP: dropping non-UTF-8 stdout frame");
+                    continue;
+                },
+            },
+            Ok(CappedLine::TooLong) => {
+                tracing::warn!("MCP: dropping oversize stdout frame (exceeds cap)");
+                continue;
+            },
+            Ok(CappedLine::Eof) | Err(_) => break,
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(msg) = serde_json::from_str::<Value>(&line) else {
+            // Slice on a char boundary — MCP stdout may contain
+            // non-ASCII text, and a raw byte slice at offset 200
+            // could fall inside a multi-byte codepoint and panic.
+            let end = line.floor_char_boundary(200);
+            tracing::warn!("MCP: unparseable stdout line: {}", &line[..end]);
+            continue;
+        };
+
+        // Only a true JSON-RPC *response* (an id, no method) completes a
+        // pending request. A server-initiated *request* also carries an id
+        // but ALSO a method; its id can collide with one of ours, and
+        // routing it to `pending` would wrongly complete a caller's oneshot
+        // (#89). Notifications (method, no id) are likewise not responses.
+        if is_response(&msg) {
+            if let Some(id) = msg.get("id").and_then(parse_response_id) {
+                let mut pending = pending.lock().await;
+                if let Some(sender) = pending.remove(&id) {
+                    let _ = sender.send(msg);
+                }
+            }
+        } else if msg.get("method").is_some() {
+            // Has a `method`: either a server-initiated REQUEST (also
+            // carries an `id`) or a NOTIFICATION (no `id`). We implement
+            // neither, but they need different handling.
+            match msg.get("id") {
+                // Server request: it BLOCKS until it gets a response. Reply
+                // with a JSON-RPC "method not supported" error rather than
+                // dropping it and letting the server stall forever (F79).
+                Some(id) if !id.is_null() => {
+                    tracing::debug!(
+                        method = msg.get("method").and_then(|m| m.as_str()).unwrap_or(""),
+                        "MCP: replying method-not-supported to unsupported server request"
+                    );
+                    reply_method_not_supported(&stdin, id).await;
+                },
+                // Notification: no `id`, no reply expected. Ignore it.
+                _ => {
+                    tracing::trace!(
+                        method = msg.get("method").and_then(|m| m.as_str()).unwrap_or(""),
+                        "MCP: ignoring server notification (no reply expected)"
+                    );
+                },
+            }
+        } else {
+            // Neither a response nor a request/notification we recognize
+            // (e.g. an `id` that isn't a parseable number, with no method).
+            tracing::trace!("MCP: ignoring unrecognized stdout message");
+        }
+    }
+
+    // Reader loop exited: stdout hit EOF (child closed it) or a fatal read
+    // error. No further responses can arrive, so fail every still-pending
+    // request NOW rather than letting each caller burn REQUEST_TIMEOUT_SECS.
+    // Dropping each oneshot::Sender closes its channel; the caller's
+    // `timeout(.., rx)` then resolves immediately via its channel-closed arm
+    // (#94). `clear()` drops all senders.
+    pending.lock().await.clear();
+}
+
+/// The stderr reader: forwards the server's stderr to tracing, redacted.
+async fn log_stderr(stderr: tokio::process::ChildStderr) {
+    let mut reader = BufReader::new(stderr);
+    loop {
+        match read_line_capped(&mut reader, MAX_MCP_FRAME_BYTES).await {
+            Ok(CappedLine::Line(bytes)) => {
+                // Redact — servers sometimes echo secrets on stderr (#93).
+                let line = String::from_utf8_lossy(&bytes);
+                tracing::debug!(
+                    "MCP stderr: {}",
+                    mermaid_model::utils::redact_secrets(&line)
+                );
+            },
+            Ok(CappedLine::TooLong) => continue,
+            Ok(CappedLine::Eof) | Err(_) => break,
+        }
+    }
 }
 
 /// Reply to a server-initiated JSON-RPC *request* we don't implement with a

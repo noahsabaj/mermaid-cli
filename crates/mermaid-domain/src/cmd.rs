@@ -609,7 +609,9 @@ impl Cmd {
     /// identifier that doesn't dump the full payload.
     #[expect(
         clippy::too_many_lines,
-        reason = "predates the lint; see .github/baselines/expect_budget.txt"
+        reason = "one arm per Cmd variant, deliberately exhaustive (no wildcard) so a new Cmd \
+         must choose its trace summary here; the length is the variant count and shrinks only \
+         when Cmd does"
     )]
     #[must_use]
     pub fn summary(&self) -> String {

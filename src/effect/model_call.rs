@@ -10,7 +10,11 @@ use super::*;
 
 #[expect(
     clippy::too_many_lines,
-    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+    reason = "one model call end to end: resolve the provider, size the window, pre-stream \
+     auto-compaction, the stream, then the context-limit retry that re-runs compaction; both \
+     compaction blocks need the provider, turn, request, token, window and policy, so a helper \
+     for either takes seven arguments, and the retry must run after the first stream's relay has \
+     been joined, which keeps the ordering here"
 )]
 pub(super) async fn dispatch_call_model(
     msg_tx: MsgSender,
@@ -188,80 +192,10 @@ pub(super) async fn dispatch_call_model(
 
     // Build a StreamContext — provider writes typed events into the
     // internal sink; we relay each to the reducer as a Msg.
-    let (stream_tx, mut stream_rx) = mpsc::channel::<StreamEvent>(256);
+    let (stream_tx, stream_rx) = mpsc::channel::<StreamEvent>(256);
     let ctx = StreamContext::new(token.clone(), stream_tx, turn);
 
-    // Drain stream events into Msgs on a sibling task. Ends when the sink
-    // closes (provider's final `Done` or completion) OR the turn token is
-    // cancelled — `select!`ing on the token ties this relay to the turn's
-    // structured cancellation so a cancel drops it within a tick instead of
-    // waiting on the next event. (A separate task is required: the relay must
-    // run concurrently with `provider.chat` for streaming backpressure.)
-    let relay_tx = msg_tx.clone();
-    let relay_token = token.clone();
-    let relay_tasks = tasks.clone();
-    let relay = spawn_guarded(async move {
-        loop {
-            let event = tokio::select! {
-                biased;
-                _ = relay_token.cancelled() => {
-                    // #F40: a cancel landing right after the provider finished must
-                    // not discard the terminal Done it already enqueued. Drain the
-                    // buffered events and relay only a terminal Done — so the
-                    // just-completed turn's usage is still recorded — while NOT
-                    // painting buffered intermediate text (the turn is cancelled).
-                    // `try_recv` drains the buffer without awaiting more.
-                    while let Ok(buffered) = stream_rx.try_recv() {
-                        if let StreamEvent::Done {
-                            usage,
-                            provider_continuation,
-                            stop_reason,
-                        } = buffered
-                        {
-                            note_stream_usage(&relay_tasks, &usage);
-                            let _ = relay_tx
-                                .send(Msg::StreamDone {
-                                    turn,
-                                    usage,
-                                    provider_continuation,
-                                    stop_reason,
-                                })
-                                .await;
-                        }
-                    }
-                    break;
-                },
-                ev = stream_rx.recv() => match ev {
-                    Some(ev) => ev,
-                    None => break,
-                },
-            };
-            let msg = match event {
-                StreamEvent::Text(chunk) => Msg::StreamText { turn, chunk },
-                StreamEvent::Reasoning(chunk) => Msg::StreamReasoning { turn, chunk },
-                StreamEvent::ToolCall(call) => Msg::StreamToolCall { turn, call },
-                // Plumbing notice ("Starting the local Ollama server…") —
-                // a turn-independent system line, not response content.
-                StreamEvent::Status(text) => Msg::TransientStatus { text },
-                StreamEvent::Done {
-                    usage,
-                    provider_continuation,
-                    stop_reason,
-                } => {
-                    note_stream_usage(&relay_tasks, &usage);
-                    Msg::StreamDone {
-                        turn,
-                        usage,
-                        provider_continuation,
-                        stop_reason,
-                    }
-                },
-            };
-            if relay_tx.send(msg).await.is_err() {
-                break;
-            }
-        }
-    });
+    let relay = spawn_stream_relay(&msg_tx, &token, &tasks, stream_rx, turn);
 
     // Run the actual provider. On error, the relay will have
     // already emitted partial events; we follow with a single
@@ -371,45 +305,23 @@ pub(super) async fn dispatch_call_model(
     }
 }
 
-/// Drop-based per-turn model-call timer: emits a structured `tracing` event with
-/// the elapsed wall time when the stream dispatch returns (success, error, or
-/// cancel). Impure-shell only — lands in the log / TRACE bundle.
-pub(super) struct TurnTimer {
+/// Drain stream events into Msgs on a sibling task. Ends when the sink
+/// closes (provider's final `Done` or completion) OR the turn token is
+/// cancelled — `select!`ing on the token ties this relay to the turn's
+/// structured cancellation so a cancel drops it within a tick instead of
+/// waiting on the next event. (A separate task is required: the relay must
+/// run concurrently with `provider.chat` for streaming backpressure.)
+fn spawn_stream_relay(
+    msg_tx: &MsgSender,
+    token: &tokio_util::sync::CancellationToken,
+    tasks: &crate::providers::TaskBroker,
+    mut stream_rx: mpsc::Receiver<StreamEvent>,
     turn: TurnId,
-    model_id: String,
-    started: std::time::Instant,
-}
-
-impl Drop for TurnTimer {
-    fn drop(&mut self) {
-        tracing::debug!(
-            turn = %self.turn,
-            model = %self.model_id,
-            elapsed_ms = self.started.elapsed().as_millis() as u64,
-            "model turn complete"
-        );
-    }
-}
-
-pub(super) async fn dispatch_provider_stream(
-    msg_tx: MsgSender,
-    provider: Arc<dyn ModelProvider>,
-    turn: TurnId,
-    request: mermaid_domain::ChatRequest,
-    token: tokio_util::sync::CancellationToken,
-    tasks: crate::providers::TaskBroker,
-) {
-    let _turn_timer = TurnTimer {
-        turn,
-        model_id: request.model_id.clone(),
-        started: std::time::Instant::now(),
-    };
-    let (stream_tx, mut stream_rx) = mpsc::channel::<StreamEvent>(256);
-    let ctx = StreamContext::new(token.clone(), stream_tx, turn);
+) -> mermaid_model::utils::AbortOnDrop {
     let relay_tx = msg_tx.clone();
     let relay_token = token.clone();
     let relay_tasks = tasks.clone();
-    let relay = spawn_guarded(async move {
+    spawn_guarded(async move {
         loop {
             let event = tokio::select! {
                 biased;
@@ -449,7 +361,8 @@ pub(super) async fn dispatch_provider_stream(
                 StreamEvent::Text(chunk) => Msg::StreamText { turn, chunk },
                 StreamEvent::Reasoning(chunk) => Msg::StreamReasoning { turn, chunk },
                 StreamEvent::ToolCall(call) => Msg::StreamToolCall { turn, call },
-                // Plumbing notice — turn-independent system line.
+                // Plumbing notice ("Starting the local Ollama server…") —
+                // a turn-independent system line, not response content.
                 StreamEvent::Status(text) => Msg::TransientStatus { text },
                 StreamEvent::Done {
                     usage,
@@ -469,7 +382,45 @@ pub(super) async fn dispatch_provider_stream(
                 break;
             }
         }
-    });
+    })
+}
+
+/// Drop-based per-turn model-call timer: emits a structured `tracing` event with
+/// the elapsed wall time when the stream dispatch returns (success, error, or
+/// cancel). Impure-shell only — lands in the log / TRACE bundle.
+pub(super) struct TurnTimer {
+    turn: TurnId,
+    model_id: String,
+    started: std::time::Instant,
+}
+
+impl Drop for TurnTimer {
+    fn drop(&mut self) {
+        tracing::debug!(
+            turn = %self.turn,
+            model = %self.model_id,
+            elapsed_ms = self.started.elapsed().as_millis() as u64,
+            "model turn complete"
+        );
+    }
+}
+
+pub(super) async fn dispatch_provider_stream(
+    msg_tx: MsgSender,
+    provider: Arc<dyn ModelProvider>,
+    turn: TurnId,
+    request: mermaid_domain::ChatRequest,
+    token: tokio_util::sync::CancellationToken,
+    tasks: crate::providers::TaskBroker,
+) {
+    let _turn_timer = TurnTimer {
+        turn,
+        model_id: request.model_id.clone(),
+        started: std::time::Instant::now(),
+    };
+    let (stream_tx, stream_rx) = mpsc::channel::<StreamEvent>(256);
+    let ctx = StreamContext::new(token.clone(), stream_tx, turn);
+    let relay = spawn_stream_relay(&msg_tx, &token, &tasks, stream_rx, turn);
 
     let model_id = request.model_id.clone();
     match provider.chat(request, ctx).await {

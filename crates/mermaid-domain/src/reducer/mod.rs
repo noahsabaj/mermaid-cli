@@ -117,7 +117,9 @@ pub fn update(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
 /// not what this rule is about.
 #[expect(
     clippy::too_many_lines,
-    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+    reason = "the reducer's top-level dispatch: one arm per Msg variant under the wildcard denies \
+     below, so every variant is visibly handled in one place; the per-variant bodies already live \
+     in the sibling modules and this is what remains"
 )]
 #[deny(
     clippy::wildcard_enum_match_arm,

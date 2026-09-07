@@ -606,7 +606,12 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
 
     #[expect(
         clippy::too_many_lines,
-        reason = "predates the lint; see .github/baselines/expect_budget.txt"
+        reason = "the transcript assembly on a memo miss: one loop over the messages handling \
+         each kind (checkpoint, summary, system, stitched continuation, thinking, assistant prose \
+         through the wrap cache, user band, image rows) and recording click targets as it goes; \
+         the loop body reads the widget, the click map and the line index together, so it would \
+         need to become a builder over all three, and this is the hot path the render-cost \
+         invariants are written against"
     )]
     fn render(self, area: Rect, buf: &mut Buffer, state: &mut Self::State) {
         // Code-block lines are tagged with this background; computed once so
@@ -1234,10 +1239,6 @@ fn expand_tabs(s: &str) -> String {
     out
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "predates the lint; see .github/baselines/expect_budget.txt"
-)]
 fn render_actions(
     actions: &[ActionDisplay],
     lines: &mut Vec<Line>,
@@ -1307,189 +1308,224 @@ fn render_actions(
             // display — the result elbow arrives with the outcome.
             ActionResult::Running => {},
             ActionResult::Success { .. } => {
-                // Result summary from details enum
-                let result_msg = match &action.details {
-                    ActionDetails::FileContent { line_count, .. } => {
-                        let base = format!(
-                            "{} {} written",
-                            line_count,
-                            if *line_count == 1 { "line" } else { "lines" }
-                        );
-                        append_action_duration(base, action.duration_seconds)
-                    },
-                    ActionDetails::Diff { summary, .. } => summary.clone(),
-                    ActionDetails::Preview { text, .. } => text.clone(),
-                    // Success is already implied (an error renders differently),
-                    // so a plain success needs no label — the header shows the
-                    // action + target; the line just carries the timing.
-                    ActionDetails::Simple => {
-                        append_action_duration(String::new(), action.duration_seconds)
-                    },
-                };
-
-                for (idx, line) in result_msg.lines().enumerate() {
-                    let prefix = if idx == 0 { "  ⎿ " } else { "    " };
-                    // Word-wrap the result row (4-space hanging indent) so a
-                    // long summary is readable instead of clipped.
-                    lines.extend(wrap_styled_line(
-                        Line::from(vec![
-                            Span::styled(prefix, Style::new().fg(action_color)),
-                            Span::styled(
-                                line.to_string(),
-                                Style::new().fg(theme.colors.text_secondary.to_color()),
-                            ),
-                        ]),
-                        viewport_width,
-                        4,
-                    ));
-                }
-
-                // Write: syntax-highlighted file preview
-                if let ActionDetails::FileContent {
-                    content,
-                    line_count,
-                } = &action.details
-                {
-                    let preview_lines: Vec<&str> = content.lines().take(10).collect();
-                    if !preview_lines.is_empty() {
-                        lines.push(Line::from(vec![Span::styled(
-                            "    ",
-                            Style::new().fg(action_color),
-                        )]));
-
-                        let preview_content = preview_lines.join("\n");
-                        let mut parsed = parse_markdown(
-                            &format!("```\n{preview_content}\n```"),
-                            theme,
-                            viewport_width.saturating_sub(4),
-                        );
-                        for parsed_line in parsed.iter_mut() {
-                            let mut new_spans =
-                                vec![Span::styled("    ", Style::new().fg(action_color))];
-                            new_spans.append(&mut parsed_line.line.spans);
-                            parsed_line.line.spans = new_spans;
-                        }
-                        // Hard-wrap (not word-wrap) so code indentation and
-                        // alignment survive; overlong rows continue with a
-                        // 6-space hanging indent instead of clipping.
-                        lines.extend(
-                            parsed
-                                .into_iter()
-                                .flat_map(|ml| wrap_preformatted(ml.line, viewport_width, 6)),
-                        );
-
-                        if *line_count > 10 {
-                            lines.push(Line::from(vec![
-                                Span::styled("    ", Style::new().fg(action_color)),
-                                Span::styled(
-                                    format!("... ({} more lines)", line_count - 10),
-                                    Style::new()
-                                        .fg(theme.colors.text_disabled.to_color())
-                                        .italic(),
-                                ),
-                            ]));
-                        }
-                    }
-                }
-
-                // Edit: color-coded diff
-                if let ActionDetails::Diff { diff, .. } = &action.details {
-                    let diff_lines: Vec<&str> = diff.lines().collect();
-                    let display_lines: Vec<&str> = diff_lines.iter().take(80).copied().collect();
-
-                    if !display_lines.is_empty() {
-                        let removed_bg = theme.colors.diff_removed_bg.to_color();
-                        let added_bg = theme.colors.diff_added_bg.to_color();
-
-                        for diff_line in &display_lines {
-                            // Expand tabs first: the TUI paints a tab as zero
-                            // cells, so a tab-bearing line's char count exceeds
-                            // its painted width and the char-count pad below
-                            // would leave the background bar short — a ragged
-                            // "staircase" down the right edge. Expanding also
-                            // makes tab indentation actually visible.
-                            let diff_line = expand_tabs(diff_line);
-                            // Delegate the producer-format awareness to
-                            // `parse_diff_line`, which lives next to the
-                            // marker constants and stays in lockstep with
-                            // any future format change.
-                            match parse_diff_line(&diff_line) {
-                                DiffLineKind::Removed => {
-                                    push_wrapped_diff_rows(
-                                        lines,
-                                        format!("    {diff_line}"),
-                                        Style::new()
-                                            .fg(theme.colors.error.to_color())
-                                            .bg(removed_bg),
-                                        viewport_width,
-                                    );
-                                },
-                                DiffLineKind::Added => {
-                                    push_wrapped_diff_rows(
-                                        lines,
-                                        format!("    {diff_line}"),
-                                        Style::new()
-                                            .fg(theme.colors.success.to_color())
-                                            .bg(added_bg),
-                                        viewport_width,
-                                    );
-                                },
-                                DiffLineKind::Context => {
-                                    // Hard-wrap like the colored rows so an
-                                    // overlong context line isn't clipped.
-                                    lines.extend(wrap_preformatted(
-                                        Line::from(vec![
-                                            Span::styled("    ", Style::new().fg(action_color)),
-                                            Span::styled(
-                                                diff_line,
-                                                Style::new()
-                                                    .fg(theme.colors.text_secondary.to_color()),
-                                            ),
-                                        ]),
-                                        viewport_width,
-                                        6,
-                                    ));
-                                },
-                            }
-                        }
-
-                        let remaining = diff_lines.len().saturating_sub(display_lines.len());
-                        if remaining > 0 {
-                            lines.push(Line::from(vec![
-                                Span::styled("    ", Style::new().fg(action_color)),
-                                Span::styled(
-                                    format!("... ({remaining} more lines)"),
-                                    Style::new()
-                                        .fg(theme.colors.text_disabled.to_color())
-                                        .italic(),
-                                ),
-                            ]));
-                        }
-                    }
-                }
+                push_result_summary(lines, action, action_color, theme, viewport_width);
+                push_file_preview(lines, &action.details, action_color, theme, viewport_width);
+                push_diff_preview(lines, &action.details, action_color, theme, viewport_width);
             },
             ActionResult::Error { error } => {
-                let error =
-                    append_action_duration(format!("Error: {error}"), action.duration_seconds);
-                // Word-wrap so the full error body (an HTTP error JSON can run
-                // hundreds of cells) is readable instead of clipped at the
-                // viewport edge. Multi-line errors keep their own rows.
-                for (idx, err_line) in error.lines().enumerate() {
-                    let prefix = if idx == 0 { "  ⎿ " } else { "    " };
-                    lines.extend(wrap_styled_line(
-                        Line::from(vec![
-                            Span::styled(prefix, Style::new().fg(theme.colors.error.to_color())),
-                            Span::styled(
-                                err_line.to_string(),
-                                Style::new().fg(theme.colors.error.to_color()),
-                            ),
-                        ]),
-                        viewport_width,
-                        4,
-                    ));
-                }
+                push_error_rows(lines, error, action.duration_seconds, theme, viewport_width);
             },
         }
+    }
+}
+
+/// The `⎿` result row(s) under a successful action: the summary its details
+/// carry (line counts, a diff summary, a preview caption) with the timing.
+fn push_result_summary(
+    lines: &mut Vec<Line>,
+    action: &ActionDisplay,
+    action_color: Color,
+    theme: &Theme,
+    viewport_width: usize,
+) {
+    let result_msg = match &action.details {
+        ActionDetails::FileContent { line_count, .. } => {
+            let base = format!(
+                "{} {} written",
+                line_count,
+                if *line_count == 1 { "line" } else { "lines" }
+            );
+            append_action_duration(base, action.duration_seconds)
+        },
+        ActionDetails::Diff { summary, .. } => summary.clone(),
+        ActionDetails::Preview { text, .. } => text.clone(),
+        // Success is already implied (an error renders differently),
+        // so a plain success needs no label — the header shows the
+        // action + target; the line just carries the timing.
+        ActionDetails::Simple => append_action_duration(String::new(), action.duration_seconds),
+    };
+
+    for (idx, line) in result_msg.lines().enumerate() {
+        let prefix = if idx == 0 { "  ⎿ " } else { "    " };
+        // Word-wrap the result row (4-space hanging indent) so a
+        // long summary is readable instead of clipped.
+        lines.extend(wrap_styled_line(
+            Line::from(vec![
+                Span::styled(prefix, Style::new().fg(action_color)),
+                Span::styled(
+                    line.to_string(),
+                    Style::new().fg(theme.colors.text_secondary.to_color()),
+                ),
+            ]),
+            viewport_width,
+            4,
+        ));
+    }
+}
+
+/// Write: a syntax-highlighted preview of the first ten lines written.
+fn push_file_preview(
+    lines: &mut Vec<Line>,
+    details: &ActionDetails,
+    action_color: Color,
+    theme: &Theme,
+    viewport_width: usize,
+) {
+    if let ActionDetails::FileContent {
+        content,
+        line_count,
+    } = details
+    {
+        let preview_lines: Vec<&str> = content.lines().take(10).collect();
+        if !preview_lines.is_empty() {
+            lines.push(Line::from(vec![Span::styled(
+                "    ",
+                Style::new().fg(action_color),
+            )]));
+
+            let preview_content = preview_lines.join("\n");
+            let mut parsed = parse_markdown(
+                &format!("```\n{preview_content}\n```"),
+                theme,
+                viewport_width.saturating_sub(4),
+            );
+            for parsed_line in parsed.iter_mut() {
+                let mut new_spans = vec![Span::styled("    ", Style::new().fg(action_color))];
+                new_spans.append(&mut parsed_line.line.spans);
+                parsed_line.line.spans = new_spans;
+            }
+            // Hard-wrap (not word-wrap) so code indentation and
+            // alignment survive; overlong rows continue with a
+            // 6-space hanging indent instead of clipping.
+            lines.extend(
+                parsed
+                    .into_iter()
+                    .flat_map(|ml| wrap_preformatted(ml.line, viewport_width, 6)),
+            );
+
+            if *line_count > 10 {
+                lines.push(Line::from(vec![
+                    Span::styled("    ", Style::new().fg(action_color)),
+                    Span::styled(
+                        format!("... ({} more lines)", line_count - 10),
+                        Style::new()
+                            .fg(theme.colors.text_disabled.to_color())
+                            .italic(),
+                    ),
+                ]));
+            }
+        }
+    }
+}
+
+/// Edit: the color-coded diff, capped at eighty rows.
+fn push_diff_preview(
+    lines: &mut Vec<Line>,
+    details: &ActionDetails,
+    action_color: Color,
+    theme: &Theme,
+    viewport_width: usize,
+) {
+    if let ActionDetails::Diff { diff, .. } = details {
+        let diff_lines: Vec<&str> = diff.lines().collect();
+        let display_lines: Vec<&str> = diff_lines.iter().take(80).copied().collect();
+
+        if !display_lines.is_empty() {
+            let removed_bg = theme.colors.diff_removed_bg.to_color();
+            let added_bg = theme.colors.diff_added_bg.to_color();
+
+            for diff_line in &display_lines {
+                // Expand tabs first: the TUI paints a tab as zero
+                // cells, so a tab-bearing line's char count exceeds
+                // its painted width and the char-count pad below
+                // would leave the background bar short — a ragged
+                // "staircase" down the right edge. Expanding also
+                // makes tab indentation actually visible.
+                let diff_line = expand_tabs(diff_line);
+                // Delegate the producer-format awareness to
+                // `parse_diff_line`, which lives next to the
+                // marker constants and stays in lockstep with
+                // any future format change.
+                match parse_diff_line(&diff_line) {
+                    DiffLineKind::Removed => {
+                        push_wrapped_diff_rows(
+                            lines,
+                            format!("    {diff_line}"),
+                            Style::new()
+                                .fg(theme.colors.error.to_color())
+                                .bg(removed_bg),
+                            viewport_width,
+                        );
+                    },
+                    DiffLineKind::Added => {
+                        push_wrapped_diff_rows(
+                            lines,
+                            format!("    {diff_line}"),
+                            Style::new()
+                                .fg(theme.colors.success.to_color())
+                                .bg(added_bg),
+                            viewport_width,
+                        );
+                    },
+                    DiffLineKind::Context => {
+                        // Hard-wrap like the colored rows so an
+                        // overlong context line isn't clipped.
+                        lines.extend(wrap_preformatted(
+                            Line::from(vec![
+                                Span::styled("    ", Style::new().fg(action_color)),
+                                Span::styled(
+                                    diff_line,
+                                    Style::new().fg(theme.colors.text_secondary.to_color()),
+                                ),
+                            ]),
+                            viewport_width,
+                            6,
+                        ));
+                    },
+                }
+            }
+
+            let remaining = diff_lines.len().saturating_sub(display_lines.len());
+            if remaining > 0 {
+                lines.push(Line::from(vec![
+                    Span::styled("    ", Style::new().fg(action_color)),
+                    Span::styled(
+                        format!("... ({remaining} more lines)"),
+                        Style::new()
+                            .fg(theme.colors.text_disabled.to_color())
+                            .italic(),
+                    ),
+                ]));
+            }
+        }
+    }
+}
+
+/// The `⎿ Error: …` rows under a failed action.
+fn push_error_rows(
+    lines: &mut Vec<Line>,
+    error: &str,
+    duration_seconds: Option<f64>,
+    theme: &Theme,
+    viewport_width: usize,
+) {
+    let error = append_action_duration(format!("Error: {error}"), duration_seconds);
+    // Word-wrap so the full error body (an HTTP error JSON can run
+    // hundreds of cells) is readable instead of clipped at the
+    // viewport edge. Multi-line errors keep their own rows.
+    for (idx, err_line) in error.lines().enumerate() {
+        let prefix = if idx == 0 { "  ⎿ " } else { "    " };
+        lines.extend(wrap_styled_line(
+            Line::from(vec![
+                Span::styled(prefix, Style::new().fg(theme.colors.error.to_color())),
+                Span::styled(
+                    err_line.to_string(),
+                    Style::new().fg(theme.colors.error.to_color()),
+                ),
+            ]),
+            viewport_width,
+            4,
+        ));
     }
 }
 

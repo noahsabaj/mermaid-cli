@@ -74,10 +74,6 @@ impl PtyDrain {
 /// can safely fall back to the pipe path without re-running side effects —
 /// openpty, `clone_reader`, and (Windows) the CPR priming write are the only
 /// `?` points ahead of `spawn_command`.
-#[expect(
-    clippy::too_many_lines,
-    reason = "predates the lint; see .github/baselines/expect_budget.txt"
-)]
 pub(crate) async fn run_command_pty(
     invocation: &ShellInvocation,
     workdir: &Path,
@@ -87,7 +83,7 @@ pub(crate) async fn run_command_pty(
     background: tokio_util::sync::CancellationToken,
     timeout: Duration,
 ) -> std::io::Result<CommandRunResult> {
-    use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+    use portable_pty::{PtySize, native_pty_system};
 
     let pty = native_pty_system();
     let pair = pty
@@ -100,7 +96,7 @@ pub(crate) async fn run_command_pty(
         .map_err(std::io::Error::other)?;
     // Clone the reader BEFORE spawning: after this point nothing may fail
     // fallibly (a post-spawn fallback would re-run the command).
-    let mut reader = pair
+    let reader = pair
         .master
         .try_clone_reader()
         .map_err(std::io::Error::other)?;
@@ -121,25 +117,9 @@ pub(crate) async fn run_command_pty(
         writer
     };
 
-    let mut builder = CommandBuilder::new(&invocation.program);
-    builder.args(&invocation.args);
-    builder.cwd(workdir);
-    for name in secret_env_names() {
-        builder.env_remove(name);
-    }
-    // Still load-bearing on a PTY: git COULD prompt here and nothing feeds
-    // the master, so it must fail fast instead of sitting on the prompt.
-    builder.env("GIT_TERMINAL_PROMPT", "0");
-    builder.env("TERM", "xterm-256color");
-    // Same export the pipe/background paths apply via `export_scratchpad_env`
-    // — keep the spawn paths from drifting.
-    if let Some(dir) = scratchpad {
-        builder.env(SCRATCHPAD_ENV_VAR, dir);
-    }
-
     let mut child = pair
         .slave
-        .spawn_command(builder)
+        .spawn_command(pty_command(invocation, workdir, scratchpad))
         .map_err(std::io::Error::other)?;
     // Drop the slave so the master reads EOF when the child exits.
     drop(pair.slave);
@@ -150,36 +130,7 @@ pub(crate) async fn run_command_pty(
     let log =
         create_tee_log_blocking(&log_path).map(|f| std::sync::Arc::new(tokio::sync::Mutex::new(f)));
 
-    // Reader thread: blocking pty reads into a bounded channel.
-    let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(32);
-    let reader_thread = tokio::task::spawn_blocking(move || {
-        let mut buf = [0u8; 8192];
-        loop {
-            match reader.read(&mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    if chunk_tx.blocking_send(buf[..n].to_vec()).is_err() {
-                        break;
-                    }
-                },
-            }
-        }
-    });
-
-    let drain = tokio::spawn(async move {
-        let mut drain = PtyDrain {
-            capture: CappedCapture::new(mermaid_model::constants::MAX_TOOL_OUTPUT_BYTES),
-            log,
-            logged: 0,
-            log_capped: false,
-            line_buf: String::new(),
-            progress,
-        };
-        while let Some(chunk) = chunk_rx.recv().await {
-            drain.push(&chunk).await;
-        }
-        drain.capture.finish()
-    });
+    let (reader_thread, drain) = spawn_pty_drain(reader, log, progress);
 
     // Waiter owns the child AND the master: the master must outlive the
     // child (dropping it early can SIGHUP the session on Unix / detach the
@@ -250,37 +201,7 @@ pub(crate) async fn run_command_pty(
             let status = status
                 .map_err(|e| std::io::Error::other(format!("pty waiter panicked: {e}")))?
                 .map_err(std::io::Error::other)?;
-            // Sanitize the WHOLE capture once (escape sequences can span
-            // chunk boundaries; per-chunk stripping is progress-only).
-            let mut output = strip_ansi(&raw);
-            // portable-pty reports a terminating signal by NAME; SIGSYS is
-            // the one downstream consumer (the seccomp denial mapping) —
-            // `128 + SIGSYS` shell-reaped exits flow through exit_code as-is.
-            // On Windows `signal()` is always None, so the exit-code arm is
-            // taken unconditionally (the seccomp sandbox is Linux-only
-            // anyway) — no cfg needed on these arms.
-            let (exit_code, signal) = match status.signal() {
-                Some(name) if name.eq_ignore_ascii_case("bad system call") => {
-                    (None, Some(SANDBOX_KILL_SIGNAL))
-                },
-                Some(_) => (None, None),
-                None => (Some(status.exit_code() as i32), None),
-            };
-            if !status.success() {
-                output.push_str(&format!(
-                    "\n--- Command exited with status: {} ---",
-                    exit_code.unwrap_or(-1)
-                ));
-            }
-            let stdout_lines = output.lines().count();
-            Ok(CommandRunResult::Completed(CommandRunOutput {
-                output,
-                exit_code,
-                signal,
-                // One merged stream on a PTY — there is no stderr split.
-                stdout_lines,
-                stderr_lines: 0,
-            }))
+            Ok(CommandRunResult::Completed(pty_completed_output(&raw, &status)))
         }
         _ = timeout_fut => {
             if let Some(p) = pid {
@@ -290,6 +211,110 @@ pub(crate) async fn run_command_pty(
             let _ = tokio::fs::remove_file(&log_path).await;
             Ok(CommandRunResult::TimedOut)
         }
+    }
+}
+
+/// The child's command line for the PTY path: the shell invocation, with
+/// secrets scrubbed from the environment and the same non-interactive
+/// guards the pipe path sets.
+fn pty_command(
+    invocation: &ShellInvocation,
+    workdir: &Path,
+    scratchpad: Option<&Path>,
+) -> portable_pty::CommandBuilder {
+    let mut builder = portable_pty::CommandBuilder::new(&invocation.program);
+    builder.args(&invocation.args);
+    builder.cwd(workdir);
+    for name in secret_env_names() {
+        builder.env_remove(name);
+    }
+    // Still load-bearing on a PTY: git COULD prompt here and nothing feeds
+    // the master, so it must fail fast instead of sitting on the prompt.
+    builder.env("GIT_TERMINAL_PROMPT", "0");
+    builder.env("TERM", "xterm-256color");
+    // Same export the pipe/background paths apply via `export_scratchpad_env`
+    // — keep the spawn paths from drifting.
+    if let Some(dir) = scratchpad {
+        builder.env(SCRATCHPAD_ENV_VAR, dir);
+    }
+    builder
+}
+
+/// A blocking reader thread that feeds pty bytes into a bounded channel, and
+/// the async drain that captures them (capped), tees them to the log, and
+/// reports progress. The drain resolves to `(output, truncated)`.
+fn spawn_pty_drain(
+    mut reader: Box<dyn std::io::Read + Send>,
+    log: Option<std::sync::Arc<tokio::sync::Mutex<tokio::fs::File>>>,
+    progress: tokio::sync::mpsc::Sender<ProgressEvent>,
+) -> (
+    tokio::task::JoinHandle<()>,
+    tokio::task::JoinHandle<(String, bool)>,
+) {
+    let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(32);
+    let reader_thread = tokio::task::spawn_blocking(move || {
+        let mut buf = [0u8; 8192];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if chunk_tx.blocking_send(buf[..n].to_vec()).is_err() {
+                        break;
+                    }
+                },
+            }
+        }
+    });
+    let drain = tokio::spawn(async move {
+        let mut drain = PtyDrain {
+            capture: CappedCapture::new(mermaid_model::constants::MAX_TOOL_OUTPUT_BYTES),
+            log,
+            logged: 0,
+            log_capped: false,
+            line_buf: String::new(),
+            progress,
+        };
+        while let Some(chunk) = chunk_rx.recv().await {
+            drain.push(&chunk).await;
+        }
+        drain.capture.finish()
+    });
+    (reader_thread, drain)
+}
+
+/// Assemble a finished PTY command's output from the raw capture and the
+/// exit status portable-pty reported.
+fn pty_completed_output(raw: &str, status: &portable_pty::ExitStatus) -> CommandRunOutput {
+    // Sanitize the WHOLE capture once (escape sequences can span
+    // chunk boundaries; per-chunk stripping is progress-only).
+    let mut output = strip_ansi(raw);
+    // portable-pty reports a terminating signal by NAME; SIGSYS is
+    // the one downstream consumer (the seccomp denial mapping) —
+    // `128 + SIGSYS` shell-reaped exits flow through exit_code as-is.
+    // On Windows `signal()` is always None, so the exit-code arm is
+    // taken unconditionally (the seccomp sandbox is Linux-only
+    // anyway) — no cfg needed on these arms.
+    let (exit_code, signal) = match status.signal() {
+        Some(name) if name.eq_ignore_ascii_case("bad system call") => {
+            (None, Some(SANDBOX_KILL_SIGNAL))
+        },
+        Some(_) => (None, None),
+        None => (Some(status.exit_code() as i32), None),
+    };
+    if !status.success() {
+        output.push_str(&format!(
+            "\n--- Command exited with status: {} ---",
+            exit_code.unwrap_or(-1)
+        ));
+    }
+    let stdout_lines = output.lines().count();
+    CommandRunOutput {
+        output,
+        exit_code,
+        signal,
+        // One merged stream on a PTY — there is no stderr split.
+        stdout_lines,
+        stderr_lines: 0,
     }
 }
 

@@ -59,13 +59,81 @@ pub(super) fn parse_prune_plan(text: &str) -> Option<PrunePlan> {
     Some(PrunePlan { prune, reason })
 }
 
+/// The one-shot prune request: every memory listed with its id, scope,
+/// description and flattened body, under the consolidation system prompt.
+fn consolidation_request(
+    items: &[(mermaid_domain::MemoryEntry, String)],
+    model_id: &str,
+) -> mermaid_domain::ChatRequest {
+    let mut listing = String::new();
+    for (entry, body) in items {
+        let id = entry
+            .path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(entry.name.as_str());
+        listing.push_str(&format!(
+            "- id: {id}\n  scope: {}\n  description: {}\n  body: {}\n",
+            entry.scope.as_str(),
+            entry.description,
+            body.replace('\n', " ").trim(),
+        ));
+    }
+    let user = format!(
+        "Here are {} durable memory facts. Identify exact duplicates and clearly obsolete or superseded facts to prune.\n\n{}",
+        items.len(),
+        listing
+    );
+    mermaid_domain::ChatRequest {
+        model_id: model_id.to_string(),
+        messages: vec![mermaid_model::models::ChatMessage::user(user)],
+        system_prompt: CONSOLIDATE_SYSTEM_PROMPT.to_string(),
+        instructions: None,
+        reasoning: mermaid_model::models::ReasoningLevel::None,
+        temperature: 0.0,
+        max_tokens: 1024,
+        tools: Vec::new(),
+        ollama_num_ctx: None,
+        ollama_allow_ram_offload: None,
+        resolved_context_window: None,
+        resolved_max_output: None,
+        output_schema: None,
+        suppress_auto_compact: false,
+        suppressed_builtin_tools: Vec::new(),
+    }
+}
+
+/// Snapshot the to-be-pruned files first so the prune is reversible. The
+/// delete that follows is irreversible, so a failed checkpoint must NOT
+/// proceed — otherwise the report would advertise "Recoverable from the latest
+/// checkpoint" for a prune with no checkpoint behind it (#F69). The `Err` is
+/// the abort message for the user; nothing has been deleted at that point, so
+/// no memory is lost.
+fn checkpoint_prune_targets(workdir: &std::path::Path, plan: &PrunePlan) -> Result<(), String> {
+    let paths: Vec<std::path::PathBuf> = plan
+        .prune
+        .iter()
+        .filter_map(|id| crate::app::memory::find(workdir, id).map(|e| e.path))
+        .collect();
+    if !paths.is_empty()
+        && let Err(e) = mermaid_runtime::create_checkpoint(
+            workdir,
+            &paths,
+            Some(serde_json::json!({ "tool": "consolidate_memory", "reason": plan.reason })),
+        )
+    {
+        return Err(format!(
+            "Memory consolidation aborted: couldn't checkpoint the {} file{} marked for pruning, so nothing was deleted (no memory lost). Error: {e}",
+            paths.len(),
+            if paths.len() == 1 { "" } else { "s" },
+        ));
+    }
+    Ok(())
+}
+
 /// `/consolidate-memory`: a one-shot model pass that names duplicate/obsolete
 /// facts to prune (never rewrites — that's the anti-drift rule). The pruned
 /// files are snapshotted into a checkpoint first, so the prune is reversible.
-#[expect(
-    clippy::too_many_lines,
-    reason = "predates the lint; see .github/baselines/expect_budget.txt"
-)]
 pub(super) async fn consolidate_memory(
     tx: MsgSender,
     providers: Option<Arc<ProviderFactory>>,
@@ -93,42 +161,7 @@ pub(super) async fn consolidate_memory(
         return;
     };
 
-    let mut listing = String::new();
-    for (entry, body) in &items {
-        let id = entry
-            .path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or(entry.name.as_str());
-        listing.push_str(&format!(
-            "- id: {id}\n  scope: {}\n  description: {}\n  body: {}\n",
-            entry.scope.as_str(),
-            entry.description,
-            body.replace('\n', " ").trim(),
-        ));
-    }
-    let user = format!(
-        "Here are {} durable memory facts. Identify exact duplicates and clearly obsolete or superseded facts to prune.\n\n{}",
-        items.len(),
-        listing
-    );
-    let request = mermaid_domain::ChatRequest {
-        model_id: model_id.clone(),
-        messages: vec![mermaid_model::models::ChatMessage::user(user)],
-        system_prompt: CONSOLIDATE_SYSTEM_PROMPT.to_string(),
-        instructions: None,
-        reasoning: mermaid_model::models::ReasoningLevel::None,
-        temperature: 0.0,
-        max_tokens: 1024,
-        tools: Vec::new(),
-        ollama_num_ctx: None,
-        ollama_allow_ram_offload: None,
-        resolved_context_window: None,
-        resolved_max_output: None,
-        output_schema: None,
-        suppress_auto_compact: false,
-        suppressed_builtin_tools: Vec::new(),
-    };
+    let request = consolidation_request(&items, &model_id);
 
     let provider = match factory.resolve(&model_id).await {
         Ok(p) => p,
@@ -178,30 +211,8 @@ pub(super) async fn consolidate_memory(
         return;
     }
 
-    // Snapshot the to-be-pruned files first so the prune is reversible. The
-    // delete below is irreversible, so a failed checkpoint must NOT proceed —
-    // otherwise the report would advertise "Recoverable from the latest
-    // checkpoint" for a prune with no checkpoint behind it (#F69). Abort instead;
-    // nothing has been deleted yet, so no memory is lost.
-    let paths: Vec<std::path::PathBuf> = plan
-        .prune
-        .iter()
-        .filter_map(|id| crate::app::memory::find(&workdir, id).map(|e| e.path))
-        .collect();
-    if !paths.is_empty()
-        && let Err(e) = mermaid_runtime::create_checkpoint(
-            &workdir,
-            &paths,
-            Some(serde_json::json!({ "tool": "consolidate_memory", "reason": plan.reason })),
-        )
-    {
-        let _ = tx
-            .send(Msg::RuntimeText(format!(
-                "Memory consolidation aborted: couldn't checkpoint the {} file{} marked for pruning, so nothing was deleted (no memory lost). Error: {e}",
-                paths.len(),
-                if paths.len() == 1 { "" } else { "s" },
-            )))
-            .await;
+    if let Err(report) = checkpoint_prune_targets(&workdir, &plan) {
+        let _ = tx.send(Msg::RuntimeText(report)).await;
         return;
     }
 
@@ -216,21 +227,26 @@ pub(super) async fn consolidate_memory(
     let (loaded, _) = crate::app::memory::refresh(None, &workdir, &cfg);
     let _ = tx.send(Msg::MemoryChanged(loaded)).await;
 
-    let report = if pruned.is_empty() {
-        "Memory consolidation: the model named facts to prune, but none matched existing memories."
-            .to_string()
-    } else {
-        format!(
-            "Consolidated memory — pruned {} fact{}: {}.{} Recoverable from the latest checkpoint (/checkpoints, /restore).",
-            pruned.len(),
-            if pruned.len() == 1 { "" } else { "s" },
-            pruned.join(", "),
-            if plan.reason.is_empty() {
-                String::new()
-            } else {
-                format!(" Reason: {}.", plan.reason)
-            },
-        )
-    };
-    let _ = tx.send(Msg::RuntimeText(report)).await;
+    let _ = tx
+        .send(Msg::RuntimeText(prune_report(&pruned, &plan.reason)))
+        .await;
+}
+
+/// The one-line outcome of a prune, naming what went and why.
+fn prune_report(pruned: &[String], reason: &str) -> String {
+    if pruned.is_empty() {
+        return "Memory consolidation: the model named facts to prune, but none matched existing memories."
+            .to_string();
+    }
+    format!(
+        "Consolidated memory — pruned {} fact{}: {}.{} Recoverable from the latest checkpoint (/checkpoints, /restore).",
+        pruned.len(),
+        if pruned.len() == 1 { "" } else { "s" },
+        pruned.join(", "),
+        if reason.is_empty() {
+            String::new()
+        } else {
+            format!(" Reason: {reason}.")
+        },
+    )
 }

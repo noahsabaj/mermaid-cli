@@ -11,10 +11,6 @@ use super::*;
 /// the owning turn scope, `dispatch` stamped by the reducer, `services`
 /// bound by the runner — assembled into a flat `ExecContext` in one shot.
 #[expect(clippy::too_many_arguments)]
-#[expect(
-    clippy::too_many_lines,
-    reason = "predates the lint; see .github/baselines/expect_budget.txt"
-)]
 pub(super) async fn dispatch_execute_tool(
     msg_tx: MsgSender,
     tools: Option<Arc<ToolRegistry>>,
@@ -28,51 +24,19 @@ pub(super) async fn dispatch_execute_tool(
     let _ = msg_tx.send(Msg::ToolStarted { turn, call_id }).await;
 
     let Some(registry) = tools else {
-        let _ = msg_tx
-            .send(Msg::ToolFinished {
-                turn,
-                call_id,
-                outcome: mermaid_domain::ToolOutcome::error(
-                    "EffectRunner has no ToolRegistry bound",
-                    0.0,
-                ),
-            })
-            .await;
+        let outcome =
+            mermaid_domain::ToolOutcome::error("EffectRunner has no ToolRegistry bound", 0.0);
+        send_finished(&msg_tx, turn, call_id, outcome).await;
         return;
     };
 
-    // Route MCP-prefixed calls to the mcp proxy, which takes
-    // {server_name, tool_name, arguments}. The raw model call has
-    // those embedded in the function name and arguments respectively.
-    let (tool_key, args) = if source.function.name.starts_with("mcp__") {
-        let rest = &source.function.name[5..];
-        if let Some((server, tool)) = rest.split_once("__") {
-            (
-                "mcp_proxy",
-                serde_json::json!({
-                    "server_name": server,
-                    "tool_name": tool,
-                    "arguments": source.function.arguments.clone(),
-                }),
-            )
-        } else {
-            let _ = msg_tx
-                .send(Msg::ToolFinished {
-                    turn,
-                    call_id,
-                    outcome: mermaid_domain::ToolOutcome::error(
-                        format!("invalid MCP tool name: {}", source.function.name),
-                        0.0,
-                    ),
-                })
-                .await;
+    let (tool_key, args) = match route_tool_call(&source) {
+        Ok(routed) => routed,
+        Err(message) => {
+            let outcome = mermaid_domain::ToolOutcome::error(message, 0.0);
+            send_finished(&msg_tx, turn, call_id, outcome).await;
             return;
-        }
-    } else {
-        (
-            source.function.name.as_str(),
-            source.function.arguments.clone(),
-        )
+        },
     };
     let tool_run_id =
         start_runtime_tool_run(services.task_id.as_deref(), turn, call_id, tool_key, &args).await;
@@ -84,47 +48,12 @@ pub(super) async fn dispatch_execute_tool(
         // actually called, not the internal routing key.
         let outcome = registry.unknown_tool_outcome(tool_key, &source.function.name);
         finish_runtime_tool_run(tool_run_id.as_deref(), &outcome);
-        let _ = msg_tx
-            .send(Msg::ToolFinished {
-                turn,
-                call_id,
-                outcome,
-            })
-            .await;
+        send_finished(&msg_tx, turn, call_id, outcome).await;
         return;
     };
 
-    // Bridge the tool's progress channel to `Msg::ToolProgress`.
-    // A sibling task drains progress events while the tool runs.
-    // The channel closes when `progress_tx` drops (when `ctx`
-    // drops at the end of `tool.execute`), which terminates the
-    // relay loop cleanly.
-    let (progress_tx, mut progress_rx) = mpsc::channel(16);
-    let relay_tx = msg_tx.clone();
-    let relay_token = signals.token.clone();
-    let progress_relay = spawn_guarded(async move {
-        loop {
-            let event = tokio::select! {
-                biased;
-                _ = relay_token.cancelled() => break,
-                ev = progress_rx.recv() => match ev {
-                    Some(ev) => ev,
-                    None => break,
-                },
-            };
-            if relay_tx
-                .send(Msg::ToolProgress {
-                    turn,
-                    call_id,
-                    event,
-                })
-                .await
-                .is_err()
-            {
-                break;
-            }
-        }
-    });
+    let (progress_tx, progress_rx) = mpsc::channel(16);
+    let progress_relay = spawn_progress_relay(&msg_tx, &signals.token, progress_rx, turn, call_id);
 
     let task_broker = services.tasks.clone();
     let ctx = ExecContext::assemble(turn, call_id, progress_tx, signals, dispatch, services);
@@ -160,13 +89,7 @@ pub(super) async fn dispatch_execute_tool(
         );
         finish_runtime_tool_run(tool_run_id.as_deref(), &outcome);
         join_logged(progress_relay.take(), "tool_progress_relay").await;
-        let _ = msg_tx
-            .send(Msg::ToolFinished {
-                turn,
-                call_id,
-                outcome,
-            })
-            .await;
+        send_finished(&msg_tx, turn, call_id, outcome).await;
         return;
     }
     // A rewritten input is deliberately NOT redacted (it becomes executable
@@ -175,24 +98,8 @@ pub(super) async fn dispatch_execute_tool(
     // rewritten call exactly like an original one.
     let args = gate.updated_input.unwrap_or(args);
     let outcome = tool.execute(args, ctx).await;
-    // Evidence trail: attribute this call to the in-progress checklist task
-    // (no-op when none). The task tools themselves are skipped — a checklist
-    // edit is not evidence of work on the task. `display_info_for` gives the
-    // same human target the transcript row shows (path, command head, query).
-    if !source.function.name.starts_with("task_") {
-        let (action, target) = mermaid_domain::display_info_for(&mermaid_domain::PendingToolCall {
-            call_id,
-            source: source.clone(),
-        });
-        if let Some(broker) = &task_broker {
-            broker
-                .record_evidence(mermaid_domain::EvidenceEntry {
-                    tool: action,
-                    target,
-                    status: tool_status_label(outcome.status).to_string(),
-                })
-                .await;
-        }
+    if let Some(broker) = &task_broker {
+        record_task_evidence(broker, &source, call_id, &outcome).await;
     }
     let after_payload = serde_json::json!({
         "turn_id": turn.0,
@@ -204,13 +111,7 @@ pub(super) async fn dispatch_execute_tool(
     fire_plugin_hooks("after_tool_use", after_payload).await;
     finish_runtime_tool_run(tool_run_id.as_deref(), &outcome);
     join_logged(progress_relay.take(), "tool_progress_relay").await;
-    let _ = msg_tx
-        .send(Msg::ToolFinished {
-            turn,
-            call_id,
-            outcome,
-        })
-        .await;
+    send_finished(&msg_tx, turn, call_id, outcome).await;
 }
 
 pub(super) async fn start_runtime_tool_run(
@@ -659,4 +560,110 @@ pub(super) fn classify_error_for_ui(
             recoverable: false,
         },
     }
+}
+
+/// Report a tool call's outcome to the reducer.
+async fn send_finished(
+    msg_tx: &MsgSender,
+    turn: TurnId,
+    call_id: mermaid_domain::ToolCallId,
+    outcome: mermaid_domain::ToolOutcome,
+) {
+    let _ = msg_tx
+        .send(Msg::ToolFinished {
+            turn,
+            call_id,
+            outcome,
+        })
+        .await;
+}
+
+/// Resolve the registry key and arguments for a model tool call. MCP-prefixed
+/// names (`mcp__<server>__<tool>`) route to the mcp proxy, which takes
+/// `{server_name, tool_name, arguments}`; everything else passes through. The
+/// `Err` is the outcome message for a malformed MCP name.
+fn route_tool_call(
+    source: &mermaid_model::models::tool_call::ToolCall,
+) -> Result<(&str, serde_json::Value), String> {
+    let Some(rest) = source.function.name.strip_prefix("mcp__") else {
+        return Ok((
+            source.function.name.as_str(),
+            source.function.arguments.clone(),
+        ));
+    };
+    let Some((server, tool)) = rest.split_once("__") else {
+        return Err(format!("invalid MCP tool name: {}", source.function.name));
+    };
+    Ok((
+        "mcp_proxy",
+        serde_json::json!({
+            "server_name": server,
+            "tool_name": tool,
+            "arguments": source.function.arguments.clone(),
+        }),
+    ))
+}
+
+/// Bridge the tool's progress channel to `Msg::ToolProgress` on a sibling
+/// task that drains events while the tool runs. The channel closes when the
+/// sender drops (when `ctx` drops at the end of `tool.execute`), which
+/// terminates the relay loop cleanly; the turn token ends it early.
+fn spawn_progress_relay(
+    msg_tx: &MsgSender,
+    token: &tokio_util::sync::CancellationToken,
+    mut progress_rx: mpsc::Receiver<mermaid_domain::ProgressEvent>,
+    turn: TurnId,
+    call_id: mermaid_domain::ToolCallId,
+) -> mermaid_model::utils::AbortOnDrop {
+    let relay_tx = msg_tx.clone();
+    let relay_token = token.clone();
+    spawn_guarded(async move {
+        loop {
+            let event = tokio::select! {
+                biased;
+                _ = relay_token.cancelled() => break,
+                ev = progress_rx.recv() => match ev {
+                    Some(ev) => ev,
+                    None => break,
+                },
+            };
+            if relay_tx
+                .send(Msg::ToolProgress {
+                    turn,
+                    call_id,
+                    event,
+                })
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    })
+}
+
+/// Evidence trail: attribute this call to the in-progress checklist task
+/// (no-op when none). The task tools themselves are skipped — a checklist
+/// edit is not evidence of work on the task. `display_info_for` gives the
+/// same human target the transcript row shows (path, command head, query).
+async fn record_task_evidence(
+    broker: &crate::providers::TaskBroker,
+    source: &mermaid_model::models::tool_call::ToolCall,
+    call_id: mermaid_domain::ToolCallId,
+    outcome: &mermaid_domain::ToolOutcome,
+) {
+    if source.function.name.starts_with("task_") {
+        return;
+    }
+    let (action, target) = mermaid_domain::display_info_for(&mermaid_domain::PendingToolCall {
+        call_id,
+        source: source.clone(),
+    });
+    broker
+        .record_evidence(mermaid_domain::EvidenceEntry {
+            tool: action,
+            target,
+            status: tool_status_label(outcome.status).to_string(),
+        })
+        .await;
 }

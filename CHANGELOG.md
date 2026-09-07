@@ -373,6 +373,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   once the transcript is long enough to scroll. Drag selection and image
   clicks subtract the padding, and a click in it maps to nothing.
 
+- **Every `too_many_lines` suppression now says why.** Fifty-seven
+  functions carried `#[expect(clippy::too_many_lines)]` with the reason
+  "predates the lint", which explained nothing. Twenty-six are gone: the
+  function was cut along a seam that already had a name -- the Select/
+  MultiSelect keys of a question modal, the per-message converters of the
+  Anthropic and OpenAI adapters, the `/context` report's sections, the
+  schema DDL hoisted to a constant, one clipboard reader per backend, the
+  duplicated stream relay in the model-call path, the per-action `memory`
+  handlers -- into private helpers with narrow signatures and no change in
+  behaviour. Thirty-one remain, each with a reason specific to that
+  function: a dispatch table with one arm per variant, a guard chain whose
+  order is the behaviour, a test whose cases are the test, a boot sequence
+  whose comments defend the order. Seven of those sat on a whole `impl`
+  block and now sit on the one method that is long. The lint-suppression
+  baseline drops from 53 keys / 65 occurrences to 34 / 39, and the string
+  "predates the lint" no longer appears in the tree.
 
 ## [0.25.0] - 2026-08-10
 

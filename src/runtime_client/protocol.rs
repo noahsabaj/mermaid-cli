@@ -208,7 +208,8 @@ mod tests {
     #[test]
     #[expect(
         clippy::too_many_lines,
-        reason = "predates the lint; see .github/baselines/expect_budget.txt"
+        reason = "a golden test: one (variant, exact wire JSON) pair per DaemonRequest variant, \
+         and the list grows with the protocol by design; the cases are the test"
     )]
     fn every_variant_round_trips_the_wire_shape() {
         let cases: Vec<(DaemonRequest, &str)> = vec![

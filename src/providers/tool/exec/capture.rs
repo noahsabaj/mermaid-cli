@@ -289,10 +289,45 @@ pub(crate) fn strip_ansi(input: &str) -> String {
     out
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "predates the lint; see .github/baselines/expect_budget.txt"
-)]
+/// Assemble a finished pipe-captured command's output: stdout, then stderr
+/// under a divider when there was any, then a status trailer on failure.
+fn completed_output(
+    output: String,
+    errors: &str,
+    status: &std::process::ExitStatus,
+) -> CommandRunOutput {
+    let stdout_lines = output.lines().count();
+    let stderr_lines = errors.lines().count();
+    let mut full_output = output;
+    if !errors.is_empty() {
+        full_output.push_str("\n--- stderr ---\n");
+        full_output.push_str(errors);
+    }
+    if !status.success() {
+        full_output.push_str(&format!(
+            "\n--- Command exited with status: {} ---",
+            status.code().unwrap_or(-1)
+        ));
+    }
+    // Preserve the terminating signal so the caller can distinguish a
+    // seccomp SIGSYS denial from an ordinary failure (mirrors
+    // `mcp/transport.rs`). `None` on non-Unix / normal exit.
+    #[cfg(unix)]
+    let signal = {
+        use std::os::unix::process::ExitStatusExt;
+        status.signal()
+    };
+    #[cfg(not(unix))]
+    let signal = None;
+    CommandRunOutput {
+        output: full_output,
+        exit_code: status.code(),
+        signal,
+        stdout_lines,
+        stderr_lines,
+    }
+}
+
 pub(crate) async fn run_command(
     mut cmd: Command,
     progress: tokio::sync::mpsc::Sender<ProgressEvent>,
@@ -396,36 +431,7 @@ pub(crate) async fn run_command(
             let (output, errors, status) = res
                 .map_err(|_| std::io::Error::other("command driver dropped before completing"))?;
             let status = status?;
-            let stdout_lines = output.lines().count();
-            let stderr_lines = errors.lines().count();
-            let mut full_output = output;
-            if !errors.is_empty() {
-                full_output.push_str("\n--- stderr ---\n");
-                full_output.push_str(&errors);
-            }
-            if !status.success() {
-                full_output.push_str(&format!(
-                    "\n--- Command exited with status: {} ---",
-                    status.code().unwrap_or(-1)
-                ));
-            }
-            // Preserve the terminating signal so the caller can distinguish a
-            // seccomp SIGSYS denial from an ordinary failure (mirrors
-            // `mcp/transport.rs`). `None` on non-Unix / normal exit.
-            #[cfg(unix)]
-            let signal = {
-                use std::os::unix::process::ExitStatusExt;
-                status.signal()
-            };
-            #[cfg(not(unix))]
-            let signal = None;
-            Ok(CommandRunResult::Completed(CommandRunOutput {
-                output: full_output,
-                exit_code: status.code(),
-                signal,
-                stdout_lines,
-                stderr_lines,
-            }))
+            Ok(CommandRunResult::Completed(completed_output(output, &errors, &status)))
         }
         _ = timeout_fut => {
             // Foreground timeout: same teardown as Esc. The old outer-`select!`

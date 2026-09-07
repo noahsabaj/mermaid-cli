@@ -107,7 +107,10 @@ impl StepObserver for RecorderTap {
 /// transcript and the loop continues, which is what makes a session survivable.
 #[expect(
     clippy::too_many_lines,
-    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+    reason = "the interactive main loop: boot wiring, the select! over terminal events, effect \
+     results, signals and ticks, and the ordered shutdown all share one scope because the \
+     terminal guard, event stream and engine must be created, suspended for $EDITOR, and dropped \
+     in a fixed order; moving any stage out would hand that order to call sites"
 )]
 pub async fn run_interactive_with(
     mut config: Config,

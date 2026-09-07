@@ -207,7 +207,10 @@ fn action_detail(tool: &str, args: &serde_json::Value) -> Option<String> {
 /// ([`scratch_downgrade_eligible`]).
 #[expect(
     clippy::too_many_lines,
-    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+    reason = "the precedence ladder of the safety gate: engine decision, plan profile, the two \
+     read-only web softenings, the scratchpad downgrade, then one arm per PolicyDecision; each \
+     softening is only correct relative to the ones above it, so the order is the security \
+     property and it has to be read whole"
 )]
 pub async fn gate(
     ctx: &ExecContext,

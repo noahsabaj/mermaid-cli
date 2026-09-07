@@ -253,10 +253,6 @@ pub(crate) fn estimate_current_context(state: &State) -> super::state::ContextUs
         .with_additional_tokens(state.runtime.builtin_tool_schema_tokens)
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "predates the lint; see .github/baselines/expect_budget.txt"
-)]
 pub(crate) fn context_text(state: &State) -> String {
     let mut lines = Vec::new();
     lines.push("Context".to_string());
@@ -289,76 +285,55 @@ pub(crate) fn context_text(state: &State) -> String {
         .as_ref()
         .filter(|c| c.source.is_some())
     {
-        if let Some(model_max) = ctx.model_max {
-            lines.push(format!(
-                "Model max window: {}",
-                format_compact_count(model_max)
-            ));
-        }
-        if let Some(eff) = ctx.effective {
-            // An auto-converged value rides the override path internally, but it's
-            // Mermaid's choice (not the user's) — label it honestly.
-            let model = &state.session.model_id;
-            let src = if state.runtime.ollama_converged_num_ctx.contains_key(model)
-                && !state.settings.ollama_num_ctx_per_model.contains_key(model)
-            {
-                "auto (GPU-fit)"
-            } else {
-                ctx.source.map(|s| s.label()).unwrap_or("auto")
-            };
-            lines.push(format!(
-                "Active num_ctx: {} ({src})",
-                format_compact_count(eff)
-            ));
-        }
-        let num_predict =
-            mermaid_model::models::adapters::ollama_sizing::default_ollama_num_predict(
-                request.max_tokens,
-                ctx.effective,
-                next_snapshot.used_tokens,
-                state.runtime.provider_capabilities.max_output_tokens,
-            );
-        lines.push(format!(
-            "Output budget (num_predict): {}",
-            match num_predict {
-                Some(n) => format_compact_count(n as usize),
-                None => "auto (provider default)".to_string(),
-            }
-        ));
-        lines.push(format!(
-            "RAM offload: {} (toggle with /context offload on|off)",
-            if state.settings.ollama.allow_ram_offload {
-                "on"
-            } else {
-                "off"
-            }
-        ));
-        // If auto-fit capped well below the model's max, point to the override.
-        if let (Some(model_max), Some(eff), Some(src)) = (ctx.model_max, ctx.effective, ctx.source)
-            && src.is_auto()
-            && model_max > eff
-        {
-            lines.push(format!(
-                "Tip: this model supports up to {} — `/context max` for the full window, or `/context <n>`.",
-                format_compact_count(model_max)
-            ));
-        }
-        // Real memory placement once a turn has probed `/api/ps`.
-        if let Some(p) = state.runtime.ollama_placement.as_ref() {
-            if p.offloaded() {
-                lines.push(format!(
-                    "GPU placement: ~{}% on CPU/RAM (slower) — `/context <n>` to shrink or `/context offload on` to accept",
-                    p.percent_on_cpu()
-                ));
-            } else {
-                lines.push("GPU placement: fully on GPU".to_string());
-            }
-        }
+        push_ollama_sizing_lines(&mut lines, state, ctx, &request, &next_snapshot);
         lines.push(String::new());
     }
 
+    push_fullness_lines(&mut lines, state, &request, &next_snapshot);
+
+    if let Some(context) = &state.session.context_usage {
+        let source = if context.is_estimate() {
+            "estimated"
+        } else {
+            "provider-reported"
+        };
+        lines.push(format!(
+            "Last reported context: {}{} ({})",
+            format_compact_count(context.used_tokens),
+            context
+                .max_tokens
+                .map(|max| format!(" / {}", format_compact_count(max)))
+                .unwrap_or_else(|| " / unknown".to_string()),
+            source
+        ));
+    }
+
+    if let Some(breakdown) = &next_snapshot.breakdown {
+        lines.push(String::new());
+        push_prompt_budget_lines(
+            &mut lines,
+            breakdown,
+            state.runtime.builtin_tool_schema_tokens,
+        );
+    }
+
+    lines.push(String::new());
+    push_last_compaction_lines(&mut lines, state);
+
+    lines.join("\n")
+}
+
+/// The verdict block of `/context`: how full the window is, what the next
+/// request costs, the response reserve, and whether auto-compaction would
+/// fire before the next call.
+fn push_fullness_lines(
+    lines: &mut Vec<String>,
+    state: &State,
+    request: &ChatRequest,
+    next_snapshot: &super::state::ContextUsageSnapshot,
+) {
     let policy = state.settings.compaction.policy();
-    let response_reserve = policy.response_reserve(&request);
+    let response_reserve = policy.response_reserve(request);
     let usage_summary = match (next_snapshot.used_percent, next_snapshot.max_tokens) {
         (Some(percent), Some(_)) if percent >= policy.auto_threshold_percent => {
             format!("high ({percent}% used)")
@@ -391,7 +366,7 @@ pub(crate) fn context_text(state: &State) -> String {
         "Auto compact threshold: {}%",
         policy.auto_threshold_percent
     ));
-    let auto_skip = should_auto_compact(&next_snapshot, &request, policy);
+    let auto_skip = should_auto_compact(next_snapshot, request, policy);
     let auto_status = match &auto_skip {
         Ok(()) => "would run before the next model call".to_string(),
         // Paused is not "not needed" — the threshold may well be exceeded;
@@ -413,102 +388,163 @@ pub(crate) fn context_text(state: &State) -> String {
     }
     lines.push(format!(
         "Hard limit risk: {}",
-        if context_exceeds_hard_limit(&next_snapshot, &request, policy) {
+        if context_exceeds_hard_limit(next_snapshot, request, policy) {
             "yes"
         } else {
             "no"
         }
     ));
+}
 
-    if let Some(context) = &state.session.context_usage {
-        let source = if context.is_estimate() {
-            "estimated"
+/// The Ollama sizing block of `/context`: real window, active `num_ctx` and
+/// where it came from, the output budget, offload mode, and GPU placement.
+fn push_ollama_sizing_lines(
+    lines: &mut Vec<String>,
+    state: &State,
+    ctx: &mermaid_model::tool_run::OllamaContextInfo,
+    request: &ChatRequest,
+    next_snapshot: &super::state::ContextUsageSnapshot,
+) {
+    if let Some(model_max) = ctx.model_max {
+        lines.push(format!(
+            "Model max window: {}",
+            format_compact_count(model_max)
+        ));
+    }
+    if let Some(eff) = ctx.effective {
+        // An auto-converged value rides the override path internally, but it's
+        // Mermaid's choice (not the user's) — label it honestly.
+        let model = &state.session.model_id;
+        let src = if state.runtime.ollama_converged_num_ctx.contains_key(model)
+            && !state.settings.ollama_num_ctx_per_model.contains_key(model)
+        {
+            "auto (GPU-fit)"
         } else {
-            "provider-reported"
+            ctx.source.map(|s| s.label()).unwrap_or("auto")
         };
         lines.push(format!(
-            "Last reported context: {}{} ({})",
-            format_compact_count(context.used_tokens),
-            context
-                .max_tokens
-                .map(|max| format!(" / {}", format_compact_count(max)))
-                .unwrap_or_else(|| " / unknown".to_string()),
-            source
+            "Active num_ctx: {} ({src})",
+            format_compact_count(eff)
         ));
     }
-
-    if let Some(breakdown) = &next_snapshot.breakdown {
-        lines.push(String::new());
-        lines.push("Prompt budget estimate:".to_string());
+    let num_predict = mermaid_model::models::adapters::ollama_sizing::default_ollama_num_predict(
+        request.max_tokens,
+        ctx.effective,
+        next_snapshot.used_tokens,
+        state.runtime.provider_capabilities.max_output_tokens,
+    );
+    lines.push(format!(
+        "Output budget (num_predict): {}",
+        match num_predict {
+            Some(n) => format_compact_count(n as usize),
+            None => "auto (provider default)".to_string(),
+        }
+    ));
+    lines.push(format!(
+        "RAM offload: {} (toggle with /context offload on|off)",
+        if state.settings.ollama.allow_ram_offload {
+            "on"
+        } else {
+            "off"
+        }
+    ));
+    // If auto-fit capped well below the model's max, point to the override.
+    if let (Some(model_max), Some(eff), Some(src)) = (ctx.model_max, ctx.effective, ctx.source)
+        && src.is_auto()
+        && model_max > eff
+    {
         lines.push(format!(
-            "- system prompt: {}",
-            format_compact_count(breakdown.system_tokens)
+            "Tip: this model supports up to {} — `/context max` for the full window, or `/context <n>`.",
+            format_compact_count(model_max)
         ));
-        lines.push(format!(
-            "- instructions: {}",
-            format_compact_count(breakdown.instructions_tokens)
-        ));
-        lines.push(format!(
-            "- messages ({}): {}",
-            breakdown.message_count,
-            format_compact_count(breakdown.message_tokens)
-        ));
-        lines.push(format!(
-            "- MCP tool schemas ({}): {}",
-            breakdown.tool_count,
-            format_compact_count(breakdown.tool_schema_tokens)
-        ));
-        if state.runtime.builtin_tool_schema_tokens > 0 {
+    }
+    // Real memory placement once a turn has probed `/api/ps`.
+    if let Some(p) = state.runtime.ollama_placement.as_ref() {
+        if p.offloaded() {
             lines.push(format!(
-                "- built-in tool schemas: {}",
-                format_compact_count(state.runtime.builtin_tool_schema_tokens)
+                "GPU placement: ~{}% on CPU/RAM (slower) — `/context <n>` to shrink or `/context offload on` to accept",
+                p.percent_on_cpu()
             ));
         } else {
-            lines.push("- built-in tool schemas: measured on the first model call".to_string());
-        }
-        if breakdown.image_count > 0 {
-            lines.push(format!("- images: {}", breakdown.image_count));
+            lines.push("GPU placement: fully on GPU".to_string());
         }
     }
+}
 
-    if let Some(last) = state.session.conversation.compactions.last() {
-        lines.push(String::new());
-        lines.push("Last compaction:".to_string());
-        lines.push(format!("- trigger: {}", last.trigger.label()));
+/// The per-component prompt estimate of `/context`.
+fn push_prompt_budget_lines(
+    lines: &mut Vec<String>,
+    breakdown: &super::state::PromptTokenBreakdown,
+    builtin_tool_schema_tokens: usize,
+) {
+    lines.push("Prompt budget estimate:".to_string());
+    lines.push(format!(
+        "- system prompt: {}",
+        format_compact_count(breakdown.system_tokens)
+    ));
+    lines.push(format!(
+        "- instructions: {}",
+        format_compact_count(breakdown.instructions_tokens)
+    ));
+    lines.push(format!(
+        "- messages ({}): {}",
+        breakdown.message_count,
+        format_compact_count(breakdown.message_tokens)
+    ));
+    lines.push(format!(
+        "- MCP tool schemas ({}): {}",
+        breakdown.tool_count,
+        format_compact_count(breakdown.tool_schema_tokens)
+    ));
+    if builtin_tool_schema_tokens > 0 {
         lines.push(format!(
-            "- context: {} -> {} tokens",
-            format_compact_count(last.before_tokens),
-            format_compact_count(last.after_tokens)
+            "- built-in tool schemas: {}",
+            format_compact_count(builtin_tool_schema_tokens)
         ));
-        lines.push(format!(
-            "- archived: {} messages",
-            last.archived_message_count
-        ));
-        lines.push(format!(
-            "- preserved: {} messages",
-            last.preserved_message_count
-        ));
-        lines.push(format!(
-            "- review: {}",
-            match last.review_status {
-                crate::CompactionReviewStatus::Reviewed => "reviewed".to_string(),
-                crate::CompactionReviewStatus::DraftValidated => last
-                    .review_error
-                    .as_ref()
-                    .map(|err| format!("validated draft ({err})"))
-                    .unwrap_or_else(|| "validated draft".to_string()),
-            }
-        ));
-        if let Some(path) = &last.archive_path {
-            lines.push(format!("- archive: {path}"));
-        }
-        lines.push("- inspect: use the archive path above to review the raw messages Mermaid removed from context.".to_string());
     } else {
-        lines.push(String::new());
-        lines.push("Last compaction: none yet.".to_string());
+        lines.push("- built-in tool schemas: measured on the first model call".to_string());
     }
+    if breakdown.image_count > 0 {
+        lines.push(format!("- images: {}", breakdown.image_count));
+    }
+}
 
-    lines.join("\n")
+/// The "Last compaction" block of `/context`.
+fn push_last_compaction_lines(lines: &mut Vec<String>, state: &State) {
+    let Some(last) = state.session.conversation.compactions.last() else {
+        lines.push("Last compaction: none yet.".to_string());
+        return;
+    };
+    lines.push("Last compaction:".to_string());
+    lines.push(format!("- trigger: {}", last.trigger.label()));
+    lines.push(format!(
+        "- context: {} -> {} tokens",
+        format_compact_count(last.before_tokens),
+        format_compact_count(last.after_tokens)
+    ));
+    lines.push(format!(
+        "- archived: {} messages",
+        last.archived_message_count
+    ));
+    lines.push(format!(
+        "- preserved: {} messages",
+        last.preserved_message_count
+    ));
+    lines.push(format!(
+        "- review: {}",
+        match last.review_status {
+            crate::CompactionReviewStatus::Reviewed => "reviewed".to_string(),
+            crate::CompactionReviewStatus::DraftValidated => last
+                .review_error
+                .as_ref()
+                .map(|err| format!("validated draft ({err})"))
+                .unwrap_or_else(|| "validated draft".to_string()),
+        }
+    ));
+    if let Some(path) = &last.archive_path {
+        lines.push(format!("- archive: {path}"));
+    }
+    lines.push("- inspect: use the archive path above to review the raw messages Mermaid removed from context.".to_string());
 }
 
 pub(crate) fn tasks_text(tasks: &[mermaid_model::records::TaskRecord]) -> String {

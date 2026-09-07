@@ -281,7 +281,10 @@ pub(crate) fn substitution_spans(chars: &[char]) -> Vec<std::ops::Range<usize>> 
 /// heredoc body — quoted, unterminated, or otherwise — still hard-denies.
 #[expect(
     clippy::too_many_lines,
-    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+    reason = "a hand-rolled shell scanner: one loop whose arms are the quote states and operator \
+     characters, all sharing the cursor, quote flags, and heredoc queue; the heredoc invariants \
+     (bodies consumed to EOF, whole SplitCommand returned) are audited by reading the loop in one \
+     piece, which cutting it into per-arm helpers would undo"
 )]
 pub(crate) fn split_command(command: &str) -> SplitCommand {
     fn flush(segments: &mut Vec<String>, current: &mut String) {

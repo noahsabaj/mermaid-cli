@@ -123,7 +123,8 @@ pub(super) async fn handle_json_command(
 
 #[expect(
     clippy::too_many_lines,
-    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+    reason = "one arm per task-family DaemonRequest variant; splitting would scatter the daemon's \
+     dispatch table across helpers that each take the same store handle"
 )]
 pub(super) async fn handle_task_command(
     request: crate::runtime_client::DaemonRequest,

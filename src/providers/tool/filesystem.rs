@@ -498,10 +498,6 @@ impl ToolExecutor for CreateDirectoryTool {
 /// `write_file` — write a single file, creating parent dirs as needed.
 pub struct WriteFileTool;
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "predates the lint; see .github/baselines/expect_budget.txt"
-)]
 #[async_trait]
 impl ToolExecutor for WriteFileTool {
     fn name(&self) -> &'static str {
@@ -523,6 +519,13 @@ impl ToolExecutor for WriteFileTool {
         )
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the gated write path in order: parse, resolve in roots, policy gate, per-path \
+         lock, checkpoint, then the blocking write with its display diff; each step is a guard \
+         returning its own outcome, and the closing select needs everything the earlier steps \
+         produced (path, counts, plan flag, timer)"
+    )]
     async fn execute(&self, args: serde_json::Value, ctx: ExecContext) -> ToolOutcome {
         let Some(path) = args.get("path").and_then(|v| v.as_str()) else {
             return ToolOutcome::error("write_file requires 'path' (string)", 0.0);
