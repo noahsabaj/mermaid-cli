@@ -46,6 +46,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with any Chat Completions provider.
 ### Fixed
 
+- **The daemon's warnings went nowhere.** `mermaidd` called `tracing::warn!`
+  for a rejected client, a failed accept, a reconcile that did not finish,
+  and never installed a subscriber, so none of it was written anywhere. It
+  now uses the CLI's log (`~/.mermaid/mermaid.log`, redacted, owner-only;
+  `RUST_LOG` sets the level) and logs its version on start. An ignored
+  daemon integration test starts a real `mermaidd` and reads that line back.
 - **A long reasoning trace silently emptied the answer that followed it.**
   Every adapter shared one truncation flag between its reasoning and its
   content accumulators, so a trace past the 400K-char response cap stopped the

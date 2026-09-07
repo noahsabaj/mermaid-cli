@@ -64,6 +64,41 @@ fn spawn_daemon(base: &Path, stderr_log: &Path) -> Child {
         .expect("spawn mermaidd")
 }
 
+/// The daemon installs the same log subscriber the CLI does; before it did,
+/// every `tracing::warn!` in the server was dropped. `HOME` is the base dir,
+/// so the log lands at `<base>/.mermaid/mermaid.log`.
+#[test]
+#[ignore = "run with: cargo test --test integration -- --ignored it::daemon_integration::"]
+fn the_daemon_writes_its_log_file() {
+    let base = fresh_base("daemon-log");
+    let _base_guard = DirGuard(base.clone());
+    let (sock, _) = data_paths(&base);
+    let stderr_log = base.join("stderr.log");
+    let child = Command::new(env!("CARGO_BIN_EXE_mermaidd"))
+        .env("XDG_DATA_HOME", &base)
+        .env("HOME", &base)
+        .env("MERMAID_DATA_DIR", base.join("mermaid"))
+        .env("RUST_LOG", "info")
+        .env_remove("MERMAID_DAEMON_ENABLE_TCP")
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(
+            std::fs::File::create(&stderr_log).expect("create stderr log"),
+        ))
+        .spawn()
+        .expect("spawn mermaidd");
+    let _daemon = DaemonGuard(child);
+    assert!(
+        wait_until(|| sock.exists(), TIMEOUT),
+        "socket never appeared"
+    );
+    let log = base.join(".mermaid").join("mermaid.log");
+    assert!(
+        wait_until(|| read(&log).contains("mermaidd starting"), TIMEOUT),
+        "log file missing the startup line: {:?}",
+        std::fs::read_to_string(&log).ok()
+    );
+}
+
 /// Kills the daemon on drop so a panicking assertion never leaks a process.
 /// `wait()` blocks until it's reaped, so any [`DirGuard`] declared *earlier*
 /// (and thus dropped *later*) removes the data dir only after the daemon's files
