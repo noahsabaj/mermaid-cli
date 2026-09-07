@@ -390,10 +390,6 @@ impl SubagentTool {
     }
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "predates the lint; see .github/baselines/expect_budget.txt"
-)]
 #[async_trait]
 impl ToolExecutor for SubagentTool {
     fn name(&self) -> &'static str {
@@ -458,6 +454,14 @@ impl ToolExecutor for SubagentTool {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "a child session's whole lifecycle: the kill action, argument parsing, the gate \
+         and breadth permit, continuation-cache lookup, type and safety resolution, workspace, \
+         state refresh, registry, then the drive loop with its Esc and Ctrl+B arms; the drive \
+         needs a dozen values the setup produced and the detach hands all of them on, so a helper \
+         boundary anywhere in the middle would be a struct of everything"
+    )]
     async fn execute(&self, args: Value, ctx: ExecContext) -> ToolOutcome {
         let started = Instant::now();
 
@@ -883,7 +887,9 @@ impl SubagentTool {
     /// releasing turn reports to the model.
     #[expect(
         clippy::too_many_lines,
-        reason = "predates the lint; see .github/baselines/expect_budget.txt"
+        reason = "the detached child's background task is the function: it captures the drive \
+         future, progress receiver, permit and eleven identifying values (already bundled as \
+         DetachArgs) and cannot be cut without threading that bundle through a second helper"
     )]
     fn detach_child<F>(&self, args: DetachArgs<F>) -> ToolOutcome
     where

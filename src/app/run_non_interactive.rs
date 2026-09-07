@@ -109,7 +109,10 @@ pub struct RunOptions {
 /// caller turns it into an exit code.
 #[expect(
     clippy::too_many_lines,
-    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+    reason = "a boot sequence whose steps each touch the same config, state, runner and options, \
+     in an order the comments defend (project context before the seed, scratchpad before the \
+     first request, the handle before the engine takes the runner); a helper per step would need \
+     most of those values and would hide the ordering that the races require"
 )]
 pub async fn run_non_interactive_with(
     mut config: Config,

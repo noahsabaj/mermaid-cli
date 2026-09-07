@@ -115,10 +115,6 @@ fn is_known_provider(config: &Config, provider_lc: &str) -> bool {
 /// key, a Cloudflare account id that was never set, a custom provider with no
 /// `base_url`. The error text is the same one the user would hit on a real
 /// request, so `status` and `doctor` can print it verbatim.
-#[expect(
-    clippy::too_many_lines,
-    reason = "predates the lint; see .github/baselines/expect_budget.txt"
-)]
 pub(crate) fn resolve_provider_endpoint(
     config: &Config,
     provider: &str,
@@ -171,51 +167,7 @@ pub(crate) fn resolve_provider_endpoint(
     // e.g. AI Gateway). Must precede the generic registry branch, which would
     // otherwise route it through the placeholder profile.base_url.
     if provider_lc == "cloudflare" {
-        let profile = lookup_provider("cloudflare").expect("cloudflare is in the registry");
-        let api_key_env = override_env.unwrap_or(profile.api_key_env);
-        let base_url = match override_url {
-            // Override present (AI Gateway / proxy): validate + warn like any
-            // built-in override. The account id isn't needed in this case.
-            Some(url) => {
-                validate_provider_base_url(&url)?;
-                warn_overridden_provider_host("cloudflare", &url);
-                url
-            },
-            // Standard path: synthesize the account-scoped endpoint from env. A
-            // fresh setup missing the token as well gets one error naming both
-            // vars, not two fix-and-retry round-trips.
-            None => match require_cloudflare_account_id() {
-                Ok(id) => cloudflare_base_url(&id),
-                Err(_)
-                    if resolve_provider_key("cloudflare", profile.api_key_env, override_env)
-                        .is_none() =>
-                {
-                    return Err(ModelError::Authentication(format!(
-                        "cloudflare requires env vars {api_key_env} and CLOUDFLARE_ACCOUNT_ID — \
-                         create a token at https://dash.cloudflare.com/profile/api-tokens; the \
-                         account id is on your Cloudflare dashboard (or set \
-                         [providers.cloudflare].base_url)"
-                    )));
-                },
-                Err(e) => return Err(e),
-            },
-        };
-        let api_key = resolve_optional_key(
-            &provider_lc,
-            profile.api_key_env,
-            override_env,
-            &base_url,
-            profile.key_hint,
-        )?;
-        let key_env = api_key
-            .is_some()
-            .then(|| key_env_source(profile.api_key_env, override_env))
-            .flatten();
-        return Ok(ProviderEndpoint {
-            base_url,
-            api_key,
-            key_env,
-        });
+        return resolve_cloudflare_endpoint(&provider_lc, override_env, override_url);
     }
 
     // The OpenAI-compatible registry.
@@ -245,51 +197,117 @@ pub(crate) fn resolve_provider_endpoint(
     // User-custom: no registry entry, but the user has [providers.<name>] in
     // config. `base_url` is mandatory here — there is no default to fall back on.
     if user_cfg.is_some() {
-        let base_url = override_url.ok_or_else(|| {
-            ModelError::InvalidRequest(format!(
-                "custom provider '{provider_lc}' requires base_url in config"
-            ))
-        })?;
-        // api_key_env is optional: a local (loopback/LAN) endpoint may run
-        // keyless. When a key IS used, harden the URL so it can't be sent in
-        // cleartext; a keyless endpoint must be local (no secret to leak).
-        // For a CUSTOM provider its api_key_env is the default (not an override
-        // of a registry default), so the keyring may fill the gap; a stored key
-        // alone also works with no api_key_env at all.
-        let resolved = match override_env {
-            Some(env) => resolve_provider_key(&provider_lc, env, None),
-            None => mermaid_model::utils::default_store().get(&provider_lc),
-        };
-        let (api_key, key_env) = match resolved {
-            Some(key) => {
-                validate_provider_base_url(&base_url)?;
-                let env = override_env.and_then(|env| key_env_source(env, None));
-                (Some(key), env)
-            },
-            None if base_url_is_local(&base_url) => (None, None),
-            None => {
-                let reason = match override_env {
-                    Some(env) => format!(
-                        "requires env var {env} (or `mermaid login {provider_lc}`, or a \
-                         loopback/LAN base_url)"
-                    ),
-                    None => "requires api_key_env, or a loopback/LAN base_url".to_string(),
-                };
-                return Err(ModelError::Authentication(format!(
-                    "custom provider '{provider_lc}' {reason}"
-                )));
-            },
-        };
-        return Ok(ProviderEndpoint {
-            base_url,
-            api_key,
-            key_env,
-        });
+        return resolve_custom_endpoint(&provider_lc, override_env, override_url);
     }
 
     Err(ModelError::InvalidRequest(format!(
         "Unknown provider '{provider}'"
     )))
+}
+
+/// Cloudflare Workers AI — OpenAI-compatible, but the endpoint URL embeds a
+/// per-account id, so the base_url is synthesized at runtime from
+/// CLOUDFLARE_ACCOUNT_ID (or a full [providers.cloudflare].base_url override,
+/// e.g. AI Gateway).
+fn resolve_cloudflare_endpoint(
+    provider_lc: &str,
+    override_env: Option<&str>,
+    override_url: Option<String>,
+) -> Result<ProviderEndpoint> {
+    let profile = lookup_provider("cloudflare").expect("cloudflare is in the registry");
+    let api_key_env = override_env.unwrap_or(profile.api_key_env);
+    let base_url = match override_url {
+        // Override present (AI Gateway / proxy): validate + warn like any
+        // built-in override. The account id isn't needed in this case.
+        Some(url) => {
+            validate_provider_base_url(&url)?;
+            warn_overridden_provider_host("cloudflare", &url);
+            url
+        },
+        // Standard path: synthesize the account-scoped endpoint from env. A
+        // fresh setup missing the token as well gets one error naming both
+        // vars, not two fix-and-retry round-trips.
+        None => match require_cloudflare_account_id() {
+            Ok(id) => cloudflare_base_url(&id),
+            Err(_)
+                if resolve_provider_key("cloudflare", profile.api_key_env, override_env)
+                    .is_none() =>
+            {
+                return Err(ModelError::Authentication(format!(
+                    "cloudflare requires env vars {api_key_env} and CLOUDFLARE_ACCOUNT_ID — \
+                     create a token at https://dash.cloudflare.com/profile/api-tokens; the \
+                     account id is on your Cloudflare dashboard (or set \
+                     [providers.cloudflare].base_url)"
+                )));
+            },
+            Err(e) => return Err(e),
+        },
+    };
+    let api_key = resolve_optional_key(
+        provider_lc,
+        profile.api_key_env,
+        override_env,
+        &base_url,
+        profile.key_hint,
+    )?;
+    let key_env = api_key
+        .is_some()
+        .then(|| key_env_source(profile.api_key_env, override_env))
+        .flatten();
+    Ok(ProviderEndpoint {
+        base_url,
+        api_key,
+        key_env,
+    })
+}
+
+/// User-custom: no registry entry, but the user has [providers.<name>] in
+/// config. `base_url` is mandatory here — there is no default to fall back on.
+fn resolve_custom_endpoint(
+    provider_lc: &str,
+    override_env: Option<&str>,
+    override_url: Option<String>,
+) -> Result<ProviderEndpoint> {
+    let base_url = override_url.ok_or_else(|| {
+        ModelError::InvalidRequest(format!(
+            "custom provider '{provider_lc}' requires base_url in config"
+        ))
+    })?;
+    // api_key_env is optional: a local (loopback/LAN) endpoint may run
+    // keyless. When a key IS used, harden the URL so it can't be sent in
+    // cleartext; a keyless endpoint must be local (no secret to leak).
+    // For a CUSTOM provider its api_key_env is the default (not an override
+    // of a registry default), so the keyring may fill the gap; a stored key
+    // alone also works with no api_key_env at all.
+    let resolved = match override_env {
+        Some(env) => resolve_provider_key(provider_lc, env, None),
+        None => mermaid_model::utils::default_store().get(provider_lc),
+    };
+    let (api_key, key_env) = match resolved {
+        Some(key) => {
+            validate_provider_base_url(&base_url)?;
+            let env = override_env.and_then(|env| key_env_source(env, None));
+            (Some(key), env)
+        },
+        None if base_url_is_local(&base_url) => (None, None),
+        None => {
+            let reason = match override_env {
+                Some(env) => format!(
+                    "requires env var {env} (or `mermaid login {provider_lc}`, or a \
+                     loopback/LAN base_url)"
+                ),
+                None => "requires api_key_env, or a loopback/LAN base_url".to_string(),
+            };
+            return Err(ModelError::Authentication(format!(
+                "custom provider '{provider_lc}' {reason}"
+            )));
+        },
+    };
+    Ok(ProviderEndpoint {
+        base_url,
+        api_key,
+        key_env,
+    })
 }
 
 /// Resolve an API key, or `None` when the key is absent AND the endpoint is a

@@ -115,6 +115,84 @@ fn random_idempotency_key() -> String {
     })
 }
 
+/// One transcript message in OpenAI's `/chat/completions` wire shape.
+fn wire_message(msg: &ChatMessage) -> Value {
+    let role = match msg.role {
+        MessageRole::User => "user",
+        MessageRole::Assistant => "assistant",
+        MessageRole::System => "system",
+        MessageRole::Tool => "tool",
+    };
+    let mut json_msg = json!({ "role": role });
+    // Vision: a user message carrying images uses OpenAI's content-array
+    // shape (a text part plus one `image_url` part per image, as a
+    // base64 data URL). Previously images were dropped silently, so
+    // vision models saw nothing. Non-user roles / no images use a plain
+    // string content. Assistant-attached artifacts (screenshots) are not
+    // sent — OpenAI rejects images in assistant turns — matching the
+    // Anthropic adapter, which also only sends images on user messages.
+    if msg.role == MessageRole::User && msg.images.as_ref().is_some_and(|images| !images.is_empty())
+    {
+        let mut parts: Vec<Value> = Vec::new();
+        if !msg.content.is_empty() {
+            parts.push(json!({ "type": "text", "text": msg.content }));
+        }
+        for data in msg.images.iter().flatten() {
+            // Default media type png — matches Mermaid's clipboard output;
+            // an unsupported format surfaces a clear 4xx from the API.
+            parts.push(json!({
+                "type": "image_url",
+                "image_url": { "url": format!("data:image/png;base64,{data}") },
+            }));
+        }
+        json_msg["content"] = json!(parts);
+    } else {
+        json_msg["content"] = json!(msg.content);
+    }
+    if msg.role == MessageRole::Assistant
+        && let Some(tool_calls) = msg.tool_calls.as_ref().filter(|tc| !tc.is_empty())
+    {
+        // OpenAI requires each assistant tool call to carry `id`, a
+        // literal `"type": "function"`, and `function.arguments` as a
+        // JSON-ENCODED STRING. Serializing the internal `ToolCall` struct
+        // directly produced `arguments` as an object and omitted `type`,
+        // which strict endpoints (OpenAI, Groq) 400 on the next turn of a
+        // tool loop.
+        let wire: Vec<Value> = tool_calls
+            .iter()
+            .map(|tc| {
+                let arguments = match &tc.function.arguments {
+                    // Already a raw JSON string (e.g. an unparseable-args
+                    // fallback) — pass through rather than double-encode.
+                    Value::String(s) => s.clone(),
+                    other => serde_json::to_string(other).unwrap_or_else(|_| "{}".to_string()),
+                };
+                json!({
+                    "id": tc.id.clone().unwrap_or_default(),
+                    "type": "function",
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": arguments,
+                    },
+                })
+            })
+            .collect();
+        json_msg["tool_calls"] = json!(wire);
+    }
+    // OpenAI tool result messages: `role: "tool"`, `tool_call_id`,
+    // and `name` (the tool name). Identical to Ollama's shape
+    // except the field is `name`, not `tool_name`.
+    if msg.role == MessageRole::Tool {
+        if let Some(ref tool_call_id) = msg.tool_call_id {
+            json_msg["tool_call_id"] = json!(tool_call_id);
+        }
+        if let Some(ref tool_name) = msg.tool_name {
+            json_msg["name"] = json!(tool_name);
+        }
+    }
+    json_msg
+}
+
 impl OpenAICompatAdapter {
     /// Create a new adapter. `base_url` is the resolved URL (registry
     /// default OR user override); `api_key` is already resolved (caller uses
@@ -166,10 +244,6 @@ impl OpenAICompatAdapter {
 
     /// Build the JSON request body for `/chat/completions`. Shared
     /// between streaming and non-streaming paths.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "predates the lint; see .github/baselines/expect_budget.txt"
-    )]
     fn build_request_body(
         &self,
         messages: &[ChatMessage],
@@ -190,83 +264,7 @@ impl OpenAICompatAdapter {
         }
 
         for msg in messages {
-            let role = match msg.role {
-                MessageRole::User => "user",
-                MessageRole::Assistant => "assistant",
-                MessageRole::System => "system",
-                MessageRole::Tool => "tool",
-            };
-            let mut json_msg = json!({ "role": role });
-            // Vision: a user message carrying images uses OpenAI's content-array
-            // shape (a text part plus one `image_url` part per image, as a
-            // base64 data URL). Previously images were dropped silently, so
-            // vision models saw nothing. Non-user roles / no images use a plain
-            // string content. Assistant-attached artifacts (screenshots) are not
-            // sent — OpenAI rejects images in assistant turns — matching the
-            // Anthropic adapter, which also only sends images on user messages.
-            if msg.role == MessageRole::User
-                && msg.images.as_ref().is_some_and(|images| !images.is_empty())
-            {
-                let mut parts: Vec<Value> = Vec::new();
-                if !msg.content.is_empty() {
-                    parts.push(json!({ "type": "text", "text": msg.content }));
-                }
-                for data in msg.images.iter().flatten() {
-                    // Default media type png — matches Mermaid's clipboard output;
-                    // an unsupported format surfaces a clear 4xx from the API.
-                    parts.push(json!({
-                        "type": "image_url",
-                        "image_url": { "url": format!("data:image/png;base64,{data}") },
-                    }));
-                }
-                json_msg["content"] = json!(parts);
-            } else {
-                json_msg["content"] = json!(msg.content);
-            }
-            if msg.role == MessageRole::Assistant
-                && let Some(tool_calls) = msg.tool_calls.as_ref().filter(|tc| !tc.is_empty())
-            {
-                // OpenAI requires each assistant tool call to carry `id`, a
-                // literal `"type": "function"`, and `function.arguments` as a
-                // JSON-ENCODED STRING. Serializing the internal `ToolCall` struct
-                // directly produced `arguments` as an object and omitted `type`,
-                // which strict endpoints (OpenAI, Groq) 400 on the next turn of a
-                // tool loop.
-                let wire: Vec<Value> = tool_calls
-                    .iter()
-                    .map(|tc| {
-                        let arguments = match &tc.function.arguments {
-                            // Already a raw JSON string (e.g. an unparseable-args
-                            // fallback) — pass through rather than double-encode.
-                            Value::String(s) => s.clone(),
-                            other => {
-                                serde_json::to_string(other).unwrap_or_else(|_| "{}".to_string())
-                            },
-                        };
-                        json!({
-                            "id": tc.id.clone().unwrap_or_default(),
-                            "type": "function",
-                            "function": {
-                                "name": tc.function.name,
-                                "arguments": arguments,
-                            },
-                        })
-                    })
-                    .collect();
-                json_msg["tool_calls"] = json!(wire);
-            }
-            // OpenAI tool result messages: `role: "tool"`, `tool_call_id`,
-            // and `name` (the tool name). Identical to Ollama's shape
-            // except the field is `name`, not `tool_name`.
-            if msg.role == MessageRole::Tool {
-                if let Some(ref tool_call_id) = msg.tool_call_id {
-                    json_msg["tool_call_id"] = json!(tool_call_id);
-                }
-                if let Some(ref tool_name) = msg.tool_name {
-                    json_msg["name"] = json!(tool_name);
-                }
-            }
-            json_messages.push(json_msg);
+            json_messages.push(wire_message(msg));
         }
 
         // Tool registration is the single capability boundary. If a tool

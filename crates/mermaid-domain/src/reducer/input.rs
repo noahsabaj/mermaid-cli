@@ -88,10 +88,6 @@ pub fn act_on_row(
 }
 
 /// Apply one keypress to the front question set, returning whether it resolves.
-#[expect(
-    clippy::too_many_lines,
-    reason = "predates the lint; see .github/baselines/expect_budget.txt"
-)]
 pub fn apply_question_key(
     set: &mut mermaid_model::question::PendingQuestionSet,
     code: KeyCode,
@@ -100,20 +96,7 @@ pub fn apply_question_key(
     // Note-editing sub-mode: keystrokes edit the active question's note until
     // Enter/Esc exits (Esc here leaves the note intact — it does not dismiss).
     if set.editing_note {
-        match code {
-            KeyCode::Enter | KeyCode::Escape => set.editing_note = false,
-            KeyCode::Char(c) if !mods.ctrl && !mods.alt => {
-                if let Some(sel) = set.selections.get_mut(set.active) {
-                    sel.note.push(c);
-                }
-            },
-            KeyCode::Backspace => {
-                if let Some(sel) = set.selections.get_mut(set.active) {
-                    sel.note.pop();
-                }
-            },
-            _ => {},
-        }
+        apply_note_key(set, code, mods);
         return QuestionKeyAction::Stay;
     }
 
@@ -176,21 +159,7 @@ pub fn apply_question_key(
 
     // Review screen: 0 = Submit answers, 1 = Cancel.
     if set.active >= nq {
-        match code {
-            KeyCode::Up => set.review_cursor = 0,
-            KeyCode::Down => set.review_cursor = 1,
-            KeyCode::Char('1') => return QuestionKeyAction::Submit,
-            KeyCode::Char('2') => return QuestionKeyAction::Dismiss,
-            KeyCode::Enter => {
-                return if set.review_cursor == 0 {
-                    QuestionKeyAction::Submit
-                } else {
-                    QuestionKeyAction::Dismiss
-                };
-            },
-            _ => {},
-        }
-        return QuestionKeyAction::Stay;
+        return apply_review_key(set, code);
     }
 
     // A question tab.
@@ -201,7 +170,64 @@ pub fn apply_question_key(
     if set.questions[q_idx].is_rank() {
         return apply_rank_key(set, q_idx, code, mods);
     }
-    // Select / MultiSelect.
+    apply_choice_key(set, q_idx, code, mods)
+}
+
+/// Key handling while the active question's note is being edited: printables
+/// append, Backspace deletes, Enter/Esc leave the sub-mode (note kept).
+fn apply_note_key(
+    set: &mut mermaid_model::question::PendingQuestionSet,
+    code: KeyCode,
+    mods: KeyMods,
+) {
+    match code {
+        KeyCode::Enter | KeyCode::Escape => set.editing_note = false,
+        KeyCode::Char(c) if !mods.ctrl && !mods.alt => {
+            if let Some(sel) = set.selections.get_mut(set.active) {
+                sel.note.push(c);
+            }
+        },
+        KeyCode::Backspace => {
+            if let Some(sel) = set.selections.get_mut(set.active) {
+                sel.note.pop();
+            }
+        },
+        _ => {},
+    }
+}
+
+/// Key handling on the review screen: row 0 = Submit answers, row 1 = Cancel;
+/// the digit keys act on a row directly.
+fn apply_review_key(
+    set: &mut mermaid_model::question::PendingQuestionSet,
+    code: KeyCode,
+) -> QuestionKeyAction {
+    match code {
+        KeyCode::Up => set.review_cursor = 0,
+        KeyCode::Down => set.review_cursor = 1,
+        KeyCode::Char('1') => return QuestionKeyAction::Submit,
+        KeyCode::Char('2') => return QuestionKeyAction::Dismiss,
+        KeyCode::Enter => {
+            return if set.review_cursor == 0 {
+                QuestionKeyAction::Submit
+            } else {
+                QuestionKeyAction::Dismiss
+            };
+        },
+        _ => {},
+    }
+    QuestionKeyAction::Stay
+}
+
+/// Key handling for a Select / MultiSelect question: Up/Down move the cursor,
+/// digits jump to an option, Enter/Space act on the current row, and text
+/// typed while the cursor sits on the "Other" row edits its free text.
+fn apply_choice_key(
+    set: &mut mermaid_model::question::PendingQuestionSet,
+    q_idx: usize,
+    code: KeyCode,
+    mods: KeyMods,
+) -> QuestionKeyAction {
     let n = set.questions[q_idx].options.len();
     let other_row = set.other_row(q_idx);
     let row_count = set.row_count(q_idx);
@@ -397,7 +423,11 @@ pub fn handle_question_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode
 
 #[expect(
     clippy::too_many_lines,
-    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+    reason = "an ordered guard chain: meta chords, transcript scrolling, modal focus, busy-Esc, \
+     composer chords, slash palette, @-mention picker, then plain editing; the precedence between \
+     stages is the behaviour, and each stage reads the fall-through of the ones above it, so \
+     per-stage helpers would move that order into call sites without shortening what a reader has \
+     to hold"
 )]
 pub fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: KeyMods) {
     // Ctrl+C: press twice to exit. The first press does the useful thing —

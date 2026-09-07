@@ -160,7 +160,9 @@ impl ModelError {
     /// Convert to user-facing error with actionable suggestions
     #[expect(
         clippy::too_many_lines,
-        reason = "predates the lint; see .github/baselines/expect_budget.txt"
+        reason = "one arm per error variant, each a five-field UserFacingError literal (summary, \
+         message, suggestion, category, recoverable); the HTTP-status arm is the only one with \
+         logic, and the table is meant to be read top to bottom to see how every error is worded"
     )]
     #[must_use]
     pub fn to_user_facing(&self) -> UserFacingError {

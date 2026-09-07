@@ -926,7 +926,9 @@ impl EffectRunner {
     /// `Msg` back through the sender channel.
     #[expect(
         clippy::too_many_lines,
-        reason = "predates the lint; see .github/baselines/expect_budget.txt"
+        reason = "the effect router: one arm per Cmd variant, each spawning or calling the \
+         handler that owns that effect; the arms are short and the routing table is the point, so \
+         the length is the Cmd count and drops only as commands are retired"
     )]
     pub fn dispatch(&mut self, cmd: Cmd) {
         // F12: reap any drained scopes before touching the map. Keeps

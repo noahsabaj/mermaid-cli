@@ -55,10 +55,6 @@ pub fn spinner_glyph(elapsed: std::time::Duration) -> &'static str {
 /// bleeds off the right edge. The fixed 1-or-2-row shape keeps the reserved
 /// height stable as the timer/token counter tick (no per-frame reflow).
 #[expect(clippy::too_many_arguments)]
-#[expect(
-    clippy::too_many_lines,
-    reason = "predates the lint; see .github/baselines/expect_budget.txt"
-)]
 #[must_use]
 pub fn build_status_lines(
     status: GenerationStatus,
@@ -173,10 +169,33 @@ pub fn build_status_lines(
         ]));
     }
 
-    // Live agent rows: one stable row per running/backgrounded subagent.
-    // Description leads in the accent color; activity/elapsed/tokens trail in
-    // the muted meta style. Counters tick but the row COUNT stays stable, so
-    // the transcript never reflows mid-run.
+    push_agent_rows(&mut lines, agents, theme, width);
+
+    // Queued messages: one truncated, highlighted row each (bounded count).
+    let body_budget = width.saturating_sub(2); // "> " prefix
+    for queued in queued_messages.iter().take(MAX_QUEUED_ROWS) {
+        lines.push(Line::from(vec![Span::styled(
+            format!("> {}", truncate_to_cells(&queued.text, body_budget)),
+            Style::new()
+                .fg(theme.colors.text_primary.to_color())
+                .bg(theme.colors.queued_bg.to_color()),
+        )]));
+    }
+
+    lines
+}
+
+/// Live agent rows: one stable row per running/backgrounded subagent.
+/// Description leads in the accent color; activity/elapsed/tokens trail in
+/// the muted meta style. Counters tick but the row COUNT stays stable, so
+/// the transcript never reflows mid-run.
+fn push_agent_rows(
+    lines: &mut Vec<Line<'static>>,
+    agents: &[AgentPanelRow],
+    theme: &Theme,
+    width: usize,
+) {
+    let meta_style = Style::new().fg(theme.colors.text_meta.to_color());
     for row in agents.iter().take(MAX_AGENT_ROWS) {
         let marker = if row.backgrounded { "◦ bg " } else { "◦ " };
         let desc = format!("  {marker}{}", row.description);
@@ -211,19 +230,6 @@ pub fn build_status_lines(
             meta_style,
         )]));
     }
-
-    // Queued messages: one truncated, highlighted row each (bounded count).
-    let body_budget = width.saturating_sub(2); // "> " prefix
-    for queued in queued_messages.iter().take(MAX_QUEUED_ROWS) {
-        lines.push(Line::from(vec![Span::styled(
-            format!("> {}", truncate_to_cells(&queued.text, body_budget)),
-            Style::new()
-                .fg(theme.colors.text_primary.to_color())
-                .bg(theme.colors.queued_bg.to_color()),
-        )]));
-    }
-
-    lines
 }
 
 #[cfg(test)]

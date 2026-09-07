@@ -392,10 +392,6 @@ pub fn has_image() -> bool {
 /// to [`read_text`] rather than surfacing it. A backend command that fails or
 /// times out is treated as "this format is not available" and the next one is
 /// tried.
-#[expect(
-    clippy::too_many_lines,
-    reason = "predates the lint; see .github/baselines/expect_budget.txt"
-)]
 pub fn read_image_bytes() -> Result<(Vec<u8>, String)> {
     let backend = detect_backend()
         .context("No clipboard backend detected (need xclip, wl-paste, pbpaste, or PowerShell)")?;
@@ -407,91 +403,103 @@ pub fn read_image_bytes() -> Result<(Vec<u8>, String)> {
     }
 
     match backend {
-        ClipboardBackend::Wayland | ClipboardBackend::X11 => {
-            for (mime, format) in LINUX_IMAGE_MIMES {
-                let output = match backend {
-                    ClipboardBackend::Wayland => output_with_timeout(
-                        Command::new("wl-paste").args(["--type", mime]),
-                        DATA_TIMEOUT,
-                    ),
-                    ClipboardBackend::X11 => output_with_timeout(
-                        Command::new("xclip").args(["-selection", "clipboard", "-t", mime, "-o"]),
-                        DATA_TIMEOUT,
-                    ),
-                    _ => unreachable!(),
-                };
+        ClipboardBackend::Wayland | ClipboardBackend::X11 => read_image_linux(backend),
+        ClipboardBackend::MacOS => read_image_macos(),
+        ClipboardBackend::Windows => read_image_windows(),
+    }
+}
 
-                if let Ok(output) = output
-                    && output.status.success()
-                    && !output.stdout.is_empty()
-                {
-                    return Ok((output.stdout, (*format).to_string()));
-                }
-            }
-            anyhow::bail!("No image data found in clipboard")
-        },
-        ClipboardBackend::MacOS => {
-            // Use osascript to save clipboard image to a temp file, then read it
-            // 0700 per-user scratch dir, not a world-readable shared /tmp path
-            // another local user could read or pre-create/symlink (#11).
-            let temp_path =
-                mermaid_model::utils::private_temp_dir()?.join("mermaid-clipboard-paste.png");
-            let temp_str = temp_path.to_string_lossy();
-            let script = format!(
-                "set theFile to POSIX file \"{temp_str}\"\n\
-                 tell application \"System Events\" to set theData to the clipboard as «class PNGf»\n\
-                 set fp to open for access theFile with write permission\n\
-                 write theData to fp\n\
-                 close access fp"
-            );
-            // Try the simpler pngpaste approach first (if available), fall back to osascript
-            let pngpaste_output =
-                output_with_timeout(Command::new("pngpaste").arg(&temp_path), DATA_TIMEOUT);
-            let success = if let Ok(output) = pngpaste_output
-                && output.status.success()
-            {
-                true
-            } else {
-                // Fall back to osascript
-                output_with_timeout(
-                    Command::new("osascript").args(["-e", &script]),
-                    DATA_TIMEOUT,
-                )
-                .map(|o| o.status.success())
-                .unwrap_or(false)
-            };
+/// `wl-paste` / `xclip`: ask for each known image MIME in turn and take the
+/// first non-empty payload.
+fn read_image_linux(backend: ClipboardBackend) -> Result<(Vec<u8>, String)> {
+    for (mime, format) in LINUX_IMAGE_MIMES {
+        let output = match backend {
+            ClipboardBackend::Wayland => output_with_timeout(
+                Command::new("wl-paste").args(["--type", mime]),
+                DATA_TIMEOUT,
+            ),
+            ClipboardBackend::X11 => output_with_timeout(
+                Command::new("xclip").args(["-selection", "clipboard", "-t", mime, "-o"]),
+                DATA_TIMEOUT,
+            ),
+            _ => unreachable!(),
+        };
 
-            if success {
-                let bytes = std::fs::read(&temp_path)
-                    .context("Failed to read clipboard image from temp file")?;
-                let _ = std::fs::remove_file(&temp_path);
-                if !bytes.is_empty() {
-                    return Ok((bytes, "png".to_string()));
-                }
-            }
-            anyhow::bail!("No image data found in clipboard (macOS)")
-        },
-        ClipboardBackend::Windows => {
-            // 0700 per-user scratch dir, not a world-readable shared /tmp path
-            // another local user could read or pre-create/symlink (#11).
-            let temp_path =
-                mermaid_model::utils::private_temp_dir()?.join("mermaid-clipboard-paste.png");
-            let _ = std::fs::remove_file(&temp_path);
-            // Two ways in, in this order:
-            //
-            //   1. The raw `PNG` stream, byte-for-byte. Preferred whenever it
-            //      exists — it is what Snipping Tool, Win+Shift+S, Chrome and
-            //      Figma put on the clipboard, it keeps the alpha channel, and
-            //      it does not depend on `ContainsImage()` (which is False for
-            //      a PNG-only clipboard — the screenshot-paste bug).
-            //   2. `GetImage()` re-encoded to PNG, for the CF_BITMAP-only
-            //      payloads older apps produce.
-            //
-            // `System.Drawing` is added explicitly: `$img.Save(…,
-            // [System.Drawing.Imaging.ImageFormat]::Png)` resolves that type by
-            // name, and it is not auto-loaded on PowerShell 7.
-            let script = format!(
-                "\
+        if let Ok(output) = output
+            && output.status.success()
+            && !output.stdout.is_empty()
+        {
+            return Ok((output.stdout, (*format).to_string()));
+        }
+    }
+    anyhow::bail!("No image data found in clipboard")
+}
+
+/// macOS: `pngpaste` when installed, else an `osascript` that writes the
+/// clipboard's PNG to a private temp file, which is then read back.
+fn read_image_macos() -> Result<(Vec<u8>, String)> {
+    // Use osascript to save clipboard image to a temp file, then read it
+    // 0700 per-user scratch dir, not a world-readable shared /tmp path
+    // another local user could read or pre-create/symlink (#11).
+    let temp_path = mermaid_model::utils::private_temp_dir()?.join("mermaid-clipboard-paste.png");
+    let temp_str = temp_path.to_string_lossy();
+    let script = format!(
+        "set theFile to POSIX file \"{temp_str}\"\n\
+         tell application \"System Events\" to set theData to the clipboard as «class PNGf»\n\
+         set fp to open for access theFile with write permission\n\
+         write theData to fp\n\
+         close access fp"
+    );
+    // Try the simpler pngpaste approach first (if available), fall back to osascript
+    let pngpaste_output =
+        output_with_timeout(Command::new("pngpaste").arg(&temp_path), DATA_TIMEOUT);
+    let success = if let Ok(output) = pngpaste_output
+        && output.status.success()
+    {
+        true
+    } else {
+        // Fall back to osascript
+        output_with_timeout(
+            Command::new("osascript").args(["-e", &script]),
+            DATA_TIMEOUT,
+        )
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+    };
+
+    if success {
+        let bytes =
+            std::fs::read(&temp_path).context("Failed to read clipboard image from temp file")?;
+        let _ = std::fs::remove_file(&temp_path);
+        if !bytes.is_empty() {
+            return Ok((bytes, "png".to_string()));
+        }
+    }
+    anyhow::bail!("No image data found in clipboard (macOS)")
+}
+
+/// Windows: a PowerShell script writes the clipboard's PNG stream (or a
+/// re-encoded bitmap) to a private temp file, which is then read back.
+fn read_image_windows() -> Result<(Vec<u8>, String)> {
+    // 0700 per-user scratch dir, not a world-readable shared /tmp path
+    // another local user could read or pre-create/symlink (#11).
+    let temp_path = mermaid_model::utils::private_temp_dir()?.join("mermaid-clipboard-paste.png");
+    let _ = std::fs::remove_file(&temp_path);
+    // Two ways in, in this order:
+    //
+    //   1. The raw `PNG` stream, byte-for-byte. Preferred whenever it
+    //      exists — it is what Snipping Tool, Win+Shift+S, Chrome and
+    //      Figma put on the clipboard, it keeps the alpha channel, and
+    //      it does not depend on `ContainsImage()` (which is False for
+    //      a PNG-only clipboard — the screenshot-paste bug).
+    //   2. `GetImage()` re-encoded to PNG, for the CF_BITMAP-only
+    //      payloads older apps produce.
+    //
+    // `System.Drawing` is added explicitly: `$img.Save(…,
+    // [System.Drawing.Imaging.ImageFormat]::Png)` resolves that type by
+    // name, and it is not auto-loaded on PowerShell 7.
+    let script = format!(
+        "\
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -514,24 +522,22 @@ if ([System.Windows.Forms.Clipboard]::ContainsImage()) {{
   }}
 }}
 exit 1",
-                out = ps_quote(&temp_path.to_string_lossy()),
-            );
-            let output = output_with_timeout(&mut powershell_command(&script), POWERSHELL_TIMEOUT);
+        out = ps_quote(&temp_path.to_string_lossy()),
+    );
+    let output = output_with_timeout(&mut powershell_command(&script), POWERSHELL_TIMEOUT);
 
-            if let Ok(output) = output
-                && output.status.success()
-                && temp_path.exists()
-            {
-                let bytes = std::fs::read(&temp_path)
-                    .context("Failed to read clipboard image from temp file")?;
-                let _ = std::fs::remove_file(&temp_path);
-                if !bytes.is_empty() {
-                    return Ok((bytes, "png".to_string()));
-                }
-            }
-            anyhow::bail!("No image data found in clipboard (Windows)")
-        },
+    if let Ok(output) = output
+        && output.status.success()
+        && temp_path.exists()
+    {
+        let bytes =
+            std::fs::read(&temp_path).context("Failed to read clipboard image from temp file")?;
+        let _ = std::fs::remove_file(&temp_path);
+        if !bytes.is_empty() {
+            return Ok((bytes, "png".to_string()));
+        }
     }
+    anyhow::bail!("No image data found in clipboard (Windows)")
 }
 
 /// Read text from the clipboard (fallback when no image is found).

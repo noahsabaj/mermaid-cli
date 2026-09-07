@@ -343,10 +343,6 @@ fn coalesce_consecutive_roles(msgs: Vec<Value>) -> Vec<Value> {
 /// Assistant messages with `thinking + provider_continuation` emit a
 /// `thinking` content block paired with the `text/tool_use` blocks; the
 /// signature round-trips so subsequent turns don't 400.
-#[expect(
-    clippy::too_many_lines,
-    reason = "predates the lint; see .github/baselines/expect_budget.txt"
-)]
 fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<Value>) {
     let mut system: Option<String> = None;
     let mut out: Vec<Value> = Vec::new();
@@ -379,88 +375,11 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<Value>) {
                 i += 1;
             },
             MessageRole::User => {
-                let mut content_blocks: Vec<Value> = Vec::new();
-                if !msg.content.is_empty() {
-                    content_blocks.push(json!({
-                        "type": "text",
-                        "text": msg.content,
-                    }));
-                }
-                // Vision: convert each base64 image to an image block.
-                if let Some(ref images) = msg.images {
-                    for data in images {
-                        // Default media type is png — matches Mermaid's
-                        // clipboard module output. Unsupported formats
-                        // surface a clear 415 from the API.
-                        content_blocks.push(json!({
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "image/png",
-                                "data": data,
-                            },
-                        }));
-                    }
-                }
-                let content = if content_blocks.len() == 1 && content_blocks[0]["type"] == "text" {
-                    // Optimization: a single text block can serialize as
-                    // a string (Anthropic accepts both shapes; string is
-                    // shorter on the wire).
-                    content_blocks[0]["text"].clone()
-                } else if content_blocks.is_empty() {
-                    // Empty content — emit an empty string (Anthropic
-                    // requires non-empty messages, but a downstream 400
-                    // is the right signal here).
-                    json!("")
-                } else {
-                    json!(content_blocks)
-                };
-                out.push(json!({"role": "user", "content": content}));
+                out.push(json!({"role": "user", "content": user_content(msg)}));
                 i += 1;
             },
             MessageRole::Assistant => {
-                let mut content_blocks: Vec<Value> = Vec::new();
-                // Thinking block FIRST per Anthropic ordering rules — but ONLY
-                // when we also have its signature. The API rejects a
-                // signature-less thinking block in history with a 400
-                // invalid_request_error, which would break the agent loop. If
-                // the signature is missing (failed to persist, migrated row,
-                // etc.) drop the thinking trace: the text/tool_use blocks alone
-                // are a valid assistant turn.
-                if let (Some(thinking), Some(sig)) = (
-                    &msg.thinking,
-                    msg.provider_continuation
-                        .as_ref()
-                        .and_then(ProviderContinuation::anthropic_signature),
-                ) && !thinking.is_empty()
-                    && !sig.is_empty()
-                {
-                    content_blocks.push(json!({
-                        "type": "thinking",
-                        "thinking": thinking,
-                        "signature": sig,
-                    }));
-                } else if msg.thinking.as_deref().is_some_and(|t| !t.is_empty()) {
-                    tracing::debug!(
-                        "dropping assistant thinking block that lacks a signature (would 400)",
-                    );
-                }
-                if !msg.content.is_empty() {
-                    content_blocks.push(json!({
-                        "type": "text",
-                        "text": msg.content,
-                    }));
-                }
-                if let Some(ref tool_calls) = msg.tool_calls {
-                    for tc in tool_calls {
-                        content_blocks.push(json!({
-                            "type": "tool_use",
-                            "id": tc.id.clone().unwrap_or_default(),
-                            "name": tc.function.name,
-                            "input": tc.function.arguments,
-                        }));
-                    }
-                }
+                let content_blocks = assistant_content_blocks(msg);
                 if content_blocks.is_empty() {
                     // Skip empty assistant messages — an artifact of
                     // tool-only responses where content is "" and there
@@ -492,6 +411,94 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<Value>) {
     }
 
     (system, coalesce_consecutive_roles(out))
+}
+
+/// The `content` value of a user turn: text plus one image block per
+/// attached image, collapsed to a bare string when it is text alone.
+fn user_content(msg: &ChatMessage) -> Value {
+    let mut content_blocks: Vec<Value> = Vec::new();
+    if !msg.content.is_empty() {
+        content_blocks.push(json!({
+            "type": "text",
+            "text": msg.content,
+        }));
+    }
+    // Vision: convert each base64 image to an image block.
+    if let Some(ref images) = msg.images {
+        for data in images {
+            // Default media type is png — matches Mermaid's
+            // clipboard module output. Unsupported formats
+            // surface a clear 415 from the API.
+            content_blocks.push(json!({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/png",
+                    "data": data,
+                },
+            }));
+        }
+    }
+    if content_blocks.len() == 1 && content_blocks[0]["type"] == "text" {
+        // Optimization: a single text block can serialize as
+        // a string (Anthropic accepts both shapes; string is
+        // shorter on the wire).
+        content_blocks[0]["text"].clone()
+    } else if content_blocks.is_empty() {
+        // Empty content — emit an empty string (Anthropic
+        // requires non-empty messages, but a downstream 400
+        // is the right signal here).
+        json!("")
+    } else {
+        json!(content_blocks)
+    }
+}
+
+/// The content blocks of an assistant turn, in Anthropic's required order:
+/// a signed `thinking` block (when the signature survived), then `text`,
+/// then one `tool_use` per call. Empty for a message with nothing to say.
+fn assistant_content_blocks(msg: &ChatMessage) -> Vec<Value> {
+    let mut content_blocks: Vec<Value> = Vec::new();
+    // Thinking block FIRST per Anthropic ordering rules — but ONLY
+    // when we also have its signature. The API rejects a
+    // signature-less thinking block in history with a 400
+    // invalid_request_error, which would break the agent loop. If
+    // the signature is missing (failed to persist, migrated row,
+    // etc.) drop the thinking trace: the text/tool_use blocks alone
+    // are a valid assistant turn.
+    if let (Some(thinking), Some(sig)) = (
+        &msg.thinking,
+        msg.provider_continuation
+            .as_ref()
+            .and_then(ProviderContinuation::anthropic_signature),
+    ) && !thinking.is_empty()
+        && !sig.is_empty()
+    {
+        content_blocks.push(json!({
+            "type": "thinking",
+            "thinking": thinking,
+            "signature": sig,
+        }));
+    } else if msg.thinking.as_deref().is_some_and(|t| !t.is_empty()) {
+        tracing::debug!("dropping assistant thinking block that lacks a signature (would 400)",);
+    }
+    if !msg.content.is_empty() {
+        content_blocks.push(json!({
+            "type": "text",
+            "text": msg.content,
+        }));
+    }
+    if let Some(ref tool_calls) = msg.tool_calls {
+        for tc in tool_calls {
+            content_blocks.push(json!({
+                "type": "tool_use",
+                "id": tc.id.clone().unwrap_or_default(),
+                "name": tc.function.name,
+                "input": tc.function.arguments,
+            }));
+        }
+    }
+    content_blocks
 }
 
 /// Anthropic Claude adapter.
@@ -956,13 +963,159 @@ impl AnthropicStream {
     }
 }
 
+impl AnthropicStream {
+    /// Record the input-side usage that rides on `message_start`.
+    fn on_message_start(&mut self, parsed: &Value) {
+        if let Some(input) = parsed
+            .pointer("/message/usage/input_tokens")
+            .and_then(|v| v.as_u64())
+        {
+            self.prompt_tokens = input as usize;
+            self.saw_usage = true;
+        }
+        if let Some(cache_creation) = parsed
+            .pointer("/message/usage/cache_creation_input_tokens")
+            .and_then(|v| v.as_u64())
+        {
+            self.cache_creation_tokens = cache_creation as usize;
+        }
+        if let Some(cache_read) = parsed
+            .pointer("/message/usage/cache_read_input_tokens")
+            .and_then(|v| v.as_u64())
+        {
+            self.cache_read_tokens = cache_read as usize;
+        }
+    }
+
+    /// Route one `content_block_delta` to the accumulator opened for its
+    /// index, emitting the streamed text/reasoning as it arrives. A delta
+    /// whose index has no open block (dropped past the slot bound, or a
+    /// mis-framed stream) is ignored.
+    fn on_block_delta(&mut self, index: usize, delta: Option<&Value>, out: &mut Vec<StreamEvent>) {
+        let delta_type = delta
+            .and_then(|d| d.get("type"))
+            .and_then(|t| t.as_str())
+            .unwrap_or("");
+        let Some(acc) = self.blocks.get_mut(&index) else {
+            return;
+        };
+        match (acc, delta_type) {
+            (BlockAccumulator::Text(buf_s), "text_delta") => {
+                let text = delta
+                    .and_then(|d| d.get("text"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if !text.is_empty() && !self.text_truncated {
+                    out.push(StreamEvent::Text(text.to_string()));
+                    push_capped(buf_s, text, &mut self.text_truncated, MAX_RESPONSE_CHARS);
+                }
+            },
+            (BlockAccumulator::Thinking { content, signature }, "thinking_delta") => {
+                let text = delta
+                    .and_then(|d| d.get("thinking"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if !text.is_empty() && !self.thinking_truncated {
+                    // #9: this is intentionally `None` here —
+                    // `signature_delta` arrives AFTER the
+                    // thinking deltas, so streamed reasoning
+                    // chunks can't carry it. The final
+                    // `ModelResponse.provider_continuation`
+                    // (captured at block stop) is correct and
+                    // is what round-trips; streamed chunks are
+                    // display-only.
+                    out.push(StreamEvent::Reasoning(ReasoningChunk {
+                        text: text.to_string(),
+                        signature: signature.clone(),
+                    }));
+                    push_capped(
+                        content,
+                        text,
+                        &mut self.thinking_truncated,
+                        MAX_RESPONSE_CHARS,
+                    );
+                }
+            },
+            (BlockAccumulator::Thinking { signature, .. }, "signature_delta") => {
+                let sig = delta
+                    .and_then(|d| d.get("signature"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if !sig.is_empty() {
+                    *signature = Some(sig.to_string());
+                }
+            },
+            (BlockAccumulator::ToolUse { input_buf, .. }, "input_json_delta") => {
+                let frag = delta
+                    .and_then(|d| d.get("partial_json"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                push_tool_arg(input_buf, frag);
+            },
+            _ => {
+                // delta type doesn't match block type
+                // (shouldn't happen per spec). Ignore.
+            },
+        }
+    }
+}
+
+/// The typed error for an `error` frame the stream carried mid-response.
+fn stream_error(parsed: &Value) -> ModelError {
+    let err_type = parsed
+        .pointer("/error/type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("api_error");
+    let err_msg = parsed
+        .pointer("/error/message")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Anthropic stream error");
+    ModelError::Backend(BackendError::ProviderError {
+        provider: "anthropic".to_string(),
+        code: Some(err_type.to_string()),
+        message: err_msg.to_string(),
+        debug: crate::models::error::ResponseDebugContext::default(),
+    })
+}
+
+/// The accumulator for a freshly opened content block, chosen by its type.
+fn block_accumulator_for(block: Option<&Value>) -> BlockAccumulator {
+    let block_type = block
+        .and_then(|b| b.get("type"))
+        .and_then(|t| t.as_str())
+        .unwrap_or("");
+    match block_type {
+        "text" => BlockAccumulator::Text(String::new()),
+        "thinking" => BlockAccumulator::Thinking {
+            content: String::new(),
+            signature: None,
+        },
+        "tool_use" => {
+            let id = block
+                .and_then(|b| b.get("id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let name = block
+                .and_then(|b| b.get("name"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            BlockAccumulator::ToolUse {
+                id,
+                name,
+                input_buf: String::new(),
+            }
+        },
+        // Unknown block types (e.g., server-tool
+        // results we don't request) — track as inert.
+        _ => BlockAccumulator::Other,
+    }
+}
+
 impl StreamProtocol for AnthropicStream {
     const FRAMING: Framing = Framing::Sse;
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "predates the lint; see .github/baselines/expect_budget.txt"
-    )]
     fn on_frame(&mut self, frame: &str, out: &mut Vec<StreamEvent>) -> Result<Flow> {
         let parsed: Value = match serde_json::from_str(frame) {
             Ok(v) => v,
@@ -976,61 +1129,10 @@ impl StreamProtocol for AnthropicStream {
         let event_type = parsed.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
         match event_type {
-            "message_start" => {
-                if let Some(input) = parsed
-                    .pointer("/message/usage/input_tokens")
-                    .and_then(|v| v.as_u64())
-                {
-                    self.prompt_tokens = input as usize;
-                    self.saw_usage = true;
-                }
-                if let Some(cache_creation) = parsed
-                    .pointer("/message/usage/cache_creation_input_tokens")
-                    .and_then(|v| v.as_u64())
-                {
-                    self.cache_creation_tokens = cache_creation as usize;
-                }
-                if let Some(cache_read) = parsed
-                    .pointer("/message/usage/cache_read_input_tokens")
-                    .and_then(|v| v.as_u64())
-                {
-                    self.cache_read_tokens = cache_read as usize;
-                }
-            },
+            "message_start" => self.on_message_start(&parsed),
             "content_block_start" => {
                 let index = parsed.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                let block = parsed.get("content_block");
-                let block_type = block
-                    .and_then(|b| b.get("type"))
-                    .and_then(|t| t.as_str())
-                    .unwrap_or("");
-                let acc = match block_type {
-                    "text" => BlockAccumulator::Text(String::new()),
-                    "thinking" => BlockAccumulator::Thinking {
-                        content: String::new(),
-                        signature: None,
-                    },
-                    "tool_use" => {
-                        let id = block
-                            .and_then(|b| b.get("id"))
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        let name = block
-                            .and_then(|b| b.get("name"))
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        BlockAccumulator::ToolUse {
-                            id,
-                            name,
-                            input_buf: String::new(),
-                        }
-                    },
-                    // Unknown block types (e.g., server-tool
-                    // results we don't request) — track as inert.
-                    _ => BlockAccumulator::Other,
-                };
+                let acc = block_accumulator_for(parsed.get("content_block"));
                 if !slot_in_bounds(index) {
                     // A well-framed stream can open blocks forever; past the
                     // bound the block is dropped and its deltas find no slot.
@@ -1044,72 +1146,7 @@ impl StreamProtocol for AnthropicStream {
             },
             "content_block_delta" => {
                 let index = parsed.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                let delta = parsed.get("delta");
-                let delta_type = delta
-                    .and_then(|d| d.get("type"))
-                    .and_then(|t| t.as_str())
-                    .unwrap_or("");
-                let Some(acc) = self.blocks.get_mut(&index) else {
-                    return Ok(Flow::Continue);
-                };
-                match (acc, delta_type) {
-                    (BlockAccumulator::Text(buf_s), "text_delta") => {
-                        let text = delta
-                            .and_then(|d| d.get("text"))
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
-                        if !text.is_empty() && !self.text_truncated {
-                            out.push(StreamEvent::Text(text.to_string()));
-                            push_capped(buf_s, text, &mut self.text_truncated, MAX_RESPONSE_CHARS);
-                        }
-                    },
-                    (BlockAccumulator::Thinking { content, signature }, "thinking_delta") => {
-                        let text = delta
-                            .and_then(|d| d.get("thinking"))
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
-                        if !text.is_empty() && !self.thinking_truncated {
-                            // #9: this is intentionally `None` here —
-                            // `signature_delta` arrives AFTER the
-                            // thinking deltas, so streamed reasoning
-                            // chunks can't carry it. The final
-                            // `ModelResponse.provider_continuation`
-                            // (captured at block stop) is correct and
-                            // is what round-trips; streamed chunks are
-                            // display-only.
-                            out.push(StreamEvent::Reasoning(ReasoningChunk {
-                                text: text.to_string(),
-                                signature: signature.clone(),
-                            }));
-                            push_capped(
-                                content,
-                                text,
-                                &mut self.thinking_truncated,
-                                MAX_RESPONSE_CHARS,
-                            );
-                        }
-                    },
-                    (BlockAccumulator::Thinking { signature, .. }, "signature_delta") => {
-                        let sig = delta
-                            .and_then(|d| d.get("signature"))
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
-                        if !sig.is_empty() {
-                            *signature = Some(sig.to_string());
-                        }
-                    },
-                    (BlockAccumulator::ToolUse { input_buf, .. }, "input_json_delta") => {
-                        let frag = delta
-                            .and_then(|d| d.get("partial_json"))
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
-                        push_tool_arg(input_buf, frag);
-                    },
-                    _ => {
-                        // delta type doesn't match block type
-                        // (shouldn't happen per spec). Ignore.
-                    },
-                }
+                self.on_block_delta(index, parsed.get("delta"), out);
             },
             "content_block_stop" => {
                 let index = parsed.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
@@ -1149,22 +1186,7 @@ impl StreamProtocol for AnthropicStream {
                 self.saw_message_stop = true;
                 return Ok(Flow::Stop);
             },
-            "error" => {
-                let err_type = parsed
-                    .pointer("/error/type")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("api_error");
-                let err_msg = parsed
-                    .pointer("/error/message")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("Anthropic stream error");
-                return Err(ModelError::Backend(BackendError::ProviderError {
-                    provider: "anthropic".to_string(),
-                    code: Some(err_type.to_string()),
-                    message: err_msg.to_string(),
-                    debug: crate::models::error::ResponseDebugContext::default(),
-                }));
-            },
+            "error" => return Err(stream_error(&parsed)),
             "ping" | "" => {
                 // Heartbeats and untyped events — ignore.
             },

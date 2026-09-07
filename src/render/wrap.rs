@@ -214,84 +214,42 @@ pub(crate) fn hard_break_styled_word(
     }
 }
 
-/// Wrap a styled Line with hanging indent, preserving all span styles.
-/// Returns multiple Line objects with proper indentation.
-///
-/// Wrapping runs over a word stream flattened ACROSS spans: a word is a run of
-/// styled fragments, and a word boundary exists only where the source text has
-/// whitespace. A span ending mid-word glues onto the next span's text, so
-/// `**bold**suffix` stays one token and a `.` right after a link's dimmed URL
-/// stays attached (no phantom space at a style boundary).
-///
-/// A separator space is re-emitted with the style of the span the whitespace
-/// CAME FROM, so a gap *inside* a styled run keeps that run's paint while a gap
-/// *between* runs stays plain. This is what keeps multi-word inline code
-/// (`` `No image data found` ``) one continuous block instead of a row of
-/// disconnected per-word boxes, and still leaves the space in front of a link
-/// un-underlined (that space belongs to the preceding prose span).
-#[expect(
-    clippy::too_many_lines,
-    reason = "predates the lint; see .github/baselines/expect_budget.txt"
-)]
-pub(crate) fn wrap_styled_line(
-    line: Line<'static>,
-    width: usize,
-    continuation_indent: usize,
-) -> Vec<Line<'static>> {
-    // Widths are counted in display cells (via `UnicodeWidthStr`), not
-    // bytes. This makes CJK double-width chars and emoji wrap at the
-    // correct visual column, and avoids over-wrapping multi-byte ASCII-
-    // looking glyphs.
-    let total_width: usize = line.spans.iter().map(|s| s.content.width()).sum();
+/// One word of a styled line: a run of styled fragments plus the style of the
+/// whitespace that separated it from the previous word.
+struct Word {
+    fragments: Vec<(String, Style)>,
+    /// Style of the whitespace run that preceded this word, taken from the
+    /// span that whitespace lived in. Interior gaps of a styled run keep
+    /// the run's style; gaps between runs carry the plain prose style.
+    separator: Style,
+}
 
-    // If the line fits within width, return as-is
-    if total_width <= width {
-        return vec![line];
-    }
-
-    // Line needs wrapping - extract all text and styles
-    let mut result_lines = Vec::new();
-    let mut current_line_spans: Vec<Span<'static>> = Vec::new();
-    let mut current_line_width = 0usize;
-    let available_width = width.saturating_sub(continuation_indent);
-
-    // Preserve the line's existing left margin (the "  " continuation gutter the
-    // caller prepends to every non-first message line) on the *first* wrapped
-    // segment. The whitespace split below drops leading spaces and the "first
-    // word, no indent" rule would then flush the segment to column 0 — that's the
-    // recurring bug where a wrapped paragraph escapes the message gutter while its
-    // own continuation lines (which get `continuation_indent`) stay aligned. A
-    // non-whitespace prefix like "● " is unaffected (it survives the split).
-    let leading_indent: usize = {
-        let mut n = 0;
-        for span in &line.spans {
-            let spaces = span.content.len() - span.content.trim_start_matches(' ').len();
-            n += spaces;
-            if spaces < span.content.len() {
-                break; // this span has non-space content, so leading run ends here
-            }
+/// Cells of leading space across the line's spans, up to the first span that
+/// carries non-space content — the "  " continuation gutter a caller prepends.
+fn leading_space_cells(spans: &[Span<'static>]) -> usize {
+    let mut n = 0;
+    for span in spans {
+        let spaces = span.content.len() - span.content.trim_start_matches(' ').len();
+        n += spaces;
+        if spaces < span.content.len() {
+            break; // this span has non-space content, so leading run ends here
         }
-        n
-    };
-
-    // Flatten the spans into words: each word is a run of styled fragments plus
-    // the style of the whitespace that separated it from the previous word.
-    // Whitespace anywhere closes the current word (runs collapse to a single
-    // boundary); a span ending mid-word leaves the word open so the next
-    // span's text glues on — a style change is NOT a word boundary.
-    struct Word {
-        fragments: Vec<(String, Style)>,
-        /// Style of the whitespace run that preceded this word, taken from the
-        /// span that whitespace lived in. Interior gaps of a styled run keep
-        /// the run's style; gaps between runs carry the plain prose style.
-        separator: Style,
     }
+    n
+}
+
+/// Flatten the spans into words: each word is a run of styled fragments plus
+/// the style of the whitespace that separated it from the previous word.
+/// Whitespace anywhere closes the current word (runs collapse to a single
+/// boundary); a span ending mid-word leaves the word open so the next
+/// span's text glues on — a style change is NOT a word boundary.
+fn flatten_words(spans: &[Span<'static>]) -> Vec<Word> {
     let mut words: Vec<Word> = Vec::new();
     let mut current_word: Vec<(String, Style)> = Vec::new();
     // Separator in front of the word currently being built. The first word has
     // no preceding gap, so its value is never emitted.
     let mut separator = Style::default();
-    for span in &line.spans {
+    for span in spans {
         let mut frag = String::new();
         for ch in span.content.chars() {
             if ch.is_whitespace() {
@@ -322,6 +280,55 @@ pub(crate) fn wrap_styled_line(
             separator,
         });
     }
+    words
+}
+
+/// Wrap a styled Line with hanging indent, preserving all span styles.
+/// Returns multiple Line objects with proper indentation.
+///
+/// Wrapping runs over a word stream flattened ACROSS spans: a word is a run of
+/// styled fragments, and a word boundary exists only where the source text has
+/// whitespace. A span ending mid-word glues onto the next span's text, so
+/// `**bold**suffix` stays one token and a `.` right after a link's dimmed URL
+/// stays attached (no phantom space at a style boundary).
+///
+/// A separator space is re-emitted with the style of the span the whitespace
+/// CAME FROM, so a gap *inside* a styled run keeps that run's paint while a gap
+/// *between* runs stays plain. This is what keeps multi-word inline code
+/// (`` `No image data found` ``) one continuous block instead of a row of
+/// disconnected per-word boxes, and still leaves the space in front of a link
+/// un-underlined (that space belongs to the preceding prose span).
+pub(crate) fn wrap_styled_line(
+    line: Line<'static>,
+    width: usize,
+    continuation_indent: usize,
+) -> Vec<Line<'static>> {
+    // Widths are counted in display cells (via `UnicodeWidthStr`), not
+    // bytes. This makes CJK double-width chars and emoji wrap at the
+    // correct visual column, and avoids over-wrapping multi-byte ASCII-
+    // looking glyphs.
+    let total_width: usize = line.spans.iter().map(|s| s.content.width()).sum();
+
+    // If the line fits within width, return as-is
+    if total_width <= width {
+        return vec![line];
+    }
+
+    // Line needs wrapping - extract all text and styles
+    let mut result_lines = Vec::new();
+    let mut current_line_spans: Vec<Span<'static>> = Vec::new();
+    let mut current_line_width = 0usize;
+    let available_width = width.saturating_sub(continuation_indent);
+
+    // Preserve the line's existing left margin (the "  " continuation gutter the
+    // caller prepends to every non-first message line) on the *first* wrapped
+    // segment. The whitespace split below drops leading spaces and the "first
+    // word, no indent" rule would then flush the segment to column 0 — that's the
+    // recurring bug where a wrapped paragraph escapes the message gutter while its
+    // own continuation lines (which get `continuation_indent`) stay aligned. A
+    // non-whitespace prefix like "● " is unaffected (it survives the split).
+    let leading_indent = leading_space_cells(&line.spans);
+    let words = flatten_words(&line.spans);
 
     fn emit_word(spans: &mut Vec<Span<'static>>, word: Vec<(String, Style)>) {
         for (text, style) in word {

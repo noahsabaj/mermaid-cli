@@ -82,7 +82,10 @@ pub fn action_display_for_shell(
 
 #[expect(
     clippy::too_many_lines,
-    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+    reason = "one arm per tool wire name, each turning that tool's metadata into its transcript \
+     detail; the web_fetch arm alone assembles a ten-field trailer, and lifting the arms into \
+     helpers would only move the per-tool knowledge out of the one table that shows which tools \
+     get rich details"
 )]
 fn action_details_for(
     call: &PendingToolCall,
@@ -508,7 +511,9 @@ pub fn display_info_for(call: &PendingToolCall) -> (String, String) {
 /// Windows.
 #[expect(
     clippy::too_many_lines,
-    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+    reason = "the verb+target table: one arm per tool wire name, most a single tuple; it is long \
+     because there are many tools, not because any arm is, and a helper per arm would hide the \
+     table this function exists to be"
 )]
 #[must_use]
 pub fn display_info_for_shell(

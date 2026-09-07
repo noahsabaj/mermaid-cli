@@ -60,50 +60,100 @@ pub fn fold_token_usage(
     }
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "predates the lint; see .github/baselines/expect_budget.txt"
-)]
-pub fn handle_compaction_finished(
-    state: &mut State,
-    cmds: &mut Vec<Cmd>,
-    turn: TurnId,
-    result: CompactionResult,
-) {
-    // Manual `/compact` ends the turn; a truncation recovery or context-limit
-    // retry resumes the run; a pre-turn auto-compaction (still `Generating`)
-    // just swaps in the compacted messages and lets the in-flight stream
-    // continue in the effect.
-    enum Outcome {
-        Manual,
-        /// Resume the run; `resume_continuation` carries the interrupted turn's
-        /// auto-continue flag so a chain survives a mid-chain compaction.
-        Recovery {
-            resume_continuation: bool,
-        },
-        AutoMidTurn,
-    }
-    let outcome = match state.turn {
+/// What a finished compaction does to the turn. Manual `/compact` ends the
+/// turn; a truncation recovery or context-limit retry resumes the run; a
+/// pre-turn auto-compaction (still `Generating`) just swaps in the compacted
+/// messages and lets the in-flight stream continue in the effect.
+enum CompactionOutcome {
+    Manual,
+    /// Resume the run; `resume_continuation` carries the interrupted turn's
+    /// auto-continue flag so a chain survives a mid-chain compaction.
+    Recovery {
+        resume_continuation: bool,
+    },
+    AutoMidTurn,
+}
+
+/// Classify a compaction result against the current turn; `None` when the
+/// result belongs to a turn that is no longer current.
+fn compaction_outcome(state: &State, turn: TurnId) -> Option<CompactionOutcome> {
+    match state.turn {
         TurnState::Compacting {
             id,
             trigger,
             resume_continuation,
             ..
-        } if id == turn => match trigger {
+        } if id == turn => Some(match trigger {
             // A context-limit compaction (the provider rejected the request
             // mid-stream for length; emitted from effect/mod.rs via
             // `is_context_limit_error`) must RESUME the interrupted request, just
             // like a truncation recovery — not silently end the turn as the old
             // `_ => Manual` arm did.
             CompactionTrigger::ContextLimitRetry | CompactionTrigger::TruncationRecovery => {
-                Outcome::Recovery {
+                CompactionOutcome::Recovery {
                     resume_continuation,
                 }
             },
-            _ => Outcome::Manual,
-        },
-        TurnState::Generating { id, .. } if id == turn => Outcome::AutoMidTurn,
-        _ => return,
+            _ => CompactionOutcome::Manual,
+        }),
+        TurnState::Generating { id, .. } if id == turn => Some(CompactionOutcome::AutoMidTurn),
+        _ => None,
+    }
+}
+
+/// Put the messages that arrived while compaction ran back into the
+/// replacement transcript, keeping their arrival order relative to a pending
+/// assistant tail (an assistant message whose tool calls are not yet answered).
+fn splice_intervening_messages(messages: &mut Vec<ChatMessage>, intervening: Vec<ChatMessage>) {
+    let before_pending_tail = messages.last().is_some_and(|message| {
+        message.role == MessageRole::Assistant
+            && message
+                .tool_calls
+                .as_ref()
+                .is_some_and(|calls| !calls.is_empty())
+    });
+    if before_pending_tail {
+        // A tool result that answers the pending tail must land AFTER its
+        // call — a `tool_result` preceding its `tool_use` 400s providers
+        // and gets scrubbed as an orphan. Split at the FIRST such result:
+        // everything before it goes ahead of the tail, and everything from
+        // it onward follows the tail, so a notice that arrived after (and
+        // may reference) the result keeps its arrival order too.
+        let tail_ids: std::collections::HashSet<String> = messages
+            .last()
+            .and_then(|message| message.tool_calls.as_ref())
+            .into_iter()
+            .flatten()
+            .filter_map(|call| call.id.clone())
+            .collect();
+        let split = intervening.iter().position(|message| {
+            message.role == MessageRole::Tool
+                && message
+                    .tool_call_id
+                    .as_ref()
+                    .is_some_and(|id| tail_ids.contains(id))
+        });
+        let mut before_tail = intervening;
+        let after_tail = match split {
+            Some(index) => before_tail.split_off(index),
+            None => Vec::new(),
+        };
+        let position = messages.len() - 1;
+        messages.splice(position..position, before_tail);
+        messages.extend(after_tail);
+    } else {
+        messages.extend(intervening);
+    }
+}
+
+pub fn handle_compaction_finished(
+    state: &mut State,
+    cmds: &mut Vec<Cmd>,
+    turn: TurnId,
+    result: CompactionResult,
+) {
+    let Some(outcome) = compaction_outcome(state, turn) else {
+        return;
     };
 
     // Compaction runs asynchronously from a request snapshot. Preserve every
@@ -128,46 +178,7 @@ pub fn handle_compaction_finished(
         .conversation
         .replace_messages(result.replacement_messages, state.now);
     if !intervening.is_empty() {
-        let messages = state.session.conversation.messages_mut();
-        let before_pending_tail = messages.last().is_some_and(|message| {
-            message.role == MessageRole::Assistant
-                && message
-                    .tool_calls
-                    .as_ref()
-                    .is_some_and(|calls| !calls.is_empty())
-        });
-        if before_pending_tail {
-            // A tool result that answers the pending tail must land AFTER its
-            // call — a `tool_result` preceding its `tool_use` 400s providers
-            // and gets scrubbed as an orphan. Split at the FIRST such result:
-            // everything before it goes ahead of the tail, and everything from
-            // it onward follows the tail, so a notice that arrived after (and
-            // may reference) the result keeps its arrival order too.
-            let tail_ids: std::collections::HashSet<String> = messages
-                .last()
-                .and_then(|message| message.tool_calls.as_ref())
-                .into_iter()
-                .flatten()
-                .filter_map(|call| call.id.clone())
-                .collect();
-            let split = intervening.iter().position(|message| {
-                message.role == MessageRole::Tool
-                    && message
-                        .tool_call_id
-                        .as_ref()
-                        .is_some_and(|id| tail_ids.contains(id))
-            });
-            let mut before_tail = intervening;
-            let after_tail = match split {
-                Some(index) => before_tail.split_off(index),
-                None => Vec::new(),
-            };
-            let position = messages.len() - 1;
-            messages.splice(position..position, before_tail);
-            messages.extend(after_tail);
-        } else {
-            messages.extend(intervening);
-        }
+        splice_intervening_messages(state.session.conversation.messages_mut(), intervening);
     }
     state
         .session
@@ -190,13 +201,13 @@ pub fn handle_compaction_finished(
             &mut state.runtime,
             &usage,
             UsageFold::Compaction {
-                mid_run: !matches!(outcome, Outcome::Manual),
+                mid_run: !matches!(outcome, CompactionOutcome::Manual),
             },
         );
     }
 
     match outcome {
-        Outcome::Manual => {
+        CompactionOutcome::Manual => {
             state.turn = TurnState::Idle;
             // Drain one queued message on the way out, same as the no-tool-calls
             // tail of `handle_stream_done` / `handle_turn_cancelled` (#73). A
@@ -204,7 +215,7 @@ pub fn handle_compaction_finished(
             // FIFO until some later turn happened to end.
             drain_next_queued_message(state);
         },
-        Outcome::Recovery {
+        CompactionOutcome::Recovery {
             resume_continuation,
         } => {
             // Resume the run with the compacted context so the model can finish the
@@ -220,7 +231,7 @@ pub fn handle_compaction_finished(
         },
         // Pre-turn auto-compaction: the stream is still live in the effect, which
         // already retried with the compacted messages — nothing to do here.
-        Outcome::AutoMidTurn => {},
+        CompactionOutcome::AutoMidTurn => {},
     }
 
     // The compaction's replacement message already carries the receipt text, so
@@ -408,7 +419,11 @@ pub const MAX_EMPTY_CONTINUATIONS: u32 = 1;
 
 #[expect(
     clippy::too_many_lines,
-    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+    reason = "the end of a model turn: unpack, commit, classify the stop reason, then branch into \
+     tool dispatch or one of three recoveries; the branches share a dozen locals derived up front \
+     (stop reason, usage, visibility, retry budgets), so any helper would take six or more of \
+     them or a mutable grab-bag, which is worse than one long function whose sections are \
+     commented"
 )]
 pub fn handle_stream_done(
     state: &mut State,

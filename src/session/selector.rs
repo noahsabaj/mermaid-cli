@@ -294,10 +294,6 @@ const DIM: Color = Color::DarkGray;
 /// Takes `&mut SelectorState` because the viewport height is only known here:
 /// it records how many entries fit (for follow-selection) and clamps the
 /// wheel-driven scroll offset to the valid range.
-#[expect(
-    clippy::too_many_lines,
-    reason = "predates the lint; see .github/baselines/expect_budget.txt"
-)]
 pub fn render(f: &mut Frame, state: &mut SelectorState, now: DateTime<Local>) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
@@ -373,33 +369,44 @@ pub fn render(f: &mut Frame, state: &mut SelectorState, now: DateTime<Local>) {
             .enumerate()
             .skip(scroll_offset)
             .take(visible)
-            .flat_map(|(row, &idx)| {
-                let entry = &state.entries[idx];
-                let is_selected = row == selected;
-                let (marker, title_style) = if is_selected {
-                    (
-                        "> ",
-                        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-                    )
-                } else {
-                    ("  ", Style::default().fg(Color::White))
-                };
-                let title_line = Line::from(vec![
-                    Span::styled(marker, Style::default().fg(ACCENT)),
-                    Span::styled(entry.history.title.clone(), title_style),
-                ]);
-                let meta_line = Line::from(vec![Span::styled(
-                    format!("  {}", meta_label(entry, now)),
-                    Style::default().fg(META),
-                )]);
-                [title_line, meta_line, Line::from("")]
-            })
+            .flat_map(|(row, &idx)| entry_block(&state.entries[idx], row == selected, now))
             .collect()
     };
     f.render_widget(Paragraph::new(lines), list);
 
     // Hints line, or the delete confirm prompt when one is armed.
-    let hints_line = if let Some(idx) = pending_delete {
+    let hints_line = hints_line(state, pending_delete);
+    f.render_widget(Paragraph::new(hints_line), hints);
+}
+
+/// One session's two-line block (title, meta) plus its blank separator.
+fn entry_block(
+    entry: &SessionEntry,
+    is_selected: bool,
+    now: DateTime<Local>,
+) -> [Line<'static>; 3] {
+    let (marker, title_style) = if is_selected {
+        (
+            "> ",
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        )
+    } else {
+        ("  ", Style::default().fg(Color::White))
+    };
+    let title_line = Line::from(vec![
+        Span::styled(marker, Style::default().fg(ACCENT)),
+        Span::styled(entry.history.title.clone(), title_style),
+    ]);
+    let meta_line = Line::from(vec![Span::styled(
+        format!("  {}", meta_label(entry, now)),
+        Style::default().fg(META),
+    )]);
+    [title_line, meta_line, Line::from("")]
+}
+
+/// The key hints, or the delete confirm prompt when one is armed.
+fn hints_line(state: &SelectorState, pending_delete: Option<usize>) -> Line<'static> {
+    if let Some(idx) = pending_delete {
         let name: String = state
             .entries
             .get(idx)
@@ -414,8 +421,7 @@ pub fn render(f: &mut Frame, state: &mut SelectorState, now: DateTime<Local>) {
             "↑↓ select · type to search · del delete · enter resume · esc cancel",
             Style::default().fg(DIM),
         ))
-    };
-    f.render_widget(Paragraph::new(hints_line), hints);
+    }
 }
 
 /// The gray meta line under a title: "relative-time · branch · size", with the

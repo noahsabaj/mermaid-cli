@@ -63,10 +63,6 @@ fn tags_arg(args: &serde_json::Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "predates the lint; see .github/baselines/expect_budget.txt"
-)]
 #[async_trait]
 impl ToolExecutor for MemoryTool {
     fn name(&self) -> &'static str {
@@ -161,100 +157,117 @@ impl ToolExecutor for MemoryTool {
             return blocked;
         }
 
-        let secs = || start.elapsed().as_secs_f64();
         match action.as_str() {
-            "remember" => {
-                let Some(name) = str_arg(&args, "name") else {
-                    return ToolOutcome::error("memory remember requires 'name'", secs());
-                };
-                let Some(content) = args.get("content").and_then(|v| v.as_str()) else {
-                    return ToolOutcome::error("memory remember requires 'content'", secs());
-                };
-                let scope = scope_from_args(&args);
-                let description = str_arg(&args, "description").unwrap_or_else(|| {
-                    content
-                        .lines()
-                        .find(|l| !l.trim().is_empty())
-                        .unwrap_or("")
-                        .to_string()
-                });
-                let tags = tags_arg(&args);
-                match memory::write_memory(&ctx.workdir, scope, &name, &description, &tags, content)
-                {
-                    Ok(path) => finish(start, "remember", &name, scope, &path),
-                    Err(e) => ToolOutcome::error(format!("memory remember failed: {e}"), secs()),
-                }
-            },
-            "update" => {
-                let Some(id) = str_arg(&args, "id").or_else(|| str_arg(&args, "name")) else {
-                    return ToolOutcome::error("memory update requires 'id'", secs());
-                };
-                let Some(content) = args.get("content").and_then(|v| v.as_str()) else {
-                    return ToolOutcome::error("memory update requires 'content'", secs());
-                };
-                let Some(existing) = memory::find(&ctx.workdir, &id) else {
-                    return ToolOutcome::error(
-                        format!("memory update: no memory named '{id}'"),
-                        secs(),
-                    );
-                };
-                let description =
-                    str_arg(&args, "description").unwrap_or_else(|| existing.description.clone());
-                let tags = tags_arg(&args);
-                match memory::write_memory(
-                    &ctx.workdir,
-                    existing.scope,
-                    &existing.name,
-                    &description,
-                    &tags,
-                    content,
-                ) {
-                    Ok(path) => {
-                        // If the slug differs from the original file's stem
-                        // (e.g. a hand-named file), drop the stale file so we
-                        // don't leave a duplicate.
-                        if path != existing.path {
-                            let _ = std::fs::remove_file(&existing.path);
-                        }
-                        finish(start, "update", &existing.name, existing.scope, &path)
-                    },
-                    Err(e) => ToolOutcome::error(format!("memory update failed: {e}"), secs()),
-                }
-            },
-            "forget" => {
-                let Some(id) = str_arg(&args, "id").or_else(|| str_arg(&args, "name")) else {
-                    return ToolOutcome::error("memory forget requires 'id'", secs());
-                };
-                match memory::delete_memory(&ctx.workdir, &id) {
-                    Ok(Some(path)) => ToolOutcome::success(
-                        format!("Forgot memory '{id}' ({})", path.display()),
-                        format!("forgot {id}"),
-                        secs(),
-                    )
-                    .with_metadata(ToolRunMetadata {
-                        detail: ToolMetadata::Custom {
-                            name: "memory".to_string(),
-                            data: serde_json::json!({
-                                "action": "forget",
-                                "id": id,
-                                "path": path.display().to_string(),
-                            }),
-                        },
-                        ..ToolRunMetadata::default()
-                    }),
-                    Ok(None) => {
-                        ToolOutcome::error(format!("memory forget: no memory named '{id}'"), secs())
-                    },
-                    Err(e) => ToolOutcome::error(format!("memory forget failed: {e}"), secs()),
-                }
-            },
+            "remember" => run_remember(&ctx.workdir, &args, start),
+            "update" => run_update(&ctx.workdir, &args, start),
+            "forget" => run_forget(&ctx.workdir, &args, start),
             other => ToolOutcome::error(
                 format!(
                     "memory: unknown action '{other}' (expected remember, update, forget, or search)"
                 ),
-                secs(),
+                start.elapsed().as_secs_f64(),
             ),
         }
+    }
+}
+
+/// The `remember` action: write a new memory file from name + content.
+fn run_remember(
+    workdir: &std::path::Path,
+    args: &serde_json::Value,
+    start: std::time::Instant,
+) -> ToolOutcome {
+    let secs = || start.elapsed().as_secs_f64();
+    let Some(name) = str_arg(args, "name") else {
+        return ToolOutcome::error("memory remember requires 'name'", secs());
+    };
+    let Some(content) = args.get("content").and_then(|v| v.as_str()) else {
+        return ToolOutcome::error("memory remember requires 'content'", secs());
+    };
+    let scope = scope_from_args(args);
+    let description = str_arg(args, "description").unwrap_or_else(|| {
+        content
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("")
+            .to_string()
+    });
+    let tags = tags_arg(args);
+    match memory::write_memory(workdir, scope, &name, &description, &tags, content) {
+        Ok(path) => finish(start, "remember", &name, scope, &path),
+        Err(e) => ToolOutcome::error(format!("memory remember failed: {e}"), secs()),
+    }
+}
+
+/// The `update` action: rewrite an existing memory in place (by id or name),
+/// keeping its scope and, unless given, its description.
+fn run_update(
+    workdir: &std::path::Path,
+    args: &serde_json::Value,
+    start: std::time::Instant,
+) -> ToolOutcome {
+    let secs = || start.elapsed().as_secs_f64();
+    let Some(id) = str_arg(args, "id").or_else(|| str_arg(args, "name")) else {
+        return ToolOutcome::error("memory update requires 'id'", secs());
+    };
+    let Some(content) = args.get("content").and_then(|v| v.as_str()) else {
+        return ToolOutcome::error("memory update requires 'content'", secs());
+    };
+    let Some(existing) = memory::find(workdir, &id) else {
+        return ToolOutcome::error(format!("memory update: no memory named '{id}'"), secs());
+    };
+    let description = str_arg(args, "description").unwrap_or_else(|| existing.description.clone());
+    let tags = tags_arg(args);
+    match memory::write_memory(
+        workdir,
+        existing.scope,
+        &existing.name,
+        &description,
+        &tags,
+        content,
+    ) {
+        Ok(path) => {
+            // If the slug differs from the original file's stem
+            // (e.g. a hand-named file), drop the stale file so we
+            // don't leave a duplicate.
+            if path != existing.path {
+                let _ = std::fs::remove_file(&existing.path);
+            }
+            finish(start, "update", &existing.name, existing.scope, &path)
+        },
+        Err(e) => ToolOutcome::error(format!("memory update failed: {e}"), secs()),
+    }
+}
+
+/// The `forget` action: delete a memory by id or name.
+fn run_forget(
+    workdir: &std::path::Path,
+    args: &serde_json::Value,
+    start: std::time::Instant,
+) -> ToolOutcome {
+    let secs = || start.elapsed().as_secs_f64();
+    let Some(id) = str_arg(args, "id").or_else(|| str_arg(args, "name")) else {
+        return ToolOutcome::error("memory forget requires 'id'", secs());
+    };
+    match memory::delete_memory(workdir, &id) {
+        Ok(Some(path)) => ToolOutcome::success(
+            format!("Forgot memory '{id}' ({})", path.display()),
+            format!("forgot {id}"),
+            secs(),
+        )
+        .with_metadata(ToolRunMetadata {
+            detail: ToolMetadata::Custom {
+                name: "memory".to_string(),
+                data: serde_json::json!({
+                    "action": "forget",
+                    "id": id,
+                    "path": path.display().to_string(),
+                }),
+            },
+            ..ToolRunMetadata::default()
+        }),
+        Ok(None) => ToolOutcome::error(format!("memory forget: no memory named '{id}'"), secs()),
+        Err(e) => ToolOutcome::error(format!("memory forget failed: {e}"), secs()),
     }
 }
 

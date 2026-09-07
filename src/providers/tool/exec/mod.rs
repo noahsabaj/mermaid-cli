@@ -132,10 +132,6 @@ impl SandboxPlan {
     }
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "predates the lint; see .github/baselines/expect_budget.txt"
-)]
 #[async_trait]
 impl ToolExecutor for ExecuteCommandTool {
     fn name(&self) -> &'static str {
@@ -181,6 +177,14 @@ impl ToolExecutor for ExecuteCommandTool {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the shell tool's whole path: cwd containment, the policy gate with its \
+         checkpoint, the background branch, the sandbox decision, then the PTY attempt with the \
+         pipe fallback; every stage reads the command, workdir and sandbox flags the earlier ones \
+         settled, and the two spawn paths must call the same finish so their semantics cannot \
+         drift, which is easiest to see with both in one place"
+    )]
     async fn execute(&self, args: serde_json::Value, ctx: ExecContext) -> ToolOutcome {
         let Some(command) = args.get("command").and_then(|v| v.as_str()) else {
             return ToolOutcome::error("execute_command requires 'command' (string)", 0.0);
@@ -470,7 +474,9 @@ impl ToolExecutor for ExecuteCommandTool {
 /// user-visible semantics cannot drift.
 #[expect(
     clippy::too_many_lines,
-    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+    reason = "one arm per CommandRunResult variant, each filling the full eleven-field command \
+     metadata for its case; the completed arm also maps sandbox denials to their messages, and \
+     the metadata literals are what make it long"
 )]
 fn finish_foreground_command(
     result: std::io::Result<CommandRunResult>,

@@ -123,7 +123,10 @@ impl RenderCache {
 /// The entrypoint. Call once per render pass from the main loop.
 #[expect(
     clippy::too_many_lines,
-    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+    reason = "the frame composition: every zone is measured before the layout is split (the \
+     status reserve depends on the input height, the tasks band on whether the status zone \
+     rendered), then each is drawn into its chunk; sizing and drawing read the same measurements, \
+     so keeping them in one scope is what keeps the layout arithmetic from scattering"
 )]
 pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
     // Resolve the palette from reducer state: NO_COLOR beats the theme

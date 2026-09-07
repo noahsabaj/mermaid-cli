@@ -137,7 +137,10 @@ pub fn parse_markdown_inline(input: &str, theme: &Theme, base_style: Style) -> L
 /// the line, so prose that merely contains `code` still word-wraps normally.
 #[expect(
     clippy::too_many_lines,
-    reason = "predates the lint; see .github/baselines/expect_budget.txt"
+    reason = "a single pass over the pulldown-cmark event stream carrying a dozen pieces of state \
+     (style stack, list stack, code and table accumulators, pending link); the event arms are \
+     each small but they all write that shared state, so the honest split is a builder struct \
+     with a method per event, a rewrite rather than a cut"
 )]
 #[must_use]
 pub fn parse_markdown(input: &str, theme: &Theme, width: usize) -> Vec<MarkdownLine> {

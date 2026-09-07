@@ -220,6 +220,182 @@ pub struct RuntimeStore {
     path: PathBuf,
 }
 
+/// The additive schema baseline: every table and index, in `IF NOT EXISTS`
+/// form so a re-run is a no-op. Column additions that a `CREATE TABLE IF NOT
+/// EXISTS` cannot apply to an existing table live in `migrate_within_txn`'s
+/// `ensure_column` calls, and so do the indexes over those columns.
+const BASELINE_SCHEMA: &str = r#"
+    CREATE TABLE IF NOT EXISTS sessions (
+        id TEXT PRIMARY KEY,
+        project_path TEXT NOT NULL,
+        model_id TEXT NOT NULL,
+        title TEXT,
+        conversation_path TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        total_tokens INTEGER
+    );
+
+    CREATE TABLE IF NOT EXISTS tasks (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        status TEXT NOT NULL,
+        priority TEXT NOT NULL,
+        project_path TEXT NOT NULL,
+        model_id TEXT NOT NULL,
+        conversation_id TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        final_report TEXT,
+        owner_kind TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_tasks_project_status
+        ON tasks(project_path, status, updated_at);
+    -- `idx_tasks_status_owner` is NOT here. It indexes `owner_kind`,
+    -- which the `ensure_column` below adds, and on a pre-v2 DB the
+    -- `CREATE TABLE IF NOT EXISTS` above is a no-op against a table
+    -- that has no such column. See the ordered block after the
+    -- `ensure_column` calls.
+
+    CREATE TABLE IF NOT EXISTS task_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL,
+        message TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_task_events_task_id
+        ON task_events(task_id, id);
+
+    CREATE TABLE IF NOT EXISTS tool_runs (
+        id TEXT PRIMARY KEY,
+        task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+        turn_id TEXT,
+        call_id TEXT,
+        tool_name TEXT NOT NULL,
+        status TEXT NOT NULL,
+        args_json TEXT,
+        output_json TEXT,
+        started_at TEXT NOT NULL,
+        finished_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_tool_runs_task_id ON tool_runs(task_id);
+
+    CREATE TABLE IF NOT EXISTS approvals (
+        id TEXT PRIMARY KEY,
+        task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+        proposed_action TEXT NOT NULL,
+        risk_classification TEXT NOT NULL,
+        policy_decision TEXT NOT NULL,
+        user_decision TEXT,
+        args_summary TEXT,
+        checkpoint_id TEXT,
+        pending_action_json TEXT,
+        created_at TEXT NOT NULL,
+        decided_at TEXT,
+        archived_at TEXT,
+        archive_reason TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_approvals_task_id ON approvals(task_id);
+    -- F75: `list_pending` scans `user_decision IS NULL ORDER BY
+    -- created_at`. A partial index over only the pending rows stays tiny
+    -- and serves both the filter and the ordering.
+    CREATE INDEX IF NOT EXISTS idx_approvals_pending
+        ON approvals(created_at)
+        WHERE user_decision IS NULL;
+
+    CREATE TABLE IF NOT EXISTS processes (
+        id TEXT PRIMARY KEY,
+        task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+        pid INTEGER NOT NULL,
+        command TEXT NOT NULL,
+        cwd TEXT,
+        log_path TEXT,
+        detected_url TEXT,
+        status TEXT NOT NULL,
+        health TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_processes_task_id ON processes(task_id);
+    CREATE INDEX IF NOT EXISTS idx_processes_pid ON processes(pid);
+
+    CREATE TABLE IF NOT EXISTS checkpoints (
+        id TEXT PRIMARY KEY,
+        task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+        project_path TEXT NOT NULL,
+        snapshot_path TEXT NOT NULL,
+        changed_files_json TEXT NOT NULL,
+        pending_action_json TEXT,
+        approval_id TEXT REFERENCES approvals(id) ON DELETE SET NULL,
+        created_at TEXT NOT NULL,
+        archived_at TEXT,
+        archive_reason TEXT,
+        session_id TEXT,
+        message_index INTEGER
+    );
+
+    CREATE TABLE IF NOT EXISTS compactions (
+        id TEXT PRIMARY KEY,
+        task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+        session_id TEXT,
+        source_token_estimate INTEGER,
+        summary_token_count INTEGER,
+        preserved_turns INTEGER,
+        archive_path TEXT,
+        verification_status TEXT,
+        created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS provider_probes (
+        provider TEXT NOT NULL,
+        model_id TEXT NOT NULL,
+        capability_key TEXT NOT NULL,
+        capability_value TEXT NOT NULL,
+        confidence TEXT NOT NULL,
+        error TEXT,
+        probed_at TEXT NOT NULL,
+        PRIMARY KEY (provider, model_id, capability_key)
+    );
+
+    CREATE TABLE IF NOT EXISTS plugin_installs (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        source TEXT NOT NULL,
+        version TEXT,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        manifest_json TEXT NOT NULL,
+        installed_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS pairing_tokens (
+        id TEXT PRIMARY KEY,
+        token_hash TEXT NOT NULL,
+        label TEXT,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL,
+        last_used_at TEXT,
+        expires_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_pairing_tokens_enabled
+        ON pairing_tokens(enabled, created_at);
+
+    CREATE TABLE IF NOT EXISTS outcomes (
+        id TEXT PRIMARY KEY,
+        task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+        tool_run_id TEXT REFERENCES tool_runs(id) ON DELETE SET NULL,
+        kind TEXT NOT NULL,
+        label TEXT NOT NULL,
+        reward REAL,
+        source TEXT NOT NULL,
+        detail_json TEXT,
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_outcomes_task_id ON outcomes(task_id);
+    CREATE INDEX IF NOT EXISTS idx_outcomes_kind ON outcomes(kind, created_at);
+"#;
+
 impl RuntimeStore {
     /// Open the store at its default location under the app data dir,
     /// creating and (best-effort) locking down that dir first.
@@ -588,184 +764,8 @@ impl RuntimeStore {
     /// `CREATE TABLE IF NOT EXISTS` plus the duplicate-tolerant `ensure_column`
     /// make a re-run a no-op, so a second concurrent opener that wins the lock
     /// after us does no harm.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "predates the lint; see .github/baselines/expect_budget.txt"
-    )]
     pub(crate) fn migrate_within_txn(&self, from_version: i32) -> Result<()> {
-        self.conn.execute_batch(
-            r#"
-            CREATE TABLE IF NOT EXISTS sessions (
-                id TEXT PRIMARY KEY,
-                project_path TEXT NOT NULL,
-                model_id TEXT NOT NULL,
-                title TEXT,
-                conversation_path TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                total_tokens INTEGER
-            );
-
-            CREATE TABLE IF NOT EXISTS tasks (
-                id TEXT PRIMARY KEY,
-                title TEXT NOT NULL,
-                status TEXT NOT NULL,
-                priority TEXT NOT NULL,
-                project_path TEXT NOT NULL,
-                model_id TEXT NOT NULL,
-                conversation_id TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                final_report TEXT,
-                owner_kind TEXT
-            );
-            CREATE INDEX IF NOT EXISTS idx_tasks_project_status
-                ON tasks(project_path, status, updated_at);
-            -- `idx_tasks_status_owner` is NOT here. It indexes `owner_kind`,
-            -- which the `ensure_column` below adds, and on a pre-v2 DB the
-            -- `CREATE TABLE IF NOT EXISTS` above is a no-op against a table
-            -- that has no such column. See the ordered block after the
-            -- `ensure_column` calls.
-
-            CREATE TABLE IF NOT EXISTS task_events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-                kind TEXT NOT NULL,
-                message TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_task_events_task_id
-                ON task_events(task_id, id);
-
-            CREATE TABLE IF NOT EXISTS tool_runs (
-                id TEXT PRIMARY KEY,
-                task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
-                turn_id TEXT,
-                call_id TEXT,
-                tool_name TEXT NOT NULL,
-                status TEXT NOT NULL,
-                args_json TEXT,
-                output_json TEXT,
-                started_at TEXT NOT NULL,
-                finished_at TEXT
-            );
-            CREATE INDEX IF NOT EXISTS idx_tool_runs_task_id ON tool_runs(task_id);
-
-            CREATE TABLE IF NOT EXISTS approvals (
-                id TEXT PRIMARY KEY,
-                task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
-                proposed_action TEXT NOT NULL,
-                risk_classification TEXT NOT NULL,
-                policy_decision TEXT NOT NULL,
-                user_decision TEXT,
-                args_summary TEXT,
-                checkpoint_id TEXT,
-                pending_action_json TEXT,
-                created_at TEXT NOT NULL,
-                decided_at TEXT,
-                archived_at TEXT,
-                archive_reason TEXT
-            );
-            CREATE INDEX IF NOT EXISTS idx_approvals_task_id ON approvals(task_id);
-            -- F75: `list_pending` scans `user_decision IS NULL ORDER BY
-            -- created_at`. A partial index over only the pending rows stays tiny
-            -- and serves both the filter and the ordering.
-            CREATE INDEX IF NOT EXISTS idx_approvals_pending
-                ON approvals(created_at)
-                WHERE user_decision IS NULL;
-
-            CREATE TABLE IF NOT EXISTS processes (
-                id TEXT PRIMARY KEY,
-                task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
-                pid INTEGER NOT NULL,
-                command TEXT NOT NULL,
-                cwd TEXT,
-                log_path TEXT,
-                detected_url TEXT,
-                status TEXT NOT NULL,
-                health TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_processes_task_id ON processes(task_id);
-            CREATE INDEX IF NOT EXISTS idx_processes_pid ON processes(pid);
-
-            CREATE TABLE IF NOT EXISTS checkpoints (
-                id TEXT PRIMARY KEY,
-                task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
-                project_path TEXT NOT NULL,
-                snapshot_path TEXT NOT NULL,
-                changed_files_json TEXT NOT NULL,
-                pending_action_json TEXT,
-                approval_id TEXT REFERENCES approvals(id) ON DELETE SET NULL,
-                created_at TEXT NOT NULL,
-                archived_at TEXT,
-                archive_reason TEXT,
-                session_id TEXT,
-                message_index INTEGER
-            );
-
-            CREATE TABLE IF NOT EXISTS compactions (
-                id TEXT PRIMARY KEY,
-                task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
-                session_id TEXT,
-                source_token_estimate INTEGER,
-                summary_token_count INTEGER,
-                preserved_turns INTEGER,
-                archive_path TEXT,
-                verification_status TEXT,
-                created_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS provider_probes (
-                provider TEXT NOT NULL,
-                model_id TEXT NOT NULL,
-                capability_key TEXT NOT NULL,
-                capability_value TEXT NOT NULL,
-                confidence TEXT NOT NULL,
-                error TEXT,
-                probed_at TEXT NOT NULL,
-                PRIMARY KEY (provider, model_id, capability_key)
-            );
-
-            CREATE TABLE IF NOT EXISTS plugin_installs (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                source TEXT NOT NULL,
-                version TEXT,
-                enabled INTEGER NOT NULL DEFAULT 1,
-                manifest_json TEXT NOT NULL,
-                installed_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS pairing_tokens (
-                id TEXT PRIMARY KEY,
-                token_hash TEXT NOT NULL,
-                label TEXT,
-                enabled INTEGER NOT NULL DEFAULT 1,
-                created_at TEXT NOT NULL,
-                last_used_at TEXT,
-                expires_at TEXT
-            );
-            CREATE INDEX IF NOT EXISTS idx_pairing_tokens_enabled
-                ON pairing_tokens(enabled, created_at);
-
-            CREATE TABLE IF NOT EXISTS outcomes (
-                id TEXT PRIMARY KEY,
-                task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
-                tool_run_id TEXT REFERENCES tool_runs(id) ON DELETE SET NULL,
-                kind TEXT NOT NULL,
-                label TEXT NOT NULL,
-                reward REAL,
-                source TEXT NOT NULL,
-                detail_json TEXT,
-                created_at TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_outcomes_task_id ON outcomes(task_id);
-            CREATE INDEX IF NOT EXISTS idx_outcomes_kind ON outcomes(kind, created_at);
-            "#,
-        )?;
+        self.conn.execute_batch(BASELINE_SCHEMA)?;
 
         ensure_column(&self.conn, "approvals", "pending_action_json", "TEXT")?;
         ensure_column(&self.conn, "approvals", "archived_at", "TEXT")?;
@@ -2422,7 +2422,9 @@ mod tests {
     #[test]
     #[expect(
         clippy::too_many_lines,
-        reason = "predates the lint; see .github/baselines/expect_budget.txt"
+        reason = "a test that seeds one stale and one live row in each of four tables, runs gc \
+         once, and asserts on all eight; the setup is the scenario and hiding it in fixtures \
+         would separate what gc saw from what the assertions expect"
     )]
     pub(crate) fn gc_prunes_high_churn_and_old_terminal_rows_but_keeps_active() {
         // F22 (RC-F): GC prunes finished tool_runs, exited processes, old

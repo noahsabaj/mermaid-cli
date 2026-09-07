@@ -233,10 +233,7 @@ impl McpClient {
     }
 
     /// Call a tool on this server and return the result.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "predates the lint; see .github/baselines/expect_budget.txt"
-    )]
+    ///
     /// # Errors
     ///
     /// The `tools/call` request failing: transport, the tool-call timeout, or
@@ -265,95 +262,10 @@ impl McpClient {
             .cloned()
             .unwrap_or_default();
 
-        let mut content = Vec::new();
-        for block in content_array {
-            let block_type = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
-            match block_type {
-                "text" => {
-                    if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
-                        content.push(ContentBlock::Text(text.to_string()));
-                    }
-                },
-                "image" => {
-                    let data = block
-                        .get("data")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let mime_type = block
-                        .get("mimeType")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("image/png")
-                        .to_string();
-                    content.push(ContentBlock::Image { data, mime_type });
-                },
-                "audio" => {
-                    let data = block
-                        .get("data")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let mime_type = block
-                        .get("mimeType")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("audio/wav")
-                        .to_string();
-                    content.push(ContentBlock::Audio { data, mime_type });
-                },
-                "resource_link" => {
-                    let uri = block
-                        .get("uri")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    if uri.is_empty() {
-                        continue;
-                    }
-                    content.push(ContentBlock::ResourceLink {
-                        uri,
-                        name: block.get("name").and_then(|v| v.as_str()).map(String::from),
-                        description: block
-                            .get("description")
-                            .and_then(|v| v.as_str())
-                            .map(String::from),
-                        mime_type: block
-                            .get("mimeType")
-                            .and_then(|v| v.as_str())
-                            .map(String::from),
-                    });
-                },
-                "resource" => {
-                    // Embedded resource — nested under `resource`.
-                    let res = match block.get("resource") {
-                        Some(r) => r,
-                        None => continue,
-                    };
-                    let uri = res
-                        .get("uri")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    if uri.is_empty() {
-                        continue;
-                    }
-                    content.push(ContentBlock::Resource {
-                        uri,
-                        mime_type: res
-                            .get("mimeType")
-                            .and_then(|v| v.as_str())
-                            .map(String::from),
-                        text: res.get("text").and_then(|v| v.as_str()).map(String::from),
-                        blob: res.get("blob").and_then(|v| v.as_str()).map(String::from),
-                    });
-                },
-                _ => {
-                    // Unknown content type — treat as text if it has a text field
-                    if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
-                        content.push(ContentBlock::Text(text.to_string()));
-                    }
-                },
-            }
-        }
+        let content = content_array
+            .iter()
+            .filter_map(parse_content_block)
+            .collect();
 
         Ok(McpToolResult { content, is_error })
     }
@@ -370,6 +282,46 @@ impl McpClient {
     /// error rather than a broken-pipe transport failure.
     pub fn is_shutdown(&self) -> bool {
         self.shutdown.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+/// Decode one `tools/call` content block. Unknown block types fall back to
+/// their `text` field; a block with nothing usable yields `None`.
+fn parse_content_block(block: &Value) -> Option<ContentBlock> {
+    let str_field = |v: &Value, key: &str| v.get(key).and_then(|v| v.as_str()).map(String::from);
+    let block_type = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    match block_type {
+        "text" => str_field(block, "text").map(ContentBlock::Text),
+        "image" => Some(ContentBlock::Image {
+            data: str_field(block, "data").unwrap_or_default(),
+            mime_type: str_field(block, "mimeType").unwrap_or_else(|| "image/png".to_string()),
+        }),
+        "audio" => Some(ContentBlock::Audio {
+            data: str_field(block, "data").unwrap_or_default(),
+            mime_type: str_field(block, "mimeType").unwrap_or_else(|| "audio/wav".to_string()),
+        }),
+        "resource_link" => {
+            let uri = str_field(block, "uri").filter(|uri| !uri.is_empty())?;
+            Some(ContentBlock::ResourceLink {
+                uri,
+                name: str_field(block, "name"),
+                description: str_field(block, "description"),
+                mime_type: str_field(block, "mimeType"),
+            })
+        },
+        "resource" => {
+            // Embedded resource — nested under `resource`.
+            let res = block.get("resource")?;
+            let uri = str_field(res, "uri").filter(|uri| !uri.is_empty())?;
+            Some(ContentBlock::Resource {
+                uri,
+                mime_type: str_field(res, "mimeType"),
+                text: str_field(res, "text"),
+                blob: str_field(res, "blob"),
+            })
+        },
+        // Unknown content type — treat as text if it has a text field.
+        _ => str_field(block, "text").map(ContentBlock::Text),
     }
 }
 

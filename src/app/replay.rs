@@ -185,10 +185,6 @@ pub fn run_replay(path: &Path) -> Result<bool> {
 }
 
 /// Plain-text report. Separate from `run_replay` so tests can assert on it.
-#[expect(
-    clippy::too_many_lines,
-    reason = "predates the lint; see .github/baselines/expect_budget.txt"
-)]
 fn render_report(path: &Path, report: &ReplayReport) -> String {
     use std::fmt::Write as _;
 
@@ -259,12 +255,21 @@ fn render_report(path: &Path, report: &ReplayReport) -> String {
         }
     );
 
-    let messages = report.state.session.messages();
+    write_transcript(&mut out, &report.state.session);
+    out
+}
+
+/// The transcript section of the report: one `[role]` line per message with
+/// continuation lines indented, plus a tool-call summary where present.
+fn write_transcript(out: &mut String, session: &mermaid_domain::Session) {
+    use std::fmt::Write as _;
+
+    let messages = session.messages();
     let _ = writeln!(out);
     let _ = writeln!(
         out,
         "transcript: {} — {} messages",
-        report.state.session.conversation.title,
+        session.conversation.title,
         messages.len()
     );
     for msg in messages {
@@ -294,7 +299,6 @@ fn render_report(path: &Path, report: &ReplayReport) -> String {
             );
         }
     }
-    out
 }
 
 #[cfg(test)]
