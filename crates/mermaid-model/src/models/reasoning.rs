@@ -85,6 +85,7 @@ impl ReasoningLevel {
             "low" => Some(Self::Low),
             "medium" => Some(Self::Medium),
             "high" => Some(Self::High),
+            "xhigh" => Some(Self::XHigh),
             "max" | "maximum" => Some(Self::Max),
             _ => None,
         }
@@ -320,5 +321,27 @@ mod tests {
         use clap::ValueEnum as _;
         assert!(ReasoningLevel::from_str("foobar", true).is_err());
         assert!(ReasoningLevel::from_str("medium ", true).is_err());
+    }
+
+    #[test]
+    fn reasoning_level_parse_covers_all_seven_levels() {
+        // Regression: `parse` (the `/reasoning` slash-command path) once missed
+        // `xhigh`, so the command silently showed the current level instead of
+        // setting it. Clap and serde covered all seven; this pins `parse` too.
+        for (s, expected) in [
+            ("none", ReasoningLevel::None),
+            ("off", ReasoningLevel::None),
+            ("minimal", ReasoningLevel::Minimal),
+            ("low", ReasoningLevel::Low),
+            ("medium", ReasoningLevel::Medium),
+            ("high", ReasoningLevel::High),
+            ("max", ReasoningLevel::Max),
+            ("maximum", ReasoningLevel::Max),
+            ("xhigh", ReasoningLevel::XHigh),
+        ] {
+            assert_eq!(ReasoningLevel::parse(s), Some(expected), "parse({s:?})");
+        }
+        assert_eq!(ReasoningLevel::parse("XHIGH"), Some(ReasoningLevel::XHigh));
+        assert_eq!(ReasoningLevel::parse("foobar"), None);
     }
 }
