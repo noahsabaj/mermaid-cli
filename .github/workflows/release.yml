@@ -17,7 +17,7 @@ env:
 jobs:
   # Fail fast if the tag and Cargo.toml version disagree. Otherwise a tag pushed
   # without the version bump publishes artifacts (and a Homebrew formula whose
-  # `mermaid version` test then fails) that report the previous version — first
+  # `mermaid --version` test then fails) that report the previous version — first
   # noticed at users' machines, not in CI.
   verify-version:
     name: Verify tag matches Cargo.toml
@@ -145,7 +145,7 @@ jobs:
         shell: bash
         run: |
           BIN="target/${{ matrix.platform.target }}/release/${{ matrix.platform.bin }}"
-          "$BIN" version
+          "$BIN" --version
           "$BIN" self-test --format json
 
       - name: Package as archive (Linux/macOS)
@@ -279,7 +279,7 @@ jobs:
             echo "install.sh attempt $attempt failed; retrying in 15s..."
             sleep 15
           done
-          got=$(mermaid version)
+          got=$(mermaid --version)
           echo "$got"
           echo "$got" | grep -F "${MERMAID_VERSION#v}"
 
@@ -415,7 +415,7 @@ jobs:
             end
 
             test do
-              assert_match "Mermaid v#{version}", shell_output("#{bin}/mermaid version")
+              assert_match "mermaid #{version}", shell_output("#{bin}/mermaid --version")
             end
           end
           RUBY

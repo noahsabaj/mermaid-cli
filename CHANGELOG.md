@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The release pipeline still ran `mermaid version`.** The subcommand went
+  in 0.26.0 (`--version` is the one that stays), but `release.yml`'s build
+  smoke test, the `install.sh` check and the Homebrew formula's test all
+  called it, so the v0.26.0 release run failed after a successful build.
+  All three use `--version` now.
+
 ## [0.26.0] - 2026-09-07
 
 ### Added
