@@ -36,7 +36,13 @@ pub(crate) fn classify_head(head: &str, segment: &[String]) -> RiskClass {
             .find(|t| !t.starts_with('-'))
             .map(|s| s.as_str());
         return match sub {
-            Some(s) if GIT_READ_ONLY.contains(&s) => RiskClass::ReadOnly,
+            Some(s) if GIT_READ_ONLY.contains(&s) => {
+                if writes_through_a_flag(head, segment) {
+                    RiskClass::ShellMutation
+                } else {
+                    RiskClass::ReadOnly
+                }
+            },
             Some("clone") | Some("fetch") | Some("pull") | Some("push") => RiskClass::Network,
             _ => RiskClass::ShellMutation,
         };
@@ -54,20 +60,19 @@ pub(crate) fn classify_head(head: &str, segment: &[String]) -> RiskClass {
     if head == "find" {
         return classify_find(segment);
     }
-    // `sort -o <file>` / `--output=` writes through an argument, not a redirect,
-    // so the redirect scan never sees it (RC-2).
-    if head == "sort" && sort_writes_file(segment) {
+    // An allowlisted reader with an output-file, in-place, or exec flag
+    // (`sort -o`, `tree -o`, `yq -i`, `fd -x`, ...) writes or runs through an
+    // argument the redirect scan never sees; the table in `tables.rs` is the
+    // one place that knows which flags those are.
+    if writes_through_a_flag(head, segment) {
         return RiskClass::ShellMutation;
     }
-    // `yq -i` / `--inplace` rewrites the file in place — a mutation the argv0
-    // read-only rating would otherwise auto-run (`jq` has no such flag, so it
-    // stays read-only). Same shape as the `sort -o` guard above.
-    if head == "yq" && segment_has_flag(segment, 'i', "inplace") {
+    // Positional write targets: `uniq IN OUT` writes OUT; `hostname NAME`
+    // sets the name. Neither is a flag, so the table above cannot express it.
+    if head == "uniq" && positional_args(segment).len() >= 2 {
         return RiskClass::ShellMutation;
     }
-    // `date -s` / `--set` sets the system clock — a control action, not the
-    // read that displaying a date (`date`, `date +%s`, `date -d …`) is.
-    if head == "date" && segment_has_flag(segment, 's', "set") {
+    if head == "hostname" && !positional_args(segment).is_empty() {
         return RiskClass::ShellMutation;
     }
     if system_install_shape(head, segment) {
@@ -261,19 +266,27 @@ pub(crate) fn classify_find(segment: &[String]) -> RiskClass {
 /// True when a `sort` invocation writes its output to a file via `-o`/`--output`
 /// (incl. the glued `-oFILE` and bundled `-bo FILE` getopt forms, where the
 /// last flag char consumes the path).
-pub(crate) fn sort_writes_file(segment: &[String]) -> bool {
-    segment.iter().skip(1).any(|t| {
-        let t = t.as_str();
-        if t == "--output" || t.starts_with("--output=") {
-            return true;
-        }
-        match t.strip_prefix('-') {
-            Some(short) if !t.starts_with("--") && !short.is_empty() => {
-                short.starts_with('o') || short.ends_with('o')
-            },
-            _ => false,
-        }
-    })
+/// Whether `segment` carries one of `head`'s output/in-place/exec flags from
+/// [`READ_ONLY_WRITE_FLAGS`]. Short flags match inside a bundle (`-ro`) and
+/// attached (`-ofile`), long flags bare or `=`-valued.
+pub(crate) fn writes_through_a_flag(head: &str, segment: &[String]) -> bool {
+    READ_ONLY_WRITE_FLAGS
+        .iter()
+        .filter(|(h, _, _)| *h == head)
+        .any(|(_, shorts, longs)| {
+            shorts.iter().any(|c| segment_has_flag(segment, *c, "\0"))
+                || longs.iter().any(|l| segment_has_flag(segment, '\0', l))
+        })
+}
+
+/// The non-flag arguments after argv0.
+fn positional_args(segment: &[String]) -> Vec<&str> {
+    segment
+        .iter()
+        .skip(1)
+        .map(String::as_str)
+        .filter(|t| !t.starts_with('-'))
+        .collect()
 }
 
 /// Classify `command` in the grammar of the shell that will run it.
@@ -528,9 +541,13 @@ pub(crate) fn segment_has_flag(segment: &[String], short: char, long: &str) -> b
         if let Some(rest) = t.strip_prefix("--") {
             rest == long || rest.split('=').next() == Some(long)
         } else if let Some(bundle) = t.strip_prefix('-') {
+            // `-o` alone, inside a bundle (`-ro`), or with its value attached
+            // (`-ofile`, `-o/etc/cron.d/x`): the value can hold any byte, so
+            // an attached form is matched on the leading letter alone.
             !bundle.is_empty()
-                && bundle.chars().all(|c| c.is_ascii_alphanumeric())
-                && bundle.contains(short)
+                && (bundle.starts_with(short)
+                    || (bundle.chars().all(|c| c.is_ascii_alphanumeric())
+                        && bundle.contains(short)))
         } else {
             false
         }

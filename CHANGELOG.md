@@ -101,6 +101,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   string later with `working_dir` pointing anywhere else, where a different
   Makefile answers, without a prompt. A command outside the project now keys
   on its working directory as well, the way the file tools key on theirs.
+- **`git log --output=FILE` and `tree -o FILE` rated read-only.** Both write
+  an arbitrary file (git's diff machinery accepts `--output` on `log`, `diff`
+  and `show`; `tree -o` sends its listing to a file), and both ran without a
+  prompt in `read_only`, `plan` and `auto`. The classifier trusted the
+  read-only allowlist and inspected flags one tool at a time (`sort -o`,
+  `yq -i`, `date -s`). One table now names every output, in-place and exec
+  flag of every allowlisted reader, checked before any of them rates
+  read-only, and a new reader cannot be added without auditing it for one;
+  it also covers `fd -x`, `rg --pre`, `ack --pager`, `less -o`, plus the
+  positional `uniq IN OUT` and `hostname NAME`. Attached flag values
+  (`-o/etc/cron.d/x`) match too. Thirty-five commands pin it both ways.
 - **A long reasoning trace silently emptied the answer that followed it.**
   Every adapter shared one truncation flag between its reasoning and its
   content accumulators, so a trace past the 400K-char response cap stopped the

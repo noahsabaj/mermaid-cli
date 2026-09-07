@@ -116,6 +116,37 @@ pub(crate) const READ_ONLY_BINARIES: &[&str] = &[
     "seq",
 ];
 
+/// Flags that turn an otherwise read-only head into a write or an execution:
+/// `(head, short flags, long flags)`. A head in [`READ_ONLY_BINARIES`] (or a
+/// `git` subcommand in [`GIT_READ_ONLY`]) is checked against this table
+/// BEFORE it rates `ReadOnly`, so the argv0 allowlist cannot be turned into
+/// a write by a flag the redirect scan never sees. Every entry is a documented
+/// output-file, in-place, or exec option of that tool. This table replaced
+/// the one-guard-per-tool pattern (`sort -o`, `yq -i`, `date -s`) after
+/// `git log --output=FILE` and `tree -o FILE` were each found to rate
+/// read-only: the class of bug is "an allowlisted reader has an output flag",
+/// and adding a reader to the allowlist means auditing it for one here.
+pub(crate) const READ_ONLY_WRITE_FLAGS: &[(&str, &[char], &[&str])] = &[
+    // `sort -o FILE` / `--output=FILE`.
+    ("sort", &['o'], &["output"]),
+    // `tree -o FILE` sends the listing to a file.
+    ("tree", &['o'], &[]),
+    // `yq -i` rewrites the document in place.
+    ("yq", &['i'], &["inplace"]),
+    // `date -s` sets the system clock.
+    ("date", &['s'], &["set"]),
+    // `fd -x CMD` / `-X CMD` run a command per result.
+    ("fd", &['x', 'X'], &["exec", "exec-batch"]),
+    // `rg --pre CMD` runs a preprocessor on every file.
+    ("rg", &[], &["pre"]),
+    // `ack --pager CMD` runs the pager command.
+    ("ack", &[], &["pager"]),
+    // `less -o FILE` / `-O FILE` / `--log-file` copy piped input to a file.
+    ("less", &['o', 'O'], &["log-file", "LOG-FILE"]),
+    // `git log|diff|show --output=FILE`: the diff machinery writes the file.
+    ("git", &['o'], &["output"]),
+];
+
 /// PowerShell cmdlets (and single-word aliases) that only read state. Matched
 /// case-insensitively — PowerShell command names are. The scriptblock-taking
 /// pipeline cmdlets (ForEach-Object, Where-Object, Select-Object, Sort-Object,
