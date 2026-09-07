@@ -65,6 +65,73 @@ impl CommandMode {
     }
 }
 
+/// The OS-sandbox decision for one command: whether the network kill-switch
+/// and write confinement apply, resolved from config against the platform's
+/// probes. Computed ONCE per call, before the foreground/background split,
+/// so both spawn paths run the same `__sandbox-exec` invocation; the
+/// background path used to skip it entirely and run `sh -c` bare.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SandboxPlan {
+    pub(crate) network: bool,
+    pub(crate) fs: bool,
+    /// Write allowlist when `fs` applies: the project root (so a build in a
+    /// subdir can still write repo-root artifacts), the effective workdir
+    /// (out-of-project commands, separately gated by policy), the system
+    /// temp dir, and -- unix only -- /dev (`>/dev/null` is a write).
+    pub(crate) confine_writes: Option<Vec<PathBuf>>,
+}
+
+impl SandboxPlan {
+    pub(crate) fn resolve(ctx: &ExecContext, effective_workdir: &Path) -> Self {
+        // The sandbox is REQUIRED on the three platforms with a backend when a
+        // policy is requested -- if the probe says the backend is broken, the
+        // launcher fails closed (exit 126) rather than running unconfined.
+        let sandbox_expected = cfg!(any(
+            target_os = "linux",
+            target_os = "macos",
+            target_os = "windows"
+        ));
+        let net_requested = matches!(ctx.config.safety.network, NetworkPolicy::Deny);
+        let fs_requested = matches!(ctx.config.safety.filesystem, FilesystemPolicy::Project);
+        let (net_available, fs_available) = sandbox_probes();
+        let network = net_requested && (sandbox_expected || net_available);
+        let fs = fs_requested && (sandbox_expected || fs_available);
+        if (net_requested && !net_available) || (fs_requested && !fs_available) {
+            static DEGRADED_WARN: std::sync::Once = std::sync::Once::new();
+            DEGRADED_WARN.call_once(|| {
+                if sandbox_expected {
+                    tracing::warn!(
+                        "sandbox policy requested but the OS sandbox backend probe failed; \
+                         sandboxed commands will refuse to run (fail-closed)"
+                    );
+                } else {
+                    tracing::warn!(
+                        "sandbox policy requested but no OS sandbox backend exists on this \
+                         platform; commands run unconfined"
+                    );
+                }
+            });
+        }
+        let confine_writes = fs.then(|| {
+            let mut dirs = vec![
+                ctx.workdir.clone(),
+                effective_workdir.to_path_buf(),
+                std::env::temp_dir(),
+            ];
+            if cfg!(unix) {
+                dirs.push(PathBuf::from("/dev"));
+            }
+            dirs.dedup();
+            dirs
+        });
+        Self {
+            network,
+            fs,
+            confine_writes,
+        }
+    }
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "predates the lint; see .github/baselines/expect_budget.txt"
@@ -223,6 +290,7 @@ impl ToolExecutor for ExecuteCommandTool {
             "working_dir": effective_workdir.display().to_string(),
         });
         let _ = mermaid_runtime::run_plugin_hooks("before_shell", &shell_payload);
+        let sandbox = SandboxPlan::resolve(&ctx, &effective_workdir);
         if mode == CommandMode::Background {
             let startup_timeout_secs = args
                 .get("startup_timeout_secs")
@@ -241,6 +309,7 @@ impl ToolExecutor for ExecuteCommandTool {
                 .map(str::to_string);
             let outcome = run_background_command(
                 command,
+                &sandbox,
                 &effective_workdir,
                 startup_timeout_secs,
                 ready_pattern.as_deref(),
@@ -269,63 +338,6 @@ impl ToolExecutor for ExecuteCommandTool {
         let start = Instant::now();
         let progress = ctx.progress.clone();
 
-        // Spawn + wait. `run_command`'s select races four outcomes: subprocess
-        // exit, timeout, Esc-cancel, and Ctrl+B detach — the timeout and cancel
-        // arms both tree-kill before returning.
-        //
-        // When network access is denied (`safety.network = "deny"` /
-        // `--no-network`) and/or writes are confined (`safety.filesystem =
-        // "project"` / `--confine-fs`), the shell is wrapped in the
-        // `__sandbox-exec` launcher, which enforces the policy via the
-        // platform backend (Linux: seccomp network kill-switch + Landlock
-        // write rules; macOS: Seatbelt via sandbox-exec; Windows: AppContainer
-        // + Job Objects) before running it — so a denied network attempt or
-        // out-of-bounds write fails with a signature the completion arm below
-        // maps to a clear denial. Platforms WITH a backend always wrap when a
-        // policy is requested — if the probe says the backend is broken, the
-        // launcher fails closed (exit 126) rather than running unconfined.
-        let sandbox_expected = cfg!(any(
-            target_os = "linux",
-            target_os = "macos",
-            target_os = "windows"
-        ));
-        let net_requested = matches!(ctx.config.safety.network, NetworkPolicy::Deny);
-        let fs_requested = matches!(ctx.config.safety.filesystem, FilesystemPolicy::Project);
-        let (net_available, fs_available) = sandbox_probes();
-        let sandbox_network = net_requested && (sandbox_expected || net_available);
-        let sandbox_fs = fs_requested && (sandbox_expected || fs_available);
-        if (net_requested && !net_available) || (fs_requested && !fs_available) {
-            static DEGRADED_WARN: std::sync::Once = std::sync::Once::new();
-            DEGRADED_WARN.call_once(|| {
-                if sandbox_expected {
-                    tracing::warn!(
-                        "sandbox policy requested but the OS sandbox backend probe failed; \
-                         sandboxed commands will refuse to run (fail-closed)"
-                    );
-                } else {
-                    tracing::warn!(
-                        "sandbox policy requested but no OS sandbox backend exists on this \
-                         platform; commands run unconfined"
-                    );
-                }
-            });
-        }
-        // Write allowlist: the project root (so a build in a subdir can still
-        // write repo-root artifacts), the effective workdir (out-of-project
-        // commands, separately gated by policy), the system temp dir, and —
-        // unix only — /dev (shell redirects like `>/dev/null` are writes).
-        let confine_writes: Option<Vec<PathBuf>> = sandbox_fs.then(|| {
-            let mut dirs = vec![
-                ctx.workdir.clone(),
-                effective_workdir.clone(),
-                std::env::temp_dir(),
-            ];
-            if cfg!(unix) {
-                dirs.push(PathBuf::from("/dev"));
-            }
-            dirs.dedup();
-            dirs
-        });
         // Default: run on a pseudo-terminal — openpty on Unix, ConPTY on
         // Windows — so the child sees a real console (progress bars,
         // isatty-gated tools); on Unix `/dev/tty` additionally resolves to
@@ -333,7 +345,8 @@ impl ToolExecutor for ExecuteCommandTool {
         // failure falls back to the pipe path below, which stays fully
         // intact.
         if ctx.config.exec.pty_enabled() {
-            let invocation = shell_invocation(&command, sandbox_network, confine_writes.as_deref());
+            let invocation =
+                shell_invocation(&command, sandbox.network, sandbox.confine_writes.as_deref());
             match run_command_pty(
                 &invocation,
                 &effective_workdir,
@@ -352,8 +365,8 @@ impl ToolExecutor for ExecuteCommandTool {
                         &effective_workdir,
                         start,
                         timeout_secs,
-                        sandbox_network,
-                        sandbox_fs,
+                        sandbox.network,
+                        sandbox.fs,
                     );
                     let _ = mermaid_runtime::run_plugin_hooks(
                         "after_shell",
@@ -373,7 +386,8 @@ impl ToolExecutor for ExecuteCommandTool {
             }
         }
 
-        let mut cmd = build_sandboxed_shell(&command, sandbox_network, confine_writes.as_deref());
+        let mut cmd =
+            build_sandboxed_shell(&command, sandbox.network, sandbox.confine_writes.as_deref());
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -430,8 +444,8 @@ impl ToolExecutor for ExecuteCommandTool {
             &effective_workdir,
             start,
             timeout_secs,
-            sandbox_network,
-            sandbox_fs,
+            sandbox.network,
+            sandbox.fs,
         );
         // Record that this command WAS the plan write (the gate said so), so
         // the doom-loop breaker disarms on the shell spelling of plan
