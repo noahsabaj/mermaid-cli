@@ -144,11 +144,23 @@ pub struct Config {
     #[serde(default)]
     pub agents: AgentsConfig,
 
+    /// Output-style (`/output-style`) selection (`[output]` table).
+    #[serde(default)]
+    pub output: OutputConfig,
+
     /// Runtime-only prompt customizations supplied by CLI flags. These are
     /// deliberately skipped when saving config so one-off agent personas do
     /// not pollute the user's persistent Mermaid settings.
     #[serde(skip)]
     pub prompt: PromptConfig,
+
+    /// Startup-resolved output-style body. Runtime-only (`skip`): the
+    /// SELECTION (`output.style`) is what persists and replays; the file body
+    /// is read at startup like skills. Built-ins resolve purely from the name
+    /// so `--replay` reproduces them; a custom file absent on replay falls
+    /// back to `default`.
+    #[serde(skip)]
+    pub active_style: ActiveStyle,
 
     /// The `--profile <name>` overlay active this session, for `doctor` and
     /// startup notices. Runtime-only (`skip`): never persisted, and
@@ -222,7 +234,6 @@ pub struct PromptConfig {
     pub system_prompt: Option<String>,
     pub append_system_prompt: Vec<String>,
 }
-
 impl PromptConfig {
     #[must_use]
     pub fn render_system_prompt(&self, default_prompt: &str) -> String {
@@ -264,6 +275,73 @@ impl PromptConfig {
     pub fn is_customized(&self) -> bool {
         self.system_prompt.is_some() || !self.append_system_prompt.is_empty()
     }
+}
+
+/// Output-style (`/output-style`) selection.
+///
+/// ```toml
+/// [output]
+/// style = "concise"  # "default" (stock prompt) or a custom style name
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OutputConfig {
+    /// Selected style name. `default` is the stock system prompt; any other
+    /// name resolves to a built-in (`proactive`, `concise`, `explanatory`,
+    /// `learning`) or a custom `output-styles/<name>.md` file.
+    pub style: String,
+}
+
+impl Default for OutputConfig {
+    fn default() -> Self {
+        Self {
+            style: crate::prompts::DEFAULT_OUTPUT_STYLE.to_string(),
+        }
+    }
+}
+
+/// Startup-resolved output-style body. The SELECTION (`output.style`) is what
+/// persists and replays; this is the file content read at startup, like
+/// skills. An empty `body` means no style applies.
+#[derive(Debug, Clone, Default)]
+pub struct ActiveStyle {
+    /// Style instructions applied to the system prompt (empty = none).
+    pub body: String,
+    /// False replaces the base prompt with `body`; true (the default)
+    /// appends `body` after it, preserving the safety/editing contract.
+    pub keep_coding_instructions: bool,
+    /// True when `body` came from a user/project file rather than a built-in.
+    pub custom: bool,
+    /// Where the selection came from: `default`, `user`, `project`, or
+    /// `session`. Shown by `/doctor` so the effective layer is visible.
+    pub source: String,
+}
+
+impl ActiveStyle {
+    /// The `default` style: no body, nothing to apply.
+    #[must_use]
+    pub fn none() -> Self {
+        Self {
+            body: String::new(),
+            keep_coding_instructions: true,
+            custom: false,
+            source: "default".to_string(),
+        }
+    }
+}
+
+/// One style row for the `/output-style` listing: a built-in or a discovered
+/// custom file. Pure data for `QueryResult::OutputStylesListed`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutputStyleSummary {
+    /// Style name (`default`, a built-in, or a file stem).
+    pub name: String,
+    /// One-line description shown in the listing.
+    pub description: String,
+    /// True for user/project files; false for built-ins.
+    pub custom: bool,
+    /// `builtin`, `user`, or `project` (custom files only).
+    pub source: String,
 }
 
 /// Whether model-driven actions may reach the network. `Deny` removes web
@@ -1190,6 +1268,9 @@ pub struct SessionFlags {
     pub max_tokens: Option<usize>,
     /// `run --allow-untrusted-tools` → `safety.allow_untrusted_headless_tools`.
     pub allow_untrusted_tools: bool,
+    /// `--output-style <name>` → `output.style`. Beats every config file;
+    /// like `--profile`, it is session-scoped and never persisted.
+    pub output_style: Option<String>,
     /// `--profile <name>`: select a `[profiles.<name>]` overlay from the user
     /// config file. NOT rendered into `to_table` — profiles are their own
     /// layer, resolved by `load_layered_config`.

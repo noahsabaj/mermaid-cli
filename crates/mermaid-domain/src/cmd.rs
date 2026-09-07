@@ -226,6 +226,13 @@ pub enum Cmd {
     PersistOllamaOffload(bool),
     /// Persist the `/theme` choice as `ui.theme` in the user config file.
     PersistUiTheme(crate::ThemeChoice),
+    /// Persist the `/output-style` choice as `output.style` in the user
+    /// config file.
+    PersistOutputStyle { style: String },
+    /// Persist the `/output-style --project` choice as `output.style` in
+    /// `<git-root>/.mermaid/config.toml`. Fails visibly (not silently) when
+    /// the cwd is outside a git repository.
+    PersistProjectOutputStyle { style: String },
     /// List saved memories; emits `Msg::RuntimeText` with the rendered list.
     ListMemory,
     /// Save free-text to private memory; emits `Msg::MemoryChanged` + status.
@@ -482,6 +489,8 @@ impl Cmd {
             Self::PersistOllamaNumCtxFor { .. } => "persist_ollama_num_ctx_for",
             Self::PersistOllamaOffload(_) => "persist_ollama_offload",
             Self::PersistUiTheme(_) => "persist_ui_theme",
+            Self::PersistOutputStyle { .. } => "persist_output_style",
+            Self::PersistProjectOutputStyle { .. } => "persist_project_output_style",
             Self::ListMemory => "list_memory",
             Self::RememberMemory { .. } => "remember_memory",
             Self::ForgetMemory { .. } => "forget_memory",
@@ -573,6 +582,8 @@ impl Cmd {
             | Self::PersistOllamaNumCtxFor { .. }
             | Self::PersistOllamaOffload(_)
             | Self::PersistUiTheme(_)
+            | Self::PersistOutputStyle { .. }
+            | Self::PersistProjectOutputStyle { .. }
             | Self::ListMemory
             | Self::RememberMemory { .. }
             | Self::ForgetMemory { .. }
@@ -698,6 +709,10 @@ impl Cmd {
                 format!("persist_ollama_offload({enabled})")
             },
             Self::PersistUiTheme(theme) => format!("persist_ui_theme({})", theme.as_str()),
+            Self::PersistOutputStyle { style } => format!("persist_output_style({style})"),
+            Self::PersistProjectOutputStyle { style } => {
+                format!("persist_project_output_style({style})")
+            },
             Self::ListMemory => "list_memory".to_string(),
             Self::RememberMemory { .. } => "remember_memory".to_string(),
             Self::ForgetMemory { .. } => "forget_memory".to_string(),

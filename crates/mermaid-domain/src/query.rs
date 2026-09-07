@@ -74,6 +74,16 @@ pub enum Query {
     /// `/plugins` — installed plugins. Answered by
     /// [`QueryResult::RuntimePluginsListed`].
     ListRuntimePlugins,
+    /// Bare `/output-style` — every style the shell can see (built-ins plus
+    /// user/project `output-styles/*.md` files, project shadowing user).
+    /// Answered by [`QueryResult::OutputStylesListed`].
+    ListOutputStyles,
+    /// `/output-style <name>` — read one style's body for the session switch.
+    /// Built-ins resolve without touching the filesystem; custom files read
+    /// project-first, then user. Answered by
+    /// [`QueryResult::OutputStyleLoaded`]. `project` is only the persist
+    /// target the reducer will use — lookup always spans both scopes.
+    LoadOutputStyle { name: String, project: bool },
 }
 
 impl Query {
@@ -93,6 +103,8 @@ impl Query {
             Self::ListRuntimeCheckpoints { .. } => "list_runtime_checkpoints",
             Self::ListForkCheckpoints { .. } => "list_fork_checkpoints",
             Self::ListRuntimePlugins => "list_runtime_plugins",
+            Self::ListOutputStyles => "list_output_styles",
+            Self::LoadOutputStyle { .. } => "load_output_style",
         }
     }
 
@@ -115,7 +127,9 @@ impl Query {
                 session_id,
                 message_index,
             } => format!("list_fork_checkpoints({session_id} > {message_index})"),
-            Self::ListConversations
+            Self::LoadOutputStyle { name, .. } => format!("load_output_style({name})"),
+            Self::ListOutputStyles
+            | Self::ListConversations
             | Self::ListAvailableModels
             | Self::ListProjectFiles
             | Self::ListRuntimeApprovals
@@ -162,6 +176,21 @@ pub enum QueryResult {
     ForkCheckpointsFound(Vec<CheckpointRecord>),
     /// Response to `/plugins`.
     RuntimePluginsListed(Vec<PluginInstallRecord>),
+    /// Response to bare `/output-style`: every selectable style.
+    OutputStylesListed(Vec<crate::OutputStyleSummary>),
+    /// Response to `/output-style <name>`: the body for the session switch.
+    /// `found == false` means no built-in or file by that name — the reducer
+    /// falls back to `default` with a warning. `project` echoes the persist
+    /// target from the request.
+    OutputStyleLoaded {
+        name: String,
+        project: bool,
+        found: bool,
+        body: String,
+        keep_coding_instructions: bool,
+        custom: bool,
+        source: String,
+    },
 }
 
 #[cfg(test)]
@@ -186,6 +215,15 @@ mod tests {
             Query::ListRuntimeTasks { limit: 10 }.summary(),
             "list_runtime_tasks(limit=10)"
         );
+        assert_eq!(
+            Query::LoadOutputStyle {
+                name: "concise".to_string(),
+                project: false,
+            }
+            .summary(),
+            "load_output_style(concise)"
+        );
+        assert_eq!(Query::ListOutputStyles.summary(), "list_output_styles");
         assert_eq!(
             Query::ListForkCheckpoints {
                 session_id: "s".to_string(),

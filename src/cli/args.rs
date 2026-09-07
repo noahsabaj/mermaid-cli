@@ -108,6 +108,12 @@ pub struct Cli {
     #[arg(long, value_name = "NAME", global = true)]
     pub profile: Option<String>,
 
+    /// Select an output style for this invocation (`default` or a custom
+    /// `output-styles/<name>.md` style). Beats config files; see
+    /// `/output-style`. Session-scoped, never persisted.
+    #[arg(long, value_name = "NAME", global = true)]
+    pub output_style: Option<String>,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -135,6 +141,7 @@ impl Cli {
             max_tokens,
             allow_untrusted_tools,
             profile: self.profile.clone(),
+            output_style: self.output_style.clone(),
         }
     }
 }
@@ -653,6 +660,15 @@ mod tests {
         assert!(flags.deny_network && !flags.confine_fs);
         assert_eq!(flags.max_tokens, None);
         assert!(!flags.allow_untrusted_tools);
+    }
+
+    #[test]
+    fn output_style_flag_reaches_the_session_layer() {
+        let cli = Cli::try_parse_from(["mermaid", "--output-style", "concise"]).expect("parses");
+        assert_eq!(cli.output_style.as_deref(), Some("concise"));
+        assert_eq!(cli.session_flags().output_style.as_deref(), Some("concise"));
+        let cli = Cli::try_parse_from(["mermaid"]).expect("parses");
+        assert_eq!(cli.session_flags().output_style, None);
     }
 
     #[test]

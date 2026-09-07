@@ -70,6 +70,11 @@ async fn async_main(hardening: mermaid_runtime::hardening::Hardening) -> Result<
     let cwd = cli.path.clone().unwrap_or(std::env::current_dir()?);
     let mut config = load_layered_config_or_warn(Some(&cwd), &cli.session_flags());
     apply_prompt_flags(&cli, &mut config)?;
+    for warning in
+        mermaid_cli::app::output_styles::resolve_and_apply(&cwd, &cli.session_flags(), &mut config)
+    {
+        eprintln!("mermaid: warning: {warning}");
+    }
     if let Some(cmd) = &cli.command
         && mermaid_cli::cli::handle_command(cmd, &config, &cwd, cli.model.as_deref()).await?
     {

@@ -13,6 +13,8 @@
 
 use std::path::{Path, PathBuf};
 
+use anyhow::{Context, Result};
+
 use super::config::read_config_table;
 use mermaid_domain::config::{ConfigLayer, LayerSource, SafetyConfig};
 use mermaid_domain::{FilesystemPolicy, NetworkPolicy};
@@ -33,6 +35,7 @@ const PROJECT_ALLOWED_TOP_LEVEL: &[&str] = &[
     "ollama_num_ctx_per_model",
     "compaction",
     "memory",
+    "output",
     "safety",
     "ui",
 ];
@@ -105,6 +108,36 @@ pub(crate) fn load_project_layer(
         warnings,
         notice,
     )
+}
+
+/// Persist the `/output-style --project` choice as `output.style` in
+/// `<git-root>/.mermaid/config.toml`, leaving every other key untouched.
+///
+/// # Errors
+///
+/// `cwd` sitting outside a git repository (there is no project file to
+/// write), and the read-modify-write itself. The write is atomic; a failure
+/// leaves the previous file intact.
+pub(crate) fn persist_project_output_style(cwd: &Path, style: &str) -> Result<()> {
+    let Some(dir) = super::memory::find_git_root(cwd).map(|root| root.join(".mermaid")) else {
+        anyhow::bail!(
+            "not inside a git repository — project output styles need <git-root>/.mermaid/config.toml"
+        );
+    };
+    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    let path = dir.join("config.toml");
+    let mut table = read_config_table(&path)?;
+    let output = table
+        .entry("output".to_string())
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+    let output = output
+        .as_table_mut()
+        .context("project config [output] is not a table")?;
+    output.insert("style".to_string(), toml::Value::String(style.to_string()));
+    let bytes = toml::to_string_pretty(&table)?.into_bytes();
+    mermaid_runtime::write_atomic(&path, &bytes)
+        .with_context(|| format!("write {}", path.display()))?;
+    Ok(())
 }
 
 /// Strip everything outside the allowlist (top-level, nested denials, and
@@ -280,6 +313,13 @@ enabled = false
         let (table, warnings) = sanitize("[ui]\ntheme = \"light\"\n");
         assert!(warnings.is_empty(), "got {warnings:?}");
         assert_eq!(table["ui"]["theme"].as_str(), Some("light"));
+    }
+
+    #[test]
+    fn sanitize_keeps_output_style_selection() {
+        let (table, warnings) = sanitize("[output]\nstyle = \"concise\"\n");
+        assert!(warnings.is_empty(), "got {warnings:?}");
+        assert_eq!(table["output"]["style"].as_str(), Some("concise"));
     }
 
     #[test]

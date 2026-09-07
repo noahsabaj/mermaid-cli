@@ -140,6 +140,14 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         group: SlashCommandGroup::ModelContext,
     },
     SlashCommand {
+        name: "output-style",
+        aliases: &["output_style"],
+        description: "Show or set the output style (voice/format preset)",
+        arg_hint: Some("[name] [--project]"),
+        usage_note: None,
+        group: SlashCommandGroup::ModelContext,
+    },
+    SlashCommand {
         name: "clear",
         aliases: &[],
         description: "Clear chat history",
@@ -581,6 +589,26 @@ pub fn filter_by_prefix(typed: &str) -> Vec<&'static SlashCommand> {
         .collect()
 }
 
+/// Parse the `/output-style` tail: an optional style name plus an optional
+/// trailing `--project` (persist to the project config instead of the user
+/// one). Split out so `parse_slash_command` stays under the line-count lint.
+fn parse_output_style_arg(arg: Option<String>) -> crate::SlashCmd {
+    let parts: Vec<&str> = arg.as_deref().unwrap_or("").split_whitespace().collect();
+    let project = parts.contains(&"--project");
+    let mut names = parts.iter().filter(|part| **part != "--project");
+    match (names.next(), names.next()) {
+        (None, _) => crate::SlashCmd::OutputStyle {
+            name: None,
+            project,
+        },
+        (Some(name), None) => crate::SlashCmd::OutputStyle {
+            name: Some((*name).to_string()),
+            project,
+        },
+        _ => crate::SlashCmd::MissingArg("Usage: /output-style [name] [--project]".to_string()),
+    }
+}
+
 /// Parse a slash-command input line (without the leading `/`) into a
 /// `SlashCmd`. Returns `SlashCmd::Unknown` if the command isn't in
 /// the registry. Shared between the TUI dispatcher (C8) and any
@@ -623,6 +651,7 @@ pub fn parse_slash_command(raw: &str) -> crate::SlashCmd {
             Some(level) => SlashCmd::Reasoning(mermaid_model::models::ReasoningLevel::parse(level)),
         },
         Some("visible-reasoning") => SlashCmd::VisibleReasoning(arg),
+        Some("output-style") => parse_output_style_arg(arg),
         Some("safety") => match arg.as_deref() {
             None => SlashCmd::Safety(None),
             // Invalid value ⇒ `None` ⇒ the reducer shows current + options.

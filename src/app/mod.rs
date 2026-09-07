@@ -8,6 +8,7 @@ pub mod event_source;
 pub mod instructions;
 pub mod lifecycle;
 pub mod memory;
+pub mod output_styles;
 pub mod plugin_assets;
 mod project_config;
 pub mod recorder;
@@ -23,11 +24,12 @@ pub use config::{
     get_config_dir, init_config, load_config, load_config_or_warn, load_layered_config,
     load_layered_config_or_warn, load_project_scoped_config, persist_default_reasoning,
     persist_last_model, persist_ollama_allow_ram_offload, persist_ollama_num_ctx_for_model,
-    persist_plan_config, persist_reasoning_for_model, persist_ui_theme, remove_user_config_key,
-    resolve_model_id, update_user_config_key,
+    persist_output_style, persist_plan_config, persist_reasoning_for_model, persist_ui_theme,
+    remove_user_config_key, resolve_model_id, update_user_config_key,
 };
 pub use event_source::event_to_msg;
 pub use lifecycle::RuntimeLifecycle;
+pub(crate) use project_config::persist_project_output_style;
 pub use recorder::{
     RECORDING_FORMAT_VERSION, RecordLine, Recorder, Replay, ReplayEntry, SessionHeader,
 };

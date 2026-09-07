@@ -111,7 +111,7 @@ When asked to read, inspect, familiarize yourself with, or review a codebase:
 
 - Project instructions in AGENTS.md and MERMAID.md are auto-loaded from the nearest matching directory and reload on the next turn (MERMAID.md is read last, so it overrides AGENTS.md). When a durable project rule emerges in conversation, suggest capturing it in MERMAID.md so it survives the session.
 - Every file mutation automatically creates a restore checkpoint first; the user rolls back with `/checkpoints` and `/restore`.
-- User controls (the user runs these, not you; `/help` lists the rest): `/model`, `/reasoning`, `/visible-reasoning`, `/safety` (switch safety mode, including `plan`), `/plan`, `/doctor`, `/context`, and `/compact`; plus `/approvals` `/approve` `/deny` for pending approvals and `/save` `/load` `/clear` for conversation history. `/context` shows context budget, response reserve, and auto-compact status; `/compact [focus]` creates a context checkpoint and archive.
+- User controls (the user runs these, not you; `/help` lists the rest): `/model`, `/reasoning`, `/visible-reasoning`, `/output-style`, `/safety` (switch safety mode, including `plan`), `/plan`, `/doctor`, `/context`, and `/compact`; plus `/approvals` `/approve` `/deny` for pending approvals and `/save` `/load` `/clear` for conversation history. `/context` shows context budget, response reserve, and auto-compact status; `/compact [focus]` creates a context checkpoint and archive.
 - Esc interrupts the current agent loop. Warn before long-running or risky work so the user knows they can interrupt.
 
 ## Output Style
@@ -297,6 +297,118 @@ the parent as the tool result: make it a complete, self-contained report of \
 what you did or found, including the concrete paths, names, numbers, and \
 facts the parent needs. Do not offer follow-ups, ask for confirmation, or \
 end mid-task.";
+
+pub const DEFAULT_OUTPUT_STYLE: &str = "default";
+
+pub struct BuiltinStyle {
+    pub name: &'static str,
+    pub description: &'static str,
+    pub body: &'static str,
+}
+
+pub const BUILTIN_OUTPUT_STYLES: &[BuiltinStyle] = &[
+    BuiltinStyle {
+        name: "proactive",
+        description: "Acts immediately, assumes routine decisions, prefers action over planning",
+        body: "## Output Style (proactive)\n\nAct immediately instead of pausing for routine decisions: make reasonable assumptions and prefer action over planning. Permission policy still decides what runs without asking — this changes initiative, not gating.",
+    },
+    BuiltinStyle {
+        name: "concise",
+        description: "Leads with results, skips preamble and narration",
+        body: "## Output Style (concise)\n\nLead with the result, skip preamble and narration, and keep responses short by default — while doing the work just as thoroughly. When asked for an explanation or more detail, answer in full. Always keep the complete content of error reports, security warnings, and confirmations for destructive actions.",
+    },
+    BuiltinStyle {
+        name: "explanatory",
+        description: "Explains implementation choices and codebase patterns",
+        body: "## Output Style (explanatory)\n\nWhile completing tasks, add brief Insights explaining implementation choices and codebase patterns so the user learns how the work fits together.",
+    },
+    BuiltinStyle {
+        name: "learning",
+        description: "Collaborative learn-by-doing with hands-on pieces for the user",
+        body: "## Output Style (learning)\n\nWork collaboratively and teach by doing: share Insights while completing tasks, and pause for the user to write small, strategic pieces of code themselves. Mark those pieces with TODO(human) markers in the code.",
+    },
+];
+
+#[must_use]
+pub fn builtin_output_style(name: &str) -> Option<&'static BuiltinStyle> {
+    BUILTIN_OUTPUT_STYLES.iter().find(|s| s.name == name)
+}
+
+#[must_use]
+pub fn is_valid_style_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+}
+
+pub struct StyleFile {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub keep_coding_instructions: bool,
+    pub body: String,
+}
+
+pub fn parse_style_file(raw: &str) -> StyleFile {
+    let mut name = None;
+    let mut description = None;
+    let mut keep_coding_instructions = true;
+    let mut body_lines: Vec<&str> = Vec::new();
+    let mut lines = raw.strip_prefix('\u{feff}').unwrap_or(raw).lines();
+    if lines.next().map(str::trim) == Some("---") {
+        let mut in_fm = true;
+        for line in lines {
+            if in_fm {
+                if line.trim() == "---" {
+                    in_fm = false;
+                    continue;
+                }
+                if let Some((key, value)) = line.split_once(':') {
+                    let value = value.trim().trim_matches('"').to_string();
+                    match key.trim() {
+                        "name" if !value.is_empty() => name = Some(value),
+                        "description" if !value.is_empty() => description = Some(value),
+                        "keep-coding-instructions" => {
+                            keep_coding_instructions =
+                                !matches!(value.as_str(), "false" | "no" | "0");
+                        },
+                        _ => {},
+                    }
+                }
+            } else {
+                body_lines.push(line);
+            }
+        }
+        if in_fm {
+            name = None;
+            description = None;
+            body_lines = raw.lines().collect();
+        }
+    } else {
+        body_lines = raw.lines().collect();
+    }
+    let body = body_lines.join("\n").trim().to_string();
+    StyleFile {
+        name,
+        description,
+        keep_coding_instructions,
+        body,
+    }
+}
+
+#[must_use]
+pub fn apply_output_style(base: &str, body: &str, keep_coding_instructions: bool) -> String {
+    let body = body.trim();
+    if body.is_empty() {
+        return base.to_string();
+    }
+    if keep_coding_instructions {
+        format!("{}\n\n{body}", base.trim_end())
+    } else {
+        body.to_string()
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -1192,5 +1304,64 @@ mod tests {
             SUBAGENT_CONTRACT.contains("returned to the parent as the tool result"),
             "the final-message contract must survive"
         );
+    }
+
+    #[test]
+    fn builtin_styles_resolve_and_default_has_no_body() {
+        assert!(builtin_output_style("default").is_none());
+        for name in ["proactive", "concise", "explanatory", "learning"] {
+            let style = builtin_output_style(name).expect("built-in must resolve");
+            assert!(!style.body.is_empty());
+            assert!(!style.description.is_empty());
+        }
+        assert!(builtin_output_style("nope").is_none());
+        assert!(
+            builtin_output_style("Concise").is_none(),
+            "names are lowercase"
+        );
+    }
+
+    #[test]
+    fn style_names_are_lowercase_slugs() {
+        for good in ["concise", "my-style", "style_2"] {
+            assert!(is_valid_style_name(good), "{good} must be valid");
+        }
+        for bad in [
+            "",
+            "Concise",
+            "has space",
+            "a/b",
+            "dot.name",
+            &"x".repeat(65),
+        ] {
+            assert!(!is_valid_style_name(bad), "{bad} must be invalid");
+        }
+    }
+
+    #[test]
+    fn style_file_parses_frontmatter_and_body() {
+        let parsed = parse_style_file(
+            "---\nname: terse\ndescription: Short\nkeep-coding-instructions: false\n---\n\nBe brief.\n",
+        );
+        assert_eq!(parsed.name.as_deref(), Some("terse"));
+        assert_eq!(parsed.description.as_deref(), Some("Short"));
+        assert!(!parsed.keep_coding_instructions);
+        assert_eq!(parsed.body, "Be brief.");
+        let plain = parse_style_file("Just instructions.\n");
+        assert_eq!(plain.name, None);
+        assert!(
+            plain.keep_coding_instructions,
+            "keeping the base prompt is the default"
+        );
+        assert_eq!(plain.body, "Just instructions.");
+    }
+
+    #[test]
+    fn apply_output_style_appends_or_replaces() {
+        let appended = apply_output_style("BASE", "STYLE", true);
+        assert!(appended.starts_with("BASE"));
+        assert!(appended.contains("STYLE"));
+        assert_eq!(apply_output_style("BASE", "STYLE", false), "STYLE");
+        assert_eq!(apply_output_style("BASE", "  \n ", true), "BASE");
     }
 }

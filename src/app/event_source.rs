@@ -352,6 +352,42 @@ mod tests {
     }
 
     #[test]
+    fn parses_output_style_command() {
+        assert_eq!(
+            mermaid_domain::parse_slash_command("output-style"),
+            SlashCmd::OutputStyle {
+                name: None,
+                project: false
+            }
+        );
+        assert_eq!(
+            mermaid_domain::parse_slash_command("output-style concise"),
+            SlashCmd::OutputStyle {
+                name: Some("concise".to_string()),
+                project: false
+            }
+        );
+        assert_eq!(
+            mermaid_domain::parse_slash_command("output-style concise --project"),
+            SlashCmd::OutputStyle {
+                name: Some("concise".to_string()),
+                project: true
+            }
+        );
+        assert_eq!(
+            mermaid_domain::parse_slash_command("output_style learning"),
+            SlashCmd::OutputStyle {
+                name: Some("learning".to_string()),
+                project: false
+            }
+        );
+        assert_eq!(
+            mermaid_domain::parse_slash_command("output-style a b"),
+            SlashCmd::MissingArg("Usage: /output-style [name] [--project]".to_string())
+        );
+    }
+
+    #[test]
     fn parses_agents_command_with_kill_tail() {
         assert_eq!(
             mermaid_domain::parse_slash_command("agents"),

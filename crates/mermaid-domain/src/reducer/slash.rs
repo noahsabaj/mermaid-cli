@@ -251,6 +251,30 @@ pub fn handle_query_result(state: &mut State, cmds: &mut Vec<Cmd>, result: Query
         QueryResult::RuntimePluginsListed(plugins) => {
             append_runtime_note(state, cmds, plugins_text(&plugins));
         },
+        QueryResult::OutputStylesListed(entries) => {
+            handle_output_styles_listed(state, cmds, &entries);
+        },
+        QueryResult::OutputStyleLoaded {
+            name,
+            project,
+            found,
+            body,
+            keep_coding_instructions,
+            custom,
+            source,
+        } => {
+            let loaded = if found {
+                Some(LoadedStyleBody {
+                    body,
+                    keep_coding_instructions,
+                    custom,
+                    source,
+                })
+            } else {
+                None
+            };
+            handle_output_style_loaded(state, cmds, &name, project, loaded);
+        },
     }
 }
 
@@ -699,6 +723,9 @@ pub fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
                 ),
             );
         },
+        SlashCmd::OutputStyle { name, project } => {
+            handle_output_style_command(state, cmds, name.as_deref(), project);
+        },
         SlashCmd::Editor => {
             // `/editor` opens on whatever draft remains after the command
             // itself was consumed (usually empty); Ctrl+O is the
@@ -724,6 +751,186 @@ pub fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
             push_system(state, cmds, format!("Unknown command: /{name}"));
         },
     }
+}
+
+/// `/output-style`: bare lists every selectable style; a name switches for
+/// this session and persists (user file, or the project file with
+/// `--project`). Built-ins resolve synchronously (pure); custom files load
+/// through `Query::LoadOutputStyle` because the reducer never touches the
+/// filesystem.
+pub fn handle_output_style_command(
+    state: &mut State,
+    cmds: &mut Vec<Cmd>,
+    name: Option<&str>,
+    project: bool,
+) {
+    let Some(name) = name.map(str::trim).filter(|name| !name.is_empty()) else {
+        cmds.push(Cmd::Query(Query::ListOutputStyles));
+        return;
+    };
+    if !crate::prompts::is_valid_style_name(name) {
+        push_system(
+            state,
+            cmds,
+            format!(
+                "Unknown output style '{name}'. Names are lowercase letters, digits, `-` and `_` (max 64). Bare `/output-style` lists what's available."
+            ),
+        );
+        return;
+    }
+    state.settings.output.style = name.to_string();
+    if name == crate::prompts::DEFAULT_OUTPUT_STYLE {
+        state.settings.active_style = crate::ActiveStyle::none();
+        cmds.push(persist_output_style_cmd(name, project));
+        push_system(
+            state,
+            cmds,
+            format!(
+                "Output style reset to default (persisted to {}).",
+                persist_target(project)
+            ),
+        );
+        return;
+    }
+    if let Some(builtin) = crate::prompts::builtin_output_style(name) {
+        state.settings.active_style = crate::ActiveStyle {
+            body: builtin.body.to_string(),
+            keep_coding_instructions: true,
+            custom: false,
+            source: (if project { "project" } else { "user" }).to_string(),
+        };
+        cmds.push(persist_output_style_cmd(name, project));
+        push_system(
+            state,
+            cmds,
+            format!(
+                "Output style set to {name} (built-in; persisted to {}). Applies to the next message.",
+                persist_target(project)
+            ),
+        );
+        return;
+    }
+    // Custom or unknown: the effect layer reads the file (project first,
+    // then user) and answers with the body — or `found: false`, which falls
+    // back to `default` with a warning.
+    state.settings.active_style = crate::ActiveStyle::none();
+    cmds.push(Cmd::Query(Query::LoadOutputStyle {
+        name: name.to_string(),
+        project,
+    }));
+}
+
+fn persist_output_style_cmd(name: &str, project: bool) -> Cmd {
+    if project {
+        Cmd::PersistProjectOutputStyle {
+            style: name.to_string(),
+        }
+    } else {
+        Cmd::PersistOutputStyle {
+            style: name.to_string(),
+        }
+    }
+}
+
+fn persist_target(project: bool) -> &'static str {
+    if project {
+        "the project config"
+    } else {
+        "your user config"
+    }
+}
+
+fn handle_output_styles_listed(
+    state: &mut State,
+    cmds: &mut Vec<Cmd>,
+    entries: &[crate::OutputStyleSummary],
+) {
+    append_runtime_note(
+        state,
+        cmds,
+        output_styles_text(&state.settings.output.style.clone(), entries),
+    );
+}
+
+/// A successfully loaded style body, bundled so the routing helper stays
+/// under the argument-count lint.
+struct LoadedStyleBody {
+    body: String,
+    keep_coding_instructions: bool,
+    custom: bool,
+    source: String,
+}
+
+/// Route a loaded style body into state: stamp it only when the loaded style
+/// is still the selected one (a newer switch raced the load), persist to the
+/// requested target, and confirm — or fall back to `default` with a warning
+/// when nothing by that name exists.
+fn handle_output_style_loaded(
+    state: &mut State,
+    cmds: &mut Vec<Cmd>,
+    name: &str,
+    project: bool,
+    loaded: Option<LoadedStyleBody>,
+) {
+    if state.settings.output.style != name {
+        return;
+    }
+    let Some(loaded) = loaded else {
+        state.settings.output.style = crate::prompts::DEFAULT_OUTPUT_STYLE.to_string();
+        state.settings.active_style = crate::ActiveStyle::none();
+        push_system(
+            state,
+            cmds,
+            format!(
+                "No output style named '{name}'. Using default instead — bare `/output-style` lists what's available."
+            ),
+        );
+        return;
+    };
+    state.settings.active_style = crate::ActiveStyle {
+        body: loaded.body,
+        keep_coding_instructions: loaded.keep_coding_instructions,
+        custom: loaded.custom,
+        source: loaded.source.clone(),
+    };
+    cmds.push(persist_output_style_cmd(name, project));
+    let kind = if loaded.custom { "custom" } else { "built-in" };
+    push_system(
+        state,
+        cmds,
+        format!(
+            "Output style set to {name} ({kind}, from {}; persisted to {}). Applies to the next message.",
+            loaded.source,
+            persist_target(project)
+        ),
+    );
+}
+
+/// The bare-`/output-style` listing: every selectable style with its source,
+/// marking the active one. Rendered when `QueryResult::OutputStylesListed`
+/// lands (the effect layer owns discovery; the reducer only formats).
+pub fn output_styles_text(current: &str, entries: &[crate::OutputStyleSummary]) -> String {
+    let mut out = String::from(
+        "Output styles (applies to the next message; subagents keep the stock prompt)\n",
+    );
+    for entry in entries {
+        let marker = if entry.name == current {
+            " (current)"
+        } else {
+            ""
+        };
+        let origin = if entry.custom {
+            format!("custom, {}", entry.source)
+        } else {
+            "built-in".to_string()
+        };
+        out.push_str(&format!(
+            "  /output-style {}{} - {} [{origin}]\n",
+            entry.name, marker, entry.description
+        ));
+    }
+    out.push_str("Custom styles live in ~/.config/mermaid/output-styles/<name>.md (all projects) or <git-root>/.mermaid/output-styles/<name>.md (this project wins).");
+    out
 }
 
 pub fn visible_reasoning_value(arg: Option<&str>, current: bool) -> Result<bool, &'static str> {

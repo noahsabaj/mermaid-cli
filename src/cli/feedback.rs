@@ -347,6 +347,8 @@ mod tests {
             safety_mode: "ask".to_string(),
             checkpoint_on_mutation: true,
             prompt_customized: false,
+            output_style: "default".to_string(),
+            output_style_source: "default".to_string(),
             ollama: DoctorCheck {
                 status: "ok",
                 message: "reachable".to_string(),

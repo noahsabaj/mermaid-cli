@@ -200,6 +200,13 @@ pub const MAX_INSTRUCTIONS_BYTES: usize = 40_000;
 pub const INSTRUCTIONS_TRUNCATION_MARKER: &str =
     "\n\n[Project instructions truncated - exceeds 10k token cap]";
 
+// Output styles (/output-style)
+/// Maximum bytes of one output-style file. Mirrors `MAX_INSTRUCTIONS_BYTES`:
+/// a style is prompt text of the same kind. Oversize files are rejected with
+/// a warning (falling back to `default`), not truncated — silently cutting a
+/// voice preset would hide intent rather than surface it.
+pub const MAX_OUTPUT_STYLE_BYTES: usize = 40_000;
+
 // Durable semantic memory (v0.10.0)
 /// Max bytes of the always-loaded memory INDEX (name + description + path per
 /// fact, all scopes). ~2k tokens at 4 chars/token. The index is terse; if it

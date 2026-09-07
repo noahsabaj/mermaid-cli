@@ -642,6 +642,16 @@ pub fn persist_ui_theme(theme: ThemeChoice) -> Result<()> {
     )
 }
 
+/// Persist the output-style choice (`/output-style <name>`) as
+/// `output.style` in the user config file.
+///
+/// # Errors
+///
+/// [`update_user_config_key`]'s.
+pub fn persist_output_style(style: &str) -> Result<()> {
+    update_user_config_key(&["output", "style"], toml::Value::String(style.to_string()))
+}
+
 /// Persist the user's default reasoning level. Used by the `/reasoning` slash
 /// command and the Alt+T cycle handler so the choice survives across sessions.
 ///
@@ -870,6 +880,13 @@ pub(crate) fn session_flags_table(flags: &SessionFlags) -> Result<toml::Table> {
             &mut table,
             &["safety", "allow_untrusted_headless_tools"],
             toml::Value::Boolean(true),
+        )?;
+    }
+    if let Some(style) = flags.output_style.as_deref() {
+        deep_set_segments(
+            &mut table,
+            &["output", "style"],
+            toml::Value::String(style.to_string()),
         )?;
     }
     Ok(table)
@@ -1227,6 +1244,7 @@ mod tests {
             max_tokens: Some(512),
             allow_untrusted_tools: true,
             profile: None,
+            output_style: Some("concise".to_string()),
         };
         let (config, _) = finalize_config(session_flags_table(&flags).unwrap()).unwrap();
         assert_eq!(config.safety.network, NetworkPolicy::Deny);
@@ -1234,6 +1252,7 @@ mod tests {
         assert_eq!(config.default_model.max_tokens, 512);
         assert!(config.safety.allow_untrusted_headless_tools);
         assert_eq!(config.web.searxng_url, "http://x:1");
+        assert_eq!(config.output.style, "concise");
     }
 
     #[test]
