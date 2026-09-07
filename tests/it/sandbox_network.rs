@@ -140,7 +140,10 @@ fn no_network_still_allows_ordinary_local_commands() {
 /// computed only on the foreground path after the background early return,
 /// so `--no-network` did not apply to a backgrounded command at all. The
 /// tool is driven directly with `safety.network = deny`; the launcher binary
-/// is the real `mermaid` (a test process has no `__sandbox-exec`).
+/// is the real `mermaid` (a test process has no `__sandbox-exec`). Linux,
+/// because the probe is socket creation (seccomp); the fix itself is the
+/// same invocation on every platform.
+#[cfg(target_os = "linux")]
 #[test]
 #[ignore = "spawns the real binary + python3; run with: cargo test --test integration -- --ignored it::sandbox_network::"]
 fn no_network_confines_a_background_command_too() {
