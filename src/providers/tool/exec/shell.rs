@@ -40,6 +40,24 @@ pub(crate) fn powershell_wrap(command: &str) -> String {
     )
 }
 
+/// The binary that runs `__sandbox-exec`: this process. A `current_exe`
+/// failure is an error here rather than a PATH lookup of `mermaid`: under a
+/// sandbox policy a different binary on PATH must not become the launcher.
+/// Tests drive the tool from a test binary that has no `__sandbox-exec`, so
+/// with `test-support` the `MERMAID_LAUNCHER_EXE` variable names the real one.
+fn launcher_exe() -> PathBuf {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(exe) = std::env::var_os("MERMAID_LAUNCHER_EXE") {
+        return PathBuf::from(exe);
+    }
+    std::env::current_exe().unwrap_or_else(|err| {
+        tracing::error!(error = %err, "current_exe failed; the sandbox launcher cannot be located");
+        // A path that does not exist: the spawn fails and the command does
+        // not run, which is the fail-closed outcome the policy asks for.
+        PathBuf::from("/nonexistent/mermaid-sandbox-launcher")
+    })
+}
+
 pub(crate) fn shell_invocation(
     command: &str,
     sandbox_network: bool,
@@ -50,7 +68,7 @@ pub(crate) fn shell_invocation(
         // sh -c <command>`: the launcher installs the requested confinement on
         // itself, then execs the shell. Unix-only path — Windows never sets
         // these flags.
-        let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("mermaid"));
+        let exe = launcher_exe();
         let mut args: Vec<std::ffi::OsString> = vec!["__sandbox-exec".into()];
         if sandbox_network {
             args.push("--no-network".into());

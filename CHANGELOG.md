@@ -83,6 +83,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same protected owner-plus-`SYSTEM` descriptor the daemon puts on its pipe,
   so the config never carries a Users or Everyone grant, and a test reads the
   resulting DACL back as SDDL to prove it.
+- **`mode="background"` commands escaped the OS sandbox.** The
+  `__sandbox-exec` wrapping that enforces `--no-network` and `--confine-fs`
+  was computed on the foreground path only, after the background branch had
+  already returned, so a backgrounded command ran as a bare `sh -c` with
+  full network and filesystem access under either flag. The sandbox
+  decision is made once, before the split, and the background launcher
+  spawns the same invocation the foreground path does (passed as positional
+  parameters and run through `"$@"`, never re-parsed). An ignored
+  integration test drives the real tool with `safety.network = deny` and a
+  backgrounded socket probe; with the wrapping removed it reports
+  `NET_ALLOWED`. A `current_exe` failure no longer falls back to whatever
+  `mermaid` is on `PATH` as the launcher; the spawn fails closed instead.
 - **A long reasoning trace silently emptied the answer that followed it.**
   Every adapter shared one truncation flag between its reasoning and its
   content accumulators, so a trace past the 400K-char response cap stopped the

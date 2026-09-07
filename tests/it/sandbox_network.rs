@@ -134,3 +134,75 @@ fn no_network_still_allows_ordinary_local_commands() {
     );
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "ok");
 }
+
+/// The kill-switch reaches a `mode="background"` command. The background
+/// launcher used to spawn `sh -c` bare, with the `__sandbox-exec` wrapping
+/// computed only on the foreground path after the background early return,
+/// so `--no-network` did not apply to a backgrounded command at all. The
+/// tool is driven directly with `safety.network = deny`; the launcher binary
+/// is the real `mermaid` (a test process has no `__sandbox-exec`). Linux,
+/// because the probe is socket creation (seccomp); the fix itself is the
+/// same invocation on every platform.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "spawns the real binary + python3; run with: cargo test --test integration -- --ignored it::sandbox_network::"]
+fn no_network_confines_a_background_command_too() {
+    use mermaid_cli::providers::ToolExecutor;
+    use mermaid_cli::providers::ctx::test_exec_context_with_config;
+    use mermaid_cli::providers::tool::exec::ExecuteCommandTool;
+    use mermaid_domain::{NetworkPolicy, ToolCallId, TurnId};
+
+    let Some(py) = python() else {
+        eprintln!("skipping: no python interpreter on PATH");
+        return;
+    };
+    // SAFETY: this test binary is single-purpose; nothing else reads the
+    // variable concurrently in a way that matters, and it names the launcher
+    // for every command the tool spawns from here on.
+    unsafe {
+        std::env::set_var("MERMAID_LAUNCHER_EXE", env!("CARGO_BIN_EXE_mermaid"));
+    }
+    let workdir = std::env::temp_dir().join(format!("mermaid-bg-sandbox-{}", std::process::id()));
+    std::fs::create_dir_all(&workdir).unwrap();
+
+    let mut config = mermaid_domain::Config::default();
+    config.safety.mode = mermaid_runtime::SafetyMode::FullAccess;
+    config.safety.network = NetworkPolicy::Deny;
+    let (ctx, _rx) =
+        test_exec_context_with_config(TurnId(1), ToolCallId(1), workdir.clone(), config);
+
+    // The probe's result lands in the background log as one word.
+    let command = format!(
+        "if {py} -c \"{MAKE_INET_SOCKET}\" 2>/dev/null; then echo NET_ALLOWED; else echo NET_DENIED; fi; sleep 20"
+    );
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let outcome = rt.block_on(ExecuteCommandTool.execute(
+        serde_json::json!({
+            "command": command,
+            "mode": "background",
+            "startup_timeout_secs": 5,
+            "ready_pattern": "NET_"
+        }),
+        ctx,
+    ));
+    let output = outcome.output().to_string();
+    let log_path = output
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("Log: "))
+        .map(str::trim)
+        .expect("background output names its log");
+    let log = std::fs::read_to_string(log_path).unwrap_or_default();
+    if let Some(pid) = output
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("PID: "))
+        .and_then(|p| p.trim().parse::<u32>().ok())
+    {
+        let _ = Command::new("kill").arg(pid.to_string()).status();
+    }
+    let _ = std::fs::remove_dir_all(&workdir);
+    assert!(outcome.is_success(), "background start failed: {output}");
+    assert!(
+        log.contains("NET_DENIED") && !log.contains("NET_ALLOWED"),
+        "a backgrounded command reached the network under --no-network; log: {log}"
+    );
+}

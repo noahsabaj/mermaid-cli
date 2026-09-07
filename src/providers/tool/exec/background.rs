@@ -15,6 +15,7 @@ pub(crate) struct BackgroundStartup {
 
 pub(crate) async fn run_background_command(
     command: &str,
+    sandbox: &super::SandboxPlan,
     workdir: &Path,
     startup_timeout_secs: u64,
     ready_pattern: Option<&str>,
@@ -25,15 +26,24 @@ pub(crate) async fn run_background_command(
 
     {
         let log_path = background_log_path();
-        let pid =
-            match launch_background_process(command, workdir, &log_path, ctx.scratchpad.as_deref())
-                .await
-            {
-                Ok(pid) => pid,
-                Err(error) => {
-                    return ToolOutcome::error(error, start.elapsed().as_secs_f64());
-                },
-            };
+        // The SAME invocation the foreground paths spawn: under a sandbox
+        // policy that is `mermaid __sandbox-exec [...] -- sh -c <command>`,
+        // so a backgrounded command is confined exactly like a foreground one.
+        let invocation =
+            shell_invocation(command, sandbox.network, sandbox.confine_writes.as_deref());
+        let pid = match launch_background_process(
+            &invocation,
+            workdir,
+            &log_path,
+            ctx.scratchpad.as_deref(),
+        )
+        .await
+        {
+            Ok(pid) => pid,
+            Err(error) => {
+                return ToolOutcome::error(error, start.elapsed().as_secs_f64());
+            },
+        };
 
         let startup = match wait_for_background_startup(
             pid,
@@ -122,7 +132,7 @@ pub(crate) async fn run_background_command(
 
 #[cfg(not(target_os = "windows"))]
 pub(crate) async fn launch_background_process(
-    command: &str,
+    invocation: &ShellInvocation,
     workdir: &Path,
     log_path: &Path,
     scratchpad: Option<&Path>,
@@ -147,18 +157,23 @@ pub(crate) async fn launch_background_process(
             // `terminate_tree` can later group-kill the whole subtree rather than
             // orphaning grandchildren. Falls back to `nohup` on hosts without
             // setsid (e.g. stock macOS), where the bare-pid kill still applies.
+            // The invocation arrives as this script's positional parameters
+            // and is spawned through `"$@"`, so the shell never re-parses it:
+            // the model's command stays one argv of the inner `sh -c`, and a
+            // sandboxed invocation keeps its `__sandbox-exec` prefix intact.
             r#"log=$MERMAID_BG_LOG
-cmd=$MERMAID_BG_COMMAND
 : > "$log" || exit 125
 if command -v setsid >/dev/null 2>&1; then
-  setsid sh -c "$cmd" > "$log" 2>&1 < /dev/null &
+  setsid "$@" > "$log" 2>&1 < /dev/null &
 else
-  nohup sh -c "$cmd" > "$log" 2>&1 < /dev/null &
+  nohup "$@" > "$log" 2>&1 < /dev/null &
 fi
 printf '%s\n' "$!""#,
         )
+        .arg("mermaid-background")
+        .arg(&invocation.program)
+        .args(&invocation.args)
         .env("MERMAID_BG_LOG", log_path)
-        .env("MERMAID_BG_COMMAND", command)
         .current_dir(workdir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -192,7 +207,7 @@ printf '%s\n' "$!""#,
 /// process running — the OS owns its lifetime from here.
 #[cfg(target_os = "windows")]
 pub(crate) async fn launch_background_process(
-    command: &str,
+    invocation: &ShellInvocation,
     workdir: &Path,
     log_path: &Path,
     scratchpad: Option<&Path>,
@@ -207,10 +222,9 @@ pub(crate) async fn launch_background_process(
     let log_err = log
         .try_clone()
         .map_err(|e| format!("failed to clone background log handle: {e}"))?;
-    let mut launcher = Command::new(powershell_program());
+    let mut launcher = Command::new(&invocation.program);
     launcher
-        .args(["-NoProfile", "-NonInteractive", "-Command"])
-        .arg(command)
+        .args(&invocation.args)
         .current_dir(workdir)
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))
