@@ -833,8 +833,10 @@ mod tests {
     }
 
     /// With write confinement alone the network stays reachable. The probe is
-    /// `curl.exe` from System32 (readable by every AppContainer; the runner's
-    /// Python is not, and exits STATUS_DLL_NOT_FOUND before running a line),
+    /// System32's `curl.exe` by full path: every AppContainer can read
+    /// System32, while PATH on a CI runner finds Git for Windows' copy first
+    /// (access denied) and the runner's Python exits STATUS_DLL_NOT_FOUND
+    /// before running a line,
     /// with stderr captured into the granted directory. That directory is a
     /// fresh one under temp, not temp itself: grants restore the previous DACL
     /// on drop, so two tests granting the same directory concurrently wipe
@@ -874,7 +876,7 @@ mod tests {
                 // the policy grants. No quotes around the paths: the argv quoter
                 // escapes inner quotes as `\"`, which cmd.exe does not
                 // understand, and the temp path has no spaces.
-                "(cd /d {} && curl.exe -sS --max-time 5 -o NUL http://1.1.1.1/ && echo [curl ok] || echo [curl failed]) > {} 2>&1",
+                "(cd /d {} && %SystemRoot%\\System32\\curl.exe -sS --max-time 5 -o NUL http://1.1.1.1/ && echo [curl ok] || echo [curl failed]) > {} 2>&1",
                 dir.display(),
                 out_path.display()
             )),
@@ -1022,7 +1024,7 @@ mod tests {
             OsString::from("cmd.exe"),
             OsString::from("/c"),
             OsString::from(format!(
-                "(cd /d {} && curl.exe -sS --max-time 5 -o NUL http://1.1.1.1/ && echo [curl ok] || echo [curl failed]) > {} 2>&1",
+                "(cd /d {} && %SystemRoot%\\System32\\curl.exe -sS --max-time 5 -o NUL http://1.1.1.1/ && echo [curl ok] || echo [curl failed]) > {} 2>&1",
                 dir.display(),
                 out_path.display()
             )),
