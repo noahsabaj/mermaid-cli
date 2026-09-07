@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`/reasoning xhigh` now sets the level instead of showing the current one.**
+  `ReasoningLevel::parse` (the slash-command path) missed the `xhigh` arm, so
+  the command parsed to `None` and printed the current depth. Alt+T,
+  `--reasoning xhigh`, and config-file `xhigh` already worked.
 - **The release pipeline still ran `mermaid version`.** The subcommand went
   in 0.26.0 (`--version` is the one that stays), but `release.yml`'s build
   smoke test, the `install.sh` check and the Homebrew formula's test all
