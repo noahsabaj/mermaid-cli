@@ -1662,6 +1662,66 @@ mod tests {
         }
     }
 
+    /// An allowlisted reader with an output, in-place, or exec flag is a
+    /// write, whatever spelling the flag takes. `git log --output=FILE` and
+    /// `tree -o FILE` each rated read-only before the flag table existed;
+    /// the rest are the table's other rows and the two positional cases.
+    #[test]
+    fn readers_with_an_output_flag_are_not_read_only() {
+        for cmd in [
+            "git log --output=/etc/cron.d/pwn",
+            "git log --output out.txt",
+            "git diff --output=/etc/passwd",
+            "git diff -p --output out",
+            "git show --output=x HEAD",
+            "tree -o /etc/cron.d/pwn",
+            "tree -o out.txt .",
+            "tree -ao out .",
+            "sort -o/etc/passwd f",
+            "sort --output=/etc/passwd f",
+            "sort -ro out f",
+            "yq -i .a=1 f.yml",
+            "date -s 2020-01-01",
+            "fd -x rm .",
+            "fd --exec-batch rm .",
+            "rg --pre cmd pattern",
+            "ack --pager=cmd x",
+            "less -o /tmp/x",
+            "less -O/tmp/x",
+            "uniq in out",
+            "hostname evil",
+        ] {
+            assert_ne!(
+                classify_shell_command(cmd),
+                RiskClass::ReadOnly,
+                "a reader writing through a flag rated read-only: {cmd}"
+            );
+        }
+        // The same tools without the flag are still the reads they are.
+        for cmd in [
+            "git log --oneline -5",
+            "git diff -p HEAD~1",
+            "git show HEAD",
+            "tree -L 2 .",
+            "sort -k2 f",
+            "sort -r f",
+            "yq .a f.yml",
+            "date +%s",
+            "fd -e rs .",
+            "rg pattern",
+            "less f",
+            "uniq f",
+            "hostname",
+            "hostname -f",
+        ] {
+            assert_eq!(
+                classify_shell_command(cmd),
+                RiskClass::ReadOnly,
+                "a plain read rated as a mutation: {cmd}"
+            );
+        }
+    }
+
     #[test]
     fn audit_control_group_mutations_still_blocked() {
         // Classifier audit control group: confirm the additions above didn't
