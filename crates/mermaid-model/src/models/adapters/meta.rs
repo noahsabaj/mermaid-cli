@@ -79,7 +79,7 @@ impl MetaAdapter {
                     reason: error.to_string(),
                 })
             })?;
-        // Prefix, not exact-id: a future muse-spark-1.2 should inherit the
+        // Prefix, not exact-id: a future muse-spark-1.4 should inherit the
         // documented family limits instead of regressing to "unknown".
         let muse_spark = model_name.to_ascii_lowercase().starts_with("muse-spark");
         // The one sanctioned static-window exception (see capabilities.rs's
@@ -92,7 +92,7 @@ impl MetaAdapter {
                 .then_some(crate::constants::META_MUSE_SPARK_MAX_OUTPUT_TOKENS),
             ..ModelCapabilities::advertised(
                 true,
-                ReasoningCapability::Levels(meta_reasoning_levels()),
+                ReasoningCapability::Levels(meta_reasoning_levels(&model_name)),
             )
             .with_provider_continuation()
         };
@@ -338,7 +338,7 @@ pub(crate) fn build_request_body(
     config: &ModelConfig,
     model_name: &str,
 ) -> Value {
-    let effort = nearest_effort(config.reasoning, &meta_reasoning_levels())
+    let effort = nearest_effort(config.reasoning, &meta_reasoning_levels(model_name))
         .unwrap_or(ReasoningLevel::Minimal);
     let mut body = json!({
         "model": model_name,
@@ -493,14 +493,43 @@ fn combined_instructions(config: &ModelConfig) -> String {
     }
 }
 
-fn meta_reasoning_levels() -> Vec<ReasoningLevel> {
-    vec![
+/// Whether this model id supports the `max` reasoning tier.
+///
+/// `max` went public on `muse-spark-1.3` (Sept 4, after the launch-gating
+/// safety review); 1.1/1.2 top out at `xhigh`, so a `Max` request for them
+/// keeps snapping down via `nearest_effort`. The minor is parsed rather
+/// than matched so a future 1.4 inherits `max`; an id with no parseable
+/// `1.N` version is assumed current (same forward-compat rule as the
+/// context-window prefix above).
+fn meta_supports_max(model_name: &str) -> bool {
+    let lower = model_name.to_ascii_lowercase();
+    let Some((_, rest)) = lower.split_once("muse-spark-") else {
+        return true;
+    };
+    // Expect `1.N...`, possibly with a `-suffix` like `-contributor` on the
+    // minor. Major 2+, or an unrecognized shape, assumes current.
+    let mut parts = rest.split('.');
+    match (parts.next(), parts.next()) {
+        (Some("1"), Some(minor)) => {
+            let digits: String = minor.chars().take_while(char::is_ascii_digit).collect();
+            digits.parse::<u64>().map_or(true, |n| n >= 3)
+        },
+        _ => true,
+    }
+}
+
+fn meta_reasoning_levels(model_name: &str) -> Vec<ReasoningLevel> {
+    let mut levels = vec![
         ReasoningLevel::Minimal,
         ReasoningLevel::Low,
         ReasoningLevel::Medium,
         ReasoningLevel::High,
         ReasoningLevel::XHigh,
-    ]
+    ];
+    if meta_supports_max(model_name) {
+        levels.push(ReasoningLevel::Max);
+    }
+    levels
 }
 
 fn meta_effort(level: ReasoningLevel) -> &'static str {
@@ -509,7 +538,10 @@ fn meta_effort(level: ReasoningLevel) -> &'static str {
         ReasoningLevel::Low => "low",
         ReasoningLevel::Medium => "medium",
         ReasoningLevel::High => "high",
-        ReasoningLevel::XHigh | ReasoningLevel::Max => "xhigh",
+        ReasoningLevel::XHigh => "xhigh",
+        // Reachable only when the model id advertises `Max`; older models
+        // snap down to `XHigh` in `nearest_effort` before reaching here.
+        ReasoningLevel::Max => "max",
     }
 }
 
@@ -700,6 +732,55 @@ mod tests {
         let body = build_request_body(&messages(), &cfg, "muse-spark-1.1");
         assert_eq!(body["reasoning"]["effort"], "minimal");
         assert!(body.get("max_output_tokens").is_none());
+    }
+
+    #[test]
+    fn max_reasoning_sends_max_on_1_3() {
+        // `max` went public on muse-spark-1.3; the request must carry it
+        // verbatim, including the `-contributor` suffixed id.
+        for model in [
+            "muse-spark-1.3",
+            "muse-spark-1.3-contributor",
+            "MUSE-SPARK-1.3",
+        ] {
+            let body = build_request_body(&messages(), &config(), model);
+            assert_eq!(body["reasoning"]["effort"], "max", "model {model}");
+        }
+        // XHigh stays xhigh on 1.3 — the tier below max must not over-deliver.
+        let mut cfg = config();
+        cfg.reasoning = ReasoningLevel::XHigh;
+        let body = build_request_body(&messages(), &cfg, "muse-spark-1.3");
+        assert_eq!(body["reasoning"]["effort"], "xhigh");
+    }
+
+    #[test]
+    fn max_reasoning_snaps_to_xhigh_before_1_3() {
+        // 1.1/1.2 top out at xhigh: a Max request downgrades rather than
+        // sending a value the API rejects.
+        for model in ["muse-spark-1.1", "muse-spark-1.2"] {
+            let body = build_request_body(&messages(), &config(), model);
+            assert_eq!(body["reasoning"]["effort"], "xhigh", "model {model}");
+        }
+    }
+
+    #[test]
+    fn meta_supports_max_gates_on_minor_version() {
+        for model in [
+            "muse-spark-1.3",
+            "muse-spark-1.3-contributor",
+            "muse-spark-1.4",
+            "muse-spark-2.0",
+            "muse-spark",
+            "something-else-entirely",
+        ] {
+            assert!(meta_supports_max(model), "model {model} should support max");
+        }
+        for model in ["muse-spark-1.1", "muse-spark-1.2", "MUSE-SPARK-1.1"] {
+            assert!(
+                !meta_supports_max(model),
+                "model {model} should not support max"
+            );
+        }
     }
 
     #[test]

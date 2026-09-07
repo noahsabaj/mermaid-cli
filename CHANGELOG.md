@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ReasoningLevel::parse` (the slash-command path) missed the `xhigh` arm, so
   the command parsed to `None` and printed the current depth. Alt+T,
   `--reasoning xhigh`, and config-file `xhigh` already worked.
+- **`reasoning: max` reaches Meta's `max` tier on muse-spark-1.3.** The Meta
+  adapter collapsed `Max` to `xhigh`, which was correct while `max` was in
+  partner preview but stale since its Sept 4 public release: a 1.3 session
+  set to `max` now sends `reasoning: {effort: "max"}`. muse-spark-1.1/1.2
+  still snap down to `xhigh`, which is their top accepted tier.
 - **The release pipeline still ran `mermaid version`.** The subcommand went
   in 0.26.0 (`--version` is the one that stays), but `release.yml`'s build
   smoke test, the `install.sh` check and the Homebrew formula's test all
