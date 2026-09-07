@@ -2,36 +2,36 @@
 source: src/render/snapshots.rs
 expression: frame
 ---
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
  > audit the codebase (use agents)                                                                                      
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
                                                                                                                         
  ◐ Running 3 agents... (esc to interrupt · ctrl+b to background · 45s · ↓ 20.4k tokens)                                 
    ◦ Map repo structure  read_file… · 45s · ↓ 12.3k tokens                                                              

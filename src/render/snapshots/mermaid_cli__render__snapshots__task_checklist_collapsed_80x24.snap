@@ -2,22 +2,22 @@
 source: src/render/snapshots.rs
 expression: frame
 ---
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
  > ship the feature                                                             
                                                                                 
  ● Bash(cargo check)                                                            
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
                                                                                 
  ◐ Wiring the broker through ExecContext...                                     
    (esc to interrupt · ctrl+b to background · 3s · ↓ 0 tokens)                  

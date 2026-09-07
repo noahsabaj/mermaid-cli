@@ -301,6 +301,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   -- `panic` 136 to 139, `redundant_pub_crate` 187 to 190,
   `option_if_let_else` 71 to 74, `large_stack_arrays` 28 to 29 -- while
   twenty-two others shrank, 2,230 occurrences to 2,166 across 79 lints.
+- **A short transcript sits against the composer.** A conversation shorter
+  than the chat area used to float at the top of an otherwise empty screen;
+  the blank rows now go above it, so the newest line is where it will be
+  once the transcript is long enough to scroll. Drag selection and image
+  clicks subtract the padding, and a click in it maps to nothing.
+
 
 ## [0.25.0] - 2026-08-10
 

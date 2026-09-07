@@ -2,6 +2,14 @@
 source: src/render/snapshots.rs
 expression: frame
 ---
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
  > run the tests and summarize                                                  
                                                                                 
  ● All 42 tests pass. The flaky one was fixed by pinning the clock:             
@@ -13,14 +21,6 @@ expression: frame
    ⎿ took 2.5s                                                                  
                                                                                 
    Worked for 12s · 1.2k tokens                                                 
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
                                                                                 
 ╭──────────────────────────────────────────────────────────────────────────────╮
 │ >                                                                            │
