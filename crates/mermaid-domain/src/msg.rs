@@ -621,6 +621,13 @@ pub enum SlashCmd {
     /// No arg → show current theme; `Some("dark"|"light")` → switch and
     /// persist. Anything else → usage.
     Theme(Option<String>),
+    /// Output style (`/output-style`): no name → list every style the shell
+    /// can see; `Some(name)` → switch for this session and persist. `project`
+    /// persists to `<git-root>/.mermaid/config.toml` instead of the user file.
+    OutputStyle {
+        name: Option<String>,
+        project: bool,
+    },
     /// Compose the input draft in `$VISUAL`/`$EDITOR` (also Ctrl+O).
     Editor,
     Help,

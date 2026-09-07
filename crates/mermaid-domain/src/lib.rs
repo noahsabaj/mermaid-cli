@@ -67,10 +67,11 @@ pub use compaction::{
     should_auto_compact, validate_summary_structure,
 };
 pub use config::{
-    AgentTypeConfig, AgentsConfig, CompactionConfig, Config, ConfigLayer, ExecConfig, FetchBackend,
-    FilesystemPolicy, McpServerConfig, MemoryConfig, NetworkPolicy, PlanConfig, PlanPermLevel,
-    PlanPermissions, PlanPostApprove, SafetyConfig, SearchBackend, SessionFlags, ThemeChoice,
-    TransportKind, UiConfig, UserProviderConfig, WebConfig,
+    ActiveStyle, AgentTypeConfig, AgentsConfig, CompactionConfig, Config, ConfigLayer, ExecConfig,
+    FetchBackend, FilesystemPolicy, McpServerConfig, MemoryConfig, NetworkPolicy, OutputConfig,
+    OutputStyleSummary, PlanConfig, PlanPermLevel, PlanPermissions, PlanPostApprove, SafetyConfig,
+    SearchBackend, SessionFlags, ThemeChoice, TransportKind, UiConfig, UserProviderConfig,
+    WebConfig,
 };
 pub use context::{
     InstructionSource, LoadedInstructions, LoadedMemory, LoadedSkills, MemoryEntry, MemoryScope,

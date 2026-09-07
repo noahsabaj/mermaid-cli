@@ -93,6 +93,24 @@ pub(crate) fn help_text(plugin_commands: &[crate::PluginCommand]) -> String {
     lines.join("\n")
 }
 
+/// One-line output-style summary for `/doctor`: the selected style and the
+/// layer that provided it (`default` when the stock prompt applies).
+pub(crate) fn output_style_display(state: &State) -> String {
+    let name = state.settings.output.style.trim();
+    if name.is_empty() || name == crate::prompts::DEFAULT_OUTPUT_STYLE {
+        return "default".to_string();
+    }
+    let kind = if state.settings.active_style.custom {
+        "custom"
+    } else {
+        "built-in"
+    };
+    format!(
+        "{name} ({kind}, from {})",
+        state.settings.active_style.source
+    )
+}
+
 pub(crate) fn doctor_text(state: &State) -> String {
     let mut lines = Vec::new();
     lines.push("Mermaid Doctor".to_string());
@@ -137,6 +155,7 @@ pub(crate) fn doctor_text(state: &State) -> String {
             "default"
         }
     ));
+    lines.push(format!("Output style: {}", output_style_display(state)));
     match &state.instructions {
         Some(instructions) => lines.push(format!(
             "Project instructions: {} bytes from {} source(s){}",

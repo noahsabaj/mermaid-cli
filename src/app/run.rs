@@ -186,6 +186,12 @@ pub async fn run_interactive_with(
             .pending_msgs
             .push_back(Msg::TransientStatus { text });
     }
+    if let Some(text) = crate::app::output_styles::output_style_notice(&config) {
+        state
+            .ui
+            .pending_msgs
+            .push_back(Msg::TransientStatus { text });
+    }
     let (runner, mut msg_rx) = EffectRunner::pair_from(cwd.clone(), providers, tools);
     // Interactive TUI: enable inline approval prompts so `ask` mode (and Auto
     // escalations) pause and prompt instead of erroring out, and inline
@@ -591,6 +597,24 @@ fn web_capabilities_notice(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn output_style_notice_speaks_only_for_non_default_styles() {
+        use crate::app::output_styles::output_style_notice;
+        assert_eq!(output_style_notice(&Config::default()), None);
+        let mut config = Config::default();
+        config.output.style = "concise".to_string();
+        config.active_style = mermaid_domain::ActiveStyle {
+            body: "x".to_string(),
+            keep_coding_instructions: true,
+            custom: false,
+            source: "user".to_string(),
+        };
+        let notice = output_style_notice(&config).expect("non-default style is announced");
+        assert!(notice.contains("concise"), "{notice}");
+        assert!(notice.contains("built-in"), "{notice}");
+        assert!(notice.contains("user"), "{notice}");
+    }
 
     #[test]
     fn bootstrap_always_ensures_the_session_scratchpad() {

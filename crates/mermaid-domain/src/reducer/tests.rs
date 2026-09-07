@@ -5738,6 +5738,241 @@ fn theme_command_notes_no_color() {
 }
 
 #[test]
+fn output_style_bare_lists_via_query() {
+    let (_, cmds) = update(
+        fresh_state(),
+        Msg::Slash(SlashCmd::OutputStyle {
+            name: None,
+            project: false,
+        }),
+    );
+    assert!(
+        cmds.iter()
+            .any(|c| matches!(c, Cmd::Query(Query::ListOutputStyles))),
+        "bare /output-style must ask the shell for the listing"
+    );
+}
+
+#[test]
+fn output_style_builtin_switches_and_persists() {
+    let (state, cmds) = update(
+        fresh_state(),
+        Msg::Slash(SlashCmd::OutputStyle {
+            name: Some("concise".to_string()),
+            project: false,
+        }),
+    );
+    assert_eq!(state.settings.output.style, "concise");
+    assert!(state.settings.active_style.body.contains("concise"));
+    assert!(!state.settings.active_style.custom);
+    assert!(
+        cmds.iter()
+            .any(|c| matches!(c, Cmd::PersistOutputStyle { style } if style == "concise"))
+    );
+    let last = state.session.messages().last().unwrap().content.clone();
+    assert!(
+        last.contains("concise"),
+        "confirmation names the style: {last}"
+    );
+}
+
+#[test]
+fn output_style_default_resets_without_a_lookup() {
+    let mut state = fresh_state();
+    state.settings.output.style = "concise".to_string();
+    let (state, cmds) = update(
+        state,
+        Msg::Slash(SlashCmd::OutputStyle {
+            name: Some("default".to_string()),
+            project: true,
+        }),
+    );
+    assert_eq!(state.settings.output.style, "default");
+    assert!(state.settings.active_style.body.is_empty());
+    assert!(
+        cmds.iter()
+            .any(|c| matches!(c, Cmd::PersistProjectOutputStyle { style } if style == "default"))
+    );
+    assert!(
+        !cmds.iter().any(|c| matches!(c, Cmd::Query(_))),
+        "resetting to default needs no filesystem lookup"
+    );
+}
+
+#[test]
+fn output_style_rejects_invalid_names() {
+    let (state, cmds) = update(
+        fresh_state(),
+        Msg::Slash(SlashCmd::OutputStyle {
+            name: Some("Has Space!".to_string()),
+            project: false,
+        }),
+    );
+    assert_eq!(state.settings.output.style, "default");
+    assert!(
+        !cmds.iter().any(|c| matches!(
+            c,
+            Cmd::PersistOutputStyle { .. } | Cmd::PersistProjectOutputStyle { .. } | Cmd::Query(_)
+        )),
+        "an invalid name must change nothing and start no lookup"
+    );
+    let last = state.session.messages().last().unwrap().content.clone();
+    assert!(
+        last.contains("Has Space!"),
+        "names the rejected value: {last}"
+    );
+}
+
+#[test]
+fn output_style_custom_load_stamps_and_persists() {
+    let (state, cmds) = update(
+        fresh_state(),
+        Msg::Slash(SlashCmd::OutputStyle {
+            name: Some("terse".to_string()),
+            project: false,
+        }),
+    );
+    assert!(
+        cmds.iter().any(|c| matches!(
+            c,
+            Cmd::Query(Query::LoadOutputStyle { name, .. }) if name == "terse"
+        )),
+        "a non-builtin name must load through the shell"
+    );
+    let (state, cmds) = update(
+        state,
+        Msg::QueryResult(QueryResult::OutputStyleLoaded {
+            name: "terse".to_string(),
+            project: false,
+            found: true,
+            body: "Be brief.".to_string(),
+            keep_coding_instructions: false,
+            custom: true,
+            source: "user".to_string(),
+        }),
+    );
+    assert_eq!(state.settings.active_style.body, "Be brief.");
+    assert!(!state.settings.active_style.keep_coding_instructions);
+    assert!(state.settings.active_style.custom);
+    assert!(
+        cmds.iter()
+            .any(|c| matches!(c, Cmd::PersistOutputStyle { style } if style == "terse"))
+    );
+}
+
+#[test]
+fn output_style_load_ignores_a_stale_race() {
+    let (mut state, _) = update(
+        fresh_state(),
+        Msg::Slash(SlashCmd::OutputStyle {
+            name: Some("terse".to_string()),
+            project: false,
+        }),
+    );
+    state.settings.output.style = "concise".to_string();
+    let (state, cmds) = update(
+        state,
+        Msg::QueryResult(QueryResult::OutputStyleLoaded {
+            name: "terse".to_string(),
+            project: false,
+            found: true,
+            body: "Be brief.".to_string(),
+            keep_coding_instructions: true,
+            custom: true,
+            source: "user".to_string(),
+        }),
+    );
+    assert!(
+        state.settings.active_style.body.is_empty(),
+        "stale load must not clobber"
+    );
+    assert!(
+        !cmds
+            .iter()
+            .any(|c| matches!(c, Cmd::PersistOutputStyle { .. })),
+        "stale load must not persist"
+    );
+}
+
+#[test]
+fn output_style_unknown_name_falls_back_to_default() {
+    let (state, _) = update(
+        fresh_state(),
+        Msg::Slash(SlashCmd::OutputStyle {
+            name: Some("ghost".to_string()),
+            project: false,
+        }),
+    );
+    let (state, cmds) = update(
+        state,
+        Msg::QueryResult(QueryResult::OutputStyleLoaded {
+            name: "ghost".to_string(),
+            project: false,
+            found: false,
+            body: String::new(),
+            keep_coding_instructions: true,
+            custom: false,
+            source: String::new(),
+        }),
+    );
+    assert_eq!(state.settings.output.style, "default");
+    assert!(state.settings.active_style.body.is_empty());
+    assert!(
+        !cmds.iter().any(|c| matches!(
+            c,
+            Cmd::PersistOutputStyle { .. } | Cmd::PersistProjectOutputStyle { .. } | Cmd::Query(_)
+        )),
+        "a fallback warns but persists nothing and starts no lookup"
+    );
+    let last = state.session.messages().last().unwrap().content.clone();
+    assert!(last.contains("ghost"), "names the missing style: {last}");
+}
+
+#[test]
+fn output_styles_listing_marks_the_current_style() {
+    let entries = vec![
+        crate::OutputStyleSummary {
+            name: "default".to_string(),
+            description: "Stock".to_string(),
+            custom: false,
+            source: "builtin".to_string(),
+        },
+        crate::OutputStyleSummary {
+            name: "terse".to_string(),
+            description: "Brief".to_string(),
+            custom: true,
+            source: "user".to_string(),
+        },
+    ];
+    let text = crate::reducer::slash::output_styles_text("terse", &entries);
+    assert!(text.contains("/output-style terse (current)"));
+    assert!(text.contains("[custom, user]"));
+    assert!(text.contains("[built-in]"));
+}
+
+#[test]
+fn system_prompt_applies_the_active_style_except_for_subagents() {
+    let mut state = fresh_state();
+    state.settings.active_style = crate::ActiveStyle {
+        body: "STYLE MARKER".to_string(),
+        keep_coding_instructions: true,
+        custom: true,
+        source: "user".to_string(),
+    };
+    let prompt = crate::request::system_prompt_for_state(&state);
+    assert!(
+        prompt.contains("STYLE MARKER"),
+        "main prompt carries the style"
+    );
+    state.session.is_subagent = true;
+    let prompt = crate::request::system_prompt_for_state(&state);
+    assert!(
+        !prompt.contains("STYLE MARKER"),
+        "subagents keep the stock prompt"
+    );
+}
+
+#[test]
 fn ctrl_o_composes_draft_in_editor() {
     let ctrl_o = Msg::Key(Key {
         code: KeyCode::Char('o'),

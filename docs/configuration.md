@@ -36,7 +36,7 @@ structural:
 
 - Only these top-level sections are honored: `default_model`, `model_aliases`,
   `reasoning_per_model`, `ollama`, `ollama_num_ctx_per_model`, `compaction`,
-  `memory`, `ui`, and a `safety` subset. Anything else —
+  `memory`, `output`, `ui`, and a `safety` subset. Anything else —
   including `web` (selects egress routing), `mcp_servers` (spawns commands), `providers`
   (redirects traffic/credentials), `agents`, and `daemon` — is ignored with a warning.
   `ollama.host`/`port` are also denied inside the otherwise-allowed `ollama` table.
@@ -127,6 +127,12 @@ checkpoint_on_mutation = true
 # variable (any non-empty value) disables colors entirely, regardless of
 # this value.
 theme = "dark"
+
+[output]
+# Voice/format preset for the system prompt (`/output-style`): "default"
+# (stock prompt), "proactive", "concise", "explanatory", "learning", or a
+# custom output-styles/<name>.md file. See "Output styles" below.
+# style = "concise"
 
 # Durable agent memory (the `memory` tool, the always-loaded index, and
 # /remember & friends). On by default.
@@ -239,6 +245,34 @@ mermaid --append-system-prompt-file ./extra-instructions.md
 mermaid --system-prompt "You are a focused code reviewer."
 mermaid --system-prompt-file ./replacement-system-prompt.md
 ```
+
+## Output styles
+
+Output styles (`/output-style`) are named voice/format presets that modify the
+system prompt. Built-ins: `default` (the stock prompt), `proactive`, `concise`,
+`explanatory`, and `learning`. A custom style is a Markdown file with optional
+frontmatter (`name`, `description`, `keep-coding-instructions`, which defaults
+to keeping the built-in engineering instructions) plus the instructions to add:
+
+```bash
+/output-style                  # list every selectable style
+/output-style concise          # switch for this session (persists to user config)
+/output-style terse --project  # ...or to <git-root>/.mermaid/config.toml
+mermaid --output-style concise # one invocation only (session-scoped)
+```
+
+```toml
+[output]
+style = "concise"
+```
+
+Custom files live in `~/.config/mermaid/output-styles/<name>.md` (every project)
+or `<git-root>/.mermaid/output-styles/<name>.md` (this project wins on a name
+clash); a custom name shadows a built-in. Files are capped at 40 KiB and an
+unknown selection warns and falls back to `default`. A switch applies to the
+next message — no `/clear` needed — and never touches subagents, which keep
+the stock prompt. `mermaid doctor` reports the active style and which layer
+set it.
 
 ## Web tool backends
 

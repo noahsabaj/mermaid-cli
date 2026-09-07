@@ -250,6 +250,8 @@ pub(crate) struct DoctorReport {
     pub(crate) safety_mode: String,
     pub(crate) checkpoint_on_mutation: bool,
     pub(crate) prompt_customized: bool,
+    pub(crate) output_style: String,
+    pub(crate) output_style_source: String,
     pub(crate) ollama: DoctorCheck,
     pub(crate) remote_providers: Vec<String>,
     /// Providers the user configured that still cannot be built, with the
@@ -425,6 +427,8 @@ pub(crate) async fn build_doctor_report(
         safety_mode: safety_mode_name(config.safety.mode).to_string(),
         checkpoint_on_mutation: config.safety.checkpoint_on_mutation,
         prompt_customized: config.prompt.is_customized(),
+        output_style: config.output.style.clone(),
+        output_style_source: config.active_style.source.clone(),
         ollama,
         remote_providers,
         provider_problems,
@@ -709,6 +713,10 @@ fn print_doctor_text(report: &DoctorReport) {
         } else {
             "default"
         }
+    );
+    println!(
+        "  [INFO] Output style: {} (from {})",
+        report.output_style, report.output_style_source
     );
     println!(
         "  [{}] Runtime daemon: {}",

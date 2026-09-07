@@ -22,6 +22,7 @@ mermaid --append-system-prompt "Prefer small diffs" # Add one-off runtime instru
 mermaid --append-system-prompt-file ./rules.md   # ...or append them from a file
 mermaid --system-prompt "You are terse."          # Replace the default prompt for one run
 mermaid --system-prompt-file ./prompt.md         # ...or replace it from a file
+mermaid --output-style concise                   # Use an output style for one run (session-scoped)
 mermaid -c safety.mode=full_access               # Override any config key for this run (repeatable, TOML values)
 mermaid --profile ci                             # Apply the [profiles.ci] overlay from your user config
 mermaid -v                                       # Verbose logging
@@ -139,6 +140,7 @@ Model and context:
 - `/visible-reasoning [on|off|toggle]` — show or hide reasoning blocks in the transcript
 - `/usage`, `/context`, `/compact [instructions]`
 - `/model-info <model>`
+- `/output-style [name] [--project]` — show or set the output style (voice/format preset: `default`, `proactive`, `concise`, `explanatory`, `learning`, or a custom style file). Persists to your user config, or to the project config with `--project`; applies to the next message, subagents keep the stock prompt
 
 Durable memory:
 

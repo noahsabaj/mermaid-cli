@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Output styles (`/output-style`).** Named voice/format presets that modify the system prompt: built-ins `default` (stock prompt), `proactive`, `concise`, `explanatory`, and `learning`, plus custom Markdown files with `name`/`description`/`keep-coding-instructions` frontmatter (keeping the built-in engineering instructions is the default). Custom files live user-globally (`~/.config/mermaid/output-styles/<name>.md`) or per-project (`<git-root>/.mermaid/output-styles/`, which wins on a clash); a custom name shadows a built-in. Select with `/output-style [name]` (persists to the user config, or the project config with `--project`), `[output] style = "..."` in either config file (project config may set it — prompt text, not a capability), or `--output-style` for one invocation. A switch applies to the next message with no `/clear` needed and never touches subagents; unknown names warn and fall back to `default`; `mermaid doctor` reports the active style and which layer set it.
+
 ### Fixed
 
 - **The release pipeline still ran `mermaid version`.** The subcommand went

@@ -206,14 +206,22 @@ pub(crate) fn system_prompt_for_state(state: &State) -> String {
     let default_prompt = get_system_prompt();
     let chosen = state.settings.prompt.base_prompt(&default_prompt);
     let planning = state.session.safety_mode.is_planning();
-    let base = if planning {
-        state
-            .settings
-            .prompt
-            .append_extras(&crate::prompts::adapt_prompt_for_plan_mode(chosen))
+    let adapted = if planning {
+        crate::prompts::adapt_prompt_for_plan_mode(chosen)
     } else {
-        state.settings.prompt.append_extras(chosen)
+        chosen.to_string()
     };
+    // Output styles (`/output-style`) shape the main conversation's voice.
+    // Subagents keep the stock prompt: a child runs headless with its own
+    // contract, and a voice preset would only bloat its context. The style
+    // applies AFTER the plan-mode adaptation (which owns the base) and
+    // BEFORE `append_system_prompt` extras (which are the user's own words
+    // and always win).
+    let styled = match output_style_for(state) {
+        Some((body, keep)) => crate::prompts::apply_output_style(&adapted, &body, keep),
+        None => adapted,
+    };
+    let base = state.settings.prompt.append_extras(&styled);
     // While a plan is being drafted the live-mode line would mislead ("attempt
     // gated actions") — the effective policy is the plan-mode read-only floor.
     // There is no restore target to name: plan is one position in the same
@@ -265,6 +273,25 @@ pub(crate) fn system_prompt_for_state(state: &State) -> String {
         );
     }
     prompt
+}
+
+/// The output-style body for this state, if any: an explicitly resolved
+/// custom file wins, else the built-in for `settings.output.style`, else none
+/// (`default`). `None` for subagents and for an empty resolved body — both
+/// keep the stock prompt.
+fn output_style_for(state: &State) -> Option<(String, bool)> {
+    if state.session.is_subagent {
+        return None;
+    }
+    let active = &state.settings.active_style;
+    if !active.body.trim().is_empty() {
+        return Some((active.body.clone(), active.keep_coding_instructions));
+    }
+    // No startup-resolved body (e.g. a `--replay` folding a log whose custom
+    // file is absent here): built-ins still resolve purely from the name, so
+    // replay reproduces them while customs fall back to `default`.
+    crate::prompts::builtin_output_style(state.settings.output.style.trim())
+        .map(|style| (style.body.to_string(), true))
 }
 
 /// Compose the "what runs while planning" sentence from the LIVE permission

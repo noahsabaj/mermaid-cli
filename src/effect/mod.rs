@@ -712,6 +712,10 @@ impl EffectRunner {
                     QueryResult::ProjectFilesListed(walk_project_files(&workdir))
                 });
             },
+            Query::ListOutputStyles => self.dispatch_list_output_styles(),
+            Query::LoadOutputStyle { name, project } => {
+                self.dispatch_load_output_style(name, project);
+            },
             Query::ListRuntimeTasks { limit } => self.send_blocking_query(move || {
                 QueryResult::RuntimeTasksListed(
                     crate::runtime_client::RuntimeClient::auto()
@@ -773,6 +777,40 @@ impl EffectRunner {
                 )
             }),
         }
+    }
+
+    /// `Query::ListOutputStyles` — every selectable output style
+    /// (built-ins plus user/project files).
+    fn dispatch_list_output_styles(&mut self) {
+        let workdir = self.workdir.clone();
+        self.send_blocking_query(move || {
+            QueryResult::OutputStylesListed(crate::app::output_styles::list_styles(&workdir))
+        });
+    }
+
+    /// `Query::LoadOutputStyle` — one style's body for the `/output-style`
+    /// switch. Answers `found: false` when nothing carries the name; the
+    /// reducer falls back to `default`.
+    fn dispatch_load_output_style(&mut self, name: String, project: bool) {
+        let workdir = self.workdir.clone();
+        self.send_blocking_query(move || {
+            let loaded = crate::app::output_styles::load_style_body(&workdir, &name);
+            let (found, body, keep, custom, source) = match loaded {
+                Some((body, keep, custom, source)) => {
+                    (true, body, keep, custom, source.to_string())
+                },
+                None => (false, String::new(), true, false, String::new()),
+            };
+            QueryResult::OutputStyleLoaded {
+                name,
+                project,
+                found,
+                body,
+                keep_coding_instructions: keep,
+                custom,
+                source,
+            }
+        });
     }
 
     /// `Query::LoadConversation` — read one saved conversation off disk. A
@@ -1400,6 +1438,26 @@ impl EffectRunner {
                 self.detached.spawn(async move {
                     if let Err(err) = crate::app::persist_ui_theme(theme) {
                         tracing::warn!(error = %err, "failed to persist theme");
+                    }
+                });
+            },
+            Cmd::PersistOutputStyle { style } => {
+                self.detached.spawn(async move {
+                    if let Err(err) = crate::app::persist_output_style(&style) {
+                        tracing::warn!(error = %err, "failed to persist output style");
+                    }
+                });
+            },
+            Cmd::PersistProjectOutputStyle { style } => {
+                let tx = self.msg_tx.clone();
+                let workdir = self.workdir.clone();
+                self.detached.spawn(async move {
+                    if let Err(err) = crate::app::persist_project_output_style(&workdir, &style) {
+                        let _ = tx
+                            .send(Msg::TransientStatus {
+                                text: format!("Couldn't save the project output style: {err}"),
+                            })
+                            .await;
                     }
                 });
             },
