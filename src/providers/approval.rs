@@ -243,7 +243,10 @@ pub fn is_domain_allowed(allowed_domains: &[String], url_or_command: &str) -> bo
 /// - `execute_command` keys on the **full normalized command** (whitespace
 ///   collapsed), so approving `curl https://safe.example` does NOT also clear
 ///   `curl https://evil.example` — argv0 keying was too coarse for a tool whose
-///   danger lives entirely in its arguments (#6).
+///   danger lives entirely in its arguments (#6). A command run OUTSIDE the
+///   project additionally keys on its working directory: `make` approved in
+///   the project must not cover `make` in a directory whose Makefile the
+///   model chose later, since the same string runs different code there.
 /// - `web_fetch` keys on the normalized authority (`web_fetch:<host>` or `web_fetch:<host>:<port>`),
 ///   so approving one URL on a domain clears subsequent fetches to that domain.
 /// - `web_search` keys on `"web_search"`.
@@ -265,13 +268,19 @@ pub fn allowlist_key(tool: &str, command: Option<&str>, external_path: Option<&s
         return format!("{tool}:{dir}");
     }
     if tool == "execute_command" {
+        // For an out-of-project command the gate's `path` IS the working
+        // directory (the exec tool sets it to the effective workdir on
+        // escalation), so it goes into the key whole.
+        let scope = external_path.map_or_else(String::new, |dir| format!("{dir}:"));
         if let Some(cmd) = command {
             let normalized = cmd.split_whitespace().collect::<Vec<_>>().join(" ");
             if !normalized.is_empty() {
-                return format!("execute_command:{normalized}");
+                return format!("execute_command:{scope}{normalized}");
             }
         }
-        return "execute_command".to_string();
+        return format!("execute_command:{scope}")
+            .trim_end_matches(':')
+            .to_string();
     }
     if tool == "web_fetch" {
         if let Some(cmd) = command
@@ -289,6 +298,28 @@ pub fn allowlist_key(tool: &str, command: Option<&str>, external_path: Option<&s
 
 #[cfg(test)]
 mod tests {
+    /// The same command string in two out-of-project directories runs two
+    /// different Makefiles; one approve-always must not cover both, and an
+    /// in-project approval must not cover either.
+    #[test]
+    fn execute_command_key_scopes_an_external_cwd() {
+        let inside = allowlist_key("execute_command", Some("make  test"), None);
+        let a = allowlist_key("execute_command", Some("make test"), Some("/srv/a"));
+        let b = allowlist_key("execute_command", Some("make test"), Some("/srv/b"));
+        assert_eq!(inside, "execute_command:make test");
+        assert_eq!(a, "execute_command:/srv/a:make test");
+        assert_ne!(a, b);
+        assert_ne!(a, inside);
+        assert_eq!(
+            allowlist_key("execute_command", None, Some("/srv/a")),
+            "execute_command:/srv/a"
+        );
+        assert_eq!(
+            allowlist_key("execute_command", None, None),
+            "execute_command"
+        );
+    }
+
     use super::*;
 
     #[test]
