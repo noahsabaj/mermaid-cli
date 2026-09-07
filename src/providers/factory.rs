@@ -261,7 +261,7 @@ fn resolve_cloudflare_endpoint(
     })
 }
 
-/// User-custom: no registry entry, but the user has [providers.<name>] in
+/// User-custom: no registry entry, but the user has `[providers.<name>]` in
 /// config. `base_url` is mandatory here — there is no default to fall back on.
 fn resolve_custom_endpoint(
     provider_lc: &str,
