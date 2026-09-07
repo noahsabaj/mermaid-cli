@@ -301,9 +301,11 @@ pub fn daemon_pipe_name() -> Result<String> {
     Ok(pipe_name_for_sid(&current_user_sid()?))
 }
 
-/// Owner-only pipe security for the daemon's listener. Owns the
-/// `LocalAlloc`ed security descriptor built from [`pipe_sddl`]; hand
-/// [`Self::attributes_ptr`] to `ServerOptions::create_with_security_attributes_raw`
+/// Owner-only security for the daemon's listener, and for any other object
+/// that must be reachable by this user alone (`atomic.rs` creates secret files
+/// with it). Owns the `LocalAlloc`ed security descriptor built from
+/// [`pipe_sddl`]; hand [`Self::attributes_ptr`] to
+/// `ServerOptions::create_with_security_attributes_raw` or `CreateFileW`
 /// while this guard is alive.
 #[cfg(windows)]
 pub struct PipeSecurity {

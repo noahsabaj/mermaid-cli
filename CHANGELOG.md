@@ -52,6 +52,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now uses the CLI's log (`~/.mermaid/mermaid.log`, redacted, owner-only;
   `RUST_LOG` sets the level) and logs its version on start. An ignored
   daemon integration test starts a real `mermaidd` and reads that line back.
+- **Process hardening applies on macOS and Windows, and says what it did.**
+  `harden_process` was a silent no-op off Linux. macOS now sets the core-dump
+  limit to zero and calls `ptrace(PT_DENY_ATTACH)`; Windows suppresses the
+  crash dialog whose debug path hands the process to a registered handler
+  (there is no per-process switch for WER dump collection, and the module
+  doc says so). The function returns what took effect, and `mermaid` logs a
+  warning at startup when nothing did instead of assuming the protection is
+  there. `mermaidd` applies it too; it had applied none.
+- **The Windows sandbox honours the half of the policy it was not asked to
+  enforce.** An AppContainer denies both axes by default, so `--confine-fs`
+  alone had also cut the network (no capability SIDs were attached) and
+  `--no-network` alone had blocked nearly every write (no path was granted).
+  Now `deny_network = false` attaches the three network capabilities, and an
+  empty write list grants the working directory and the temp directory. An
+  AppContainer cannot be told "writes unconfined", so that floor is
+  documented in `docs/sandbox.md`. Three Windows tests cover the capability
+  list, the implicit temp grant, and that write confinement alone leaves the
+  network reachable.
+- **Concurrent sandboxed commands on Windows no longer strip each other's
+  write grant.** The guard that undid a command's directory grant restored
+  the DACL it had captured before the grant, which also removed any grant a
+  command started since (a background command plus a foreground one on the
+  same project root). It now revokes its own container SID and nothing
+  else; a test grants a directory to two containers, drops one, and checks
+  the other's grant is still there.
+- **Secret files are owner-only on Windows too.** `write_atomic_with_mode`
+  dropped its `0600` on non-Unix and relied on the directory's inherited ACL.
+  On Windows it now creates the temp file through `CreateFileW` with the
+  same protected owner-plus-`SYSTEM` descriptor the daemon puts on its pipe,
+  so the config never carries a Users or Everyone grant, and a test reads the
+  resulting DACL back as SDDL to prove it.
 - **A long reasoning trace silently emptied the answer that followed it.**
   Every adapter shared one truncation flag between its reasoning and its
   content accumulators, so a trace past the 400K-char response cap stopped the

@@ -75,7 +75,14 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Memory",
     "Win32_System_Threading",
     "Win32_System_IO",
+    # `SetErrorMode` for `hardening.rs`.
+    "Win32_System_Diagnostics_Debug",
 ] }
+
+# macOS process hardening: `ptrace(PT_DENY_ATTACH)`, which rustix does not
+# bind. Nothing else here calls into `libc` on macOS.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
 
 # Linux OS sandbox: pure-Rust seccomp-BPF assembler for the network kill-switch,
 # plus the official `landlock` crate for filesystem write-confinement. `libc`

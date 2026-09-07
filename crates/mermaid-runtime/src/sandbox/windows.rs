@@ -2,6 +2,17 @@
 //!
 //! Enforces network kill-switch and filesystem write-confinement via
 //! native Windows AppContainers (LowBox tokens) and Job Objects.
+//!
+//! An AppContainer denies by default on both axes, so each half of the
+//! policy that is NOT requested has to be granted back explicitly:
+//!
+//! - network: the three well-known network capability SIDs are attached to
+//!   the container unless `deny_network` is set (without them a
+//!   `--confine-fs`-only run could not reach the network at all);
+//! - writes: with no `allowed_writes` the container is granted the current
+//!   directory and the temp directory (without that a `--no-network`-only
+//!   run could not write its own project). An AppContainer cannot be told
+//!   "writes unconfined", so this is the documented floor.
 
 use std::ffi::{OsStr, OsString};
 use std::os::windows::ffi::OsStrExt;
@@ -107,49 +118,47 @@ impl Drop for AutoHandle {
     }
 }
 
-/// RAII guard that restores a directory's previous DACL when dropped.
+/// RAII guard that revokes one container SID's grant on a directory when
+/// dropped.
+///
+/// It revokes the SID, not "restores the previous DACL": every sandboxed
+/// command grants its own container SID on the same project root, and two
+/// commands overlap whenever a background command is running. Restoring a
+/// DACL captured before the second grant would strip the second command's
+/// access mid-run (which is exactly how it surfaced: a test's redirect into
+/// a granted directory failed with access denied while a sibling test's
+/// guard dropped). Each container SID is unique to its run, so revoking it
+/// touches nothing another command added.
 struct DaclGuard {
     path_w: Vec<u16>,
-    old_dacl: *mut ACL,
-    sec_desc: PSECURITY_DESCRIPTOR,
-    new_dacl: *mut ACL,
+    /// The container SID, copied: the guard may outlive the profile that
+    /// produced it.
+    sid: Vec<u8>,
 }
 
 impl Drop for DaclGuard {
     fn drop(&mut self) {
-        unsafe {
-            let _ = SetNamedSecurityInfoW(
-                self.path_w.as_mut_ptr(),
-                SE_FILE_OBJECT,
-                DACL_SECURITY_INFORMATION,
-                null_mut(),
-                null_mut(),
-                self.old_dacl,
-                null_mut(),
-            );
-            if !self.new_dacl.is_null() {
-                LocalFree(self.new_dacl as _);
-            }
-            if !self.sec_desc.is_null() {
-                LocalFree(self.sec_desc as _);
-            }
-        }
+        let _ = edit_path_dacl(
+            &mut self.path_w,
+            self.sid.as_mut_ptr().cast(),
+            REVOKE_ACCESS,
+            0,
+        );
     }
 }
 
-/// Grant filesystem permissions to `sid` on `path`.
-fn grant_path_access(
-    path: &Path,
+/// Read `path`'s DACL, apply one `EXPLICIT_ACCESS` entry for `sid`
+/// (`GRANT_ACCESS` with `access_mask`, or `REVOKE_ACCESS`), and write it
+/// back. Reads the DACL at call time rather than reusing an earlier copy, so
+/// concurrent edits by other commands' guards compose instead of clobbering.
+fn edit_path_dacl(
+    path_w: &mut [u16],
     sid: PSID,
+    mode: ACCESS_MODE,
     access_mask: u32,
-) -> anyhow::Result<Option<DaclGuard>> {
-    if !path.exists() {
-        return Ok(None);
-    }
-    let mut path_w = to_wide_null(path.as_os_str());
+) -> anyhow::Result<()> {
     let mut old_dacl: *mut ACL = null_mut();
     let mut sec_desc: PSECURITY_DESCRIPTOR = null_mut();
-
     let status = unsafe {
         GetNamedSecurityInfoW(
             path_w.as_ptr(),
@@ -162,16 +171,14 @@ fn grant_path_access(
             &mut sec_desc,
         )
     };
-    if status != ERROR_SUCCESS {
-        anyhow::bail!(
-            "GetNamedSecurityInfoW failed for {}: {status}",
-            path.display()
-        );
-    }
+    anyhow::ensure!(
+        status == ERROR_SUCCESS,
+        "GetNamedSecurityInfoW failed: {status}"
+    );
 
     let mut ea: EXPLICIT_ACCESS_W = unsafe { std::mem::zeroed() };
     ea.grfAccessPermissions = access_mask;
-    ea.grfAccessMode = GRANT_ACCESS;
+    ea.grfAccessMode = mode;
     ea.grfInheritance = CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE;
     ea.Trustee.pMultipleTrustee = null_mut();
     ea.Trustee.MultipleTrusteeOperation = 0;
@@ -183,13 +190,10 @@ fn grant_path_access(
     let status = unsafe { SetEntriesInAclW(1, &ea, old_dacl, &mut new_dacl) };
     if status != ERROR_SUCCESS {
         unsafe {
-            if !sec_desc.is_null() {
-                LocalFree(sec_desc as _);
-            }
+            LocalFree(sec_desc as _);
         }
-        anyhow::bail!("SetEntriesInAclW failed for {}: {status}", path.display());
+        anyhow::bail!("SetEntriesInAclW failed: {status}");
     }
-
     let status = unsafe {
         SetNamedSecurityInfoW(
             path_w.as_mut_ptr(),
@@ -201,24 +205,43 @@ fn grant_path_access(
             null_mut(),
         )
     };
-    if status != ERROR_SUCCESS {
-        unsafe {
-            LocalFree(new_dacl as _);
-            if !sec_desc.is_null() {
-                LocalFree(sec_desc as _);
-            }
-        }
-        anyhow::bail!(
-            "SetNamedSecurityInfoW failed for {}: {status}",
-            path.display()
-        );
+    unsafe {
+        LocalFree(new_dacl as _);
+        LocalFree(sec_desc as _);
     }
+    anyhow::ensure!(
+        status == ERROR_SUCCESS,
+        "SetNamedSecurityInfoW failed: {status}"
+    );
+    Ok(())
+}
 
+/// Byte copy of a SID, so a guard can name its trustee after the profile
+/// that produced the SID is gone.
+fn copy_sid(sid: PSID) -> Vec<u8> {
+    let len = unsafe { GetLengthSid(sid) } as usize;
+    let mut buf = vec![0u8; len];
+    unsafe {
+        CopySid(len as u32, buf.as_mut_ptr().cast(), sid);
+    }
+    buf
+}
+
+/// Grant filesystem permissions to `sid` on `path`; the guard revokes them.
+fn grant_path_access(
+    path: &Path,
+    sid: PSID,
+    access_mask: u32,
+) -> anyhow::Result<Option<DaclGuard>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let mut path_w = to_wide_null(path.as_os_str());
+    edit_path_dacl(&mut path_w, sid, GRANT_ACCESS, access_mask)
+        .with_context(|| format!("granting the sandbox access to {}", path.display()))?;
     Ok(Some(DaclGuard {
         path_w,
-        old_dacl,
-        sec_desc,
-        new_dacl,
+        sid: copy_sid(sid),
     }))
 }
 
@@ -316,14 +339,86 @@ const WRITE_PERMISSIONS: u32 =
 const PROC_THREAD_ATTRIBUTE_HANDLE_LIST_ID: usize = 0x00020002;
 const PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES_ID: usize = 0x00020009;
 
+/// The roots a container may write when the policy confines nothing: the
+/// working directory and the temp directory. An AppContainer has no "writes
+/// unconfined" setting -- it can only be granted paths -- so a policy that
+/// asks for the network kill-switch alone still has to name what the child
+/// may write, and these two are what an unconfined command would touch.
+fn implicit_write_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        roots.push(cwd);
+    }
+    roots.push(std::env::temp_dir());
+    roots
+}
+
+fn write_roots(policy: &SandboxPolicy) -> Vec<PathBuf> {
+    if policy.allowed_writes.is_empty() {
+        implicit_write_roots()
+    } else {
+        policy.allowed_writes.clone()
+    }
+}
+
 fn setup_dacl_guards(policy: &SandboxPolicy, app_sid: PSID) -> anyhow::Result<Vec<DaclGuard>> {
     let mut guards = Vec::new();
-    for dir in &policy.allowed_writes {
-        if let Some(guard) = grant_path_access(dir, app_sid, WRITE_PERMISSIONS)? {
+    for dir in write_roots(policy) {
+        if let Some(guard) = grant_path_access(&dir, app_sid, WRITE_PERMISSIONS)? {
             guards.push(guard);
         }
     }
     Ok(guards)
+}
+
+/// `SE_GROUP_ENABLED` from `winnt.h`. `windows-sys` files it under
+/// `Win32_System_SystemServices`, a feature that drags in thousands of
+/// unrelated constants for one flag; the value has been 0x4 since NT.
+const SE_GROUP_ENABLED: u32 = 0x0000_0004;
+
+/// A well-known capability SID, owned, for a `SECURITY_CAPABILITIES` list.
+struct CapabilitySid {
+    buf: Vec<u8>,
+}
+
+impl CapabilitySid {
+    fn well_known(kind: WELL_KNOWN_SID_TYPE) -> anyhow::Result<Self> {
+        let mut buf = vec![0u8; SECURITY_MAX_SID_SIZE as usize];
+        let mut len = buf.len() as u32;
+        let ok = unsafe { CreateWellKnownSid(kind, null_mut(), buf.as_mut_ptr().cast(), &mut len) };
+        if ok == 0 {
+            let err = unsafe { GetLastError() };
+            anyhow::bail!("CreateWellKnownSid({kind}) failed (error code {err})");
+        }
+        buf.truncate(len as usize);
+        Ok(Self { buf })
+    }
+
+    fn as_psid(&self) -> PSID {
+        self.buf.as_ptr().cast_mut().cast()
+    }
+}
+
+/// The capability SIDs that let an AppContainer open network sockets:
+/// internet client, internet client+server, private-network client+server.
+/// A container without them has no network at all (the loopback exemption
+/// aside), which is the kill-switch; a container with all three has what a
+/// normal process has.
+const NETWORK_CAPABILITIES: [WELL_KNOWN_SID_TYPE; 3] = [
+    WinCapabilityInternetClientSid,
+    WinCapabilityInternetClientServerSid,
+    WinCapabilityPrivateNetworkClientServerSid,
+];
+
+/// Empty under `deny_network`; the three network capabilities otherwise.
+fn network_capabilities(policy: &SandboxPolicy) -> anyhow::Result<Vec<CapabilitySid>> {
+    if policy.deny_network {
+        return Ok(Vec::new());
+    }
+    NETWORK_CAPABILITIES
+        .iter()
+        .map(|kind| CapabilitySid::well_known(*kind))
+        .collect()
 }
 
 fn collect_stdio_handles(app_sid: PSID) -> (Vec<HANDLE>, HANDLE, HANDLE, HANDLE) {
@@ -543,10 +638,22 @@ pub(crate) fn run_in_appcontainer(
 
     let _dacl_guards = setup_dacl_guards(policy, app_sid.as_psid())?;
 
+    let capabilities = network_capabilities(policy)?;
+    let mut capability_attrs: Vec<SID_AND_ATTRIBUTES> = capabilities
+        .iter()
+        .map(|sid| SID_AND_ATTRIBUTES {
+            Sid: sid.as_psid(),
+            Attributes: SE_GROUP_ENABLED,
+        })
+        .collect();
     let mut sec_cap: SECURITY_CAPABILITIES = unsafe { std::mem::zeroed() };
     sec_cap.AppContainerSid = app_sid.as_psid();
-    sec_cap.Capabilities = null_mut();
-    sec_cap.CapabilityCount = 0;
+    sec_cap.Capabilities = if capability_attrs.is_empty() {
+        null_mut()
+    } else {
+        capability_attrs.as_mut_ptr()
+    };
+    sec_cap.CapabilityCount = capability_attrs.len() as u32;
 
     let (mut handles, h_stdin, h_stdout, h_stderr) = collect_stdio_handles(app_sid.as_psid());
     let (_attr_buf, attr_list) = setup_proc_attributes(&mut sec_cap, &mut handles)?;
@@ -680,6 +787,159 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// `deny_network` strips every capability; otherwise the three network
+    /// capabilities are attached, each a valid SID.
+    #[test]
+    fn network_capabilities_follow_the_policy() {
+        let denied = network_capabilities(&SandboxPolicy {
+            deny_network: true,
+            allowed_writes: Vec::new(),
+        })
+        .expect("capabilities");
+        assert!(denied.is_empty());
+
+        let allowed = network_capabilities(&SandboxPolicy::default()).expect("capabilities");
+        assert_eq!(allowed.len(), NETWORK_CAPABILITIES.len());
+        for sid in &allowed {
+            assert_ne!(unsafe { IsValidSid(sid.as_psid()) }, 0);
+        }
+    }
+
+    /// A policy that names no write roots is `--no-network` alone: the child
+    /// must still be able to write where an unconfined command would, so the
+    /// working directory and the temp directory are granted. Asserted on the
+    /// root list rather than by running a child: the grant propagates
+    /// inheritable ACEs down the whole working directory, which in a test is
+    /// the checkout (and its `target/`) while other test binaries are busy in
+    /// it -- slow, and it raced once in CI. The grant mechanism itself is
+    /// exercised by `appcontainer_enforces_write_confinement`.
+    #[test]
+    fn a_policy_without_write_roots_grants_cwd_and_temp() {
+        let policy = SandboxPolicy {
+            deny_network: true,
+            allowed_writes: Vec::new(),
+        };
+        let roots = write_roots(&policy);
+        assert!(roots.contains(&std::env::temp_dir()), "{roots:?}");
+        assert!(
+            roots.contains(&std::env::current_dir().unwrap()),
+            "{roots:?}"
+        );
+        let explicit = SandboxPolicy {
+            deny_network: true,
+            allowed_writes: vec![std::env::temp_dir()],
+        };
+        assert_eq!(write_roots(&explicit), vec![std::env::temp_dir()]);
+    }
+
+    /// Two commands granting the same directory: dropping the first guard
+    /// must leave the second's grant in place. The previous guard restored
+    /// the DACL it had captured before the second grant existed.
+    #[test]
+    fn dropping_one_grant_keeps_a_concurrent_grant_on_the_same_directory() {
+        fn sid_string(sid: PSID) -> String {
+            let mut w: *mut u16 = null_mut();
+            assert_ne!(unsafe { ConvertSidToStringSidW(sid, &mut w) }, 0);
+            let mut len = 0;
+            while unsafe { *w.add(len) } != 0 {
+                len += 1;
+            }
+            let s = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(w, len) });
+            unsafe {
+                LocalFree(w.cast());
+            }
+            s
+        }
+        fn dacl_sddl(path: &Path) -> String {
+            let path_w = to_wide_null(path.as_os_str());
+            let mut sd: PSECURITY_DESCRIPTOR = null_mut();
+            let rc = unsafe {
+                GetNamedSecurityInfoW(
+                    path_w.as_ptr(),
+                    SE_FILE_OBJECT,
+                    DACL_SECURITY_INFORMATION,
+                    null_mut(),
+                    null_mut(),
+                    null_mut(),
+                    null_mut(),
+                    &mut sd,
+                )
+            };
+            assert_eq!(rc, ERROR_SUCCESS);
+            let mut w: *mut u16 = null_mut();
+            assert_ne!(
+                unsafe {
+                    ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                        sd,
+                        SDDL_REVISION_1,
+                        DACL_SECURITY_INFORMATION,
+                        &mut w,
+                        null_mut(),
+                    )
+                },
+                0
+            );
+            let mut len = 0;
+            while unsafe { *w.add(len) } != 0 {
+                len += 1;
+            }
+            let s = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(w, len) });
+            unsafe {
+                LocalFree(w.cast());
+                LocalFree(sd.cast());
+            }
+            s
+        }
+
+        let dir = std::env::temp_dir().join(format!(
+            "mermaid-appcontainer-grants-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let first = AppContainerProfileGuard::create(&format!(
+            "mermaid-test-grant-a-{}",
+            std::process::id()
+        ))
+        .unwrap();
+        let second = AppContainerProfileGuard::create(&format!(
+            "mermaid-test-grant-b-{}",
+            std::process::id()
+        ))
+        .unwrap();
+        let first_sid = sid_string(first.as_psid());
+        let second_sid = sid_string(second.as_psid());
+
+        let guard_a = grant_path_access(&dir, first.as_psid(), WRITE_PERMISSIONS).unwrap();
+        let guard_b = grant_path_access(&dir, second.as_psid(), WRITE_PERMISSIONS).unwrap();
+        let both = dacl_sddl(&dir);
+        assert!(
+            both.contains(&first_sid) && both.contains(&second_sid),
+            "{both}"
+        );
+
+        drop(guard_a);
+        let after = dacl_sddl(&dir);
+        assert!(
+            !after.contains(&first_sid),
+            "first grant survived its guard: {after}"
+        );
+        assert!(
+            after.contains(&second_sid),
+            "second grant was stripped: {after}"
+        );
+
+        drop(guard_b);
+        let none = dacl_sddl(&dir);
+        assert!(!none.contains(&second_sid), "{none}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Vacuous on the CI runner: the runner's Python exits
+    /// STATUS_DLL_NOT_FOUND inside the container before running a line, so
+    /// `code != 0` holds without testing the kill-switch, and a curl.exe probe
+    /// could not be launched from inside the container there either ("Access
+    /// is denied" from cmd, cause not yet found). Left as it was; an
+    /// end-to-end network probe needs a hands-on Windows box.
     #[test]
     fn appcontainer_enforces_network_isolation() {
         let temp = std::env::temp_dir();
