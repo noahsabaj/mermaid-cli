@@ -866,7 +866,10 @@ mod tests {
             OsString::from("cmd.exe"),
             OsString::from("/c"),
             OsString::from(format!(
-                "(curl.exe -sS --max-time 5 -o NUL http://1.1.1.1/ && echo [curl ok] || echo [curl failed]) > \"{}\" 2>&1",
+                // No quotes around the path: the argv quoter escapes inner
+                // quotes as `\"`, which cmd.exe does not understand, and the
+                // temp path has no spaces.
+                "(curl.exe -sS --max-time 5 -o NUL http://1.1.1.1/ && echo [curl ok] || echo [curl failed]) > {} 2>&1",
                 out_path.display()
             )),
         ];
