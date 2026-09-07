@@ -47,6 +47,11 @@ pub struct ChatState {
     pub image_click_map: Vec<(u16, ImageClickTarget)>,
     /// Scroll position used in last render (for coordinate mapping)
     pub last_scroll_position: u16,
+    /// Rows of the chat area left blank ABOVE a transcript shorter than the
+    /// viewport, so a short conversation sits against the composer instead of
+    /// floating at the top of an empty screen. Zero once the transcript fills
+    /// the area. The screen-to-content mappings subtract it.
+    pub last_top_pad: u16,
     /// Chat area rect from last render
     pub last_chat_area: Option<(u16, u16, u16, u16)>, // (x, y, width, height)
     /// Active drag-selection in CONTENT coordinates: `(anchor, cursor)` where
@@ -94,6 +99,7 @@ impl ChatState {
             is_user_scrolling: false,
             image_click_map: Vec::new(),
             last_scroll_position: 0,
+            last_top_pad: 0,
             last_chat_area: None,
             selection: None,
             last_rendered_rows: Vec::new(),
@@ -156,9 +162,13 @@ impl ChatState {
             return None;
         }
 
-        // Convert screen row to content line
+        // Convert screen row to content line; the padding above a short
+        // transcript holds no content.
         let viewport_row = screen_row - area_y;
-        let content_line = viewport_row + self.last_scroll_position;
+        if viewport_row < self.last_top_pad {
+            return None;
+        }
+        let content_line = viewport_row - self.last_top_pad + self.last_scroll_position;
 
         // Look up in click map
         self.image_click_map
@@ -175,7 +185,12 @@ impl ChatState {
         if screen_row < area_y || screen_row >= area_y + area_height {
             return None;
         }
-        let content_line = (screen_row - area_y) as usize + self.last_scroll_position as usize;
+        let viewport_row = screen_row - area_y;
+        if viewport_row < self.last_top_pad {
+            return None;
+        }
+        let content_line =
+            (viewport_row - self.last_top_pad) as usize + self.last_scroll_position as usize;
         let col = screen_col.saturating_sub(area_x) as usize;
         Some((content_line, col))
     }
@@ -1013,6 +1028,16 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
 
         let scroll_pos = state.get_scroll_position(clamp_to_u16(content_height), viewport_height);
         state.last_scroll_position = scroll_pos;
+        // A transcript shorter than the viewport is bottom-anchored: the blank
+        // rows go above it, so the newest line sits against the composer the
+        // way it does once the transcript is long enough to scroll.
+        let top_pad = viewport_height.saturating_sub(clamp_to_u16(content_height));
+        state.last_top_pad = top_pad;
+        let content_area = Rect {
+            y: content_area.y.saturating_add(top_pad),
+            height: content_area.height.saturating_sub(top_pad),
+            ..content_area
+        };
 
         // Clone ONLY the visible window. Feeding the whole transcript to
         // `Paragraph` and letting it scroll meant cloning every line to paint a
@@ -2383,5 +2408,32 @@ mod tests {
         );
         // No duration → text unchanged (empty stays empty → renders no line).
         assert_eq!(append_action_duration(String::new(), None), "");
+    }
+
+    /// The padding above a short transcript holds no content: a click there
+    /// maps to nothing, and a click on the first painted row maps to content
+    /// line 0, not to the row's distance from the area top.
+    #[test]
+    fn screen_to_content_subtracts_the_top_pad() {
+        let mut state = ChatState {
+            last_chat_area: Some((1, 2, 78, 20)),
+            last_scroll_position: 0,
+            last_top_pad: 17,
+            ..Default::default()
+        };
+        assert_eq!(state.screen_to_content(2, 1), None);
+        assert_eq!(state.screen_to_content(18, 1), None);
+        assert_eq!(state.screen_to_content(19, 1), Some((0, 0)));
+        assert_eq!(state.screen_to_content(21, 5), Some((2, 4)));
+        state.image_click_map = vec![(
+            0,
+            ImageClickTarget {
+                message_index: 0,
+                image_index: 0,
+                image_number: None,
+            },
+        )];
+        assert!(state.find_image_at_screen_pos(18).is_none());
+        assert!(state.find_image_at_screen_pos(19).is_some());
     }
 }

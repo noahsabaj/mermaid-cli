@@ -2,24 +2,24 @@
 source: src/render/snapshots.rs
 expression: frame
 ---
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
  > explain the plan                                                             
                                                                                 
  ● The plan has three phases: first we                                          
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
                                                                                 
  ◐ Streaming... (esc to interrupt · 3s · ↓ 12 tokens)                           
 ╭──────────────────────────────────────────────────────────────────────────────╮

@@ -2,19 +2,19 @@
 source: src/render/snapshots.rs
 expression: frame
 ---
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
  > audit the codebase (use agents)                                              
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
                                                                                 
  ◐ Running 3 agents...                                                          
    (esc to interrupt · ctrl+b to background · 45s · ↓ 20.4k tokens)             

@@ -681,3 +681,33 @@ fn user_prompts_carry_no_timestamp() {
     assert!(!row.contains(" at "), "{row}");
     assert_eq!(row.trim(), "> what time is it");
 }
+
+/// A transcript shorter than the chat area sits against the composer, not
+/// at the top of an empty screen: the row above the composer band carries
+/// the newest line and the chat area's first row is blank.
+#[test]
+fn a_short_transcript_sits_against_the_composer() {
+    let mut s = scene_state();
+    s.session
+        .append(ChatMessage::user("only one line so far"), s.now);
+    let lines = frame_lines(&s, 80, 24);
+    let row = lines
+        .iter()
+        .position(|l| l.contains("only one line so far"))
+        .expect("user row");
+    let composer_top = lines
+        .iter()
+        .position(|l| l.trim_start().starts_with('╭'))
+        .expect("composer top border");
+    assert!(
+        composer_top - row <= 3,
+        "the message sits {} rows above the composer:\n{}",
+        composer_top - row,
+        lines.join("\n")
+    );
+    assert!(
+        lines[0].trim().is_empty(),
+        "first chat row must be blank: {:?}",
+        lines[0]
+    );
+}
