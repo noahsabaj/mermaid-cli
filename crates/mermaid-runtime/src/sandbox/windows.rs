@@ -866,10 +866,16 @@ mod tests {
             OsString::from("cmd.exe"),
             OsString::from("/c"),
             OsString::from(format!(
-                // No quotes around the path: the argv quoter escapes inner
-                // quotes as `\"`, which cmd.exe does not understand, and the
-                // temp path has no spaces.
-                "(curl.exe -sS --max-time 5 -o NUL http://1.1.1.1/ && echo [curl ok] || echo [curl failed]) > {} 2>&1",
+                // `cd /d` first: the child inherits the test's working directory
+                // (the checkout), which the container cannot read, and cmd will
+                // run builtins but not launch an external program from a
+                // directory it cannot see ("The current directory is invalid").
+                // In production the working directory is the project root, which
+                // the policy grants. No quotes around the paths: the argv quoter
+                // escapes inner quotes as `\"`, which cmd.exe does not
+                // understand, and the temp path has no spaces.
+                "(cd /d {} && curl.exe -sS --max-time 5 -o NUL http://1.1.1.1/ && echo [curl ok] || echo [curl failed]) > {} 2>&1",
+                dir.display(),
                 out_path.display()
             )),
         ];
