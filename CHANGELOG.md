@@ -95,6 +95,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   backgrounded socket probe; with the wrapping removed it reports
   `NET_ALLOWED`. A `current_exe` failure no longer falls back to whatever
   `mermaid` is on `PATH` as the launcher; the spawn fails closed instead.
+- **"Don't ask again" for a shell command did not remember where it ran.**
+  The allowlist key for `execute_command` was the command string alone, so
+  approving `make` once in the project let the model run the identical
+  string later with `working_dir` pointing anywhere else, where a different
+  Makefile answers, without a prompt. A command outside the project now keys
+  on its working directory as well, the way the file tools key on theirs.
 - **A long reasoning trace silently emptied the answer that followed it.**
   Every adapter shared one truncation flag between its reasoning and its
   content accumulators, so a trace past the 400K-char response cap stopped the
