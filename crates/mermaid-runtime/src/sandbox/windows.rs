@@ -996,22 +996,45 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Under `deny_network` the same curl probe must fail to connect. The
+    /// Python probe this replaces exited STATUS_DLL_NOT_FOUND inside the
+    /// container before running a line, so its `code != 0` passed without
+    /// testing the kill-switch. `curl: (7)` is the could-not-connect class;
+    /// the text after it reads `Permission denied` for WSAEACCES on the
+    /// runners seen so far, but curl's wording is not asserted.
     #[test]
     fn appcontainer_enforces_network_isolation() {
-        let temp = std::env::temp_dir();
+        let dir = std::env::temp_dir().join(format!(
+            "mermaid-appcontainer-deny-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
         let policy = SandboxPolicy {
             deny_network: true,
-            allowed_writes: vec![temp],
+            allowed_writes: vec![dir.clone()],
         };
-        let py_cmd = "import socket; s = socket.socket(socket.AF_INET, socket.SOCK_STREAM); s.settimeout(0.5); s.connect(('8.8.8.8', 80))";
+        let out_path = dir.join("probe.txt");
         let argv = vec![
-            OsString::from("python.exe"),
-            OsString::from("-c"),
-            OsString::from(py_cmd),
+            OsString::from("cmd.exe"),
+            OsString::from("/c"),
+            OsString::from(format!(
+                "(cd /d {} && curl.exe -sS --max-time 5 -o NUL http://1.1.1.1/ && echo [curl ok] || echo [curl failed]) > {} 2>&1",
+                dir.display(),
+                out_path.display()
+            )),
         ];
-        if resolve_executable(std::ffi::OsStr::new("python.exe")).is_file() {
-            let code = run_in_appcontainer(&policy, &argv).expect("run in appcontainer");
-            assert_ne!(code, 0);
-        }
+        let code = run_in_appcontainer(&policy, &argv).expect("run in appcontainer");
+        let output = std::fs::read_to_string(&out_path);
+        let _ = std::fs::remove_dir_all(&dir);
+        let output =
+            output.unwrap_or_else(|err| panic!("no probe output file (exit {code}): {err}"));
+        assert!(
+            output.contains("[curl failed]") && output.contains("curl: (7)"),
+            "the connect was not refused (exit {code}): {output}"
+        );
     }
 }
