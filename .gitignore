@@ -2,6 +2,13 @@
 # will have compiled files and executables
 /target/
 
+# Custom CARGO_TARGET_DIR build trees (per-profile/shell builds); same
+# generated content as /target/, so they stay out of git and out of
+# stash -u sweeps.
+target-hardening/
+target-mermaidd/
+target-tui/
+
 # Remove Cargo.lock from gitignore if creating an executable, leave it for libraries
 # More information here https://doc.rust-lang.org/cargo/guide/cargo-toml-vs-cargo-lock.html
 # Cargo.lock
