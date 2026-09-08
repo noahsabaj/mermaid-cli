@@ -347,6 +347,8 @@ jobs:
         run: python3 .github/scripts/check_expect_budget.py
       - name: Crate-root re-exports have consumers
         run: python3 .github/scripts/check_exports.py
+      - name: Build tree stays outside the working tree
+        run: python3 .github/scripts/check_build_tree_out_of_repo.py
       # Not a release step: this proves the release gate still FIRES, on a
       # fixture, so `just preflight` cannot rot into a check that passes
       # everything. It takes no version and touches no network.

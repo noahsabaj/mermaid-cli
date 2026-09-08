@@ -27,6 +27,7 @@ guards:
     {{python}} .github/scripts/check_layering.py
     {{python}} .github/scripts/check_expect_budget.py
     {{python}} .github/scripts/check_exports.py
+    {{python}} .github/scripts/check_build_tree_out_of_repo.py
     {{python}} .github/scripts/check_release_ready.py --self-test
 
 # Mirrors every gate `release.yml` applies, so a version mismatch or an empty
@@ -48,17 +49,45 @@ ratchet:
 # `just guards` and `just ratchet` because turning these lints on changes
 # clippy's fingerprint and rebuilds the workspace — minutes, against
 # milliseconds for the file-reading guards. CI runs it off the PR critical
-# path. `CLIPPY_RATCHET_TARGET_DIR` keeps that rebuild out of ./target, so the
-# next `cargo test` does not pay for this one. Both recipes run the clippy
+# path. `CLIPPY_RATCHET_TARGET_DIR` keeps that rebuild out of the
+# main build tree, so the next `cargo test` does not pay for this one. It is
+# an explicit override, so it does NOT inherit build.target-dir from
+# .cargo/config.toml — it has to name an out-of-tree path itself, or it
+# recreates a ./target inside the checkout. Both recipes run the clippy
 # named in .github/baselines/clippy_toolchain.txt (the script adds the
 # `+<toolchain>`), because each release moves these counts; to move to a
 # newer clippy, edit that file and re-record.
 clippy-debt:
-    CLIPPY_RATCHET_TARGET_DIR=target/clippy-debt {{python}} .github/scripts/check_clippy_ratchet.py
+    CLIPPY_RATCHET_TARGET_DIR=../mermaid-target/clippy-debt {{python}} .github/scripts/check_clippy_ratchet.py
 
 # Re-record it after paying some down.
 clippy-debt-record:
-    CLIPPY_RATCHET_TARGET_DIR=target/clippy-debt {{python}} .github/scripts/check_clippy_ratchet.py --write-baseline
+    CLIPPY_RATCHET_TARGET_DIR=../mermaid-target/clippy-debt {{python}} .github/scripts/check_clippy_ratchet.py --write-baseline
+
+# Create an isolated worktree off fresh origin/main, with its own build tree.
+#
+# Each worktree gets its OWN parent directory, which is what keeps the build
+# trees apart: build.target-dir in .cargo/config.toml is relative, and cargo
+# resolves it against each worktree's root, so `<base>/<name>/repo` builds into
+# `<base>/<name>/mermaid-target`. Worktrees sharing one parent would resolve to
+# one shared dir and serialise on cargo's exclusive target-dir lock -- which is
+# the whole reason the old setup used per-worktree CARGO_TARGET_DIR values, and
+# how target-hardening/, target-tui/ and target-mermaidd/ ended up inside the
+# checkout in the first place.
+#
+# Always off fresh origin/main, never off the primary checkout's HEAD.
+worktree NAME BASE="../mermaid-worktrees":
+    git fetch origin --quiet
+    git worktree add -b {{NAME}} {{BASE}}/{{NAME}}/repo origin/main
+    @echo "worktree:   {{BASE}}/{{NAME}}/repo"
+    @echo "build tree: {{BASE}}/{{NAME}}/mermaid-target (outside the worktree)"
+
+# Remove a worktree created by `just worktree`, and its build tree with it.
+# Dropping the worktree alone leaves gigabytes of build output orphaned on disk.
+worktree-rm NAME BASE="../mermaid-worktrees":
+    git worktree remove {{BASE}}/{{NAME}}/repo
+    rm -rf {{BASE}}/{{NAME}}
+    @echo "removed {{BASE}}/{{NAME}} (worktree + build tree)"
 
 # Format the whole workspace.
 fmt:
