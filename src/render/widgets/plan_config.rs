@@ -13,9 +13,9 @@ use crate::render::theme::Theme;
 use mermaid_domain::PlanConfig;
 
 /// Row count (kept in sync with `plan_config_rows` and the reducer's key
-/// handler). Rows: preset, builds, web, memory, tasks, model, reasoning,
-/// `auto_approve`, `post_approve`.
-pub const PLAN_CONFIG_ROWS: usize = 9;
+/// handler). Rows: preset, builds, web, memory, tasks, scratchpad, model,
+/// reasoning, `auto_approve`, `post_approve`.
+pub const PLAN_CONFIG_ROWS: usize = 10;
 
 /// Pane height: rows + border(2) + hint line.
 pub const PLAN_CONFIG_HEIGHT: u16 = PLAN_CONFIG_ROWS as u16 + 3;
@@ -40,6 +40,10 @@ pub fn plan_config_rows(plan: &PlanConfig, session_model: &str) -> Vec<(String, 
             perms.memory.as_str().to_string(),
         ),
         ("  task tools".to_string(), perms.tasks.as_str().to_string()),
+        (
+            "  scratchpad".to_string(),
+            perms.scratchpad.as_str().to_string(),
+        ),
         (
             "plan model".to_string(),
             plan.model.clone().unwrap_or_else(|| {
@@ -119,13 +123,15 @@ mod tests {
 
     #[test]
     fn row_count_matches_the_reducer_contract() {
-        // The reducer's key handler hardcodes PLAN_CONFIG_ROW_COUNT = 9;
-        // this pins the widget to the same shape so indices can't drift.
+        // The reducer's key handler indexes rows by hardcoded integer; this
+        // pins the widget to the same shape so the two cannot drift. Adding a
+        // category renumbers everything after it in BOTH places.
         let rows = plan_config_rows(&PlanConfig::default(), "ollama/test");
         assert_eq!(rows.len(), PLAN_CONFIG_ROWS);
-        assert_eq!(rows.len(), 9);
+        assert_eq!(rows.len(), 10);
         assert_eq!(rows[0].1, "default");
-        assert_eq!(rows[4].1, "deny");
-        assert!(rows[5].1.starts_with("unset"));
+        assert_eq!(rows[4].1, "deny", "task tools");
+        assert_eq!(rows[5].1, "allow", "scratchpad");
+        assert!(rows[6].1.starts_with("unset"), "plan model");
     }
 }

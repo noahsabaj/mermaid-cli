@@ -184,3 +184,86 @@ fn seatbelt_profile_compiles_under_both_policies() {
 
     let _ = std::fs::remove_dir_all(&base);
 }
+
+/// The plan-mode scratchpad carve-out's enforcement half, end-to-end through
+/// the real launcher with the exact roots `SandboxPlan::scratch_confined`
+/// builds: the scratchpad plus the discard devices, and nothing else.
+///
+/// The lexical prover (`is_scratch_only_command`) is the authorization and is
+/// unit-tested next to itself. What this proves is the other half — that a
+/// command granted the carve-out genuinely cannot reach the project tree even
+/// when it names it by absolute path, so the two together are belt and braces
+/// rather than one mechanism trusted twice.
+#[test]
+#[ignore = "spawns the real binary; run with: cargo test --test integration -- --ignored it::sandbox_fs::"]
+#[cfg(not(windows))]
+fn scratch_confinement_denies_the_project_tree() {
+    #[cfg(target_os = "linux")]
+    if !landlock_active() {
+        eprintln!("skipping: kernel has no active landlock LSM");
+        return;
+    }
+    let bin = env!("CARGO_BIN_EXE_mermaid");
+    let base = fresh_base();
+    let scratch = base.join("scratchpad");
+    let project = base.join("project");
+    std::fs::create_dir_all(&scratch).unwrap();
+    std::fs::create_dir_all(&project).unwrap();
+    let canary = project.join("canary.txt");
+    std::fs::write(&canary, "original").unwrap();
+    let scratch_arg = scratch.to_str().unwrap().to_string();
+
+    // Exactly the carve-out's roots: scratch + the safe devices. Notably NOT
+    // the project root, and NOT the system temp dir that contains both.
+    let roots = |cmd: &mut Command| {
+        cmd.args(["__sandbox-exec", "--no-network", "--confine-fs"]);
+        cmd.args(["--confine-writes", &scratch_arg]);
+        for dev in ["/dev/null", "/dev/zero", "/dev/tty"] {
+            cmd.args(["--confine-writes", dev]);
+        }
+        cmd.arg("--");
+    };
+
+    let mut inside = Command::new(bin);
+    roots(&mut inside);
+    inside.args([
+        "sh",
+        "-c",
+        &format!("echo hi > {}/in.txt", scratch.display()),
+    ]);
+    let inside = inside.output().expect("spawn confined shell (scratch)");
+    assert!(
+        inside.status.success(),
+        "a write into the scratchpad must succeed (stderr={})",
+        String::from_utf8_lossy(&inside.stderr)
+    );
+    assert!(scratch.join("in.txt").exists());
+
+    // The same grant, aimed at the project tree by absolute path.
+    let mut denied = Command::new(bin);
+    roots(&mut denied);
+    denied.args(["sh", "-c", &format!("echo pwned > {}", canary.display())]);
+    let denied = denied.output().expect("spawn confined shell (project)");
+    assert!(
+        !denied.status.success(),
+        "a write into the project tree must be denied by the kernel"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&canary).unwrap(),
+        "original",
+        "the project file must be byte-identical"
+    );
+
+    // `2>/dev/null` must still work: the discard devices are in the set.
+    let mut discard = Command::new(bin);
+    roots(&mut discard);
+    discard.args(["sh", "-c", "echo hi 2>/dev/null"]);
+    let discard = discard.output().expect("spawn confined shell (discard)");
+    assert!(
+        discard.status.success(),
+        "redirecting to /dev/null must stay possible (stderr={})",
+        String::from_utf8_lossy(&discard.stderr)
+    );
+
+    let _ = std::fs::remove_dir_all(&base);
+}
