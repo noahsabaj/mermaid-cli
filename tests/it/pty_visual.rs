@@ -22,8 +22,8 @@ use std::time::Duration;
 fn shift_tab_cycles_every_safety_mode_in_the_footer() {
     let mut term = Terminal::launch("pty-safety");
 
-    // Starts in `ask` (the default), so the cycle order from here is fixed.
-    for expected in ["auto", "full_access", "plan", "read_only", "ask"] {
+    // Starts in `auto` (the default), so the cycle order from here is fixed.
+    for expected in ["full_access", "plan", "read_only", "ask", "auto"] {
         term.press(SHIFT_TAB);
         assert!(
             term.wait_for_text(&format!("safety: {expected}"), Duration::from_secs(10)),

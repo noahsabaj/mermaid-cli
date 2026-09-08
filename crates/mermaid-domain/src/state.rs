@@ -1786,7 +1786,7 @@ mod tests {
         let mut restored = mock_state();
         assert_eq!(
             restored.session.safety_mode,
-            SafetyMode::Ask,
+            SafetyMode::Auto,
             "config default"
         );
         assert_eq!(restored.session.cumulative_token_usage.total_tokens(), 0);

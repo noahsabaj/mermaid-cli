@@ -44,8 +44,8 @@ pub enum SafetyMode {
     /// another mode, like leaving any other.
     Plan,
     ReadOnly,
-    #[default]
     Ask,
+    #[default]
     Auto,
     FullAccess,
 }
