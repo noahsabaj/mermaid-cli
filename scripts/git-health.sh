@@ -160,6 +160,43 @@ else
 fi
 note ".git size: $(du -sh "$gitdir" 2>/dev/null | cut -f1)"
 
+# Unreachable-object bloat.
+#
+# `git gc` does not delete unreachable objects, it parks them in a *cruft pack*
+# -- a .pack with a .mtimes sibling -- and keeps them for gc.pruneExpire (two
+# weeks by default). That is a good safety net and a silent disk leak: this
+# repo once carried 2.5 GiB of orphaned .rlib blobs there against 8 MiB of real
+# history, invisible in every git command anyone runs day to day. Summing the
+# cruft packs is exact and costs no object walk.
+cruft_bytes=0
+for _mt in "$gitdir"/objects/pack/*.mtimes; do
+  [ -e "$_mt" ] || continue
+  _pk="${_mt%.mtimes}.pack"
+  [ -e "$_pk" ] || continue
+  cruft_bytes=$((cruft_bytes + $(wc -c <"$_pk")))
+done
+cruft_mib=$((cruft_bytes / 1048576))
+
+# Loose objects too: gc has not swept them into a cruft pack yet, but they are
+# the same debris one step earlier. count-objects reports KiB.
+loose_kib=$(git count-objects -v 2>/dev/null | awk '/^size:/ {print $2}')
+[ -z "${loose_kib:-}" ] && loose_kib=0
+
+if [ "$cruft_mib" -ge 100 ]; then
+  note "unreachable objects: ${cruft_mib} MiB held in cruft packs"
+  suggest "git gc --prune=now   # drops them immediately; they expire on their own around gc.pruneExpire (default 2w)"
+  note "     (if that is unexpected, something hashed files it should not have —"
+  note "      \`git stash -a\` sweeps ignored files, build trees included)"
+elif [ "$cruft_bytes" -gt 0 ]; then
+  note "unreachable objects: ${cruft_mib} MiB in cruft packs (normal; expires on its own)"
+else
+  note "unreachable objects: none held in cruft packs"
+fi
+if [ "$loose_kib" -ge 102400 ]; then
+  note "loose objects: $((loose_kib / 1024)) MiB not yet packed"
+  suggest "git gc --prune=now"
+fi
+
 # --- 6. open PRs (optional; needs gh) -------------------------------------
 if command -v gh >/dev/null 2>&1; then
   hdr "Open PRs (gh)"

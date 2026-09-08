@@ -6,3 +6,20 @@ rustflags = ["-C", "linker=rust-lld"]
 
 [target.aarch64-pc-windows-msvc]
 rustflags = ["-C", "linker=rust-lld"]
+
+# Build output lives outside the working tree.
+#
+# A target dir inside the checkout is gigabytes of hashable content sitting in
+# the repository. `git stash -a` sweeps ignored files by design, so .gitignore
+# does not protect it: one such sweep hashed 12,433 .rlib and binary blobs into
+# the object store, and after the stash was dropped they survived as 2.5 GiB of
+# unreachable objects in a cruft pack. Moving the tree out means there is
+# nothing inside the repo for any sweep to find.
+#
+# The path is relative, and cargo resolves it against the workspace root rather
+# than the cwd -- so every worktree gets its own sibling build tree, and the
+# path stays correct from subdirectories. CARGO_TARGET_DIR still overrides this
+# (see `just worktree`, which gives concurrent worktrees distinct dirs so they
+# do not serialise on cargo's target-dir lock).
+[build]
+target-dir = "../mermaid-target"

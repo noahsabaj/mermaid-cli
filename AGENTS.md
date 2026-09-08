@@ -36,6 +36,20 @@ tests hold the detail; this is what's easy to get wrong.
 - **No emojis / pictographs** in any user-facing output, ever. CI enforces it
   (`.github/scripts/check_no_emoji.py`). Box-drawing, arrows, and the middot are
   fine — they sit below the flagged ranges.
+- **Never put a build tree inside the checkout.** `build.target-dir` in
+  `.cargo/config.toml` points at `../mermaid-target`, and any custom
+  `CARGO_TARGET_DIR` you set must also land outside the working tree.
+  `.gitignore` is not protection here: `git stash -a` sweeps ignored files by
+  design, and one such sweep hashed 12,433 `.rlib` and binary blobs into the
+  object store — 2.5 GiB of unreachable objects that survived in a cruft pack
+  long after the stash was dropped. CI enforces it
+  (`.github/scripts/check_build_tree_out_of_repo.py`), and
+  `scripts/git-health.sh` reports the debris if it ever happens again.
+  For a second worktree use `just worktree NAME`: it branches off fresh
+  `origin/main` and gives the worktree its own parent directory, so its build
+  tree is both outside the tree and distinct from every other worktree's —
+  worktrees sharing one build dir serialise on cargo's target-dir lock.
+  `just worktree-rm NAME` removes both.
 - **No back-compat shims.** The product is the `mermaid` binary. The published
   crates (`mermaid-cli`, `mermaid-domain`, `mermaid-model`, `mermaid-runtime`)
   carry **no

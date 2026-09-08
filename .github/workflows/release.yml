@@ -120,6 +120,8 @@ jobs:
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          workspaces: ". -> ../mermaid-target"
 
       # Install cross-compilation tools for Linux ARM64
       - name: Install cross-compilation tools
@@ -144,22 +146,22 @@ jobs:
         if: matrix.platform.target != 'aarch64-unknown-linux-gnu'
         shell: bash
         run: |
-          BIN="target/${{ matrix.platform.target }}/release/${{ matrix.platform.bin }}"
+          BIN="../mermaid-target/${{ matrix.platform.target }}/release/${{ matrix.platform.bin }}"
           "$BIN" --version
           "$BIN" self-test --format json
 
       - name: Package as archive (Linux/macOS)
         if: contains(matrix.platform.os, 'ubuntu') || contains(matrix.platform.os, 'macos')
         run: |
-          cd target/${{ matrix.platform.target }}/release
-          tar czvf ../../../${{ matrix.platform.name }} ${{ matrix.platform.bin }} ${{ matrix.platform.daemon_bin }}
+          cd ../mermaid-target/${{ matrix.platform.target }}/release
+          tar czvf "$GITHUB_WORKSPACE/${{ matrix.platform.name }}" ${{ matrix.platform.bin }} ${{ matrix.platform.daemon_bin }}
           cd -
 
       - name: Package as ZIP (Windows)
         if: contains(matrix.platform.os, 'windows')
         run: |
-          cd target/${{ matrix.platform.target }}/release
-          7z a ../../../${{ matrix.platform.name }} ${{ matrix.platform.bin }} ${{ matrix.platform.daemon_bin }}
+          cd ../mermaid-target/${{ matrix.platform.target }}/release
+          7z a "$env:GITHUB_WORKSPACE/${{ matrix.platform.name }}" ${{ matrix.platform.bin }} ${{ matrix.platform.daemon_bin }}
           cd -
 
       - name: Install Linux packaging tools
@@ -168,12 +170,18 @@ jobs:
           cargo install cargo-deb --locked
           cargo install cargo-generate-rpm --locked
 
+      # cargo-deb resolves the `target/release/...` asset paths in Cargo.toml
+      # through cargo's own config, so it follows build.target-dir with no flag
+      # and its asset paths stay as written. cargo-generate-rpm does not: it
+      # treats `target/` as a literal prefix and needs --target-dir spelled out,
+      # or it fails with "Asset file not found". Verified both against a moved
+      # build tree before this landed.
       - name: Package Linux distro artifacts
         if: contains(matrix.platform.os, 'ubuntu')
         shell: bash
         run: |
           cargo deb --no-build --target ${{ matrix.platform.target }} --output mermaid-cli-${{ matrix.platform.package_suffix }}.deb
-          cargo generate-rpm --target ${{ matrix.platform.target }} --output mermaid-cli-${{ matrix.platform.package_suffix }}.rpm
+          cargo generate-rpm --target ${{ matrix.platform.target }} --target-dir ../mermaid-target --output mermaid-cli-${{ matrix.platform.package_suffix }}.rpm
 
       - name: Upload artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
