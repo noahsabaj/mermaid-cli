@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Plan mode can work in the scratchpad.** A shell command that provably
+  writes nothing outside the session scratchpad now runs while a plan is being
+  drafted, so unpacking an archive to read it — `ar x $MERMAID_SCRATCHPAD/pkg.deb
+  && tar -tJf control.tar.xz` — is research a plan can actually do. Before, the
+  prompt told the model to use the scratchpad for all temporary files and the
+  gate then denied every spelling of it, including `$MERMAID_SCRATCHPAD`
+  itself: the containment prover rejected `$` outright, so the only handle the
+  shell is given could never satisfy it.
+
+  Authorization is a lexical proof (`is_scratch_only_command`), not the
+  sandbox. Every segment of the command is proven independently, so `|`, `&&`,
+  `||` and `;` are fine; each segment's head must be a known reader or one of
+  the archive/inspection tools in `SCRATCH_TOOLS`; every path-shaped argument
+  must stay inside the scratchpad; and command substitution, backticks, globs,
+  `~`, heredocs, `tee`/`dd` and cwd-changing builtins all refuse.
+
+  The OS write-confinement runs beneath that as defense-in-depth, never in
+  place of it — the network kill-switch spares `AF_UNIX` by design (so
+  `systemd-run --user` would otherwise escape into an unconfined child) and
+  Landlock carries no mode/owner/xattr right (so `chmod -R go+w ~/.ssh` would
+  not be confined). The head allowlist is what puts both out of reach. The
+  confinement is also tighter than the existing one: the scratchpad plus the
+  discard devices, and specifically not the project root or the system temp
+  directory that contains the scratchpad.
+
+  Tunable as `[plan] scratchpad` (`allow` by default, `deny` under the strict
+  preset) and cyclable in `/plan config`. The working tree stays read-only
+  regardless.
+
+### Fixed
+
+- **Landlock rules no longer fail on device files.** Granting a write root
+  that is a file rather than a directory asked the kernel for directory-only
+  rights (`MakeReg`, `RemoveFile`, …) on a non-directory and failed the whole
+  ruleset with `EBADFD`. Files now get the file-applicable subset, which is
+  what lets the scratch confinement name `/dev/null` individually instead of
+  granting `/dev` as a hierarchy — the latter also hands out `/dev/sda` and
+  `/dev/mem`.
+
+
 ### Security
 
 - **`execute_command`'s `open_url` is now policy-gated.** It was never passed

@@ -8066,7 +8066,28 @@ fn plan_capabilities_line_tracks_the_profile() {
         line.contains("write_file or apply_patch"),
         "the capabilities line must name the plan-authoring tools: {line}"
     );
-    assert!(line.contains("ONLY writable path"));
+    // The plan file is no longer the only writable path: the scratchpad
+    // carve-out adds a second one, so the line must say what actually stays
+    // read-only rather than over-promising and then being contradicted by a
+    // gate that permits a scratch write.
+    assert!(
+        !line.contains("ONLY writable path"),
+        "stale absolute claim: {line}"
+    );
+    assert!(
+        line.contains("working tree itself stays read-only"),
+        "the line must still bound what planning may touch: {line}"
+    );
+    let line = plan_capabilities_line(&PlanPermissions::default());
+    assert!(
+        line.contains("scratchpad"),
+        "an allowed scratchpad must be advertised: {line}"
+    );
+    let line = plan_capabilities_line(&PlanPermissions::strict());
+    assert!(
+        !line.contains("scratchpad"),
+        "a denied scratchpad must not be advertised: {line}"
+    );
 }
 
 fn plan_outcome(fresh: bool, fork: bool, model: Option<&str>) -> ToolOutcome {

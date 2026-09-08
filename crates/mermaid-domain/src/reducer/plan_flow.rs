@@ -164,16 +164,19 @@ pub fn cycle_plan_config_row(state: &mut State, row: usize, forward: bool) {
                 L::Allow
             };
         },
+        5 => {
+            plan.permissions.scratchpad = cycle(&LEVELS, plan.permissions.scratchpad, forward);
+        },
         // Unset <-> pin to the current session model. Other models are set
         // by editing `[plan] model` in config.toml (the handoff picker is
         // the searchable surface).
-        5 => {
+        6 => {
             plan.model = match plan.model {
                 Some(_) => None,
                 None => Some(session_model),
             };
         },
-        6 => {
+        7 => {
             use mermaid_model::models::ReasoningLevel as R;
             const REASONING: [Option<R>; 8] = [
                 None,
@@ -187,8 +190,8 @@ pub fn cycle_plan_config_row(state: &mut State, row: usize, forward: bool) {
             ];
             plan.reasoning = cycle(&REASONING, plan.reasoning, forward);
         },
-        7 => plan.auto_approve = !plan.auto_approve,
-        8 => {
+        8 => plan.auto_approve = !plan.auto_approve,
+        9 => {
             const POST: [Option<PlanPostApprove>; 3] = [
                 None,
                 Some(PlanPostApprove::Start),

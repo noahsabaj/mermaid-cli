@@ -81,7 +81,53 @@ pub(crate) struct SandboxPlan {
     pub(crate) confine_writes: Option<Vec<PathBuf>>,
 }
 
+/// Whether this platform can install BOTH halves of the scratchpad
+/// confinement right now. The gate consults this before granting the
+/// carve-out, so a platform that cannot enforce falls through to the plan
+/// denial instead of running the command with no confinement at all.
+pub(crate) fn scratch_confinement_available() -> bool {
+    let (network, fs) = sandbox::sandbox_probes();
+    network && fs
+}
+
 impl SandboxPlan {
+    /// The carve-out's enforcement half: writes confined to the scratchpad
+    /// and the safe devices, network killed, regardless of config. Deliberately
+    /// NOT `resolve`'s write set — that one includes the project root and the
+    /// whole system temp dir (the scratchpad's own parent), which would let a
+    /// "scratch-only" command rewrite the repository.
+    pub(crate) fn scratch_confined(scratch: &Path) -> Self {
+        let mut dirs = vec![scratch.to_path_buf()];
+        if cfg!(unix) {
+            // Not `/dev` as a hierarchy: that would grant `/dev/sda` and
+            // `/dev/mem`. Only the discard devices a shell legitimately
+            // redirects to, matching `is_safe_device_write`.
+            // Real character devices only. `/dev/stdin`, `/dev/stdout` and
+            // `/dev/stderr` are deliberately absent: they resolve through
+            // `/proc/self/fd/N` to whatever the fd already is — often a pipe,
+            // which Landlock refuses to attach a file rule to (`EBADFD`) — and
+            // they need no rule anyway, since writing through an
+            // already-open descriptor is not path-gated.
+            dirs.extend(
+                [
+                    "/dev/null",
+                    "/dev/zero",
+                    "/dev/full",
+                    "/dev/tty",
+                    "/dev/random",
+                    "/dev/urandom",
+                ]
+                .into_iter()
+                .map(PathBuf::from),
+            );
+        }
+        Self {
+            network: true,
+            fs: true,
+            confine_writes: Some(dirs),
+        }
+    }
+
     pub(crate) fn resolve(ctx: &ExecContext, effective_workdir: &Path) -> Self {
         // The sandbox is REQUIRED on the three platforms with a backend when a
         // policy is requested -- if the probe says the backend is broken, the
@@ -253,7 +299,7 @@ impl ToolExecutor for ExecuteCommandTool {
         // (checkpoint + approval row + blocking outcome). Allow returns the
         // classified risk so we can take the pre-existing Allow-path
         // checkpoint below.
-        let plan_write = match super::policy_gate::gate(
+        let (plan_write, confinement) = match super::policy_gate::gate(
             &ctx,
             policy_request,
             &[],
@@ -264,7 +310,11 @@ impl ToolExecutor for ExecuteCommandTool {
         .await
         {
             super::policy_gate::Gate::Block(outcome) => return outcome,
-            super::policy_gate::Gate::Proceed { risk, plan_write } => {
+            super::policy_gate::Gate::Proceed {
+                risk,
+                plan_write,
+                confine,
+            } => {
                 // A proven scratch-contained command can't touch the project,
                 // so there is nothing worth snapshotting.
                 if !scratch_contained
@@ -278,7 +328,7 @@ impl ToolExecutor for ExecuteCommandTool {
                         ctx.checkpoint_origin(),
                     );
                 }
-                plan_write
+                (plan_write, confine)
             },
         };
 
@@ -294,7 +344,17 @@ impl ToolExecutor for ExecuteCommandTool {
             "working_dir": effective_workdir.display().to_string(),
         });
         let _ = mermaid_runtime::run_plugin_hooks("before_shell", &shell_payload);
-        let sandbox = SandboxPlan::resolve(&ctx, &effective_workdir);
+        let sandbox = match confinement {
+            super::policy_gate::Confinement::Scratchpad => {
+                // The gate proved the command scratch-only AND checked the
+                // probes; `ctx.scratchpad` is what it proved against.
+                let scratch = ctx.scratchpad.clone().expect("scratch carve-out ctx");
+                SandboxPlan::scratch_confined(&scratch)
+            },
+            super::policy_gate::Confinement::Inherit => {
+                SandboxPlan::resolve(&ctx, &effective_workdir)
+            },
+        };
         if mode == CommandMode::Background {
             let startup_timeout_secs = args
                 .get("startup_timeout_secs")
@@ -1146,6 +1206,45 @@ mod tests {
                 outcome.model_content.contains("open_url"),
                 "{mode:?}: the refusal must name the action it refused: {:?}",
                 outcome.model_content,
+            );
+        }
+    }
+
+    /// The carve-out's write set is a POLICY decision, so pin it here rather
+    /// than only observing it through a sandbox. `resolve`'s set includes the
+    /// project root and the whole system temp dir — and the scratchpad lives
+    /// *under* the system temp dir, so reusing it would let a "scratch-only"
+    /// command rewrite the repository it is supposed to be planning about.
+    #[test]
+    fn scratch_confined_write_set_excludes_the_project_and_the_temp_dir() {
+        let scratch = std::env::temp_dir().join("mermaid-scratch-set-probe/scratchpad");
+        let plan = SandboxPlan::scratch_confined(&scratch);
+
+        assert!(plan.network, "the kill-switch rides with the carve-out");
+        assert!(plan.fs);
+        let dirs = plan.confine_writes.expect("scratch plan confines writes");
+        assert!(
+            dirs.contains(&scratch),
+            "the scratchpad itself must be writable"
+        );
+        assert!(
+            !dirs.contains(&std::env::temp_dir()),
+            "the scratchpad's own parent must NOT be writable: {dirs:?}"
+        );
+        assert!(
+            !dirs.iter().any(|d| d == std::path::Path::new("/dev")),
+            "/dev as a hierarchy would grant /dev/sda and /dev/mem: {dirs:?}"
+        );
+        #[cfg(unix)]
+        assert!(
+            dirs.iter().any(|d| d == std::path::Path::new("/dev/null")),
+            "the discard devices a shell redirects to must stay writable: {dirs:?}"
+        );
+        // Nothing in the set may be an ancestor of a source tree.
+        for d in &dirs {
+            assert!(
+                d == &scratch || d.starts_with("/dev"),
+                "unexpected root in the scratch write set: {d:?}"
             );
         }
     }
