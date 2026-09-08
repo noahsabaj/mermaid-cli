@@ -143,13 +143,19 @@ pub fn palette_is_open(buf: &str, plugins: &[crate::PluginCommand]) -> bool {
     palette_rows(buf, plugins).is_some()
 }
 
-/// The `/word` to name in the "no commands match" hint, or `None` when the
-/// buffer is not slash-prefixed at all. Only meaningful while
-/// [`palette_is_open`] is false — that pairing is what the hint reports.
+/// The `/word` to name in the "no commands match" hint, or `None` when there
+/// is nothing to say. Only meaningful while [`palette_is_open`] is false —
+/// that pairing is what the hint reports.
+///
+/// Requires the line to be a bare word: the moment a space follows it, the
+/// user has committed to prose and the hint goes away. `/tmp` is still
+/// plausibly a half-typed command and earns the note; `/tmp is full of junk`
+/// is a sentence, and captioning a sentence with "no commands match" would
+/// be telling the user their message is wrong.
 #[must_use]
 pub fn unmatched_command_word(buf: &str) -> Option<String> {
     let line = command_line(buf)?;
-    Some(format!("/{}", line.token))
+    line.args.is_empty().then(|| format!("/{}", line.token))
 }
 
 #[cfg(test)]
@@ -318,11 +324,21 @@ mod tests {
 
     #[test]
     fn the_hint_names_the_word_with_its_slash() {
-        assert_eq!(
-            unmatched_command_word("/tmp is full").as_deref(),
-            Some("/tmp")
-        );
+        assert_eq!(unmatched_command_word("/tmp").as_deref(), Some("/tmp"));
+        assert_eq!(unmatched_command_word("//foo").as_deref(), Some("//foo"));
         assert_eq!(unmatched_command_word("plain text"), None);
+    }
+
+    #[test]
+    fn the_hint_stops_once_the_line_becomes_a_sentence() {
+        // A space commits the line to prose. Captioning a sentence with "no
+        // commands match" would be reporting a problem the user does not
+        // have — they are writing a message, not mistyping a command.
+        assert_eq!(unmatched_command_word("/tmp test"), None);
+        assert_eq!(unmatched_command_word("/tmp "), None);
+        assert_eq!(unmatched_command_word(DEB), None);
+        // Still a bare word, still worth explaining.
+        assert!(unmatched_command_word("/home/nsabaj/Downloads/pkg.deb").is_some());
     }
 
     #[test]

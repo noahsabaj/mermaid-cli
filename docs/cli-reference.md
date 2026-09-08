@@ -121,7 +121,7 @@ prompt as text the agent reads with its tools.
 
 Type `/` to open the command palette (shows all commands with live filter); type `/<name>` to invoke directly. `/help` shows the same commands grouped in the TUI.
 
-A line is a command only when its first word names one. Anything else that happens to start with a slash is an ordinary message: paths (`/etc/hosts`, `/home/you/pkg.deb can you make this run on fedora`), a doubled slash (`//`), a typo, or a leading space before the slash. While you type one, the palette closes and a dim `No commands match "/tmp"` appears above the composer; Up/Down/Tab/Esc keep their normal meanings and Enter sends the line exactly as written.
+A line is a command only when its first word names one. Anything else that happens to start with a slash is an ordinary message: paths (`/etc/hosts`, `/home/you/pkg.deb can you make this run on fedora`), a doubled slash (`//`), a typo, or a leading space before the slash. While you type one, the palette closes, Up/Down/Tab/Esc keep their normal meanings, and Enter sends the line exactly as written. While the line is still a bare word, a dim `No commands match "/tmp"` sits above the composer to explain why nothing is filtering; it disappears once a space follows, since a sentence needs no caption.
 
 Everyday:
 

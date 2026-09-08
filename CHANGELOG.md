@@ -21,8 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   different number of slashes than the submit path did. They are now one
   function, and the test is whether the first word names a real command
   rather than whether the line starts with a slash. A `/` that matches
-  nothing shows a dim `No commands match "/tmp"` above the composer, leaves
-  every key alone, and sends verbatim on Enter. `//foo` is likewise ordinary
+  nothing leaves every key alone and sends verbatim on Enter; while it is
+  still a bare word, a dim `No commands match "/tmp"` sits above the
+  composer, and it goes away as soon as a space makes the line a sentence. `//foo` is likewise ordinary
   text, where before it dispatched as `/foo` while the palette offered to
   complete it to `/forget`.
 

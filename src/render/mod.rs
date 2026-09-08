@@ -1993,36 +1993,44 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_path_gets_a_hint_instead_of_a_palette() {
-        // The reported bug, at the frame level: the composer kept its plain
-        // border, the palette never replaced the status band, and the line
-        // above the composer says why nothing is matching.
+    fn frame_for(buf: &str) -> String {
         let mut s = mock_state();
-        s.ui.input_buffer =
-            "/home/nsabaj/Downloads/pkg.deb can you make this run on fedora".to_string();
+        s.ui.input_buffer = buf.to_string();
         s.ui.input_cursor = s.ui.input_buffer.len();
-        let frame = render_to_string(&s);
-        assert!(
-            !frame.contains("Enter Command"),
-            "a path is not a command, so no command border"
-        );
-        assert!(
-            !frame.contains("No matching commands"),
-            "and no empty palette over the status band"
-        );
+        render_to_string(&s)
+    }
+
+    #[test]
+    fn a_bare_path_gets_a_hint_instead_of_a_palette() {
+        // Still a bare word, so it could plausibly be a half-typed command:
+        // say why nothing matches, without claiming the command border or
+        // covering the status band with an empty palette.
+        let frame = frame_for("/home/nsabaj/Downloads/pkg.deb");
         assert!(
             frame.contains("No commands match"),
-            "the hint explains it instead: {frame}"
+            "the hint explains it: {frame}"
         );
+        assert!(!frame.contains("Enter Command"));
+        assert!(!frame.contains("No matching commands"));
+    }
+
+    #[test]
+    fn a_path_followed_by_prose_gets_no_hint_at_all() {
+        // The reported bug, at the frame level. Once a space follows, the
+        // line is a sentence — captioning it "no commands match" would be
+        // reporting a problem the user does not have.
+        let frame = frame_for("/home/nsabaj/Downloads/pkg.deb can you make this run on fedora");
+        assert!(
+            !frame.contains("No commands match"),
+            "a sentence needs no caption: {frame}"
+        );
+        assert!(!frame.contains("Enter Command"));
+        assert!(!frame.contains("No matching commands"));
     }
 
     #[test]
     fn ordinary_prose_gets_neither_palette_nor_hint() {
-        let mut s = mock_state();
-        s.ui.input_buffer = "just a message".to_string();
-        s.ui.input_cursor = s.ui.input_buffer.len();
-        let frame = render_to_string(&s);
+        let frame = frame_for("just a message");
         assert!(!frame.contains("No commands match"));
         assert!(!frame.contains("Enter Command"));
     }

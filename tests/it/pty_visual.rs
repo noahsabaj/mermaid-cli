@@ -205,13 +205,13 @@ fn slash_model_opens_a_picker_and_escape_dismisses_it() {
 #[test]
 fn a_pasted_path_is_a_message_not_a_command() {
     let mut term = Terminal::launch("pty-path");
-    term.type_text(
-        "/home/nsabaj/Downloads/grok-bot_0.44.0_amd64.deb can you make this run on fedora",
-    );
 
+    // A bare path is still a bare word, so the hint explains why nothing
+    // matches — while the border and the status band stay as they were.
+    term.type_text("/home/nsabaj/Downloads/grok-bot_0.44.0_amd64.deb");
     assert!(
         term.wait_for_text("No commands match", Duration::from_secs(10)),
-        "the composer should say why nothing matches. Screen:\n{}",
+        "a bare path should say why nothing matches. Screen:\n{}",
         term.frame_text()
     );
     let screen = term.frame_text();
@@ -222,6 +222,14 @@ fn a_pasted_path_is_a_message_not_a_command() {
     assert!(
         !screen.contains("No matching commands"),
         "and must not draw an empty palette over the status band:\n{screen}"
+    );
+
+    // The space commits the line to prose: the hint has nothing left to say.
+    term.type_text(" can you make this run on fedora");
+    assert!(
+        term.wait_for_gone("No commands match", Duration::from_secs(5)),
+        "a sentence needs no caption. Screen:\n{}",
+        term.frame_text()
     );
 
     // Esc belongs to the composer, not to a palette that has nothing to offer.
