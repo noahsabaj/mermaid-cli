@@ -4,7 +4,8 @@
 //! instead of running a command directly when OS confinement is requested. This
 //! process asks the platform backend ([`mermaid_runtime::enforce`]) to enforce
 //! the requested sandbox — network denial (`--no-network`) and/or filesystem
-//! write-confinement (repeatable `--confine-writes <dir>`) — from ordinary
+//! write-confinement (`--confine-fs`, plus a repeatable
+//! `--confine-writes <dir>` per allowed root) — from ordinary
 //! single-threaded code, then runs the real command. On Linux the seccomp /
 //! Landlock restrictions are installed on this process and survive `execve`;
 //! on macOS the command is exec'd under `/usr/bin/sandbox-exec` instead. Either
@@ -38,7 +39,10 @@ pub fn maybe_dispatch<I: IntoIterator<Item = OsString>>(args: I) -> Option<i32> 
     }
 
     let mut no_network = false;
-    let mut confine_writes: Vec<PathBuf> = Vec::new();
+    // `None` until the flag is seen even once: the launcher must be able to
+    // say "confine writes to nothing" (an empty `Some`), which is a deny-all,
+    // distinctly from "confinement was never requested".
+    let mut confine_writes: Option<Vec<PathBuf>> = None;
     let mut argv: Vec<OsString> = Vec::new();
     let mut in_argv = false;
     while let Some(arg) = it.next() {
@@ -48,9 +52,16 @@ pub fn maybe_dispatch<I: IntoIterator<Item = OsString>>(args: I) -> Option<i32> 
             in_argv = true;
         } else if arg == "--no-network" {
             no_network = true;
+        } else if arg == "--confine-fs" {
+            // Marks write-confinement as REQUESTED. Separate from the roots so
+            // an empty root list stays a deny-all rather than collapsing into
+            // "no confinement asked for".
+            confine_writes.get_or_insert_with(Vec::new);
         } else if arg == "--confine-writes" {
             match it.next() {
-                Some(dir) => confine_writes.push(PathBuf::from(dir)),
+                Some(dir) => confine_writes
+                    .get_or_insert_with(Vec::new)
+                    .push(PathBuf::from(dir)),
                 None => {
                     eprintln!(
                         "mermaid {SANDBOX_EXEC_SUBCOMMAND}: --confine-writes needs a directory"
@@ -75,7 +86,7 @@ pub fn maybe_dispatch<I: IntoIterator<Item = OsString>>(args: I) -> Option<i32> 
     // apply it, exit 126 — never run the command unconfined.
     let policy = mermaid_runtime::SandboxPolicy {
         deny_network: no_network,
-        allowed_writes: confine_writes,
+        confine_writes,
     };
     match mermaid_runtime::enforce(&policy, &argv) {
         Ok(mermaid_runtime::Enforcement::SelfApplied { fs_enforced }) => {

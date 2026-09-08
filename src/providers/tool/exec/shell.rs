@@ -64,18 +64,28 @@ pub(crate) fn shell_invocation(
     confine_writes: Option<&[PathBuf]>,
 ) -> ShellInvocation {
     if sandbox_network || confine_writes.is_some() {
-        // `mermaid __sandbox-exec [--no-network] [--confine-writes <dir>]… --
-        // sh -c <command>`: the launcher installs the requested confinement on
-        // itself, then execs the shell. Unix-only path — Windows never sets
-        // these flags.
+        // `mermaid __sandbox-exec [--no-network] [--confine-fs]
+        // [--confine-writes <dir>]… -- sh -c <command>`: the launcher installs
+        // the requested confinement on itself, then execs the shell. Both
+        // PowerShell and `sh` come through here — `SandboxPlan::resolve` sets
+        // these flags on Windows too, where the launcher runs the child in an
+        // AppContainer.
         let exe = launcher_exe();
         let mut args: Vec<std::ffi::OsString> = vec!["__sandbox-exec".into()];
         if sandbox_network {
             args.push("--no-network".into());
         }
-        for dir in confine_writes.unwrap_or_default() {
-            args.push("--confine-writes".into());
-            args.push(dir.into());
+        if let Some(dirs) = confine_writes {
+            // The marker, not the dir count, is what tells the launcher that
+            // write-confinement was requested. An empty root list is a
+            // deny-all-writes policy and must not be indistinguishable from
+            // "confinement never asked for" — that read is what let a
+            // confined command run unconfined while reporting success.
+            args.push("--confine-fs".into());
+            for dir in dirs {
+                args.push("--confine-writes".into());
+                args.push(dir.into());
+            }
         }
         args.push("--".into());
         if mermaid_runtime::HostShell::current() == mermaid_runtime::HostShell::PowerShell {
@@ -177,35 +187,10 @@ pub(crate) fn command_provably_in_scratch(command: &str, scratch: &Path) -> bool
     tokens.iter().all(|t| token_provably_in_scratch(t, scratch))
 }
 
-/// One token of a scratch-candidate command. Rules, all fail-closed:
-/// - `..` anywhere: rejected (can climb out of the scratch cwd).
-/// - `:/` anywhere: rejected (URL / remote-host / list-of-paths shapes).
-/// - Drive-designator shape (`C:x`, `c:\x`): rejected on every platform —
-///   on Windows it targets a drive root or a per-drive cwd, never scratch.
-/// - No path separator: fine — a bare word, flag, or PATH-resolved argv0.
-/// - Rooted: must sit lexically inside the scratchpad. `has_root`, not
-///   `is_absolute` — on Windows `/etc/passwd` is rooted but not "absolute"
-///   (no drive prefix), yet still escapes the scratch cwd via the drive
-///   root, so every rooted token gets the containment check.
-/// - Relative with a separator: accepted only as a PLAIN path (no leading
-///   `-`, no `=`) so flag-embedded paths (`-t/etc`, `--output=/etc/x`,
-///   `VAR=/etc`) can't smuggle a target past the rooted check.
-pub(crate) fn token_provably_in_scratch(token: &str, scratch: &Path) -> bool {
-    if token.contains("..") || token.contains(":/") {
-        return false;
-    }
-    let bytes = token.as_bytes();
-    if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
-        return false;
-    }
-    if !token.contains(['/', '\\']) {
-        return true;
-    }
-    if Path::new(token).has_root() {
-        return Path::new(token).starts_with(scratch);
-    }
-    !token.starts_with('-') && !token.contains('=')
-}
+/// Re-exported so the exec-side prover and the plan-mode carve-out cannot
+/// drift: there is ONE containment rule, and it lives in the policy crate
+/// next to `is_scratch_only_command`.
+pub(crate) use mermaid_runtime::token_provably_in_scratch;
 
 /// Advertised to spawned commands so scripts have a ready-made place for
 /// throwaway files that never dirties the project tree.

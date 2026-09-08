@@ -971,7 +971,14 @@ async fn external_read_gate(ctx: &ExecContext, raw: &str, abs: &Path) -> Option<
     });
     match super::policy_gate::gate(ctx, request, &[], pending_action, false, false).await {
         super::policy_gate::Gate::Block(outcome) => Some(outcome),
-        super::policy_gate::Gate::Proceed { .. } => None,
+        super::policy_gate::Gate::Proceed { confine, .. } => {
+            debug_assert_eq!(
+                confine,
+                super::policy_gate::Confinement::Inherit,
+                "read gate cannot honor a confinement directive"
+            );
+            None
+        },
     }
 }
 
@@ -1164,7 +1171,21 @@ pub(super) async fn mutation_policy_outcome(
     .await
     {
         super::policy_gate::Gate::Block(outcome) => MutationGate::Blocked(Box::new(outcome)),
-        super::policy_gate::Gate::Proceed { plan_write, .. } => {
+        super::policy_gate::Gate::Proceed {
+            plan_write,
+            confine,
+            ..
+        } => {
+            // File tools write with `std::fs`/`open_beneath` and have no
+            // launcher to wrap, so they cannot honor a confinement directive.
+            // The scratchpad carve-out only matches shell requests, so this is
+            // unreachable — assert it rather than drop it silently, which is
+            // exactly how a "confined" write would have run unconfined.
+            debug_assert_eq!(
+                confine,
+                super::policy_gate::Confinement::Inherit,
+                "file mutations cannot honor a confinement directive"
+            );
             let _ = mermaid_runtime::run_plugin_hooks(
                 "before_file_mutation",
                 &serde_json::json!({

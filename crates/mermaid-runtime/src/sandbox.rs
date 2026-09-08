@@ -38,10 +38,16 @@ use std::path::PathBuf;
 pub struct SandboxPolicy {
     /// Deny network access (internet sockets; local `AF_UNIX` is spared).
     pub deny_network: bool,
-    /// When non-empty, confine write-class filesystem access to (beneath)
-    /// these directories. Roots that don't exist are skipped, narrowing the
-    /// sandbox rather than erroring.
-    pub allowed_writes: Vec<PathBuf>,
+    /// `Some` confines write-class filesystem access to (beneath) these
+    /// directories; `None` leaves writes unrestricted. Roots that don't exist
+    /// are skipped, narrowing the sandbox rather than erroring.
+    ///
+    /// The `Option` is load-bearing: `Some(vec![])` means "confine writes to
+    /// nowhere" (deny every write) and MUST NOT be read as "no confinement
+    /// requested". A plain `Vec` could not tell those apart, and the
+    /// all-off short-circuit in [`enforce`] then ran the command unconfined
+    /// while reporting `fs_enforced: true`.
+    pub confine_writes: Option<Vec<PathBuf>>,
 }
 
 /// How the platform enforced a [`SandboxPolicy`] — the contract between
@@ -75,7 +81,7 @@ pub enum Enforcement {
 /// rather than an error — that one case is the documented best-effort, and it
 /// is why `Ok` alone is not proof the filesystem is confined.
 pub fn enforce(policy: &SandboxPolicy, argv: &[OsString]) -> anyhow::Result<Enforcement> {
-    if !policy.deny_network && policy.allowed_writes.is_empty() {
+    if !policy.deny_network && policy.confine_writes.is_none() {
         // Nothing requested: nothing to enforce, on any platform.
         return Ok(Enforcement::SelfApplied { fs_enforced: true });
     }
@@ -86,9 +92,12 @@ pub fn enforce(policy: &SandboxPolicy, argv: &[OsString]) -> anyhow::Result<Enfo
         let _ = argv;
         // Landlock first (its setup opens the allowed dirs), then seccomp.
         let mut fs_enforced = true;
-        if !policy.allowed_writes.is_empty() {
-            fs_enforced = linux::apply_fs_confinement(&policy.allowed_writes)
-                .context("filesystem sandbox unavailable")?;
+        if let Some(roots) = &policy.confine_writes {
+            // An empty `roots` installs a write-handling ruleset with no allow
+            // rules, i.e. every write is denied. That is the intended reading
+            // of `Some(vec![])`, not a no-op.
+            fs_enforced =
+                linux::apply_fs_confinement(roots).context("filesystem sandbox unavailable")?;
         }
         if policy.deny_network {
             linux::apply_network_killswitch().context("network sandbox unavailable")?;
@@ -224,8 +233,8 @@ mod macos {
             sbpl.push_str("(allow network* (local unix))\n");
         }
         let mut params: Vec<(String, PathBuf)> = Vec::new();
-        if !policy.allowed_writes.is_empty() {
-            for (n, root) in policy.allowed_writes.iter().enumerate() {
+        if let Some(roots) = &policy.confine_writes {
+            for (n, root) in roots.iter().enumerate() {
                 if !root.exists() {
                     continue;
                 }
@@ -237,9 +246,10 @@ mod macos {
                 }
             }
             if params.is_empty() {
-                // Confinement was requested but every allowed root is
-                // missing: deny all writes (Landlock parity — missing dirs
-                // narrow the sandbox) rather than emit an empty require-all.
+                // Confinement was requested but every allowed root is missing
+                // (or the list was empty): deny all writes (Landlock parity —
+                // missing dirs narrow the sandbox) rather than emit an empty
+                // require-all.
                 sbpl.push_str("(deny file-write*)\n");
             } else {
                 // FOOTGUN: the require-nots MUST be wrapped in `require-all`.
@@ -281,10 +291,14 @@ mod macos {
     mod tests {
         use super::*;
 
-        fn policy(deny_network: bool, allowed_writes: &[PathBuf]) -> SandboxPolicy {
+        /// `confine_writes` is deliberately an `Option` here rather than a
+        /// slice that collapses empty to "off": `None` is "write confinement
+        /// not requested", `Some(&[])` is "confine writes to nowhere" (a
+        /// deny-all). Conflating them is the bug this shape exists to prevent.
+        fn policy(deny_network: bool, confine_writes: Option<&[PathBuf]>) -> SandboxPolicy {
             SandboxPolicy {
                 deny_network,
-                allowed_writes: allowed_writes.to_vec(),
+                confine_writes: confine_writes.map(<[PathBuf]>::to_vec),
             }
         }
 
@@ -304,7 +318,7 @@ mod macos {
 
         #[test]
         fn network_denial_lines_present_iff_requested() {
-            let (with_net, _) = profile(&policy(true, &[]));
+            let (with_net, _) = profile(&policy(true, None));
             assert!(with_net.contains("(deny network*)"));
             // AF_UNIX-sparing allows ship with the deny (Linux parity).
             assert!(with_net.contains("(allow network* (remote unix))"));
@@ -313,16 +327,30 @@ mod macos {
             assert!(!with_net.contains("file-write"));
 
             let dir = tempdir("no-net");
-            let (without_net, _) = profile(&policy(false, std::slice::from_ref(&dir)));
+            let (without_net, _) = profile(&policy(false, Some(std::slice::from_ref(&dir))));
             assert!(!without_net.contains("network"));
             let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn empty_confinement_denies_every_write() {
+            // `Some(&[])` grants no roots, so the profile must deny writes
+            // outright. Reading it as "no confinement requested" — which a
+            // bare `Vec` forced — would emit no `file-write` rule at all and
+            // leave the command able to write anywhere.
+            let (sbpl, params) = profile(&policy(false, Some(&[])));
+            assert!(params.is_empty(), "no roots to parameterize: {params:?}");
+            assert!(
+                sbpl.contains("(deny file-write*)"),
+                "an empty allowlist is a deny-all, not a no-op: {sbpl:?}"
+            );
         }
 
         #[test]
         fn write_denial_nests_require_nots_under_require_all() {
             let a = tempdir("ra-a");
             let b = tempdir("ra-b");
-            let (sbpl, params) = profile(&policy(false, &[a.clone(), b.clone()]));
+            let (sbpl, params) = profile(&policy(false, Some(&[a.clone(), b.clone()])));
             // Both roots exist and are already canonical-ish; at least the
             // two literal params must be present and referenced.
             assert!(params.iter().any(|(n, _)| n == "WR0"));
@@ -352,7 +380,7 @@ mod macos {
             // platform-neutral stand-in for the macOS TMPDIR firmlink
             // (/var/... vs /private/var/...).
             let alias = sub.join("..");
-            let (sbpl, params) = profile(&policy(false, std::slice::from_ref(&alias)));
+            let (sbpl, params) = profile(&policy(false, Some(std::slice::from_ref(&alias))));
             let literal = params.iter().find(|(n, _)| n == "WR0").expect("literal");
             let canonical = params.iter().find(|(n, _)| n == "WR0C").expect("canonical");
             assert_eq!(literal.1, alias);
@@ -365,7 +393,7 @@ mod macos {
         #[test]
         fn nonexistent_roots_are_skipped_and_all_missing_denies_all_writes() {
             let missing = std::env::temp_dir().join("mermaid-sbpl-test-definitely-missing");
-            let (sbpl, params) = profile(&policy(false, std::slice::from_ref(&missing)));
+            let (sbpl, params) = profile(&policy(false, Some(std::slice::from_ref(&missing))));
             assert!(params.is_empty());
             // No surviving root: plain deny (narrowed sandbox, Landlock
             // parity), not an empty require-all of unknown SBPL validity.
@@ -379,7 +407,7 @@ mod macos {
             // the profile text — it rides only in the -D parameter values.
             let evil = tempdir("evil").join("x) (allow default) (deny");
             std::fs::create_dir_all(&evil).unwrap();
-            let (sbpl, params) = profile(&policy(true, std::slice::from_ref(&evil)));
+            let (sbpl, params) = profile(&policy(true, Some(std::slice::from_ref(&evil))));
             assert!(!sbpl.contains("allow default) (deny"));
             assert!(
                 params.iter().any(|(_, v)| *v == evil),
@@ -392,7 +420,7 @@ mod macos {
         fn wrap_argv_shape_is_frozen() {
             let dir = tempdir("argv");
             let argv: Vec<OsString> = vec!["sh".into(), "-c".into(), "echo hi".into()];
-            let wrapped = wrap_argv(&policy(true, std::slice::from_ref(&dir)), &argv);
+            let wrapped = wrap_argv(&policy(true, Some(std::slice::from_ref(&dir))), &argv);
             assert_eq!(wrapped[0], OsString::from(SANDBOX_EXEC));
             assert_eq!(wrapped[1], OsString::from("-p"));
             let profile_arg = wrapped[2].to_string_lossy();
@@ -481,6 +509,18 @@ mod linux {
         };
 
         let write_access = AccessFs::from_write(LANDLOCK_ABI);
+        // A rule may not grant directory-only rights (`MakeReg`, `RemoveFile`,
+        // …) on a non-directory: the kernel answers `EBADFD`. So an allowed
+        // path that is a FILE — `/dev/null` and the other discard devices,
+        // which a shell legitimately redirects to — gets the file-applicable
+        // subset instead. Granting `/dev` as a hierarchy would avoid the split
+        // and also hand out `/dev/sda` and `/dev/mem`, which is the whole
+        // reason to name devices individually.
+        let file_access = write_access & AccessFs::from_file(LANDLOCK_ABI);
+        let (files, dirs): (Vec<_>, Vec<_>) = allowed_writes
+            .iter()
+            .cloned()
+            .partition(|p| p.is_file() || p.symlink_metadata().is_ok_and(|m| !m.is_dir()));
         let status = Ruleset::default()
             .set_compatibility(CompatLevel::BestEffort)
             .handle_access(write_access)
@@ -489,8 +529,10 @@ mod linux {
             .context("landlock: create ruleset")?
             // `path_beneath_rules` silently skips paths that can't be opened,
             // so a missing allowed dir narrows the sandbox instead of erroring.
-            .add_rules(path_beneath_rules(allowed_writes, write_access))
+            .add_rules(path_beneath_rules(&dirs, write_access))
             .context("landlock: add write rules")?
+            .add_rules(path_beneath_rules(&files, file_access))
+            .context("landlock: add file write rules")?
             .restrict_self()
             .context("landlock: restrict self")?;
         Ok(status.ruleset != RulesetStatus::NotEnforced)
