@@ -20,7 +20,8 @@ pub(crate) mod shell;
 // The public half of the split, named explicitly: `lib.rs` re-exports these,
 // and a `pub(crate)` glob cannot carry a name across the crate boundary.
 pub use plan_gate::{
-    PLAN_DENIAL_MARKER, READ_ONLY_DENIAL_MARKER, is_plan_file_only_write, is_plan_file_path,
-    is_plan_safe_build_command,
+    PLAN_DENIAL_MARKER, READ_ONLY_DENIAL_MARKER, SCRATCHPAD_ENV_VAR, is_plan_file_only_write,
+    is_plan_file_path, is_plan_safe_build_command, is_scratch_only_command,
+    token_provably_in_scratch,
 };
 pub use shell::destructive::is_destructive_command;

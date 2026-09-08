@@ -58,9 +58,9 @@ pub use plugin::{
 };
 pub use policy::{
     ActionRequest, FloorLevel, HostShell, PLAN_DENIAL_MARKER, PolicyDecision, PolicyEngine,
-    PolicyOverride, PolicyOverrideDecision, READ_ONLY_DENIAL_MARKER, RiskClass, SafetyMode,
-    ToolCategory, is_destructive_command, is_plan_file_only_write, is_plan_file_path,
-    is_plan_safe_build_command,
+    PolicyOverride, PolicyOverrideDecision, READ_ONLY_DENIAL_MARKER, RiskClass, SCRATCHPAD_ENV_VAR,
+    SafetyMode, ToolCategory, is_destructive_command, is_plan_file_only_write, is_plan_file_path,
+    is_plan_safe_build_command, is_scratch_only_command, token_provably_in_scratch,
 };
 pub use redact::{redact_json, redact_json_text, redact_secrets, sanitize_url_for_display};
 pub use sandbox::{

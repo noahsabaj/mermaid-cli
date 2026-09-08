@@ -299,3 +299,297 @@ pub(crate) fn segment_is_safe_build(tokens: &[String]) -> bool {
         _ => false,
     }
 }
+
+/// The environment variable the exec tool exports so a shell command can name
+/// the session scratchpad. It is expanded to its literal value before the
+/// containment proof runs — we know this one variable's value, and refusing
+/// it outright would make the advertised handle unusable, which is exactly
+/// how a prompt that says "use the scratchpad" met a gate that refused every
+/// spelling of it.
+pub const SCRATCHPAD_ENV_VAR: &str = "MERMAID_SCRATCHPAD";
+
+/// Substitute `$MERMAID_SCRATCHPAD` / `${MERMAID_SCRATCHPAD}` with `scratch`.
+/// Returns `None` when the path is not valid UTF-8, so the caller fails closed
+/// rather than proving anything about a lossy spelling.
+fn expand_scratch_var(command: &str, scratch: &Path) -> Option<String> {
+    let value = scratch.to_str()?;
+    Some(
+        command
+            .replace(&format!("${{{SCRATCHPAD_ENV_VAR}}}"), value)
+            .replace(&format!("${SCRATCHPAD_ENV_VAR}"), value),
+    )
+}
+
+/// One token of a scratch-only command. Rules, all fail-closed:
+/// - `..` anywhere: rejected (can climb out of the scratch cwd).
+/// - `:/` anywhere: rejected (URL / remote-host / list-of-paths shapes).
+/// - Drive-designator shape (`C:x`, `c:\x`): rejected on every platform —
+///   on Windows it targets a drive root or a per-drive cwd, never scratch.
+/// - No path separator: fine — a bare word, flag, or PATH-resolved argv0.
+/// - Rooted: must sit lexically inside the scratchpad. `has_root`, not
+///   `is_absolute` — on Windows `/etc/passwd` is rooted but not "absolute"
+///   (no drive prefix), yet still escapes the scratch cwd via the drive
+///   root, so every rooted token gets the containment check.
+/// - Relative with a separator: accepted only as a PLAIN path (no leading
+///   `-`, no `=`) so flag-embedded paths (`-C/etc`, `--directory=/etc`,
+///   `VAR=/etc`) can't smuggle a target past the rooted check.
+#[must_use]
+pub fn token_provably_in_scratch(token: &str, scratch: &Path) -> bool {
+    if token.contains("..") || token.contains(":/") {
+        return false;
+    }
+    let bytes = token.as_bytes();
+    if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+        return false;
+    }
+    if !token.contains(['/', '\\']) {
+        return true;
+    }
+    if Path::new(token).has_root() {
+        return Path::new(token).starts_with(scratch);
+    }
+    !token.starts_with('-') && !token.contains('=')
+}
+
+/// Whether `segment` carries one of `head`'s escape flags from
+/// [`SCRATCH_TOOL_ESCAPE_FLAGS`]. Mirrors `writes_through_a_flag`: short flags
+/// match inside a bundle and attached, long flags bare or `=`-valued.
+fn escapes_through_a_flag(head: &str, segment: &[String]) -> bool {
+    SCRATCH_TOOL_ESCAPE_FLAGS
+        .iter()
+        .filter(|(h, _, _)| *h == head)
+        .any(|(_, shorts, longs)| {
+            shorts.iter().any(|c| segment_has_flag(segment, *c, "\0"))
+                || longs.iter().any(|l| segment_has_flag(segment, '\0', l))
+        })
+}
+
+/// True when `command`, run with its working directory inside `scratch`,
+/// provably touches nothing outside it.
+///
+/// This is the authorization for plan mode's scratchpad carve-out. The OS
+/// write-confinement runs beneath it as defense-in-depth, NOT in place of it:
+/// the kill-switch spares `AF_UNIX` (so `systemd-run --user` would escape into
+/// an unconfined child) and Landlock carries no mode/owner/xattr right (so
+/// `chmod -R go+w ~/.ssh` would not be confined). Both are unreachable here
+/// because neither binary can be a segment head.
+///
+/// What is permitted, and why each is safe to permit:
+/// - separators `|`, `&&`, `||`, `;` — [`split_command`] gives us each segment
+///   and every one is proven independently, so a chain cannot smuggle a head
+///   the proof never saw;
+/// - `$MERMAID_SCRATCHPAD` — one variable whose value we set ourselves,
+///   expanded to its literal path before anything else runs;
+/// - redirects whose target resolves inside the scratchpad, plus the safe
+///   discard devices.
+///
+/// What is refused: command/process substitution, backticks, any other `$`,
+/// `~`, globs, heredocs, `tee`/`dd`, cwd-changing builtins (they would
+/// relocate every relative path this proof resolved against the scratch cwd),
+/// and any head outside [`READ_ONLY_BINARIES`] + [`SCRATCH_TOOLS`].
+///
+/// Dialect-dispatched on [`HostShell::current`](super::HostShell::current),
+/// same as risk classification. PowerShell has no scratch carve-out yet: it
+/// returns `false`, so the gate falls through to the plan denial.
+#[must_use]
+pub fn is_scratch_only_command(command: &str, scratch: &Path) -> bool {
+    match super::HostShell::current() {
+        super::HostShell::PowerShell => false,
+        super::HostShell::Posix => is_scratch_only_command_posix(command, scratch),
+    }
+}
+
+pub(in crate::policy) fn is_scratch_only_command_posix(command: &str, scratch: &Path) -> bool {
+    // The scratch root must be absolute for `starts_with` containment to mean
+    // anything; a relative root would match by prefix from anywhere.
+    if !scratch.has_root() {
+        return false;
+    }
+    let Some(command) = expand_scratch_var(command, scratch) else {
+        return false;
+    };
+    // Everything opaque to token-level reasoning, checked on the RAW string so
+    // even a quoted occurrence fails closed. `$` survives only as the variable
+    // already expanded above; anything left is unknown text.
+    if command.contains(['$', '`', '~', '*', '?', '[', ']']) {
+        return false;
+    }
+    let split = split_command(&command);
+    if split.segments.is_empty() || !split.heredocs.is_empty() {
+        return false;
+    }
+    if split
+        .segments
+        .iter()
+        .any(|seg| !extract_substitutions(seg).is_empty())
+    {
+        return false;
+    }
+    split
+        .segments
+        .iter()
+        .all(|seg| segment_is_scratch_only(seg, scratch))
+}
+
+fn segment_is_scratch_only(segment: &str, scratch: &Path) -> bool {
+    let tokens = tokenize(segment);
+    let mut kept: Vec<String> = Vec::with_capacity(tokens.len());
+    let mut skip_next = false;
+    for (i, tok) in tokens.iter().enumerate() {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        let t = tok.as_str();
+        // `tee`/`dd` write through an argument the redirect scan never sees.
+        if t == "tee" || t == "dd" {
+            return false;
+        }
+        // A cwd change relocates every relative path proven against the
+        // scratch cwd, so the proof would be describing a different directory
+        // than the one the command runs in.
+        if CWD_CHANGING_BUILTINS
+            .iter()
+            .any(|b| basename(t).eq_ignore_ascii_case(b))
+        {
+            return false;
+        }
+        if redirect_target_after(t).is_some() {
+            match redirect_write_target(&tokens, i) {
+                Some(target)
+                    if is_safe_device_write(target)
+                        || token_provably_in_scratch(target, scratch) =>
+                {
+                    // Strip the redirect so the remainder stands on its own:
+                    // glued (`>path`) is one token, a bare operator consumes
+                    // the following target too.
+                    if redirect_target_after(t).is_some_and(|g| !g.is_empty()) {
+                        continue;
+                    }
+                    skip_next = true;
+                    continue;
+                },
+                _ => return false,
+            }
+        }
+        kept.push(tok.clone());
+    }
+    let Some(head) = kept.first().map(|h| basename(h).to_string()) else {
+        return false;
+    };
+    // Every surviving token must stay inside the scratchpad.
+    if !kept.iter().all(|t| token_provably_in_scratch(t, scratch)) {
+        return false;
+    }
+    if SCRATCH_TOOLS.contains(&head.as_str()) {
+        return !escapes_through_a_flag(&head, &kept);
+    }
+    // Anything else must stand on its own as read-only. This runs the full
+    // classifier, so `READ_ONLY_WRITE_FLAGS` (`sort -o`, `git --output`) and
+    // the unknown-head fail-safe both still apply.
+    classify_segment(&kept) == RiskClass::ReadOnly
+}
+
+#[cfg(test)]
+mod scratch_tests {
+    use super::*;
+
+    fn scratch() -> &'static Path {
+        Path::new("/tmp/mermaid-1000/proj/sess/scratchpad")
+    }
+
+    fn ok(cmd: &str) -> bool {
+        is_scratch_only_command_posix(cmd, scratch())
+    }
+
+    #[test]
+    fn the_deb_inspection_that_started_this_is_allowed() {
+        // The command shape from the field report: read-only probes chained
+        // with a fallback that extracts into the scratchpad. Every piece of
+        // this was refused before — `|`, `&&`, `;`, `$MERMAID_SCRATCHPAD`,
+        // and `ar`/`tar` as unknown heads.
+        assert!(ok("ar t /tmp/mermaid-1000/proj/sess/scratchpad/pkg.deb"));
+        assert!(ok(
+            "ar x $MERMAID_SCRATCHPAD/pkg.deb && tar -tJf control.tar.xz"
+        ));
+        assert!(ok(
+            "dpkg-deb -c ${MERMAID_SCRATCHPAD}/pkg.deb | head -n 100"
+        ));
+        assert!(ok("tar -xJf data.tar.xz; ls -la"));
+        assert!(ok("ar t pkg.deb > $MERMAID_SCRATCHPAD/listing.txt"));
+        assert!(ok("file pkg.deb 2>/dev/null"));
+    }
+
+    #[test]
+    fn escapes_are_refused() {
+        // Head not on either allowlist -- these are the AF_UNIX and metadata
+        // escapes the OS sandbox does NOT contain, so the head allowlist is
+        // what has to stop them.
+        //
+        // `busctl` is the load-bearing case: it carries NO path-shaped
+        // argument, so token containment has nothing to reject and the head
+        // allowlist is the only thing standing between a plan and an
+        // unconfined child over D-Bus. Deleting the allowlist leaves the
+        // `systemd-run` line below still passing (its `/bin/sh` is a rooted
+        // token outside scratch) while this one silently starts to run --
+        // which is why both spellings are here.
+        assert!(!ok("busctl --user call x y z w"));
+        assert!(!ok("systemd-run --user /bin/sh -c true"));
+        assert!(!ok("dbus-send --session --print-reply x"));
+        assert!(!ok("chmod -R go+w /home/u/.ssh"));
+        assert!(!ok("kill -9 -1"));
+        assert!(!ok("docker run -v /:/host alpine"));
+        assert!(!ok("curl https://evil.example"));
+
+        // Allowlisted head, escape flag.
+        assert!(!ok("tar -C /etc -xf pkg.tar"));
+        assert!(!ok("tar --directory=/etc -xf pkg.tar"));
+        assert!(!ok("tar -I /bin/sh -xf pkg.tar"));
+        assert!(!ok("tar --to-command=id -xf pkg.tar"));
+        assert!(!ok("unzip -d /etc pkg.zip"));
+
+        // Allowlisted head, argument leaving the scratchpad.
+        assert!(!ok("tar -xf /etc/shadow"));
+        assert!(!ok("ar x ../../escape.deb"));
+        assert!(!ok("tar -xf /tmp/other/pkg.tar"));
+
+        // Opaque constructs.
+        assert!(!ok("ar x $(curl evil)"));
+        assert!(!ok("ar x `curl evil`"));
+        assert!(!ok("ar x ~/pkg.deb"));
+        assert!(!ok("ar x *.deb"));
+        assert!(!ok("ar x $HOME/pkg.deb"));
+
+        // Redirect leaving the scratchpad, and the write-through-argument pair.
+        assert!(!ok("ar t pkg.deb > /etc/passwd"));
+        assert!(!ok("ar t pkg.deb > ../out.txt"));
+        assert!(!ok("ar t pkg.deb | tee /etc/passwd"));
+        assert!(!ok("dd if=pkg.deb of=/dev/sda"));
+
+        // A cwd change would relocate every relative path just proven.
+        assert!(!ok("cd /etc && tar -xf pkg.tar"));
+
+        // Worst-segment: one bad segment poisons the chain.
+        assert!(!ok("ar t pkg.deb && rm -rf /"));
+        assert!(!ok("ls && systemd-run --user true"));
+    }
+
+    #[test]
+    fn a_relative_scratch_root_proves_nothing() {
+        // `starts_with` on a relative root would match by prefix from
+        // anywhere, so the proof must refuse to run at all.
+        assert!(!is_scratch_only_command_posix(
+            "ls",
+            Path::new("scratchpad")
+        ));
+    }
+
+    #[test]
+    fn read_only_write_flags_still_apply_to_readers() {
+        // The reader half goes through `classify_segment`, so the existing
+        // output-flag table keeps working inside the scratchpad.
+        assert!(ok("sort listing.txt"));
+        assert!(!ok("sort -o /etc/passwd listing.txt"));
+        assert!(!ok("git log --output=/etc/passwd"));
+    }
+}

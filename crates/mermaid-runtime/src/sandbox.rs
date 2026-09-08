@@ -509,6 +509,18 @@ mod linux {
         };
 
         let write_access = AccessFs::from_write(LANDLOCK_ABI);
+        // A rule may not grant directory-only rights (`MakeReg`, `RemoveFile`,
+        // …) on a non-directory: the kernel answers `EBADFD`. So an allowed
+        // path that is a FILE — `/dev/null` and the other discard devices,
+        // which a shell legitimately redirects to — gets the file-applicable
+        // subset instead. Granting `/dev` as a hierarchy would avoid the split
+        // and also hand out `/dev/sda` and `/dev/mem`, which is the whole
+        // reason to name devices individually.
+        let file_access = write_access & AccessFs::from_file(LANDLOCK_ABI);
+        let (files, dirs): (Vec<_>, Vec<_>) = allowed_writes
+            .iter()
+            .cloned()
+            .partition(|p| p.is_file() || p.symlink_metadata().is_ok_and(|m| !m.is_dir()));
         let status = Ruleset::default()
             .set_compatibility(CompatLevel::BestEffort)
             .handle_access(write_access)
@@ -517,8 +529,10 @@ mod linux {
             .context("landlock: create ruleset")?
             // `path_beneath_rules` silently skips paths that can't be opened,
             // so a missing allowed dir narrows the sandbox instead of erroring.
-            .add_rules(path_beneath_rules(allowed_writes, write_access))
+            .add_rules(path_beneath_rules(&dirs, write_access))
             .context("landlock: add write rules")?
+            .add_rules(path_beneath_rules(&files, file_access))
+            .context("landlock: add file write rules")?
             .restrict_self()
             .context("landlock: restrict self")?;
         Ok(status.ruleset != RulesetStatus::NotEnforced)

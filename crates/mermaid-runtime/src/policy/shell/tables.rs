@@ -147,6 +147,112 @@ pub(crate) const READ_ONLY_WRITE_FLAGS: &[(&str, &[char], &[&str])] = &[
     ("git", &['o'], &["output"]),
 ];
 
+/// Archive and package-inspection tools a plan may run INSIDE the session
+/// scratchpad. Unlike [`READ_ONLY_BINARIES`] these write by design — pulling
+/// an archive apart to look inside it is the point — so they can never rate
+/// `ReadOnly`. Containment comes from three other places at once: the command
+/// runs with its cwd proven inside the scratchpad, every argument carrying a
+/// path separator is proven to stay there, and the OS write-confinement is
+/// active beneath it.
+///
+/// The head allowlist is what makes the carve-out sound rather than merely
+/// sandboxed: `systemd-run`, `docker`, `chmod` and friends can never be a
+/// head here, so neither the `AF_UNIX` escape the network kill-switch spares
+/// nor Landlock's missing metadata rights are reachable. Adding a tool means
+/// auditing it for an entry in [`SCRATCH_TOOL_ESCAPE_FLAGS`].
+pub(crate) const SCRATCH_TOOLS: &[&str] = &[
+    "tar",
+    "bsdtar",
+    "ar",
+    "unzip",
+    "zipinfo",
+    "funzip",
+    "gzip",
+    "gunzip",
+    "zcat",
+    "bzip2",
+    "bunzip2",
+    "bzcat",
+    "xz",
+    "unxz",
+    "xzcat",
+    "lzma",
+    "unlzma",
+    "zstd",
+    "unzstd",
+    "zstdcat",
+    "lz4",
+    "unlz4",
+    "compress",
+    "uncompress",
+    "cpio",
+    "pax",
+    "7z",
+    "7za",
+    "7zr",
+    "dpkg-deb",
+    "dpkg-split",
+    "rpm2cpio",
+    "cabextract",
+    "msiextract",
+    "unrar",
+    "unar",
+    "lsar",
+    "binwalk",
+    "sqlite3",
+];
+
+/// Flags that let a [`SCRATCH_TOOLS`] head write outside its working directory
+/// or run a program of its own — the same hazard [`READ_ONLY_WRITE_FLAGS`]
+/// covers for readers, for a table whose members write on purpose.
+///
+/// Argument-shaped escapes (`tar -C /etc`, `--directory=/etc`, `unzip -d
+/// ../..`) are already refused by the token containment proof, which rejects
+/// any rooted path outside the scratchpad, anything containing `..`, and any
+/// `-`-led or `=`-bearing token that hides a path. What this table adds is the
+/// shapes that name no path at all and would otherwise read as bare words:
+/// `tar -I xz` and `--use-compress-program` hand tar a program to execute,
+/// `--to-command` runs one per member, and `sqlite3 .shell` style escapes ride
+/// in on a bare argument.
+pub(crate) const SCRATCH_TOOL_ESCAPE_FLAGS: &[(&str, &[char], &[&str])] = &[
+    (
+        "tar",
+        &['C', 'I'],
+        &[
+            "directory",
+            "to-command",
+            "use-compress-program",
+            "rmt-command",
+            "rsh-command",
+            "checkpoint-action",
+        ],
+    ),
+    (
+        "bsdtar",
+        &['C', 'I'],
+        &["directory", "use-compress-program"],
+    ),
+    ("unzip", &['d'], &[]),
+    ("funzip", &[], &[]),
+    (
+        "cpio",
+        &['D', 'E', 'F'],
+        &["directory", "to-stdout", "rsh-command", "file"],
+    ),
+    ("pax", &[], &[]),
+    ("zstd", &['o'], &["output-dir-flat", "output-dir-mirror"]),
+    ("xz", &[], &["files", "files0"]),
+    ("7z", &['o'], &[]),
+    ("7za", &['o'], &[]),
+    ("7zr", &['o'], &[]),
+    ("unrar", &[], &[]),
+    ("unar", &['o'], &["output-directory"]),
+    ("binwalk", &['C', 'e'], &["directory", "extract", "run-as"]),
+    // `sqlite3` reads a database, but `.shell`/`.system`/`.import`/`.output`
+    // dot-commands and `-cmd` run arbitrary programs or write files.
+    ("sqlite3", &[], &["cmd"]),
+];
+
 /// PowerShell cmdlets (and single-word aliases) that only read state. Matched
 /// case-insensitively — PowerShell command names are. The scriptblock-taking
 /// pipeline cmdlets (ForEach-Object, Where-Object, Select-Object, Sort-Object,

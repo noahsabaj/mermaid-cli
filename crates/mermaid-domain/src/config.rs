@@ -536,6 +536,11 @@ pub struct PlanPermissions {
     /// tools with no approval path, and the checklist is seeded from the
     /// approved plan anyway).
     pub tasks: PlanPermLevel,
+    /// Commands that provably touch nothing outside the session scratchpad
+    /// (`is_scratch_only_command`), run under OS write-confinement. Unpacking
+    /// an archive into a private temp dir to read it is research, which is
+    /// what planning is for; the working tree stays read-only regardless.
+    pub scratchpad: PlanPermLevel,
 }
 
 impl Default for PlanPermissions {
@@ -548,6 +553,7 @@ impl Default for PlanPermissions {
             web: PlanPermLevel::Ask,
             memory: PlanPermLevel::Allow,
             tasks: PlanPermLevel::Deny,
+            scratchpad: PlanPermLevel::Allow,
         }
     }
 }
@@ -576,6 +582,7 @@ impl PlanPermissions {
             web: PlanPermLevel::Deny,
             memory: PlanPermLevel::Deny,
             tasks: PlanPermLevel::Deny,
+            scratchpad: PlanPermLevel::Deny,
         }
     }
 
@@ -587,6 +594,7 @@ impl PlanPermissions {
             web: PlanPermLevel::Allow,
             memory: PlanPermLevel::Allow,
             tasks: PlanPermLevel::Allow,
+            scratchpad: PlanPermLevel::Allow,
         }
     }
 }

@@ -252,6 +252,19 @@ pub(crate) fn system_prompt_for_state(state: &State) -> String {
             "\nScratchpad directory: {}\nUse it for ALL temporary files instead of /tmp or the system temp dir.",
             scratch.display()
         ));
+        // While a plan is being drafted the gate only permits scratch commands
+        // it can PROVE stay inside — telling the model "use it for everything"
+        // without that qualifier is what produced a plan-mode denial for a
+        // command the prompt had just asked for.
+        if state.session.plan.is_some()
+            && state.settings.plan.permissions.scratchpad != crate::PlanPermLevel::Deny
+        {
+            prompt.push_str(
+                "\nWhile planning, a shell command may write there when it provably stays \
+                 inside it: run it with working_dir set to the scratchpad, use only reads and \
+                 archive/inspection tools, and avoid command substitution, globs and `~`.",
+            );
+        }
     }
     if state.session.is_subagent {
         prompt.push_str("\n\n");
@@ -315,8 +328,15 @@ pub(crate) fn plan_capabilities_line(perms: &crate::PlanPermissions) -> String {
     );
     push("web search/fetch", perms.web);
     push("memory writes", perms.memory);
+    push(
+        "shell commands that provably write only inside the session scratchpad (run them with working_dir set to it)",
+        perms.scratchpad,
+    );
     let mut line = parts.join(", ");
-    line.push_str(", and authoring the plan file (write_file or apply_patch on the plan path — the ONLY writable path).");
+    line.push_str(
+        ", and authoring the plan file (write_file or apply_patch on the plan path). The working \
+         tree itself stays read-only.",
+    );
     line
 }
 
