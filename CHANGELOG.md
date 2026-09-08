@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.0] - 2026-09-07
+
 - **Output styles (`/output-style`).** Named voice/format presets that modify the system prompt: built-ins `default` (stock prompt), `proactive`, `concise`, `explanatory`, and `learning`, plus custom Markdown files with `name`/`description`/`keep-coding-instructions` frontmatter (keeping the built-in engineering instructions is the default). Custom files live user-globally (`~/.config/mermaid/output-styles/<name>.md`) or per-project (`<git-root>/.mermaid/output-styles/`, which wins on a clash); a custom name shadows a built-in. Select with `/output-style [name]` (persists to the user config, or the project config with `--project`), `[output] style = "..."` in either config file (project config may set it — prompt text, not a capability), or `--output-style` for one invocation. A switch applies to the next message with no `/clear` needed and never touches subagents; unknown names warn and fall back to `default`; `mermaid doctor` reports the active style and which layer set it.
 
 ### Fixed
@@ -5090,7 +5092,8 @@ MERMAID.md project instructions, MCP spec bump, and a security update.
 - rustfmt and clippy configuration
 - Docker compose setup for LiteLLM proxy
 
-[Unreleased]: https://github.com/noahsabaj/mermaid-cli/compare/v0.26.0...HEAD
+[Unreleased]: https://github.com/noahsabaj/mermaid-cli/compare/v0.27.0...HEAD
+[0.27.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.26.0...v0.27.0
 [0.26.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.25.0...v0.26.0
 [0.25.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.24.0...v0.25.0
 [0.24.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.23.0...v0.24.0
