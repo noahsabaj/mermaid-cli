@@ -550,9 +550,12 @@ pub enum ContextCmd {
 }
 
 /// Slash commands — a typed surface over what the user typed as
-/// `/<name> [args]`. Parsed in `app::event_source` against the single
-/// `COMMAND_REGISTRY`; unknown commands produce `SlashCmd::Unknown`
-/// so the reducer can issue a "no such command" status line.
+/// `/<name> [args]`. Parsed against the single `COMMAND_REGISTRY`.
+///
+/// There is deliberately no `Unknown` variant: `input_kind::classify_input`
+/// only builds a `SlashCmd` for a name the registry knows, and a line naming
+/// no command is a message rather than an error. "Unknown command" having no
+/// representation is what guarantees the composer can never eat a line.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SlashCmd {
     /// No arg → show current; `Some` → switch (and pull if needed).
@@ -638,9 +641,6 @@ pub enum SlashCmd {
     /// the reducer's arm is a plain print and a recording replays exactly
     /// what the user saw. Arity itself lives in the registry, not here.
     MissingArg(String),
-    /// User typed something that isn't in the registry; carries the
-    /// raw name for the error message.
-    Unknown(String),
 }
 
 impl Msg {

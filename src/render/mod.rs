@@ -397,8 +397,30 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
     // own layout slot: the zone above the input already stacks three
     // conditional bands, and a fourth that appears for two seconds would shove
     // the whole transcript. Borrowing a row keeps the input box still.
-    let toast = active_toast(state);
-    let (chat_area, toast_area) = match toast {
+    // A `/` naming no command explains itself on that same borrowed row, and
+    // outranks a toast while it shows: it describes what the user is typing
+    // right now. Left-aligned and dim, so it reads as a note about the
+    // composer rather than as a transcript entry or an error.
+    let hint = unmatched_command_hint(state);
+    let notice = hint.as_deref().map_or_else(
+        || {
+            active_toast(state).map(|t| {
+                (
+                    t,
+                    ratatui::layout::Alignment::Right,
+                    rstate.theme.colors.info.to_color(),
+                )
+            })
+        },
+        |h| {
+            Some((
+                h.to_string(),
+                ratatui::layout::Alignment::Left,
+                rstate.theme.colors.text_disabled.to_color(),
+            ))
+        },
+    );
+    let (chat_area, notice_area) = match notice {
         Some(_) if chat_area.height > 1 => (
             Rect {
                 height: chat_area.height - 1,
@@ -447,15 +469,15 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
     };
     frame.render_stateful_widget(chat_widget, chat_area, &mut rstate.chat);
 
-    // Toast: right-aligned and dim on the row it borrowed, so it reads as
-    // feedback beside the input rather than as a transcript entry.
-    if let (Some(text), Some(area)) = (toast, toast_area) {
+    // Toast or palette hint on the row it borrowed, so it reads as feedback
+    // beside the input rather than as a transcript entry.
+    if let (Some((text, align, color)), Some(area)) = (notice, notice_area) {
         frame.render_widget(
             ratatui::widgets::Paragraph::new(Line::from(Span::styled(
                 text,
-                Style::new().fg(rstate.theme.colors.info.to_color()),
+                Style::new().fg(color),
             )))
-            .alignment(ratatui::layout::Alignment::Right),
+            .alignment(align),
             area,
         );
     }
@@ -492,7 +514,10 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
     if !question_modal_open {
         let input_widget = InputWidget {
             input: state.ui.input_buffer.as_str(),
-            showing_command_hints: state.ui.input_buffer.starts_with('/'),
+            showing_command_hints: mermaid_domain::input_kind::palette_is_open(
+                &state.ui.input_buffer,
+                &state.plugin_commands,
+            ),
             theme: &rstate.theme,
             reasoning_active: state.session.reasoning != ReasoningLevel::None,
             exit_armed: exit_armed(state),
@@ -744,25 +769,38 @@ fn bottom_pane(state: &mermaid_domain::State) -> BottomPane<'_> {
             UiMode::EditingInput | UiMode::ModelList => BottomPane::Status,
         },
         Focus::Composer => {
-            if state.ui.file_picker_open() {
+            if state.file_picker_open() {
                 BottomPane::FilePicker
-            } else if state.ui.input_buffer.starts_with('/') {
-                let typed = state
-                    .ui
-                    .input_buffer
-                    .trim_start_matches('/')
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or("");
-                BottomPane::Palette(mermaid_domain::slash_commands::filter_entries(
-                    typed,
-                    &state.plugin_commands,
-                ))
+            } else if let Some(rows) = mermaid_domain::input_kind::palette_rows(
+                &state.ui.input_buffer,
+                &state.plugin_commands,
+            ) {
+                BottomPane::Palette(rows)
             } else {
+                // A `/` that matches nothing keeps the status band: the
+                // "no commands match" hint says so above the composer
+                // instead, so typing a path never costs the user the mode
+                // line it used to hide behind an empty palette.
                 BottomPane::Status
             }
         },
     }
+}
+
+/// The note shown above the composer when the buffer opens with a `/` that
+/// names no command: `No commands match "/tmp"`.
+///
+/// `None` whenever the palette is open — it lists the matches itself — and
+/// for ordinary prose. The pair is exhaustive by construction: a
+/// slash-prefixed buffer either has rows or has this line, so the surface
+/// that used to render an empty palette over the status band now says what
+/// it means and leaves every key alone.
+fn unmatched_command_hint(state: &State) -> Option<String> {
+    if mermaid_domain::input_kind::palette_is_open(&state.ui.input_buffer, &state.plugin_commands) {
+        return None;
+    }
+    let word = mermaid_domain::input_kind::unmatched_command_word(&state.ui.input_buffer)?;
+    Some(format!("No commands match \"{word}\""))
 }
 
 /// Can a `Continuation` message be folded into this predecessor?/// Can a `Continuation` message be folded into this predecessor? Guards the
@@ -1942,13 +1980,51 @@ mod tests {
     }
 
     #[test]
-    fn palette_renders_when_input_starts_with_slash() {
+    fn palette_renders_when_the_input_names_a_command() {
         let mut s = mock_state();
         s.ui.input_buffer = "/help".to_string();
         s.ui.input_cursor = 5;
         let frame = render_to_string(&s);
         // At least one registered command should surface in the overlay.
         assert!(frame.contains("help"));
+        assert!(
+            frame.contains("Enter Command"),
+            "and the border cue rides the same authority as the palette"
+        );
+    }
+
+    #[test]
+    fn a_path_gets_a_hint_instead_of_a_palette() {
+        // The reported bug, at the frame level: the composer kept its plain
+        // border, the palette never replaced the status band, and the line
+        // above the composer says why nothing is matching.
+        let mut s = mock_state();
+        s.ui.input_buffer =
+            "/home/nsabaj/Downloads/pkg.deb can you make this run on fedora".to_string();
+        s.ui.input_cursor = s.ui.input_buffer.len();
+        let frame = render_to_string(&s);
+        assert!(
+            !frame.contains("Enter Command"),
+            "a path is not a command, so no command border"
+        );
+        assert!(
+            !frame.contains("No matching commands"),
+            "and no empty palette over the status band"
+        );
+        assert!(
+            frame.contains("No commands match"),
+            "the hint explains it instead: {frame}"
+        );
+    }
+
+    #[test]
+    fn ordinary_prose_gets_neither_palette_nor_hint() {
+        let mut s = mock_state();
+        s.ui.input_buffer = "just a message".to_string();
+        s.ui.input_cursor = s.ui.input_buffer.len();
+        let frame = render_to_string(&s);
+        assert!(!frame.contains("No commands match"));
+        assert!(!frame.contains("Enter Command"));
     }
 
     #[test]

@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A message that opens with a path is no longer swallowed by the command
+  parser.** Typing `/home/you/Downloads/pkg.deb can you make this run on
+  fedora` used to turn the composer yellow, retitle it " Enter Command ",
+  replace the status band with an empty palette, hijack Up/Down/Tab/Esc (Esc
+  wiped the whole line), suppress the `@`-mention picker, and on Enter
+  discard the message for a transcript row reading `Unknown command:
+  /home/you/downloads/pkg.deb` — lowercased, with everything after the first
+  space dropped. Six places decided independently whether a buffer was a
+  command, each with a bare `starts_with('/')`, and two of them stripped a
+  different number of slashes than the submit path did. They are now one
+  function, and the test is whether the first word names a real command
+  rather than whether the line starts with a slash. A `/` that matches
+  nothing shows a dim `No commands match "/tmp"` above the composer, leaves
+  every key alone, and sends verbatim on Enter. `//foo` is likewise ordinary
+  text, where before it dispatched as `/foo` while the palette offered to
+  complete it to `/forget`.
+
+### Changed
+
+- **"Unknown command" is gone as a concept.** A slash line the registry does
+  not know is a message, so there is no error row to post and nothing the
+  composer can eat; `SlashCmd::Unknown` no longer exists and
+  `parse_slash_command` returns `Option`. Two side effects of the single
+  classifier: a buffer with leading whitespace (`  /help`) is now prose,
+  where before it drew no palette but still ran the command on Enter, and
+  `/help<newline>more` now runs `/help`, where before the palette offered it
+  and the parser refused it.
+
 ### Changed
 
 - **BREAKING: default safety mode is now `Auto` (was `Ask`).** A fresh

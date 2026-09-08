@@ -36,6 +36,7 @@ pub mod context;
 pub mod conversation;
 pub mod file_mention;
 pub mod image_token;
+pub mod input_kind;
 pub mod msg;
 pub mod picker;
 pub mod plan;

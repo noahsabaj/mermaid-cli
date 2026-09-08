@@ -1320,16 +1320,25 @@ pub const CANCEL_WATCHDOG: std::time::Duration = std::time::Duration::from_secs(
 
 pub const TOAST_TTL: chrono::Duration = chrono::Duration::milliseconds(2000);
 
-impl UiState {
+impl State {
     /// The @-mention token under the cursor, when the picker may show:
-    /// not user-dismissed, and not while the buffer is a slash command
-    /// (the slash palette owns that surface).
+    /// not user-dismissed, and not while the slash palette is open (it owns
+    /// that surface). `input_kind` decides when that is, so a message that
+    /// merely OPENS with a path — `/etc/hosts vs @src/config.rs` — keeps its
+    /// @-mentions instead of losing them to a palette with nothing to offer.
+    ///
+    /// Lives on `State`, not `UiState`, because the palette's rows include
+    /// the enabled plugins' commands and those hang off `State`. Splitting
+    /// the question across two structs is how the six call sites drifted
+    /// apart in the first place.
     #[must_use]
     pub fn active_file_token(&self) -> Option<crate::file_mention::AtToken> {
-        if self.file_picker_dismissed || self.input_buffer.starts_with('/') {
+        if self.ui.file_picker_dismissed
+            || crate::input_kind::palette_is_open(&self.ui.input_buffer, &self.plugin_commands)
+        {
             return None;
         }
-        crate::file_mention::active_at_token(&self.input_buffer, self.input_cursor)
+        crate::file_mention::active_at_token(&self.ui.input_buffer, self.ui.input_cursor)
     }
 
     /// Whether the @-mention file picker is currently open.

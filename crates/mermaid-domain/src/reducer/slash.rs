@@ -747,9 +747,6 @@ pub fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
         SlashCmd::MissingArg(usage) => {
             push_system(state, cmds, usage);
         },
-        SlashCmd::Unknown(name) => {
-            push_system(state, cmds, format!("Unknown command: /{name}"));
-        },
     }
 }
 
