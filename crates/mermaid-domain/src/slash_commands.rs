@@ -610,19 +610,27 @@ fn parse_output_style_arg(arg: Option<String>) -> crate::SlashCmd {
 }
 
 /// Parse a slash-command input line (without the leading `/`) into a
-/// `SlashCmd`. Returns `SlashCmd::Unknown` if the command isn't in
-/// the registry. Shared between the TUI dispatcher (C8) and any
-/// non-interactive command dispatch.
+/// `SlashCmd`, or `None` when the line names no command.
+///
+/// `None` is unreachable in practice: `input_kind::classify_input` only
+/// hands a line here after confirming the registry knows its first word, and
+/// `every_registry_command_parses` proves the two agree. It stays an `Option`
+/// so "unknown command" has no representation to leak into the transcript —
+/// a line the registry does not know is a message, and the composer sends it.
 ///
 /// Arity is enforced HERE, from the registry: a command whose hint marks its
 /// argument required answers a bare (or blank) invocation with
 /// [`SlashCmd::Usage`] carrying [`SlashCommand::usage_line`], so the reducer
 /// never sees a required-arg command without its argument and the usage text
 /// exists in exactly one place.
-pub fn parse_slash_command(raw: &str) -> crate::SlashCmd {
+pub fn parse_slash_command(raw: &str) -> Option<crate::SlashCmd> {
     use crate::SlashCmd;
     let trimmed = raw.trim();
-    let (name, arg) = match trimmed.split_once(' ') {
+    // Split on any whitespace, not just a space: a buffer can carry newlines
+    // (Ctrl+J, a multi-line paste), and `/help\nmore` must look up `help` —
+    // the same token `input_kind::command_line` filters the palette with.
+    // While these disagreed, the palette offered a row the parser refused.
+    let (name, arg) = match trimmed.split_once(char::is_whitespace) {
         Some((n, a)) => (n.to_lowercase(), Some(a.trim().to_string())),
         None => (trimmed.to_lowercase(), None),
     };
@@ -636,7 +644,7 @@ pub fn parse_slash_command(raw: &str) -> crate::SlashCmd {
         && cmd.requires_arg()
         && arg.as_deref().is_none_or(|a| a.trim().is_empty())
     {
-        return SlashCmd::MissingArg(cmd.usage_line());
+        return Some(SlashCmd::MissingArg(cmd.usage_line()));
     }
     let canonical = entry.map(|c| c.name);
     // The guard above proved required-arg commands carry a non-blank
@@ -644,7 +652,7 @@ pub fn parse_slash_command(raw: &str) -> crate::SlashCmd {
     // empty argument, not a panic).
     let required = |a: Option<String>| a.unwrap_or_default();
 
-    match canonical {
+    Some(match canonical {
         Some("model") => SlashCmd::Model(arg),
         Some("reasoning") => match arg.as_deref() {
             None => SlashCmd::Reasoning(None),
@@ -725,8 +733,8 @@ pub fn parse_slash_command(raw: &str) -> crate::SlashCmd {
         Some("editor") => SlashCmd::Editor,
         Some("help") => SlashCmd::Help,
         Some("quit") => SlashCmd::Quit,
-        _ => SlashCmd::Unknown(name),
-    }
+        _ => return None,
+    })
 }
 
 #[cfg(test)]
@@ -862,7 +870,7 @@ mod tests {
         );
         for cmd in required {
             assert_eq!(
-                parse_slash_command(cmd.name),
+                parse_slash_command(cmd.name).unwrap(),
                 SlashCmd::MissingArg(cmd.usage_line()),
                 "/{} without its argument must answer with usage",
                 cmd.name
@@ -870,7 +878,7 @@ mod tests {
             // A blank argument ("/task " with trailing space) is missing too —
             // previously it dispatched an empty id downstream.
             assert_eq!(
-                parse_slash_command(&format!("{} ", cmd.name)),
+                parse_slash_command(&format!("{} ", cmd.name)).unwrap(),
                 SlashCmd::MissingArg(cmd.usage_line()),
                 "/{} with a blank argument must answer with usage",
                 cmd.name
@@ -878,7 +886,7 @@ mod tests {
         }
         // With the argument present, dispatch proceeds untouched.
         assert_eq!(
-            parse_slash_command("stop proc-1"),
+            parse_slash_command("stop proc-1").unwrap(),
             SlashCmd::Stop("proc-1".to_string())
         );
     }
@@ -897,5 +905,52 @@ mod tests {
             len_before,
             "duplicate command name detected in COMMAND_REGISTRY"
         );
+    }
+}
+
+#[cfg(test)]
+mod parse_agreement_tests {
+    use super::*;
+
+    #[test]
+    fn every_registry_command_parses() {
+        // `input_kind::classify_input` promises a `Builtin` only for a name
+        // this function knows, and `submit_current_input` leans on that. A
+        // registry entry without a parse arm would break the promise
+        // silently, so prove the two agree over the whole registry.
+        for cmd in COMMAND_REGISTRY {
+            for name in std::iter::once(&cmd.name).chain(cmd.aliases.iter()) {
+                assert!(
+                    parse_slash_command(&format!("{name} arg")).is_some(),
+                    "/{name} is in the registry but has no parse arm"
+                );
+                assert!(
+                    parse_slash_command(name).is_some(),
+                    "/{name} bare must parse (to MissingArg when its arg is required)"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_newline_splits_the_command_name_like_a_space() {
+        // Ctrl+J and multi-line pastes put newlines in the buffer. While this
+        // split on a literal space only, the palette filtered on `help` while
+        // the parser looked up `help\nmore` and found nothing — the same
+        // disagreement, one layer down.
+        assert_eq!(
+            parse_slash_command("help\nmore"),
+            Some(crate::SlashCmd::Help)
+        );
+        assert_eq!(
+            parse_slash_command("help\tmore"),
+            Some(crate::SlashCmd::Help)
+        );
+    }
+
+    #[test]
+    fn a_name_outside_the_registry_has_no_parse() {
+        assert_eq!(parse_slash_command("nosuch"), None);
+        assert_eq!(parse_slash_command("home/nsabaj/pkg.deb"), None);
     }
 }

@@ -38,6 +38,14 @@ fn user_submit(state: State, text: &str) -> (State, Vec<Cmd>) {
     )
 }
 
+/// A bare Enter keypress — the path that classifies the composer buffer.
+fn enter() -> Msg {
+    Msg::Key(mermaid_domain::msg::Key {
+        code: mermaid_domain::msg::KeyCode::Enter,
+        modifiers: mermaid_domain::msg::KeyMods::default(),
+    })
+}
+
 // ─── full happy-path turn ──────────────────────────────────────────
 
 #[test]
@@ -693,20 +701,26 @@ fn manual_compaction_finish_drains_queued_message() {
 }
 
 #[test]
-fn slash_unknown_posts_to_transcript() {
-    // An unknown command posts to the chat transcript.
-    let (state, cmds) = update(fresh(), Msg::Slash(SlashCmd::Unknown("nope".to_string())));
+fn a_slash_line_naming_no_command_is_sent_as_a_message() {
+    // The reported bug, end to end: this used to post `Unknown command:
+    // /home/nsabaj/downloads/grok-bot_0.44.0_amd64.deb` — lowercased, with
+    // everything after the first space dropped — and throw the line away.
+    const LINE: &str =
+        "/home/nsabaj/Downloads/grok-bot_0.44.0_amd64.deb can you make this run on fedora";
+    let mut state = fresh();
+    state.ui.input_buffer = LINE.to_string();
+    let (state, cmds) = update(state, enter());
+
+    let last = state.session.messages().last().expect("a message");
+    assert_eq!(last.content, LINE, "the line is sent byte-for-byte");
+    assert_eq!(last.role, MessageRole::User, "as the user's own message");
     assert!(
-        state
-            .session
-            .messages()
-            .last()
-            .is_some_and(|m| m.content.contains("Unknown command: /nope")),
-        "unknown command posts a note to the chat transcript"
+        cmds.iter().any(|c| matches!(c, Cmd::CallModel { .. })),
+        "and it starts a turn, rather than being answered by the parser"
     );
     assert!(
-        cmds.iter()
-            .any(|c| matches!(c, Cmd::SaveConversation { .. }))
+        state.ui.input_buffer.is_empty(),
+        "the composer clears the way it does for any sent message"
     );
 }
 

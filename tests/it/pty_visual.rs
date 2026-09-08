@@ -195,6 +195,76 @@ fn slash_model_opens_a_picker_and_escape_dismisses_it() {
     );
 }
 
+/// A message that opens with an absolute path must stay a message. The
+/// composer used to read the leading `/` as a command: yellow " Enter Command "
+/// border, the palette over the status band saying "No matching commands",
+/// Up/Down/Tab/Esc stolen, and Esc one keystroke from wiping the sentence.
+///
+/// Driven through a real pty because every part of that was a glyph on the
+/// screen: the unit tests all passed while the composer was doing this.
+#[test]
+fn a_pasted_path_is_a_message_not_a_command() {
+    let mut term = Terminal::launch("pty-path");
+
+    // A bare path is still a bare word, so the hint explains why nothing
+    // matches — while the border and the status band stay as they were.
+    term.type_text("/home/nsabaj/Downloads/grok-bot_0.44.0_amd64.deb");
+    assert!(
+        term.wait_for_text("No commands match", Duration::from_secs(10)),
+        "a bare path should say why nothing matches. Screen:\n{}",
+        term.frame_text()
+    );
+    let screen = term.frame_text();
+    assert!(
+        !screen.contains("Enter Command"),
+        "a path must not claim the command border:\n{screen}"
+    );
+    assert!(
+        !screen.contains("No matching commands"),
+        "and must not draw an empty palette over the status band:\n{screen}"
+    );
+
+    // The space commits the line to prose: the hint has nothing left to say.
+    term.type_text(" can you make this run on fedora");
+    assert!(
+        term.wait_for_gone("No commands match", Duration::from_secs(5)),
+        "a sentence needs no caption. Screen:\n{}",
+        term.frame_text()
+    );
+
+    // Esc belongs to the composer, not to a palette that has nothing to offer.
+    term.press(ESC);
+    assert!(
+        term.wait_for_text("grok-bot_0.44.0_amd64.deb", Duration::from_secs(5)),
+        "Esc wiped the line. Screen:\n{}",
+        term.frame_text()
+    );
+}
+
+/// The other half: a real command still gets its palette, its border, and its
+/// completion. The fix must not cost `/model` anything.
+#[test]
+fn a_real_command_still_gets_the_palette_and_the_border() {
+    let mut term = Terminal::launch("pty-cmd");
+    term.type_text("/mod");
+
+    assert!(
+        term.wait_for_text("Enter Command", Duration::from_secs(10)),
+        "a command prefix keeps the command border. Screen:\n{}",
+        term.frame_text()
+    );
+    assert!(
+        term.wait_for_text("/model", Duration::from_secs(5)),
+        "and the palette still offers it. Screen:\n{}",
+        term.frame_text()
+    );
+    assert!(
+        term.wait_for_gone("No commands match", Duration::from_secs(5)),
+        "with no no-match hint. Screen:\n{}",
+        term.frame_text()
+    );
+}
+
 /// The picker enumerated only Ollama and the OpenAI-compatible registry, so a
 /// bespoke provider's models — Meta's `muse-spark-*` among them — never showed
 /// up no matter how many turns the user had run on one. Typing the provider

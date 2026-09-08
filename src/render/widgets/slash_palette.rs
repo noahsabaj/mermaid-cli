@@ -1,7 +1,12 @@
 //! Slash-command palette widget — renders a filter-as-you-type list of
-//! available commands with the selected row highlighted. Visible
-//! whenever the input starts with `/`; replaces the bottom status bar
+//! available commands with the selected row highlighted. Visible whenever
+//! `input_kind::palette_rows` yields rows; replaces the bottom status bar
 //! while open (same screen region — see `render.rs::render_ui`).
+//!
+//! It has no empty state, because it is never shown empty: a `/` that
+//! matches nothing closes the palette and puts a "No commands match" note
+//! above the composer instead. An empty palette over the hidden status bar,
+//! silently eating Up/Down/Tab/Esc, was the bug.
 //!
 //! Keyboard handling lives in `event_handler.rs::handle_palette_key`.
 //! This widget is purely presentational — it consumes a pre-filtered
@@ -72,17 +77,6 @@ impl<'a> Widget for SlashPaletteWidget<'a> {
             .borders(Borders::ALL)
             .border_style(Style::new().fg(self.theme.colors.border.to_color()))
             .title(title);
-
-        // Empty filter result: render one line of explanatory text so
-        // the user understands their typed prefix matched nothing.
-        if self.entries.is_empty() {
-            let line = Line::from(vec![Span::styled(
-                "  No matching commands",
-                Style::new().fg(self.theme.colors.text_disabled.to_color()),
-            )]);
-            Paragraph::new(vec![line]).block(block).render(area, buf);
-            return;
-        }
 
         let mut lines: Vec<Line> = Vec::with_capacity(MAX_VISIBLE_ROWS);
         for (offset, entry) in self.entries[scroll_offset..visible_end].iter().enumerate() {

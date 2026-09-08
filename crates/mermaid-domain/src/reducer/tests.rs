@@ -142,7 +142,7 @@ fn plain_key(code: KeyCode) -> Msg {
 #[test]
 fn file_picker_opens_on_at_and_walks_once() {
     let (state, cmds) = type_text(fresh_state(), "look at @");
-    assert!(state.ui.file_picker_open(), "@ opens the picker");
+    assert!(state.file_picker_open(), "@ opens the picker");
     assert!(state.ui.project_files_loading);
     let walks = cmds
         .iter()
@@ -151,7 +151,7 @@ fn file_picker_opens_on_at_and_walks_once() {
     assert_eq!(walks, 1, "open fires exactly one walk");
     // Further filtering while the walk is in flight never re-fires.
     let (state, cmds) = type_text(state, "src");
-    assert!(state.ui.file_picker_open());
+    assert!(state.file_picker_open());
     assert!(
         !cmds
             .iter()
@@ -176,7 +176,7 @@ fn file_picker_ranks_listed_files_and_completes_with_tab() {
     assert_eq!(state.ui.input_buffer, "@src/main.rs ");
     assert_eq!(state.ui.input_cursor, state.ui.input_buffer.len());
     assert!(
-        !state.ui.file_picker_open(),
+        !state.file_picker_open(),
         "the trailing space closes the token"
     );
 }
@@ -222,10 +222,7 @@ fn a_paste_that_creates_the_token_opens_the_picker_and_walks() {
         fresh_state(),
         Msg::Paste(Paste::Text("look at @ma".to_string())),
     );
-    assert!(
-        state.ui.file_picker_open(),
-        "pasted @-token opens the picker"
-    );
+    assert!(state.file_picker_open(), "pasted @-token opens the picker");
     assert_eq!(
         cmds.iter()
             .filter(|c| matches!(c, Cmd::Query(Query::ListProjectFiles)))
@@ -265,10 +262,10 @@ fn clipboard_text_into_the_at_token_re_ranks_the_picker() {
 fn a_paste_reopens_a_dismissed_picker() {
     let (state, _) = type_text(fresh_state(), "@ma");
     let (state, _) = update(state, plain_key(KeyCode::Escape));
-    assert!(!state.ui.file_picker_open(), "Esc dismisses");
+    assert!(!state.file_picker_open(), "Esc dismisses");
     let (state, _) = update(state, Msg::Paste(Paste::Text("in".to_string())));
     assert!(
-        state.ui.file_picker_open(),
+        state.file_picker_open(),
         "a paste is typing: the dismissal lifts"
     );
 }
@@ -363,29 +360,37 @@ fn file_picker_esc_dismisses_and_typing_reopens() {
     );
     let buffer_before = state.ui.input_buffer.clone();
     let (state, _) = update(state, plain_key(KeyCode::Escape));
-    assert!(!state.ui.file_picker_open(), "Esc dismisses");
+    assert!(!state.file_picker_open(), "Esc dismisses");
     assert_eq!(
         state.ui.input_buffer, buffer_before,
         "Esc leaves the typed text untouched"
     );
     let (state, _) = type_text(state, "i");
-    assert!(state.ui.file_picker_open(), "typing reopens the picker");
+    assert!(state.file_picker_open(), "typing reopens the picker");
 }
 
 #[test]
 fn file_picker_never_opens_on_slash_commands_or_emails() {
     let (state, cmds) = type_text(fresh_state(), "/load @x");
-    assert!(!state.ui.file_picker_open(), "slash palette owns `/` input");
+    assert!(!state.file_picker_open(), "slash palette owns `/` input");
     assert!(
         !cmds
             .iter()
             .any(|c| matches!(c, Cmd::Query(Query::ListProjectFiles)))
     );
     let (state, cmds) = type_text(fresh_state(), "mail user@host");
-    assert!(!state.ui.file_picker_open(), "user@host is not a mention");
+    assert!(!state.file_picker_open(), "user@host is not a mention");
     assert!(
         !cmds
             .iter()
+            .any(|c| matches!(c, Cmd::Query(Query::ListProjectFiles)))
+    );
+    // But a line that merely OPENS with a path is prose, and prose keeps its
+    // @-mentions — the palette only owns the surface when it has rows.
+    let (state, cmds) = type_text(fresh_state(), "/etc/hosts vs @s");
+    assert!(state.file_picker_open(), "no palette, so no suppression");
+    assert!(
+        cmds.iter()
             .any(|c| matches!(c, Cmd::Query(Query::ListProjectFiles)))
     );
     let _ = state;
@@ -4738,7 +4743,7 @@ fn slash_memory_commands_dispatch_effects() {
     // answers with the registry's usage line, and the reducer prints it.
     let (state, cmds) = update(
         fresh_state(),
-        Msg::Slash(crate::parse_slash_command("remember")),
+        Msg::Slash(crate::parse_slash_command("remember").unwrap()),
     );
     assert!(!cmds.iter().any(|c| matches!(c, Cmd::RememberMemory { .. })));
     assert!(
@@ -6089,13 +6094,14 @@ fn plugin_command_expands_into_a_prompt_submit() {
 }
 
 #[test]
-fn unknown_slash_still_reports_unknown_not_plugin() {
+fn a_slash_line_naming_no_command_never_falls_through_to_a_plugin() {
     let mut state = fresh_state();
     state.plugin_commands = vec![plugin_cmd("deploy", "body")];
     state.ui.input_buffer = "/nosuch".to_string();
     let (state, _) = update(state, key(KeyCode::Enter));
     let last = state.session.messages().last().unwrap().content.clone();
-    assert!(last.contains("Unknown command: /nosuch"), "{last}");
+    assert_eq!(last, "/nosuch", "sent verbatim, not matched loosely");
+    assert!(!last.contains("body"), "and no plugin body was expanded");
 }
 
 #[test]
@@ -9599,5 +9605,91 @@ fn a_cancel_that_never_completes_is_abandoned_by_the_watchdog() {
         state.session.messages().len(),
         before + 1,
         "and the user is told"
+    );
+}
+
+// ─── slash palette: a path is not a command ────────────────────────
+
+/// The buffer from the bug report.
+const PATH_LINE: &str =
+    "/home/nsabaj/Downloads/grok-bot_0.44.0_amd64.deb can you make this run on fedora";
+
+#[test]
+fn typing_an_absolute_path_never_opens_the_slash_palette() {
+    let (state, _) = type_text(fresh_state(), PATH_LINE);
+    assert!(
+        state.ui.palette_cursor.is_none(),
+        "a path names no command, so there is nothing to palette"
+    );
+    assert!(!crate::input_kind::palette_is_open(
+        &state.ui.input_buffer,
+        &state.plugin_commands
+    ));
+}
+
+#[test]
+fn escape_leaves_a_path_line_alone() {
+    // The palette's Esc arm wipes the whole buffer. While it owned every
+    // `/`-prefixed line, one keystroke destroyed a sentence the user had
+    // typed out in full.
+    let (state, _) = type_text(fresh_state(), PATH_LINE);
+    let (state, _) = update(state, plain_key(KeyCode::Escape));
+    assert_eq!(state.ui.input_buffer, PATH_LINE, "nothing was wiped");
+}
+
+#[test]
+fn arrow_keys_navigate_history_not_a_palette_for_a_path() {
+    let (state, _) = type_text(fresh_state(), "/etc/hosts");
+    let (state, _) = update(state, plain_key(KeyCode::Up));
+    assert!(
+        state.ui.palette_cursor.is_none(),
+        "Up is history navigation, not palette navigation"
+    );
+}
+
+#[test]
+fn submitting_a_path_line_sends_it_verbatim() {
+    let (state, _) = type_text(fresh_state(), PATH_LINE);
+    let (state, _) = update(state, key(KeyCode::Enter));
+    assert_eq!(
+        state.session.messages().last().unwrap().content,
+        PATH_LINE,
+        "byte-for-byte, original casing, nothing after the first space dropped"
+    );
+    assert!(state.ui.input_buffer.is_empty());
+}
+
+#[test]
+fn pasting_an_absolute_path_never_opens_the_slash_palette() {
+    // The paste half of the same gate: `insert_text_at_cursor`.
+    let (state, _) = update(
+        fresh_state(),
+        Msg::Paste(crate::msg::Paste::Text("/etc/hosts".to_string())),
+    );
+    assert!(state.ui.palette_cursor.is_none());
+}
+
+#[test]
+fn a_real_command_still_opens_the_palette_and_dispatches() {
+    // The other half of the invariant: nothing above may cost a command its
+    // palette. `/mo` filters, Tab completes, Enter runs it.
+    let (state, _) = type_text(fresh_state(), "/mo");
+    assert_eq!(state.ui.palette_cursor, Some(0), "a prefix still filters");
+    let (state, _) = update(state, key(KeyCode::Tab));
+    assert_eq!(state.ui.input_buffer, "/model ");
+    let (state, _) = update(state, key(KeyCode::Enter));
+    assert!(matches!(state.ui.mode, UiMode::ModelPicker { .. }));
+}
+
+#[test]
+fn a_double_slash_is_prose_not_a_command() {
+    // The two gates used to disagree here: submit read `//forget` as the
+    // command `/forget`, while the palette filtered on `forget`.
+    let (state, _) = type_text(fresh_state(), "//forget everything");
+    assert!(state.ui.palette_cursor.is_none());
+    let (state, _) = update(state, key(KeyCode::Enter));
+    assert_eq!(
+        state.session.messages().last().unwrap().content,
+        "//forget everything"
     );
 }

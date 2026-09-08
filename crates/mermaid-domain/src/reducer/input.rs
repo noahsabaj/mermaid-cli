@@ -652,20 +652,14 @@ pub fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: K
         return;
     }
 
-    // Slash-palette navigation — intercepts ↑/↓/Tab/Esc while the
-    // input buffer opens with `/`. Enter falls through to the normal
+    // Slash-palette navigation — intercepts ↑/↓/Tab/Esc while the palette
+    // has rows to offer. `palette_rows` is the one authority on that, so a
+    // buffer that names no command keeps its keys: `/etc/hosts` takes Esc as
+    // Esc rather than as "wipe the line". Enter falls through to the normal
     // handler below so the command actually dispatches.
-    if state.ui.input_buffer.starts_with('/') {
-        use crate::slash_commands::filter_entries;
-        let typed = state
-            .ui
-            .input_buffer
-            .trim_start_matches('/')
-            .split_whitespace()
-            .next()
-            .unwrap_or("")
-            .to_string();
-        let candidates = filter_entries(&typed, &state.plugin_commands);
+    if let Some(candidates) =
+        crate::input_kind::palette_rows(&state.ui.input_buffer, &state.plugin_commands)
+    {
         match code {
             KeyCode::Up => {
                 let cur = state.ui.palette_cursor.unwrap_or(0);
@@ -704,13 +698,9 @@ pub fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: K
                 if let Some(entry) = candidates.get(sel) {
                     let name = entry.name().to_string();
                     drop(candidates);
-                    let raw = state.ui.input_buffer.clone();
-                    let after_slash = raw.trim_start_matches('/');
-                    let rest = match after_slash.find(char::is_whitespace) {
-                        Some(idx) => &after_slash[idx..],
-                        None => "",
-                    };
-                    state.ui.input_buffer = format!("/{name}{rest}");
+                    let args = crate::input_kind::command_line(&state.ui.input_buffer)
+                        .map_or(String::new(), |line| line.args.to_string());
+                    state.ui.input_buffer = format!("/{name}{args}");
                     state.ui.input_cursor = state.ui.input_buffer.len();
                 }
                 // Fall through to the Enter handler below.
@@ -727,7 +717,7 @@ pub fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: K
     // above owns that surface). Enter COMPLETES here instead of submitting:
     // picking a file and firing the prompt with one keypress would send a
     // half-written message.
-    if state.ui.file_picker_open() {
+    if state.file_picker_open() {
         match code {
             KeyCode::Up => {
                 let cur = state.ui.file_picker_cursor.unwrap_or(0);
@@ -802,10 +792,14 @@ pub fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: K
                 // Opening the palette, or editing its filter, resets
                 // the cursor to the first candidate — stops stale
                 // indices from pointing past the end of a shrinking
-                // filter result.
-                if state.ui.input_buffer.starts_with('/') {
-                    state.ui.palette_cursor = Some(0);
-                }
+                // filter result. A keystroke that leaves nothing matching
+                // (`/etc` -> `/etc/`) closes it instead: the palette never
+                // stays open with no row to offer.
+                state.ui.palette_cursor = crate::input_kind::palette_is_open(
+                    &state.ui.input_buffer,
+                    &state.plugin_commands,
+                )
+                .then_some(0);
             },
             KeyCode::Backspace => {
                 state.ui.input_history_cursor = None;
@@ -825,11 +819,11 @@ pub fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: K
                     state.ui.input_buffer.drain(new_pos..pos);
                     state.ui.input_cursor = new_pos;
                 }
-                if state.ui.input_buffer.starts_with('/') {
-                    state.ui.palette_cursor = Some(0);
-                } else {
-                    state.ui.palette_cursor = None;
-                }
+                state.ui.palette_cursor = crate::input_kind::palette_is_open(
+                    &state.ui.input_buffer,
+                    &state.plugin_commands,
+                )
+                .then_some(0);
             },
             KeyCode::Delete => {
                 state.ui.input_history_cursor = None;
@@ -847,11 +841,11 @@ pub fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: K
                     let next = state.ui.input_buffer.ceil_char_boundary(pos + 1);
                     state.ui.input_buffer.drain(pos..next);
                 }
-                if state.ui.input_buffer.starts_with('/') {
-                    state.ui.palette_cursor = Some(0);
-                } else {
-                    state.ui.palette_cursor = None;
-                }
+                state.ui.palette_cursor = crate::input_kind::palette_is_open(
+                    &state.ui.input_buffer,
+                    &state.plugin_commands,
+                )
+                .then_some(0);
             },
             KeyCode::Left => {
                 let pos = clamp_cursor(&state.ui.input_buffer, state.ui.input_cursor);
@@ -1354,7 +1348,7 @@ pub const FILE_PICKER_MAX_MATCHES: usize = 50;
 /// Re-rank `file_picker_matches` for the active @-token against the cached
 /// project file list. Pure recompute — never fires a walk.
 pub fn recompute_file_matches(state: &mut State) {
-    let Some(token) = state.ui.active_file_token() else {
+    let Some(token) = state.active_file_token() else {
         state.ui.file_picker_matches.clear();
         state.ui.file_picker_cursor = None;
         return;
@@ -1388,7 +1382,7 @@ pub fn refresh_file_picker(state: &mut State, cmds: &mut Vec<Cmd>) {
 /// `@<path> ` over `@<query>` and land the cursor after the space. The
 /// trailing space closes the token, so the picker drops on its own.
 pub fn complete_file_mention(state: &mut State) {
-    let Some(token) = state.ui.active_file_token() else {
+    let Some(token) = state.active_file_token() else {
         return;
     };
     let sel = state.ui.file_picker_cursor.unwrap_or(0);
@@ -1517,53 +1511,63 @@ pub fn cycle_safety(
 /// deferred clipboard read drains, re-deriving text + attachments (and thus
 /// picking up a freshly-pasted image). No-op on empty/whitespace input.
 pub fn submit_current_input(state: &mut State) {
-    let buf = state.ui.input_buffer.trim().to_string();
-    if buf.is_empty() {
+    if state.ui.input_buffer.trim().is_empty() {
         return;
     }
-    if let Some(rest) = buf.strip_prefix('/') {
-        // Plugin prompt commands: an enabled plugin's `/name args` expands
-        // into a normal user prompt — the transcript shows the EXPANSION, so
-        // recordings replay without the plugin installed. Built-ins always
-        // win (the loader already refuses shadowing names; this order makes
-        // it structural).
-        let (name, args) = match rest.split_once(char::is_whitespace) {
-            Some((n, a)) => (n.to_lowercase(), a),
-            None => (rest.to_lowercase(), ""),
+    /// What the buffer resolved to. Built before anything touches the
+    /// composer, so no borrow of the buffer outlives the clear below.
+    enum Submit {
+        /// Dispatch a parsed command.
+        Slash(crate::SlashCmd),
+        /// Send text: `Some` for a plugin expansion, `None` to take the
+        /// buffer verbatim.
+        Prompt(Option<String>),
+    }
+    // ONE classification, of the exact buffer the border cue and the palette
+    // already classified. A line the registry does not know is a message —
+    // that is what stops `/home/you/pkg.deb can you...` from being eaten by
+    // a command parser that never had a command to run.
+    let submit =
+        match crate::input_kind::classify_input(&state.ui.input_buffer, &state.plugin_commands) {
+            crate::input_kind::InputKind::Builtin { rest } => crate::parse_slash_command(rest)
+            // Unreachable: the classifier reports `Builtin` only for a name
+            // the registry knows, and `every_registry_command_parses` pins
+            // that. Sending the line still beats swallowing it.
+            .map_or(Submit::Prompt(None), Submit::Slash),
+            // Plugin prompt commands: an enabled plugin's `/name args` expands
+            // into a normal user prompt — the transcript shows the EXPANSION, so
+            // recordings replay without the plugin installed. Built-ins win, and
+            // `classify_input` is where that order is enforced.
+            crate::input_kind::InputKind::Plugin { cmd, args } => {
+                Submit::Prompt(Some(cmd.expand(args)))
+            },
+            crate::input_kind::InputKind::Text => Submit::Prompt(None),
         };
-        let builtin = crate::slash_commands::COMMAND_REGISTRY
-            .iter()
-            .any(|c| c.name == name || c.aliases.contains(&name.as_str()));
-        if !builtin && let Some(cmd) = state.plugin_commands.iter().find(|c| c.name == name) {
-            let text = cmd.expand(args);
+
+    state.ui.input_cursor = 0;
+    state.ui.palette_cursor = None;
+    match submit {
+        Submit::Slash(cmd) => {
             state.ui.input_buffer.clear();
-            state.ui.input_cursor = 0;
-            state.ui.palette_cursor = None;
+            state.ui.pending_msgs.push_back(Msg::Slash(cmd));
+        },
+        Submit::Prompt(expanded) => {
+            // Verbatim when the buffer itself is the message: a leading `/`
+            // that named nothing is part of what the user wrote.
+            let text = expanded.unwrap_or_else(|| std::mem::take(&mut state.ui.input_buffer));
+            state.ui.input_buffer.clear();
             let attachment_ids: Vec<u64> = state.ui.attachments.iter().map(|a| a.id).collect();
             state.ui.pending_msgs.push_back(Msg::SubmitPrompt {
                 text,
                 attachment_ids,
             });
-            return;
-        }
-        let slash = crate::parse_slash_command(rest);
-        state.ui.input_buffer.clear();
-        state.ui.input_cursor = 0;
-        state.ui.palette_cursor = None;
-        state.ui.pending_msgs.push_back(Msg::Slash(slash));
-    } else {
-        let text = std::mem::take(&mut state.ui.input_buffer);
-        state.ui.input_cursor = 0;
-        let attachment_ids: Vec<u64> = state.ui.attachments.iter().map(|a| a.id).collect();
-        state.ui.pending_msgs.push_back(Msg::SubmitPrompt {
-            text,
-            attachment_ids,
-        });
+        },
     }
 }
 
 /// Insert `text` at the input cursor and advance past it, resetting history-nav
-/// and opening the slash palette if the buffer now starts with `/`. Shared by
+/// and opening the slash palette if the buffer now names a command (pasting
+/// `/home/you/pkg.deb` must not open it). Shared by
 /// terminal bracketed paste (`handle_paste`) and Ctrl+V text
 /// (`handle_clipboard_read`) so the two agree on cursor handling — and on the
 /// @-mention picker, which re-ranks here for the same reason the keystroke
@@ -1584,9 +1588,9 @@ pub fn insert_text_at_cursor(state: &mut State, cmds: &mut Vec<Cmd>, text: &str)
     let pos = clamp_cursor(&state.ui.input_buffer, state.ui.input_cursor);
     state.ui.input_buffer.insert_str(pos, text);
     state.ui.input_cursor = clamp_cursor(&state.ui.input_buffer, pos + text.len());
-    if state.ui.input_buffer.starts_with('/') {
-        state.ui.palette_cursor = Some(0);
-    }
+    state.ui.palette_cursor =
+        crate::input_kind::palette_is_open(&state.ui.input_buffer, &state.plugin_commands)
+            .then_some(0);
     refresh_file_picker(state, cmds);
 }
 

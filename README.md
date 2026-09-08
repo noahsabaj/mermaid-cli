@@ -111,7 +111,7 @@ Every flag, structured output, headless session resume, and record/replay: [docs
 | Shift+Tab | Cycle safety mode: `plan → read_only → ask → auto → full_access` |
 | Ctrl+V | Paste image or text from clipboard |
 | Ctrl+O | Compose the prompt in `$VISUAL`/`$EDITOR` |
-| `/` | Open the slash-command palette |
+| `/` | Open the slash-command palette (a line that names no command is sent as a message) |
 | `@` | Open the fuzzy file picker |
 
 The [full tables](docs/cli-reference.md#keyboard-shortcuts) add selection, background processes, and every slash command; `/help` groups them in the TUI.
