@@ -69,6 +69,8 @@ jobs:
           toolchain: stable
           components: clippy
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          workspaces: ". -> ../mermaid-target"
       - name: Run clippy
         # `--workspace` so the `mermaid-runtime` crate (safety classifier,
         # approvals store) is linted too — a bare `cargo clippy` only covers the
@@ -107,6 +109,7 @@ jobs:
           # blocking `Clippy` job, and sharing one key would have each evict
           # the other's cache on every run.
           key: clippy-ratchet
+          workspaces: ". -> ../mermaid-target"
       - name: Pedantic + nursery debt only shrinks
         run: python3 .github/scripts/check_clippy_ratchet.py
 
@@ -148,6 +151,7 @@ jobs:
         with:
           # Cache key includes OS and Rust version
           key: ${{ matrix.os }}-${{ matrix.rust }}
+          workspaces: ". -> ../mermaid-target"
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@5bf6ce016fd2e72eefc647cbca1e4213f65955b8 # v2.87.5
@@ -273,6 +277,7 @@ jobs:
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           key: isolated-crate-build
+          workspaces: ". -> ../mermaid-target"
       - name: Build each crate outside the workspace
         run: |
           set -euo pipefail
@@ -325,6 +330,7 @@ jobs:
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           key: release-build
+          workspaces: ". -> ../mermaid-target"
       - name: Build the workspace in release
         run: cargo build --workspace --release
 
@@ -367,6 +373,8 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          workspaces: ". -> ../mermaid-target"
       - name: Build binaries
         run: cargo build --workspace
       - name: Daemon integration tests (ignored)
@@ -398,6 +406,7 @@ jobs:
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           key: managed-searxng-${{ matrix.os }}
+          workspaces: ". -> ../mermaid-target"
       - name: Managed SearXNG end-to-end (ignored)
         run: cargo test --lib searxng::tests::managed_searxng_end_to_end -- --ignored --exact
 
@@ -423,6 +432,7 @@ jobs:
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           key: clipboard-macos
+          workspaces: ". -> ../mermaid-target"
       - name: Arm the clipboard with a file reference, then probe it
         run: |
           set -uo pipefail
@@ -463,6 +473,7 @@ jobs:
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           key: sandbox-${{ matrix.os }}
+          workspaces: ". -> ../mermaid-target"
       - name: Build binaries
         run: cargo build --workspace
       - name: Sandbox network denial (ignored)

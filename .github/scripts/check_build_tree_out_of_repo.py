@@ -18,6 +18,14 @@ The path has to be repeated in files cargo config does not reach:
 Every repetition is a chance for one to drift back to ./target and quietly put
 the artifacts back inside the repo. This asserts they all agree, and that none
 of them names an in-tree path.
+
+It also asserts every Swatinem/rust-cache step passes `workspaces`. That action
+does NOT read build.target-dir -- it derives the cache path from the workspace
+root and caches `<workspace>/target`. Moving the build tree without telling it
+made it cache a directory that no longer exists: every Rust job still passed,
+having silently rebuilt from scratch. Roughly 90% of a CI leg is compilation
+(see the env comment in rust.yml), so the failure is invisible in the check
+marks and expensive in wall clock -- exactly the kind that survives review.
 """
 
 import re
@@ -29,7 +37,15 @@ ROOT = Path(__file__).resolve().parents[2]
 CONFIG = ROOT / ".cargo" / "config.toml"
 CONSUMERS = [
     ROOT / ".github" / "workflows" / "release.yml",
+    ROOT / ".github" / "workflows" / "rust.yml",
     ROOT / "justfile",
+]
+
+# Every workflow that caches Rust build output.
+CACHE_ACTION = "Swatinem/rust-cache"
+CACHE_WORKFLOWS = [
+    ROOT / ".github" / "workflows" / "release.yml",
+    ROOT / ".github" / "workflows" / "rust.yml",
 ]
 
 
@@ -43,6 +59,43 @@ def declared_target_dir() -> str:
             "The build tree belongs outside the checkout; see this guard's docstring."
         )
     return m.group(1)
+
+
+def cache_steps_declare_workspaces(target_dir: str) -> list[str]:
+    """Every rust-cache step must point the action at the moved build tree.
+
+    Parsed by indentation rather than with a YAML library, to keep these guards
+    dependency-free (nothing here imports outside the stdlib).
+    """
+    want = f'workspaces: ". -> {target_dir}"'
+    failures = []
+    for path in CACHE_WORKFLOWS:
+        lines = path.read_text(encoding="utf-8").split("\n")
+        rel = path.relative_to(ROOT)
+        for i, line in enumerate(lines):
+            if CACHE_ACTION not in line or "uses:" not in line:
+                continue
+            col = line.index("uses:")
+            # The step's own keys sit at `col`; a sibling step opens with "- "
+            # at col - 2, and anything shallower has left the step entirely.
+            block, j = [], i + 1
+            while j < len(lines):
+                nxt = lines[j]
+                if not nxt.strip():
+                    j += 1
+                    continue
+                indent = len(nxt) - len(nxt.lstrip())
+                if indent < col or (indent == col - 2 and nxt.lstrip().startswith("- ")):
+                    break
+                block.append(nxt)
+                j += 1
+            if not any(want in b for b in block):
+                failures.append(
+                    f"  {rel}:{i + 1}: {CACHE_ACTION} step is missing `{want}`\n"
+                    f"      without it the action caches <workspace>/target, "
+                    f"which no longer exists -- the job silently rebuilds from scratch"
+                )
+    return failures
 
 
 def main() -> int:
@@ -77,13 +130,16 @@ def main() -> int:
         if target_dir not in text:
             failures.append(f"  {rel}: never mentions {target_dir!r}")
 
+    failures += cache_steps_declare_workspaces(target_dir)
+
     if failures:
         print("build tree escaped its declared location:", file=sys.stderr)
         print("\n".join(failures), file=sys.stderr)
         return 1
 
     print(f"build tree out of repo: OK — {target_dir} agreed by "
-          f"{len(CONSUMERS)} consumer(s) + .cargo/config.toml")
+          f"{len(CONSUMERS)} consumer(s) + .cargo/config.toml, "
+          f"and every {CACHE_ACTION} step points at it")
     return 0
 
 
