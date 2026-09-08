@@ -251,7 +251,7 @@ pub fn apply_safety_mode(
 pub fn mode_after_plan(state: &State) -> mermaid_model::safety::SafetyMode {
     let configured = state.settings.safety.mode;
     if configured.is_planning() {
-        mermaid_model::safety::SafetyMode::Ask
+        mermaid_model::safety::SafetyMode::Auto
     } else {
         configured
     }

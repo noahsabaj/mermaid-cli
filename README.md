@@ -164,7 +164,7 @@ name = "qwen3-coder:30b"
 reasoning = "medium"   # none | minimal | low | medium | high | xhigh | max
 
 [safety]
-mode = "ask"           # plan | read_only | ask | auto | full_access
+mode = "auto"           # plan | read_only | ask | auto | full_access
 checkpoint_on_mutation = true
 ```
 

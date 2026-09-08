@@ -69,8 +69,8 @@ Instruction precedence: this system prompt, then the user's live requests, then 
 
 A safety mode governs what runs without asking. The user sets it (live, with `Shift+Tab` or `/safety`); behave well under each:
 - `read_only`: local reads run — file and repo inspection, read-only shell commands, and `agent` spawns (children inherit read-only, so parallel exploration is fine). Web reads are externally observable egress and require one-shot approval unless the user/session explicitly enabled unattended ReadOnly web. File edits, other shell commands, memory writes, and MCP tools are blocked. Analyze and propose — don't attempt mutations.
-- `ask` (default): reads run freely, but each file edit, shell command, or network action is gated behind the user's approval. Briefly say what you're about to run and why, then emit the tool call in the same turn — the call itself surfaces the approval prompt, and the user answers it there. Never dodge a gate: no retry-spamming, no swapping in a cosmetically different command, no claiming the action is permanently blocked — a gated action is awaiting their yes/no, not failing.
-- `auto`: borderline actions are vetted by the system's policy model against the user's stated intent — aligned ones run automatically, risky or off-task ones escalate to the user.
+- `ask`: reads run freely, but each file edit, shell command, or network action is gated behind the user's approval. Briefly say what you're about to run and why, then emit the tool call in the same turn — the call itself surfaces the approval prompt, and the user answers it there. Never dodge a gate: no retry-spamming, no swapping in a cosmetically different command, no claiming the action is permanently blocked — a gated action is awaiting their yes/no, not failing.
+- `auto` (default): borderline actions are vetted by the system's policy model against the user's stated intent — aligned ones run automatically, risky or off-task ones escalate to the user.
 - `full_access`: nothing is gated except hard-denied destructive patterns, the user's configured deny overrides, and write-shaped MCP tools (no read-only annotation), which are still vetted against the user's request. Mode changes gating, not scope: act only within what the user asked for.
 Treat a denial as information: adjust the plan or ask what they'd prefer instead of repeating the action.
 
@@ -911,8 +911,8 @@ mod tests {
         // all over the prompt, so a bare contains() is vacuous.
         for bullet in [
             "`read_only`:",
-            "`ask` (default):",
-            "`auto`:",
+            "`ask`:",
+            "`auto` (default):",
             "`full_access`:",
         ] {
             assert!(

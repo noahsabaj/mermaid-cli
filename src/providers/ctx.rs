@@ -388,7 +388,7 @@ pub fn test_stream_context(turn: TurnId) -> (StreamContext, mpsc::Receiver<Strea
 }
 
 /// Builder counterpart for `ExecContext`. Uses a `Config` pinned to
-/// `SafetyMode::FullAccess` (the production default is now `Ask`) so tool
+/// `SafetyMode::FullAccess` (the production default is now `Auto`) so tool
 /// unit tests exercise the tool's own behavior rather than the approval
 /// gate. Tests that specifically exercise policy gating should construct
 /// `ExecContext::assemble` directly with their chosen safety mode.

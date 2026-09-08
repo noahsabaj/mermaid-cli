@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING: default safety mode is now `Auto` (was `Ask`).** A fresh
+  session — with no `mode` in any config file — starts classifier-vetted:
+  aligned actions run without prompting, risky or off-task ones still
+  escalate to an approval prompt. Leaving plan mode (`/plan off`, plan
+  approval, handoffs) lands on the configured `[safety] mode`, which is
+  `auto` unless pinned — so accepting a plan no longer drops you into
+  `ask`. Set `[safety] mode = "ask"` in config to restore
+  prompt-before-everything; existing configs that already pin a mode
+  (including `mode = "ask"` frozen by an earlier `mermaid init`) keep
+  their value.
+
 ## [0.27.0] - 2026-09-07
 
 - **Output styles (`/output-style`).** Named voice/format presets that modify the system prompt: built-ins `default` (stock prompt), `proactive`, `concise`, `explanatory`, and `learning`, plus custom Markdown files with `name`/`description`/`keep-coding-instructions` frontmatter (keeping the built-in engineering instructions is the default). Custom files live user-globally (`~/.config/mermaid/output-styles/<name>.md`) or per-project (`<git-root>/.mermaid/output-styles/`, which wins on a clash); a custom name shadows a built-in. Select with `/output-style [name]` (persists to the user config, or the project config with `--project`), `[output] style = "..."` in either config file (project config may set it — prompt text, not a capability), or `--output-style` for one invocation. A switch applies to the next message with no `/clear` needed and never touches subagents; unknown names warn and fall back to `default`; `mermaid doctor` reports the active style and which layer set it.

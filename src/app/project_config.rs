@@ -385,12 +385,12 @@ decision = "allow"
 
     #[test]
     fn clamp_mode_is_tighten_only() {
-        let base = SafetyConfig::default(); // mode = Ask
+        let base = SafetyConfig::default(); // mode = Auto
         // A project trying to LOOSEN (full_access) is clamped back to the base...
         let mut table: toml::Table = toml::from_str("[safety]\nmode = \"full_access\"\n").unwrap();
         let mut warnings = Vec::new();
         clamp_project_safety(&mut table, &base, "x", &mut warnings);
-        assert_eq!(table["safety"]["mode"].as_str(), Some("ask"));
+        assert_eq!(table["safety"]["mode"].as_str(), Some("auto"));
         // ...while TIGHTENING (read_only) is honored.
         let mut table: toml::Table = toml::from_str("[safety]\nmode = \"read_only\"\n").unwrap();
         clamp_project_safety(&mut table, &base, "x", &mut warnings);

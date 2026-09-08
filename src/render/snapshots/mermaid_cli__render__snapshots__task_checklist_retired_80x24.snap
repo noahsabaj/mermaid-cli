@@ -25,4 +25,4 @@ expression: frame
 ╭──────────────────────────────────────────────────────────────────────────────╮
 │ >                                                                            │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-safety: ask · reasoning: medium                                      ollama/test
+safety: auto · reasoning: medium                                     ollama/test

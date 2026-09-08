@@ -77,8 +77,8 @@ fn readme_sample_config_parses() {
     let config: mermaid_domain::Config =
         toml::from_str(block).expect("README sample config must parse as a valid Config");
     assert!(
-        matches!(config.safety.mode, mermaid_runtime::SafetyMode::Ask),
-        "sample config's documented default must stay ask"
+        matches!(config.safety.mode, mermaid_runtime::SafetyMode::Auto),
+        "sample config's documented default must stay auto"
     );
 }
 
@@ -88,8 +88,8 @@ fn config_doc_schema_parses() {
     let config: mermaid_domain::Config =
         toml::from_str(block).expect("docs/configuration.md schema must parse as a valid Config");
     assert!(
-        matches!(config.safety.mode, mermaid_runtime::SafetyMode::Ask),
-        "documented default must stay ask"
+        matches!(config.safety.mode, mermaid_runtime::SafetyMode::Auto),
+        "documented default must stay auto"
     );
     assert!(
         block.contains("external_writes"),

@@ -2151,7 +2151,7 @@ mod tests {
         // plumbing around the drive, not the drive.
         let mut config = mermaid_domain::Config::default();
         config.ollama.host = "http://127.0.0.1:1".to_string();
-        // The default `Ask` would block the spawn on an approval UI that a
+        // The default `Auto` would block the spawn on a vetting verdict that a
         // test has no way to answer; the gate itself is covered elsewhere.
         config.safety.mode = SafetyMode::FullAccess;
         let providers = Arc::new(ProviderFactory::new(config.clone()));
@@ -2216,7 +2216,7 @@ mod tests {
         // Core tools present.
         assert!(r.get("read_file").is_some());
         assert!(r.get("execute_command").is_some());
-        // Default Ask cannot be satisfied by a headless child, so dead web
+        // Ask cannot be satisfied by a headless child, so dead web
         // capabilities must not be advertised.
         assert!(r.get("web_fetch").is_none());
         assert!(r.get("web_search").is_none());

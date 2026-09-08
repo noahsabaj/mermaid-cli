@@ -82,10 +82,10 @@ auto_start = true
 # numa = false
 
 [safety]
-# Approval policy. Default is "ask": prompt before mutations / shell / network
-# actions. "auto" runs an LLM classifier that vets each borderline action
-# against your stated intent — aligned actions run automatically, risky ones
-# escalate to an approval prompt. "full_access" auto-runs everything local;
+# Approval policy. Default is "auto": an LLM classifier vets each borderline
+# action against your stated intent — aligned actions run automatically, risky
+# ones escalate to an approval prompt. "ask" prompts before every mutation /
+# shell / network action. "full_access" auto-runs everything local;
 # write-shaped MCP tools (no read-only annotation) are still vetted against
 # your intent per `external_writes` below. "read_only" blocks mutations and
 # requires one-shot approval for each web request because URLs and queries are
@@ -93,7 +93,7 @@ auto_start = true
 # web egress in read_only sessions is intentional; project config cannot set it.
 # Change it live with Shift+Tab or `/safety <mode>` (session-scoped; this
 # value is the persistent default each session starts from).
-mode = "ask"
+mode = "auto"
 checkpoint_on_mutation = true
 # network = "allow"       # "deny" is a global shell + web egress kill-switch
 # allow_readonly_web = false

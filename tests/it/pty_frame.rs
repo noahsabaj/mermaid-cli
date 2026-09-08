@@ -108,7 +108,7 @@ fn model_picker_frame() {
 #[test]
 fn safety_mode_footers() {
     let mut term = Terminal::launch("frame-safety");
-    for mode in ["auto", "full_access", "plan", "read_only", "ask"] {
+    for mode in ["full_access", "plan", "read_only", "ask", "auto"] {
         term.press(harness::SHIFT_TAB);
         term.wait_for_text(&format!("safety: {mode}"), Duration::from_secs(10));
         term.assert_footer(&format!("footer_{mode}"));

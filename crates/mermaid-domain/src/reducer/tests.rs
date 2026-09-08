@@ -6848,10 +6848,8 @@ fn shift_tab_cycles_into_plan_mode_and_allocates_a_plan_path() {
             modifiers: KeyMods::default(),
         })
     };
-    // ask -> auto -> full_access -> plan
+    // auto -> full_access -> plan
     let (state, _) = update(fresh_state(), tab());
-    assert_eq!(state.session.safety_mode, S::Auto);
-    let (state, _) = update(state, tab());
     assert_eq!(state.session.safety_mode, S::FullAccess);
     let (state, _) = update(state, tab());
     assert_eq!(state.session.safety_mode, S::Plan);

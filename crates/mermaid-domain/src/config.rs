@@ -113,9 +113,11 @@ pub struct Config {
     #[serde(default)]
     pub model_aliases: HashMap<String, String>,
 
-    /// Runtime safety policy. Defaults to `Ask` so mutations / shell /
-    /// network actions require approval out of the box; users opt into
-    /// `Auto` (LLM-vetted) or `FullAccess` deliberately.
+    /// Runtime safety policy. Defaults to `Auto`: borderline actions are
+    /// vetted by an LLM classifier against the user's stated intent, so
+    /// aligned actions run without prompting while risky or off-task ones
+    /// still escalate. Users opt into `Ask` (always prompt) or `FullAccess`
+    /// deliberately.
     #[serde(default)]
     pub safety: SafetyConfig,
 
@@ -422,10 +424,10 @@ pub struct SafetyConfig {
 impl Default for SafetyConfig {
     fn default() -> Self {
         Self {
-            // Safe-by-default: the first run prompts for approval on
-            // mutations / shell / network rather than silently auto-allowing
-            // everything. FullAccess remains available via config.
-            mode: SafetyMode::Ask,
+            // Classifier-vetted by default: aligned actions run without
+            // prompting, while risky or off-task ones escalate to an approval
+            // prompt. `Ask` (always prompt) remains available via config.
+            mode: SafetyMode::Auto,
             checkpoint_on_mutation: true,
             network: NetworkPolicy::default(),
             filesystem: FilesystemPolicy::default(),
