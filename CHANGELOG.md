@@ -68,6 +68,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **`eval` is now inspected by the hard-deny check.** `eval "rm -rf /"` was
+  approvable in every safety mode, including `full_access`. `eval` re-parses
+  its arguments as shell source, so the command it runs is never a token of the
+  outer argv, and the argv shapes never saw `rm` as a head. Its whole argument
+  tail is now re-parsed the same bounded way `sh -c` is, which also covers
+  `eval rm -rf /` and `eval "rm" "-rf" "/"`, since `eval` joins its arguments
+  before parsing. `su -c <script>` gets the same treatment, being the same
+  single-token shape. The prefix wrappers — `sudo`, `env`, `nohup`, `timeout`,
+  `nice`, `xargs`, `command` — needed no change: they take their command as
+  ordinary argv tokens, so the existing scan already reaches it, and there are
+  now tests pinning that.
+
 - **rustls bumped to 0.23.45** (GHSA-2mjx-qc3c-rqvc). Pulled in transitively
   through `reqwest`, so Dependabot never proposed it; the advisory had been
   failing the Security Audit gate on `main`, and therefore every pull request,
