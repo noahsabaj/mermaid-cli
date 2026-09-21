@@ -224,6 +224,31 @@ fn argv_shapes(command: &str, depth: u8) -> Option<&'static str> {
         {
             return Some(rule);
         }
+        // `eval` re-parses its arguments as shell source, so the command it
+        // runs is never a token of the outer argv. The prefix wrappers (`sudo`,
+        // `env`, `nohup`, `timeout`, `nice`, `xargs`, `command`) need nothing
+        // here: they take their command as ordinary argv tokens, so the scan
+        // above already reaches it at a later index. Only a wrapper that hides
+        // a command inside ONE token has to be re-parsed.
+        //
+        // `eval` joins ALL its arguments with a space before parsing, so the
+        // whole tail is recursed into: that covers `eval "rm -rf /"`,
+        // `eval rm -rf /` and `eval "rm" "-rf" "/"` alike.
+        if head == "eval" && !rest.is_empty() {
+            let joined = rest.join(" ");
+            if let Some(rule) = nested_script_rule(&joined, depth) {
+                return Some(rule);
+            }
+        }
+        // `su -c <script>` runs the script through the target user's shell,
+        // the same single-token smuggling shape as `sh -c`.
+        if head == "su"
+            && let Some(pos) = rest.iter().position(|a| a == "-c")
+            && let Some(script) = rest.get(pos + 1)
+            && let Some(rule) = nested_script_rule(script, depth)
+        {
+            return Some(rule);
+        }
         // PowerShell running `-Command <script>` — the same smuggling shape
         // as `sh -c`, same bounded recursion, same fail-safe at the cap.
         if matches!(head, "pwsh" | "powershell")
@@ -434,6 +459,15 @@ mod tests {
 ls",
             // Wrapped one level deeper.
             r#"sh -c "rm -rf /""#,
+            // Wrappers that hide the command inside one re-parsed token.
+            r#"eval "rm -rf /""#,
+            r#"su -c "rm -rf /""#,
+            // Prefix wrappers reach the argv scan at a later token index.
+            "sudo rm -rf /",
+            "nohup rm -rf /",
+            "env FOO=1 rm -rf /",
+            "timeout 5 rm -rf /",
+            "xargs rm -rf /",
             // Substitution bodies really execute.
             "echo $(rm -rf /)",
             "echo `rm -rf /`",
@@ -443,17 +477,6 @@ ls",
                 "{cmd:?} is a real destructive command and must stay hard-denied"
             );
         }
-
-        // KNOWN GAP, pre-existing and unchanged by the move to per-segment
-        // matching: `eval` is not recognised as an interpreter, and its script
-        // is one quoted token, so `rm` is never seen as a head. main behaves
-        // identically -- the whole-text scan used the same tokenizer, so it
-        // saw the same single token. Asserted here so the gap is recorded
-        // rather than rediscovered, and so closing it trips this test.
-        assert!(
-            destructive_rule(r#"eval "rm -rf /""#).is_none(),
-            "eval is now inspected -- close the gap and move this into the list above"
-        );
     }
 
     /// The user-visible symptom this rework exists to fix. Each of these is an
@@ -468,6 +491,14 @@ ls",
             "rm -rf node_modules; echo .",
             "rm -rf target && cd ..",
             "git log --oneline; make reset --hard",
+            // Everyday `eval` from shell init. Widening the hard-deny to
+            // re-parse eval's tail must not make these unapprovable.
+            r#"eval "$(ssh-agent -s)""#,
+            r#"eval "$(direnv hook bash)""#,
+            r#"eval "$(rbenv init -)""#,
+            "eval rm -rf build",
+            r#"su -c "cargo build""#,
+            "sudo rm -rf target",
         ] {
             assert!(
                 destructive_rule(cmd).is_none(),
