@@ -113,7 +113,7 @@ mermaid-runtime = { path = "crates/mermaid-runtime", version = "0.27.0" }
 
 # Additional utilities
 rustc-hash = "2.0"  # Faster non-cryptographic hash for HashMap
-base64 = "0.22"  # Base64 encoding for binary files (PDFs, images)
+base64 = "0.23"  # Base64 encoding for binary files (PDFs, images)
 rpassword = "7.4.0"
 unicode-width = "0.2"
 unicode-normalization = "0.1.25"
