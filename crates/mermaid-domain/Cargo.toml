@@ -52,7 +52,7 @@ warnings = "deny"
 [dependencies]
 anyhow = "1.0"
 tracing = "0.1"
-base64 = "0.22"
+base64 = "0.23"
 chrono = { version = "0.4", features = ["serde"] }
 nucleo-matcher = "0.3"
 regex = "1.12"

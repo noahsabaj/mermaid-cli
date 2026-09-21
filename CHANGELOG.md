@@ -182,6 +182,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Dependency and action roll-up.** `base64` 0.22 -> 0.23 (a major bump, but the
+  API this codebase uses is unchanged), `reqwest` 0.13.4 -> 0.13.5, `rusqlite`
+  0.40.1 -> 0.40.2, `which` 8.0.4 -> 8.0.6, `async-trait` 0.1.89 -> 0.1.92, and
+  the pinned SHAs for `actions/deploy-pages` (v5.0.1),
+  `dtolnay/rust-toolchain` and `taiki-e/install-action` (v2.87.14). Rolled up
+  into one change rather than eight: branch protection requires branches be up
+  to date, so each separate merge would have put the other seven behind and
+  forced a fresh check cycle for every one.
+
 - **"Unknown command" is gone as a concept.** A slash line the registry does
   not know is a message, so there is no error row to post and nothing the
   composer can eat; `SlashCmd::Unknown` no longer exists and
