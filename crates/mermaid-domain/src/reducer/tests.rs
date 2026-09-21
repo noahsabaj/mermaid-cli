@@ -8056,10 +8056,10 @@ fn plan_model_override_swaps_on_entry_and_restores_on_exit() {
 #[test]
 fn plan_capabilities_line_tracks_the_profile() {
     use crate::PlanPermissions;
-    let line = plan_capabilities_line(&PlanPermissions::default());
+    let line = plan_capabilities_line(PlanPermissions::default());
     assert!(line.contains("build and test"));
     assert!(line.contains("web search/fetch"));
-    let line = plan_capabilities_line(&PlanPermissions::strict());
+    let line = plan_capabilities_line(PlanPermissions::strict());
     assert!(!line.contains("build and test"));
     assert!(!line.contains("web search/fetch"));
     assert!(
@@ -8078,12 +8078,12 @@ fn plan_capabilities_line_tracks_the_profile() {
         line.contains("working tree itself stays read-only"),
         "the line must still bound what planning may touch: {line}"
     );
-    let line = plan_capabilities_line(&PlanPermissions::default());
+    let line = plan_capabilities_line(PlanPermissions::default());
     assert!(
         line.contains("scratchpad"),
         "an allowed scratchpad must be advertised: {line}"
     );
-    let line = plan_capabilities_line(&PlanPermissions::strict());
+    let line = plan_capabilities_line(PlanPermissions::strict());
     assert!(
         !line.contains("scratchpad"),
         "a denied scratchpad must not be advertised: {line}"

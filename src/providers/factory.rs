@@ -206,8 +206,9 @@ pub(crate) fn resolve_provider_endpoint(
 }
 
 /// Cloudflare Workers AI — OpenAI-compatible, but the endpoint URL embeds a
-/// per-account id, so the base_url is synthesized at runtime from
-/// CLOUDFLARE_ACCOUNT_ID (or a full [providers.cloudflare].base_url override,
+/// per-account id, so the `base_url` is synthesized at runtime from
+/// `CLOUDFLARE_ACCOUNT_ID` (or a full `[providers.cloudflare].base_url`
+/// override,
 /// e.g. AI Gateway).
 fn resolve_cloudflare_endpoint(
     provider_lc: &str,

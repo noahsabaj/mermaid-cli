@@ -116,8 +116,9 @@ impl ReasoningStrategy {
             },
             Self::OpenRouterShape => match level {
                 ReasoningLevel::None => Some(json!({"reasoning": {"exclude": true}})),
-                ReasoningLevel::Minimal => Some(json!({"reasoning": {"effort": "low"}})),
-                ReasoningLevel::Low => Some(json!({"reasoning": {"effort": "low"}})),
+                ReasoningLevel::Minimal | ReasoningLevel::Low => {
+                    Some(json!({"reasoning": {"effort": "low"}}))
+                },
                 ReasoningLevel::Medium => Some(json!({"reasoning": {"effort": "medium"}})),
                 ReasoningLevel::High => Some(json!({"reasoning": {"effort": "high"}})),
                 // OpenRouter has no `xhigh` tier. Since XHigh sits between

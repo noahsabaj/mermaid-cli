@@ -45,7 +45,7 @@ pub fn resolve_provider_key(
 }
 
 /// [`resolve_provider_key`] against an explicit store (test seam).
-pub(crate) fn resolve_provider_key_in(
+pub fn resolve_provider_key_in(
     store: &dyn super::credentials::CredentialStore,
     provider: &str,
     default_env: &str,

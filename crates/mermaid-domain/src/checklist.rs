@@ -33,7 +33,7 @@ pub enum ChecklistStatus {
 
 impl ChecklistStatus {
     #[must_use]
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Pending => "pending",
             Self::InProgress => "in_progress",
@@ -122,7 +122,7 @@ pub struct ChecklistItem {
 impl ChecklistItem {
     /// Elapsed seconds from start to completion, when both stamps exist.
     #[must_use]
-    pub fn elapsed_secs(&self) -> Option<u64> {
+    pub const fn elapsed_secs(&self) -> Option<u64> {
         match (self.started_at, self.completed_at) {
             (Some(s), Some(c)) => Some(c.saturating_sub(s)),
             (Some(_), None) | (None, Some(_)) | (None, None) => None,
@@ -151,9 +151,10 @@ pub struct ChecklistEdit {
     pub description: Option<String>,
 }
 
-/// A checklist edit made by the user via `/tasks` (not the model). Carried
-/// on `Cmd::UserTaskEdit` to the effect runner, which applies it through the
-/// `TaskBroker` — the single writer — so user edits and concurrent tool calls
+/// A checklist edit made by the user via `/tasks` (not the model).
+///
+/// Carried on `Cmd::UserTaskEdit` to the effect runner, which applies it through
+/// the `TaskBroker` — the single writer — so user edits and concurrent tool calls
 /// serialize instead of racing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UserChecklistEdit {
@@ -374,10 +375,11 @@ fn transition(task: &mut ChecklistItem, status: ChecklistStatus, stamp: Stamp) {
     task.status = status;
 }
 
-/// Soft validation: advisory notes appended to the tool result, never a
-/// rejection (a hard reject risks retry loops; codex's enforce-nothing
-/// approach lets malformed checklists render silently). Strictness changes
-/// edit this list of checks only.
+/// Soft validation: advisory notes appended to the tool result, never a rejection
+/// (a hard reject risks retry loops; codex's enforce-nothing approach lets
+/// malformed checklists render silently).
+///
+/// Strictness changes edit this list of checks only.
 #[must_use]
 pub fn advisory_notes(
     before: &ChecklistStore,

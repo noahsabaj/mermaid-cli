@@ -385,7 +385,9 @@ async fn oversized_everywhere(needle: &str) -> Vec<(ScenarioResult, &'static str
 #[tokio::test]
 async fn a_reasoning_trace_past_the_cap_leaves_the_answer_everywhere() {
     for (result, provider) in oversized_everywhere("weighing ").await {
-        let outcome = result.unwrap_or_else(|e| panic!("{provider}: {e:?}"));
+        let outcome = result
+            .map_err(|e| format!("{provider}: {e:?}"))
+            .expect("the stream decoded");
         assert_eq!(
             outcome.content, "the answer",
             "{provider}: the answer after an oversized trace was dropped"
@@ -402,7 +404,9 @@ async fn a_reasoning_trace_past_the_cap_leaves_the_answer_everywhere() {
 async fn content_past_the_cap_is_marked_everywhere() {
     let cap = crate::constants::MAX_RESPONSE_CHARS;
     for (result, provider) in oversized_everywhere("the answer").await {
-        let outcome = result.unwrap_or_else(|e| panic!("{provider}: {e:?}"));
+        let outcome = result
+            .map_err(|e| format!("{provider}: {e:?}"))
+            .expect("the stream decoded");
         assert!(
             outcome
                 .content
@@ -490,7 +494,9 @@ async fn no_usage_frame_means_no_usage_everywhere() {
         ),
     ];
     for (result, provider) in cases {
-        let outcome = result.unwrap_or_else(|e| panic!("{provider}: {e:?}"));
+        let outcome = result
+            .map_err(|e| format!("{provider}: {e:?}"))
+            .expect("the stream decoded");
         assert_eq!(outcome.usage, None, "{provider}: fabricated a usage record");
     }
 }

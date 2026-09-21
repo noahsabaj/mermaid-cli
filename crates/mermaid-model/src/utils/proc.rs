@@ -217,8 +217,8 @@ pub fn output_with_timeout(cmd: &mut Command, timeout: Duration) -> std::io::Res
     match wait_deadline(&mut child, timeout)? {
         Some(status) => Ok(Output {
             status,
-            stdout: collect_drained(stdout_rx),
-            stderr: collect_drained(stderr_rx),
+            stdout: collect_drained(&stdout_rx),
+            stderr: collect_drained(&stderr_rx),
         }),
         None => Err(timed_out(cmd, timeout)),
     }
@@ -315,7 +315,7 @@ fn drain_pipe<R: Read + Send + 'static>(pipe: Option<R>) -> mpsc::Receiver<Vec<u
 /// pipe hits EOF (sender dropped); otherwise gives up after [`READER_GRACE`]
 /// so a grandchild that inherited the pipe can't stall us, keeping any
 /// partial output.
-fn collect_drained(rx: mpsc::Receiver<Vec<u8>>) -> Vec<u8> {
+fn collect_drained(rx: &mpsc::Receiver<Vec<u8>>) -> Vec<u8> {
     let mut out = Vec::new();
     let deadline = Instant::now() + READER_GRACE;
     while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {

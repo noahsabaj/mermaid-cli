@@ -294,7 +294,7 @@ pub(crate) fn strip_ansi(input: &str) -> String {
 fn completed_output(
     output: String,
     errors: &str,
-    status: &std::process::ExitStatus,
+    status: std::process::ExitStatus,
 ) -> CommandRunOutput {
     let stdout_lines = output.lines().count();
     let stderr_lines = errors.lines().count();
@@ -431,7 +431,7 @@ pub(crate) async fn run_command(
             let (output, errors, status) = res
                 .map_err(|_| std::io::Error::other("command driver dropped before completing"))?;
             let status = status?;
-            Ok(CommandRunResult::Completed(completed_output(output, &errors, &status)))
+            Ok(CommandRunResult::Completed(completed_output(output, &errors, status)))
         }
         _ = timeout_fut => {
             // Foreground timeout: same teardown as Esc. The old outer-`select!`

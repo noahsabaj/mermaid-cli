@@ -109,7 +109,7 @@ pub fn is_plan_file_path(workdir: &Path, raw: &str, plan_file: &Path) -> bool {
 /// resolves command names that way, so `CD`/`Set-Location` must refuse too;
 /// for POSIX that can only over-refuse (a unix binary literally named `CD`),
 /// the safe direction.
-pub(crate) const CWD_CHANGING_BUILTINS: &[&str] = &[
+pub const CWD_CHANGING_BUILTINS: &[&str] = &[
     "cd",
     "pushd",
     "popd",
@@ -234,7 +234,7 @@ pub(in crate::policy) fn is_plan_file_only_write_posix(
 /// redirect whose target is not one of the safe discard devices. Mirrors the
 /// redirect handling in `classify_segment`, which folds these into the
 /// severity ranking rather than reporting them separately.
-pub(crate) fn segment_has_file_write(tokens: &[String]) -> bool {
+pub fn segment_has_file_write(tokens: &[String]) -> bool {
     tokens.iter().enumerate().any(|(i, tok)| {
         let t = tok.as_str();
         if t == "tee" || t == "dd" {
@@ -254,7 +254,7 @@ pub(crate) fn segment_has_file_write(tokens: &[String]) -> bool {
 /// build/test subcommand. The head must be argv[0] directly — a wrapper
 /// (`sudo`, `env`, `xargs`) in front refuses even though `classify_segment`
 /// would look through it, because the wrapper changes what actually runs.
-pub(crate) fn segment_is_safe_build(tokens: &[String]) -> bool {
+pub fn segment_is_safe_build(tokens: &[String]) -> bool {
     let Some(head) = tokens.first().map(|t| basename(t)) else {
         return false;
     };
