@@ -51,6 +51,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **rustls bumped to 0.23.45** (GHSA-2mjx-qc3c-rqvc). Pulled in transitively
+  through `reqwest`, so Dependabot never proposed it; the advisory had been
+  failing the Security Audit gate on `main`, and therefore every pull request,
+  since it was published.
+
 - **`execute_command`'s `open_url` is now policy-gated.** It was never passed
   to the safety gate: `execute()` built its request from `command` alone, then
   handed the URL to the OS browser launcher from the *unsandboxed* parent
