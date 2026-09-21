@@ -171,12 +171,14 @@ pub enum LengthCause {
     Unknown,
 }
 
-/// Classify a `FinishReason::Length` stop from the response usage and the
-/// known context window. The discriminator that holds even for providers whose
-/// window is unknown: a length-stop with window room to spare (or no known
-/// window at all — the normal remote-provider case) is the per-response output
-/// cap, not a full window. `usage == None` (common on tool follow-ups) stays
-/// `Unknown` so the caller preserves the legacy recovery path.
+/// Classify a `FinishReason::Length` stop from the response usage and the known
+/// context window.
+///
+/// The discriminator that holds even for providers whose window is unknown: a
+/// length-stop with window room to spare (or no known window at all — the normal
+/// remote-provider case) is the per-response output cap, not a full window. `usage
+/// == None` (common on tool follow-ups) stays `Unknown` so the caller preserves the
+/// legacy recovery path.
 #[must_use]
 pub fn classify_length_stop(
     usage: Option<&TokenUsage>,
@@ -787,8 +789,9 @@ pub fn estimate_messages_tokens(messages: &[ChatMessage]) -> usize {
     messages.iter().map(estimate_message_tokens).sum()
 }
 
-/// Canonical compact token/count formatter shared across the reducer status
-/// text, the footer widget, chat compaction receipts, and compaction records.
+/// Canonical compact token/count formatter shared across the reducer status text,
+/// the footer widget, chat compaction receipts, and compaction records.
+///
 /// Abbreviates at 1k (`43.8k`, `1.2M`), exact below; a whole value drops the
 /// decimal (`128k`, not `128.0k`). Previously three copies existed with two
 /// different policies (threshold + rounding), so the same count rendered
@@ -1044,8 +1047,8 @@ fn format_history_excerpt(
 fn estimate_message_tokens(msg: &ChatMessage) -> usize {
     let mut chars = msg.content.len();
     chars = chars.saturating_add(format!("{:?}", msg.role).len());
-    chars = chars.saturating_add(msg.tool_name.as_deref().map(str::len).unwrap_or(0));
-    chars = chars.saturating_add(msg.tool_call_id.as_deref().map(str::len).unwrap_or(0));
+    chars = chars.saturating_add(msg.tool_name.as_deref().map_or(0, str::len));
+    chars = chars.saturating_add(msg.tool_call_id.as_deref().map_or(0, str::len));
     if let Some(images) = &msg.images {
         chars = chars.saturating_add(images.iter().map(String::len).sum::<usize>());
     }

@@ -281,7 +281,7 @@ pub(crate) fn system_prompt_for_state(state: &State) -> String {
                 .replace("{plan_path}", &plan.plan_path.display().to_string())
                 .replace(
                     "{plan_capabilities}",
-                    &plan_capabilities_line(&state.settings.plan.permissions),
+                    &plan_capabilities_line(state.settings.plan.permissions),
                 ),
         );
     }
@@ -310,7 +310,7 @@ fn output_style_for(state: &State) -> Option<(String, bool)> {
 /// Compose the "what runs while planning" sentence from the LIVE permission
 /// profile, so the prompt never promises a capability the gate will deny
 /// (`/plan config` can retune the profile mid-session).
-pub(crate) fn plan_capabilities_line(perms: &crate::PlanPermissions) -> String {
+pub(crate) fn plan_capabilities_line(perms: crate::PlanPermissions) -> String {
     use crate::PlanPermLevel as L;
     // Read-only subagent fan-out is always allowed under the plan-mode floor
     // (policy_gate leaves the Subagent Allow untouched) — without naming it,

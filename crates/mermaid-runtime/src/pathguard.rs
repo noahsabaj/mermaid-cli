@@ -22,7 +22,7 @@ use anyhow::Result;
 /// `..` pops the previous component — so traversal is resolved without symlink
 /// expansion or filesystem access (the target may not exist yet, as on a fresh
 /// checkout). Returns the normalized in-root path, or `Err` if it escapes.
-pub(crate) fn contain_within(root: &Path, raw: &str) -> Result<PathBuf> {
+pub fn contain_within(root: &Path, raw: &str) -> Result<PathBuf> {
     let candidate = if Path::new(raw).is_absolute() {
         PathBuf::from(raw)
     } else {
@@ -45,7 +45,7 @@ pub(crate) fn contain_within(root: &Path, raw: &str) -> Result<PathBuf> {
 /// up to the nearest existing ancestor and canonicalize that. Falls back to the
 /// lexical result when the root doesn't yet exist on disk (nothing to escape
 /// through).
-pub(crate) fn contain_within_canonical(root: &Path, raw: &str) -> Result<PathBuf> {
+pub fn contain_within_canonical(root: &Path, raw: &str) -> Result<PathBuf> {
     let lexical = contain_within(root, raw)?;
     let canon_root = match std::fs::canonicalize(root) {
         Ok(r) => r,
@@ -78,7 +78,7 @@ pub(crate) fn contain_within_canonical(root: &Path, raw: &str) -> Result<PathBuf
 /// swapped-in symlink can't redirect the operation outside `root`. Used by
 /// [`crate::approval`] so the replay path gets the same symlink-safe confinement
 /// the live tool path has, instead of by-path `std::fs` that follows symlinks.
-pub(crate) fn relative_within(root: &Path, raw: &str) -> Result<PathBuf> {
+pub fn relative_within(root: &Path, raw: &str) -> Result<PathBuf> {
     let abs = contain_within(root, raw)?;
     let root_norm = normalize_lexical(root);
     let rel = abs

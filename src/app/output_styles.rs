@@ -201,22 +201,19 @@ pub fn resolve_and_apply(
         return warnings;
     }
     let source = style_source(cwd, flags);
-    match load_style_body(cwd, &name) {
-        Some((body, keep, custom, _)) => {
-            config.active_style = ActiveStyle {
-                body,
-                keep_coding_instructions: keep,
-                custom,
-                source: source.to_string(),
-            };
-        },
-        None => {
-            warnings.push(format!(
-                "unknown output style '{name}' — using default (bare `/output-style` lists styles)"
-            ));
-            config.output.style = mermaid_domain::prompts::DEFAULT_OUTPUT_STYLE.to_string();
-            config.active_style = ActiveStyle::none();
-        },
+    if let Some((body, keep, custom, _)) = load_style_body(cwd, &name) {
+        config.active_style = ActiveStyle {
+            body,
+            keep_coding_instructions: keep,
+            custom,
+            source: source.to_string(),
+        };
+    } else {
+        warnings.push(format!(
+            "unknown output style '{name}' — using default (bare `/output-style` lists styles)"
+        ));
+        config.output.style = mermaid_domain::prompts::DEFAULT_OUTPUT_STYLE.to_string();
+        config.active_style = ActiveStyle::none();
     }
     warnings
 }

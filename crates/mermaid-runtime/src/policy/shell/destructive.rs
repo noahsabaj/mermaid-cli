@@ -161,7 +161,7 @@ fn argv_scan_units(lower: &str) -> Vec<String> {
 
 /// Recurse into command/process substitutions — the shell executes them, so a
 /// destructive command hidden in `$(…)`/backticks must be hard-denied too
-/// (#F1), even in full_access. Bounded depth guards crafted nesting.
+/// (#F1), even in `full_access`. Bounded depth guards crafted nesting.
 fn substitution_rule(lower: &str, depth: u8) -> Option<&'static str> {
     let bodies = extract_substitutions(lower);
     if depth < 3 {
@@ -481,7 +481,7 @@ ls",
 
     /// The user-visible symptom this rework exists to fix. Each of these is an
     /// ordinary command that shipped main hard-denies in every safety mode,
-    /// including full_access and including with an explicit allow override,
+    /// including `full_access` and including with an explicit allow override,
     /// because the argv shape reads a `/` or `--hard` from a *different*
     /// segment. Verified failing against origin/main before the rework.
     #[test]

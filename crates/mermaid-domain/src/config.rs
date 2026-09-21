@@ -519,9 +519,10 @@ impl PlanPermLevel {
 }
 
 /// Per-category permission profile applied while a plan is being drafted.
-/// The read-only floor stays the base; these levels decide how far each
-/// carve-out opens. The plan file itself is not a category — being able to
-/// author the plan IS plan mode.
+///
+/// The read-only floor stays the base; these levels decide how far each carve-out
+/// opens. The plan file itself is not a category — being able to author the plan IS
+/// plan mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PlanPermissions {

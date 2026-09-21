@@ -221,10 +221,10 @@ impl ModelError {
                 // Cloud emits `{"error":"Internal Server Error (ref: ...)"}`).
                 // Render the extracted message when we can, fall back to the
                 // raw body so we never lose information.
-                let rendered = match try_extract_error_message(message) {
-                    Some(clean) => format!("HTTP {status}: {clean}"),
-                    None => format!("HTTP {status}: {message}"),
-                };
+                let rendered = try_extract_error_message(message).map_or_else(
+                    || format!("HTTP {status}: {message}"),
+                    |clean| format!("HTTP {status}: {clean}"),
+                );
                 UserFacingError {
                     summary: summary.to_string(),
                     message: debug.suffix(rendered),

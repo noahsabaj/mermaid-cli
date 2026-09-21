@@ -5,7 +5,7 @@ use super::destructive::*;
 use super::lexer::*;
 use super::tables::*;
 
-pub(crate) fn shell_severity(risk: RiskClass) -> u8 {
+pub fn shell_severity(risk: RiskClass) -> u8 {
     match risk {
         RiskClass::ReadOnly => 0,
         RiskClass::ShellMutation => 1,
@@ -16,7 +16,7 @@ pub(crate) fn shell_severity(risk: RiskClass) -> u8 {
     }
 }
 
-pub(crate) fn shell_max(a: RiskClass, b: RiskClass) -> RiskClass {
+pub fn shell_max(a: RiskClass, b: RiskClass) -> RiskClass {
     if shell_severity(a) >= shell_severity(b) {
         a
     } else {

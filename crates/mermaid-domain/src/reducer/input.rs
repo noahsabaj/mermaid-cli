@@ -219,9 +219,9 @@ fn apply_review_key(
     QuestionKeyAction::Stay
 }
 
-/// Key handling for a Select / MultiSelect question: Up/Down move the cursor,
-/// digits jump to an option, Enter/Space act on the current row, and text
-/// typed while the cursor sits on the "Other" row edits its free text.
+/// Key handling for a `Select` / `MultiSelect` question: Up/Down move the
+/// cursor, digits jump to an option, Enter/Space act on the current row, and
+/// text typed while the cursor sits on the "Other" row edits its free text.
 fn apply_choice_key(
     set: &mut mermaid_model::question::PendingQuestionSet,
     q_idx: usize,
@@ -1818,9 +1818,8 @@ pub fn handle_open_image_at(
     let b64 = match by_number {
         Some(b64) => b64,
         None => {
-            let msg = match state.session.messages().get(message_index) {
-                Some(m) => m,
-                None => return,
+            let Some(msg) = state.session.messages().get(message_index) else {
+                return;
             };
             let Some(images) = msg.images.as_ref() else {
                 return;

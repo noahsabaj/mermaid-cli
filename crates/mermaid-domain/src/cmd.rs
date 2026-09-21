@@ -37,12 +37,13 @@ use super::session_event::SessionEvent;
 use mermaid_model::ids::{ToolCallId, TurnId};
 use mermaid_model::tool_run::ManagedProcess;
 
-/// Everything the reducer stamps onto one tool call at dispatch time — the
-/// LIVE session context a tool needs that the frozen startup `Config`
-/// cannot supply. `Cmd::ExecuteTool` carries it whole; the effect layer
-/// threads it into the exec context untouched. One struct, one hat: this is
-/// the "session identity + policy inputs at dispatch" half of what used to
-/// be eleven loose fields on the Cmd and a 24-argument effect signature.
+/// Everything the reducer stamps onto one tool call at dispatch time — the LIVE
+/// session context a tool needs that the frozen startup `Config` cannot supply.
+///
+/// `Cmd::ExecuteTool` carries it whole; the effect layer threads it into the exec
+/// context untouched. One struct, one hat: this is the "session identity + policy
+/// inputs at dispatch" half of what used to be eleven loose fields on the Cmd and a
+/// 24-argument effect signature.
 #[derive(Debug, Clone)]
 pub struct ToolDispatch {
     /// The active session's model id at the moment this call was emitted,
@@ -341,13 +342,13 @@ pub enum Cmd {
     AlertUser,
 }
 
-/// Inputs a model needs to generate a turn. Built by the reducer from
-/// `Session` + `Settings` + current `MERMAID.md` context. Pure data —
-/// no provider-specific knowledge here (that's in
-/// `providers::model::*::chat`).
-/// `Default` exists so adding a field costs one line here instead of a
-/// mechanical edit in every construction site across providers, the CLI and
-/// the tests (adding `suppressed_builtin_tools` took 15). Use
+/// Inputs a model needs to generate a turn.
+///
+/// Built by the reducer from `Session` + `Settings` + current `MERMAID.md` context.
+/// Pure data — no provider-specific knowledge here (that's in
+/// `providers::model::*::chat`). `Default` exists so adding a field costs one line
+/// here instead of a mechanical edit in every construction site across providers,
+/// the CLI and the tests (adding `suppressed_builtin_tools` took 15). Use
 /// `..ChatRequest::default()` for the fields a caller does not care about.
 #[derive(Debug, Clone, Default)]
 pub struct ChatRequest {

@@ -86,13 +86,13 @@ impl IdAllocator {
     }
 
     /// Reset to 1. Used by `--replay` when loading a fresh log.
-    pub fn reset(&mut self) {
+    pub const fn reset(&mut self) {
         self.next = 1;
     }
 
     /// Peek without advancing.
     #[must_use]
-    pub fn peek(&self) -> u64 {
+    pub const fn peek(&self) -> u64 {
         self.next
     }
 }

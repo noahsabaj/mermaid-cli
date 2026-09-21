@@ -40,6 +40,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The pedantic lint debt is back under its baseline.** Eleven lints had drifted
+  above `.github/baselines/clippy_pedantic.txt` — 22 occurrences in total — and
+  the ratchet had been failing on `main` because of it. They accumulated
+  unnoticed because the Lint Debt job is skipped on `pull_request` events, so
+  every contributing PR looked green. Paid down rather than re-baselined, since
+  that file may only shrink: `pub(crate)` narrowed to `pub` where the module is
+  already crate-private, over-long first doc paragraphs split into a summary and
+  a body, `push_str(&format!(..))` replaced by `write!`, `map(..).unwrap_or(..)`
+  by `map_or`, two const-eligible functions marked `const`, a `Copy` argument
+  taken by value instead of by reference, and a handful of matches expressed as
+  `if let` / `let else`. No behaviour changes.
+
+  Two lint keys the gate had never recorded are closed at the same time, since
+  the ratchet blocks an unrecorded key outright rather than counting it:
+  seven `doc_markdown` sites (bare `full_access`, `base_url`, `ReadOnly` and
+  friends in doc comments, now backticked) and one `must_use_candidate`.
+
+  The baseline itself is re-recorded from CI's measurement, because it had gone
+  stale in the other direction too: earlier work had shrunk eleven counters and
+  emptied two keys without anyone lowering them, and an unrecorded shrink fails
+  the ratchet exactly like a growth. `too_many_lines` alone had been carrying 57
+  where only 31 remain. The file now reads 77 keys / 2116 occurrences, down from
+  79 / 2166.
+
 - **Lint debt: one needless raw-string hash.** A test string added with the
   per-segment hard-deny work used `r#"..."#` where the content holds no double
   quote, so `r"..."` says the same thing. It was the only new

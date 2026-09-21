@@ -15,6 +15,8 @@
 //! the ~150-line state machine it claims to be, and this one owns the
 //! presentation.
 
+use std::fmt::Write as _;
+
 use super::state::{PendingToolCall, ToolOutcome};
 use mermaid_model::action::{ActionDetails, ActionDisplay, ActionResult};
 use mermaid_model::tool_run::ToolMetadata;
@@ -173,10 +175,10 @@ fn action_details_for(
             } = &outcome.metadata.detail
             {
                 if !backend.is_empty() {
-                    detail.push_str(&format!(" via {backend}"));
+                    let _ = write!(detail, " via {backend}");
                 }
                 if *failed_queries > 0 {
-                    detail.push_str(&format!(" · {failed_queries} failed"));
+                    let _ = write!(detail, " · {failed_queries} failed");
                 }
                 if *truncated {
                     detail.push_str(" · truncated");
@@ -210,19 +212,19 @@ fn action_details_for(
             } = &outcome.metadata.detail
             {
                 if !backend.is_empty() {
-                    detail.push_str(&format!(" via {backend}"));
+                    let _ = write!(detail, " via {backend}");
                 }
                 if let Some(status) = status {
-                    detail.push_str(&format!(" · HTTP {status}"));
+                    let _ = write!(detail, " · HTTP {status}");
                 }
                 if let Some(media_type) = media_type {
-                    detail.push_str(&format!(" · {media_type}"));
+                    let _ = write!(detail, " · {media_type}");
                 }
                 if !extraction.is_empty() {
-                    detail.push_str(&format!(" · {extraction}"));
+                    let _ = write!(detail, " · {extraction}");
                 }
                 if *output_byte_count > 0 {
-                    detail.push_str(&format!(" · {output_byte_count} extracted bytes"));
+                    let _ = write!(detail, " · {output_byte_count} extracted bytes");
                 }
                 if let Some(pattern) = pattern {
                     let match_count = match_count.unwrap_or(0);
@@ -244,7 +246,7 @@ fn action_details_for(
                     detail.push_str(" · truncated");
                 }
                 if let Some(snapshot_id) = snapshot_id {
-                    detail.push_str(&format!(" · {snapshot_id}"));
+                    let _ = write!(detail, " · {snapshot_id}");
                 }
             }
             ActionDetails::Preview {
@@ -492,10 +494,11 @@ fn count_search_results(output: &str) -> usize {
 }
 
 /// [`display_info_for_shell`] with the machine's own
-/// [`HostShell`](mermaid_model::safety::HostShell) — what the committed
-/// transcript and activity labels want. The render layer passes its
-/// `RenderCache`-pinned value instead so snapshot frames stay byte-stable
-/// across platforms.
+/// [`HostShell`](mermaid_model::safety::HostShell) — what the committed transcript
+/// and activity labels want.
+///
+/// The render layer passes its `RenderCache`-pinned value instead so snapshot
+/// frames stay byte-stable across platforms.
 #[must_use]
 pub fn display_info_for(call: &PendingToolCall) -> (String, String) {
     display_info_for_shell(call, mermaid_model::safety::HostShell::current())

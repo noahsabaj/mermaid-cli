@@ -3,11 +3,10 @@
 # Debt that predates the guard. This file may only SHRINK.
 # Regenerate with: just clippy-debt-record
 #
-# 79 keys / 2166 occurrences
+# 77 keys / 2116 occurrences
 clippy::assigning_clones 31
 clippy::bool_to_int_with_if 2
 clippy::borrow_as_ptr 2
-clippy::branches_sharing_code 1
 clippy::case_sensitive_file_extension_comparisons 4
 clippy::cast_lossless 4
 clippy::cast_possible_truncation 70
@@ -21,24 +20,24 @@ clippy::duration_suboptimal_units 6
 clippy::elidable_lifetime_names 11
 clippy::explicit_iter_loop 3
 clippy::format_collect 2
-clippy::format_push_string 65
+clippy::format_push_string 58
 clippy::if_not_else 1
 clippy::ignore_without_reason 2
-clippy::ignored_unit_patterns 45
+clippy::ignored_unit_patterns 44
 clippy::implicit_clone 5
 clippy::ip_constant 1
-clippy::items_after_statements 46
+clippy::items_after_statements 45
 clippy::iter_on_single_items 1
 clippy::large_futures 3
 clippy::large_stack_arrays 29
 clippy::large_stack_frames 1
 clippy::manual_is_variant_and 1
-clippy::manual_let_else 13
+clippy::manual_let_else 12
 clippy::manual_string_new 3
-clippy::map_unwrap_or 84
+clippy::map_unwrap_or 83
 clippy::match_same_arms 15
 clippy::match_wildcard_for_single_variants 2
-clippy::missing_const_for_fn 199
+clippy::missing_const_for_fn 198
 clippy::missing_errors_doc 1
 clippy::missing_fields_in_debug 1
 clippy::missing_panics_doc 20
@@ -50,11 +49,11 @@ clippy::no_effect_underscore_binding 40
 clippy::option_if_let_else 74
 clippy::option_option 1
 clippy::or_fun_call 7
-clippy::panic 139
+clippy::panic 138
 clippy::range_plus_one 2
 clippy::redundant_clone 37
 clippy::redundant_closure_for_method_calls 146
-clippy::redundant_pub_crate 190
+clippy::redundant_pub_crate 186
 clippy::ref_option 3
 clippy::return_self_not_must_use 6
 clippy::semicolon_if_nothing_returned 7
@@ -63,13 +62,12 @@ clippy::significant_drop_tightening 12
 clippy::similar_names 7
 clippy::single_char_pattern 3
 clippy::single_match_else 14
-clippy::string_slice 93
+clippy::string_slice 91
 clippy::struct_excessive_bools 5
 clippy::struct_field_names 3
 clippy::suboptimal_flops 1
-clippy::too_long_first_doc_paragraph 257
-clippy::too_many_lines 57
-clippy::trivially_copy_pass_by_ref 1
+clippy::too_long_first_doc_paragraph 254
+clippy::too_many_lines 31
 clippy::uninlined_format_args 6
 clippy::unnecessary_debug_formatting 2
 clippy::unnecessary_wraps 6
