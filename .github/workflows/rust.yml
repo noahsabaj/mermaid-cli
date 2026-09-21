@@ -80,15 +80,21 @@ jobs:
   # Tier-2 lint debt: pedantic + nursery + a handful of named lints, tracked
   # against `.github/baselines/clippy_pedantic.txt` rather than blocking.
   #
-  # NOT on pull requests, and the reason is measurable: enabling these lints
-  # changes clippy's fingerprint, so this job cannot share the `Clippy` job's
-  # cache and rebuilds the workspace (~200s). "How much pedantic debt is there"
-  # does not change PR-to-PR in a way a merge should wait on. Same trade the
-  # `test` matrix already makes for its beta and nightly legs: the same signal,
-  # arriving within a day, off the critical path.
+  # This DOES run on pull requests, and is deliberately NOT a required check:
+  # advisory, but visible. It used to be skipped on `pull_request` to save the
+  # ~200s it costs (enabling these lints changes clippy's fingerprint, so it
+  # cannot share the `Clippy` job's cache and rebuilds the workspace). That
+  # trade was wrong in one direction: a PR that added debt looked entirely
+  # green, the growth only surfaced on the push to `main` afterwards, and
+  # nobody was watching. Thirteen lints drifted above the baseline that way and
+  # `main` sat red until #447/#448 paid them back.
+  #
+  # The ~200s is real but off the critical path: this runs in parallel with the
+  # Windows test leg and the release build, both of which take longer. Not being
+  # required, a red result here never blocks a merge -- it only lets the author
+  # see, before merging, what the push to `main` is about to report.
   clippy-ratchet:
     name: Lint Debt (pedantic + nursery)
-    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

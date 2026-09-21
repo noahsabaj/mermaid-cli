@@ -182,6 +182,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The lint-debt ratchet now runs on pull requests.** It was skipped on
+  `pull_request` to save the ~200s it costs, which meant a PR that added
+  pedantic debt looked entirely green and the growth only surfaced on the push
+  to `main` afterwards, where nobody was watching — thirteen lints drifted above
+  the baseline that way. It is still not a required check, so a red result never
+  blocks a merge; it just lets the author see beforehand what the push to `main`
+  is about to report. The cost is off the critical path: the job runs in
+  parallel with the Windows test leg and the release build, both longer.
+
 - **Dependency and action roll-up.** `base64` 0.22 -> 0.23 (a major bump, but the
   API this codebase uses is unchanged), `reqwest` 0.13.4 -> 0.13.5, `rusqlite`
   0.40.1 -> 0.40.2, `which` 8.0.4 -> 8.0.6, `async-trait` 0.1.89 -> 0.1.92, and
