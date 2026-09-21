@@ -41,7 +41,7 @@ pub(crate) async fn run_background_command(
         {
             Ok(pid) => pid,
             Err(error) => {
-                return ToolOutcome::error(error, start.elapsed().as_secs_f64());
+                return ToolOutcome::error(error, Some(start.elapsed().as_secs_f64()));
             },
         };
 
@@ -67,7 +67,7 @@ pub(crate) async fn run_background_command(
                         log_path.display(),
                         log_excerpt
                     ),
-                    start.elapsed().as_secs_f64(),
+                    Some(start.elapsed().as_secs_f64()),
                 );
             },
         };

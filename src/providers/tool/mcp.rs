@@ -58,10 +58,10 @@ impl ToolExecutor for McpToolProxy {
         // Args shape: { server_name, tool_name, arguments }. The effect
         // runner constructs this from the model-emitted tool call.
         let Some(server_name) = args.get("server_name").and_then(|v| v.as_str()) else {
-            return ToolOutcome::error("mcp_proxy requires 'server_name'", 0.0);
+            return ToolOutcome::error("mcp_proxy requires 'server_name'", None);
         };
         let Some(tool_name) = args.get("tool_name").and_then(|v| v.as_str()) else {
-            return ToolOutcome::error("mcp_proxy requires 'tool_name'", 0.0);
+            return ToolOutcome::error("mcp_proxy requires 'tool_name'", None);
         };
         let tool_args = args
             .get("arguments")
@@ -82,7 +82,7 @@ impl ToolExecutor for McpToolProxy {
             .await;
         }
         let Some(manager) = manager_ref::get() else {
-            return ToolOutcome::error("MCP servers not initialized", 0.0);
+            return ToolOutcome::error("MCP servers not initialized", None);
         };
 
         // Safety gate: MCP servers are untrusted external processes.
@@ -116,7 +116,7 @@ impl ToolExecutor for McpToolProxy {
                 ),
                 Err(e) => ToolOutcome::error(
                     format!("mcp_proxy({server_name}:{tool_name}): {e}"),
-                    start.elapsed().as_secs_f64(),
+                    Some(start.elapsed().as_secs_f64()),
                 )
                 .with_metadata(mcp_metadata(server_name, tool_name)),
             },

@@ -91,7 +91,7 @@ fn plan_mode_block(ctx: &crate::providers::ExecContext, secs: f64) -> Option<Too
              approved plan. Put implementation steps in the plan file's Tasks section \
              instead."
                 .to_string(),
-            secs,
+            Some(secs),
         )
     })
 }
@@ -265,7 +265,7 @@ impl ToolExecutor for TaskCreateTool {
         };
         let specs = match parse_specs(&args) {
             Ok(s) => s,
-            Err(e) => return ToolOutcome::error(e, secs()),
+            Err(e) => return ToolOutcome::error(e, Some(secs())),
         };
         let count = specs.len();
         let (created, store) = broker.create(specs, ChecklistOrigin::Model).await;
@@ -353,13 +353,13 @@ impl ToolExecutor for TaskUpdateTool {
         };
         let edits = match parse_edits(&args) {
             Ok(e) => e,
-            Err(e) => return ToolOutcome::error(e, secs()),
+            Err(e) => return ToolOutcome::error(e, Some(secs())),
         };
         let (report, store) = broker.update(edits.clone()).await;
         if report.applied.is_empty() {
             return ToolOutcome::error(
                 format!("No updates applied:\n{}", report.errors.join("\n")),
-                secs(),
+                Some(secs()),
             );
         }
         let mut out = String::new();

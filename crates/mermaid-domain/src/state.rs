@@ -1001,9 +1001,15 @@ impl ToolOutcome {
         }
     }
 
-    pub fn error(error: impl Into<String>, duration_secs: f64) -> Self {
+    /// `duration_secs` is `None` for an outcome that never ran — a rejected
+    /// argument, a policy denial, a hard-denied command. Passing `Some(0.0)`
+    /// there would render as "took 1ms": `format_action_duration` floors a
+    /// sub-millisecond measurement at 1ms, so a "not measured" sentinel came
+    /// out looking like a real timing. `cancelled()` below already carries
+    /// `None` for the same reason.
+    pub fn error(error: impl Into<String>, duration_secs: Option<f64>) -> Self {
         let error = error.into();
-        let duration = Some(duration_secs);
+        let duration = duration_secs;
         Self {
             status: ToolStatus::Error,
             summary: error.clone(),

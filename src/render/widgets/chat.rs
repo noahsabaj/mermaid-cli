@@ -2446,6 +2446,22 @@ mod tests {
         assert_eq!(append_action_duration(String::new(), None), "");
     }
 
+    /// Why a tool that never ran must carry `None` and not `0.0`: the sub-second
+    /// branch floors at 1ms, so a zero duration renders as a real-looking
+    /// measurement. Every rejected argument and policy denial used to pass
+    /// `0.0`, and so reported "took 1ms" for work that never happened.
+    #[test]
+    fn a_zero_duration_would_render_as_a_fabricated_measurement() {
+        assert_eq!(
+            append_action_duration("blocked by policy".to_string(), Some(0.0)),
+            "blocked by policy, took 1ms"
+        );
+        assert_eq!(
+            append_action_duration("blocked by policy".to_string(), None),
+            "blocked by policy"
+        );
+    }
+
     /// The padding above a short transcript holds no content: a click there
     /// maps to nothing, and a click on the first painted row maps to content
     /// line 0, not to the row's distance from the area top.

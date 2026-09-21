@@ -164,10 +164,10 @@ impl ToolExecutor for ReadFileTool {
     async fn execute(&self, args: serde_json::Value, ctx: ExecContext) -> ToolOutcome {
         let paths = match extract_paths(&args) {
             Ok(p) => p,
-            Err(e) => return ToolOutcome::error(e, 0.0),
+            Err(e) => return ToolOutcome::error(e, None),
         };
         if paths.is_empty() {
-            return ToolOutcome::error("read_file requires at least one path", 0.0);
+            return ToolOutcome::error("read_file requires at least one path", None);
         }
 
         let start = std::time::Instant::now();
@@ -181,7 +181,7 @@ impl ToolExecutor for ReadFileTool {
                 Err(e) => {
                     return ToolOutcome::error(
                         format!("{raw_path}: {e}"),
-                        start.elapsed().as_secs_f64(),
+                        Some(start.elapsed().as_secs_f64()),
                     );
                 },
             };
@@ -226,7 +226,7 @@ impl ToolExecutor for ReadFileTool {
                         Err(e) => {
                             return ToolOutcome::error(
                                 format!("{raw_path}: {e}"),
-                                start.elapsed().as_secs_f64(),
+                                Some(start.elapsed().as_secs_f64()),
                             );
                         },
                     }
@@ -528,10 +528,10 @@ impl ToolExecutor for WriteFileTool {
     )]
     async fn execute(&self, args: serde_json::Value, ctx: ExecContext) -> ToolOutcome {
         let Some(path) = args.get("path").and_then(|v| v.as_str()) else {
-            return ToolOutcome::error("write_file requires 'path' (string)", 0.0);
+            return ToolOutcome::error("write_file requires 'path' (string)", None);
         };
         let Some(content) = args.get("content").and_then(|v| v.as_str()) else {
-            return ToolOutcome::error("write_file requires 'content' (string)", 0.0);
+            return ToolOutcome::error("write_file requires 'content' (string)", None);
         };
 
         let start = std::time::Instant::now();
@@ -545,7 +545,7 @@ impl ToolExecutor for WriteFileTool {
             containment,
         } = match resolve_in_roots(&roots, path) {
             Ok(r) => r,
-            Err(e) => return ToolOutcome::error(format!("write_file: {e}"), 0.0),
+            Err(e) => return ToolOutcome::error(format!("write_file: {e}"), None),
         };
         let pending_action = serde_json::json!({
             "tool": "write_file",
@@ -590,7 +590,7 @@ impl ToolExecutor for WriteFileTool {
                 ctx.checkpoint_origin(),
             )
         {
-            return ToolOutcome::error(format!("write_file checkpoint failed: {e}"), 0.0);
+            return ToolOutcome::error(format!("write_file checkpoint failed: {e}"), None);
         }
         let display_path = path.to_string();
         let line_count = content.lines().count();
@@ -632,11 +632,11 @@ impl ToolExecutor for WriteFileTool {
                     },
                     Ok(Err(e)) => ToolOutcome::error(
                         format!("write_file({display_path}): {e}"),
-                        start.elapsed().as_secs_f64(),
+                        Some(start.elapsed().as_secs_f64()),
                     ),
                     Err(e) => ToolOutcome::error(
                         format!("write_file join error: {e}"),
-                        start.elapsed().as_secs_f64(),
+                        Some(start.elapsed().as_secs_f64()),
                     ),
                 }
             }
@@ -685,13 +685,13 @@ impl ToolExecutor for EditFileTool {
     async fn execute(&self, args: serde_json::Value, ctx: ExecContext) -> ToolOutcome {
         let start = std::time::Instant::now();
         let Some(path) = args.get("path").and_then(|v| v.as_str()) else {
-            return ToolOutcome::error("edit_file requires 'path' (string)", 0.0);
+            return ToolOutcome::error("edit_file requires 'path' (string)", None);
         };
         let Some(target) = args.get("target_content").and_then(|v| v.as_str()) else {
-            return ToolOutcome::error("edit_file requires 'target_content' (string)", 0.0);
+            return ToolOutcome::error("edit_file requires 'target_content' (string)", None);
         };
         let Some(replacement) = args.get("replacement_content").and_then(|v| v.as_str()) else {
-            return ToolOutcome::error("edit_file requires 'replacement_content' (string)", 0.0);
+            return ToolOutcome::error("edit_file requires 'replacement_content' (string)", None);
         };
         let allow_multiple = args
             .get("allow_multiple")
@@ -706,7 +706,7 @@ impl ToolExecutor for EditFileTool {
             containment,
         } = match resolve_in_roots(&roots, path) {
             Ok(r) => r,
-            Err(e) => return ToolOutcome::error(format!("edit_file: {e}"), 0.0),
+            Err(e) => return ToolOutcome::error(format!("edit_file: {e}"), None),
         };
 
         let pending_action = serde_json::json!({
@@ -754,7 +754,7 @@ impl ToolExecutor for EditFileTool {
                 ctx.checkpoint_origin(),
             )
         {
-            return ToolOutcome::error(format!("edit_file checkpoint failed: {e}"), 0.0);
+            return ToolOutcome::error(format!("edit_file checkpoint failed: {e}"), None);
         }
 
         let display_path = path.to_string();
@@ -773,11 +773,11 @@ impl ToolExecutor for EditFileTool {
                     },
                     Ok(Err(e)) => ToolOutcome::error(
                         format!("edit_file({display_path}): {e}"),
-                        start.elapsed().as_secs_f64(),
+                        Some(start.elapsed().as_secs_f64()),
                     ),
                     Err(e) => ToolOutcome::error(
                         format!("edit_file join error: {e}"),
-                        start.elapsed().as_secs_f64(),
+                        Some(start.elapsed().as_secs_f64()),
                     ),
                 }
             }
@@ -1215,7 +1215,7 @@ pub(super) fn after_file_mutation(ctx: &ExecContext, tool: &str, path: &str) {
 }
 
 fn err(msg: &str, duration_secs: f64) -> ToolOutcome {
-    ToolOutcome::error(msg, duration_secs)
+    ToolOutcome::error(msg, Some(duration_secs))
 }
 
 fn plural(count: usize, singular: &'static str, plural: &'static str) -> &'static str {

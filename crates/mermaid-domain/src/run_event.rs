@@ -967,7 +967,7 @@ mod tests {
     #[test]
     fn web_fetch_error_event_keeps_typed_failure_context() {
         let outcome =
-            ToolOutcome::error("backend unavailable", 0.1).with_metadata(ToolRunMetadata {
+            ToolOutcome::error("backend unavailable", Some(0.1)).with_metadata(ToolRunMetadata {
                 detail: ToolMetadata::WebFetch {
                     url: "https://example.test/start".to_string(),
                     final_url: None,

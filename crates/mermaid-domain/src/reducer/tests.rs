@@ -7376,7 +7376,7 @@ fn plan_denial_outcome() -> ToolOutcome {
                  only",
             mermaid_model::safety::PLAN_DENIAL_MARKER
         ),
-        0.0,
+        None,
     )
 }
 

@@ -137,7 +137,7 @@ impl ToolExecutor for MemoryTool {
             let Some(query) = str_arg(&args, "query") else {
                 return ToolOutcome::error(
                     "memory search requires 'query'",
-                    start.elapsed().as_secs_f64(),
+                    Some(start.elapsed().as_secs_f64()),
                 );
             };
             return run_search(&ctx.workdir, &query, start);
@@ -165,7 +165,7 @@ impl ToolExecutor for MemoryTool {
                 format!(
                     "memory: unknown action '{other}' (expected remember, update, forget, or search)"
                 ),
-                start.elapsed().as_secs_f64(),
+                Some(start.elapsed().as_secs_f64()),
             ),
         }
     }
@@ -179,10 +179,10 @@ fn run_remember(
 ) -> ToolOutcome {
     let secs = || start.elapsed().as_secs_f64();
     let Some(name) = str_arg(args, "name") else {
-        return ToolOutcome::error("memory remember requires 'name'", secs());
+        return ToolOutcome::error("memory remember requires 'name'", Some(secs()));
     };
     let Some(content) = args.get("content").and_then(|v| v.as_str()) else {
-        return ToolOutcome::error("memory remember requires 'content'", secs());
+        return ToolOutcome::error("memory remember requires 'content'", Some(secs()));
     };
     let scope = scope_from_args(args);
     let description = str_arg(args, "description").unwrap_or_else(|| {
@@ -195,7 +195,7 @@ fn run_remember(
     let tags = tags_arg(args);
     match memory::write_memory(workdir, scope, &name, &description, &tags, content) {
         Ok(path) => finish(start, "remember", &name, scope, &path),
-        Err(e) => ToolOutcome::error(format!("memory remember failed: {e}"), secs()),
+        Err(e) => ToolOutcome::error(format!("memory remember failed: {e}"), Some(secs())),
     }
 }
 
@@ -208,13 +208,16 @@ fn run_update(
 ) -> ToolOutcome {
     let secs = || start.elapsed().as_secs_f64();
     let Some(id) = str_arg(args, "id").or_else(|| str_arg(args, "name")) else {
-        return ToolOutcome::error("memory update requires 'id'", secs());
+        return ToolOutcome::error("memory update requires 'id'", Some(secs()));
     };
     let Some(content) = args.get("content").and_then(|v| v.as_str()) else {
-        return ToolOutcome::error("memory update requires 'content'", secs());
+        return ToolOutcome::error("memory update requires 'content'", Some(secs()));
     };
     let Some(existing) = memory::find(workdir, &id) else {
-        return ToolOutcome::error(format!("memory update: no memory named '{id}'"), secs());
+        return ToolOutcome::error(
+            format!("memory update: no memory named '{id}'"),
+            Some(secs()),
+        );
     };
     let description = str_arg(args, "description").unwrap_or_else(|| existing.description.clone());
     let tags = tags_arg(args);
@@ -235,7 +238,7 @@ fn run_update(
             }
             finish(start, "update", &existing.name, existing.scope, &path)
         },
-        Err(e) => ToolOutcome::error(format!("memory update failed: {e}"), secs()),
+        Err(e) => ToolOutcome::error(format!("memory update failed: {e}"), Some(secs())),
     }
 }
 
@@ -247,7 +250,7 @@ fn run_forget(
 ) -> ToolOutcome {
     let secs = || start.elapsed().as_secs_f64();
     let Some(id) = str_arg(args, "id").or_else(|| str_arg(args, "name")) else {
-        return ToolOutcome::error("memory forget requires 'id'", secs());
+        return ToolOutcome::error("memory forget requires 'id'", Some(secs()));
     };
     match memory::delete_memory(workdir, &id) {
         Ok(Some(path)) => ToolOutcome::success(
@@ -266,8 +269,11 @@ fn run_forget(
             },
             ..ToolRunMetadata::default()
         }),
-        Ok(None) => ToolOutcome::error(format!("memory forget: no memory named '{id}'"), secs()),
-        Err(e) => ToolOutcome::error(format!("memory forget failed: {e}"), secs()),
+        Ok(None) => ToolOutcome::error(
+            format!("memory forget: no memory named '{id}'"),
+            Some(secs()),
+        ),
+        Err(e) => ToolOutcome::error(format!("memory forget failed: {e}"), Some(secs())),
     }
 }
 

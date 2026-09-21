@@ -244,7 +244,10 @@ impl ToolExecutor for ExitPlanModeTool {
         let secs = || start_t.elapsed().as_secs_f64();
 
         let Some(plan_path) = ctx.plan_file.clone() else {
-            return ToolOutcome::error("exit_plan_mode is only available in plan mode", secs());
+            return ToolOutcome::error(
+                "exit_plan_mode is only available in plan mode",
+                Some(secs()),
+            );
         };
         // Fresh read so the user's external edits win over the model's last
         // write — the file on disk IS the plan being approved.
@@ -257,7 +260,7 @@ impl ToolExecutor for ExitPlanModeTool {
                          then call exit_plan_mode again",
                         plan_path.display()
                     ),
-                    secs(),
+                    Some(secs()),
                 );
             },
         };

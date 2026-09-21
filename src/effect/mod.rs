@@ -1203,7 +1203,7 @@ impl EffectRunner {
                                 call_id,
                                 outcome: mermaid_domain::ToolOutcome::error(
                                     "internal error: the tool execution task panicked".to_string(),
-                                    0.0,
+                                    None,
                                 ),
                             })
                             .await;

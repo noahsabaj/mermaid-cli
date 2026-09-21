@@ -55,15 +55,15 @@ impl ToolExecutor for ApplyPatchTool {
     async fn execute(&self, args: serde_json::Value, ctx: ExecContext) -> ToolOutcome {
         let start = std::time::Instant::now();
         let Some(patch) = args.get("patch").and_then(|v| v.as_str()) else {
-            return ToolOutcome::error("apply_patch requires 'patch' (string)", 0.0);
+            return ToolOutcome::error("apply_patch requires 'patch' (string)", None);
         };
         let hunks = match parse_patch(patch) {
             Ok(h) => h,
-            Err(e) => return ToolOutcome::error(format!("apply_patch: {e}"), 0.0),
+            Err(e) => return ToolOutcome::error(format!("apply_patch: {e}"), None),
         };
         let (ops, paths) = match plan_ops(&ctx, &hunks) {
             Ok(v) => v,
-            Err(e) => return ToolOutcome::error(format!("apply_patch: {e}"), 0.0),
+            Err(e) => return ToolOutcome::error(format!("apply_patch: {e}"), None),
         };
 
         let summary_path = ops
@@ -114,7 +114,7 @@ impl ToolExecutor for ApplyPatchTool {
                 ctx.checkpoint_origin(),
             )
         {
-            return ToolOutcome::error(format!("apply_patch checkpoint failed: {e}"), 0.0);
+            return ToolOutcome::error(format!("apply_patch checkpoint failed: {e}"), None);
         }
 
         let report = tokio::select! {
@@ -124,10 +124,10 @@ impl ToolExecutor for ApplyPatchTool {
                 match result {
                     Ok(Ok(report)) => report,
                     Ok(Err(e)) => {
-                        return ToolOutcome::error(format!("apply_patch: {e}"), start.elapsed().as_secs_f64());
+                        return ToolOutcome::error(format!("apply_patch: {e}"), Some(start.elapsed().as_secs_f64()));
                     },
                     Err(e) => {
-                        return ToolOutcome::error(format!("apply_patch join error: {e}"), start.elapsed().as_secs_f64());
+                        return ToolOutcome::error(format!("apply_patch join error: {e}"), Some(start.elapsed().as_secs_f64()));
                     },
                 }
             }

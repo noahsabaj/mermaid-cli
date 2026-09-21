@@ -366,10 +366,10 @@ impl ToolExecutor for WebSearchTool {
     async fn execute(&self, args: serde_json::Value, ctx: ExecContext) -> ToolOutcome {
         let queries = match parse_queries(&args) {
             Ok(q) => q,
-            Err(e) => return ToolOutcome::error(e, 0.0),
+            Err(e) => return ToolOutcome::error(e, None),
         };
         if queries.is_empty() {
-            return ToolOutcome::error("web_search requires at least one query", 0.0);
+            return ToolOutcome::error("web_search requires at least one query", None);
         }
         if let Some(blocked) = super::policy_gate::gate_external(
             &ctx,
@@ -469,7 +469,7 @@ impl ToolExecutor for WebSearchTool {
                 mermaid_model::constants::WEB_SEARCH_AGGREGATE_MAX_BYTES
                     .saturating_sub("Error: ".len()),
             );
-            return ToolOutcome::error(message, start.elapsed().as_secs_f64()).with_metadata(
+            return ToolOutcome::error(message, Some(start.elapsed().as_secs_f64())).with_metadata(
                 ToolRunMetadata {
                     detail: ToolMetadata::WebSearch {
                         queries: queries.iter().map(|(query, _)| query.clone()).collect(),
@@ -577,7 +577,7 @@ fn fetch_failure_outcome(
         "web_fetch({requested_url}) via {backend}: {error}"
     ));
     let pattern_context = pattern.as_ref().map(|_| context_lines);
-    ToolOutcome::error(message, duration_secs).with_metadata(ToolRunMetadata {
+    ToolOutcome::error(message, Some(duration_secs)).with_metadata(ToolRunMetadata {
         detail: ToolMetadata::WebFetch {
             url: requested_url,
             final_url: None,
@@ -867,7 +867,7 @@ impl ToolExecutor for WebFetchTool {
     async fn execute(&self, args: serde_json::Value, ctx: ExecContext) -> ToolOutcome {
         let request = match parse_fetch_args(&args) {
             Ok(request) => request,
-            Err(error) => return ToolOutcome::error(error, 0.0),
+            Err(error) => return ToolOutcome::error(error, None),
         };
         let start = std::time::Instant::now();
         let snapshot_scope = FetchSnapshotScope::from_context(&ctx);
@@ -883,7 +883,7 @@ impl ToolExecutor for WebFetchTool {
                         format!(
                             "web_fetch: snapshot '{snapshot_id}' is unavailable or was evicted"
                         ),
-                        start.elapsed().as_secs_f64(),
+                        Some(start.elapsed().as_secs_f64()),
                     );
                 };
                 (page, snapshot_id.to_string())
@@ -927,7 +927,7 @@ impl ToolExecutor for WebFetchTool {
                 match inserted {
                     Ok((snapshot_id, page)) => (page, snapshot_id),
                     Err(error) => {
-                        return ToolOutcome::error(error, start.elapsed().as_secs_f64());
+                        return ToolOutcome::error(error, Some(start.elapsed().as_secs_f64()));
                     },
                 }
             },
@@ -955,7 +955,7 @@ impl ToolExecutor for WebFetchTool {
             result = render => match result {
                 Ok(formatted) => formatted,
                 Err(error) => {
-                    return ToolOutcome::error(error, start.elapsed().as_secs_f64());
+                    return ToolOutcome::error(error, Some(start.elapsed().as_secs_f64()));
                 },
             },
         };

@@ -153,8 +153,8 @@ impl ToolRegistry {
     #[must_use]
     pub fn unknown_tool_outcome(&self, tool_key: &str, called_name: &str) -> ToolOutcome {
         self.unavailable.get(tool_key).map_or_else(
-            || ToolOutcome::error(format!("unknown tool: {called_name}"), 0.0),
-            |reason| ToolOutcome::error(format!("{called_name} is not available: {reason}"), 0.0),
+            || ToolOutcome::error(format!("unknown tool: {called_name}"), None),
+            |reason| ToolOutcome::error(format!("{called_name} is not available: {reason}"), None),
         )
     }
 

@@ -126,7 +126,7 @@ async fn gate_external_inner(
             format!(
                 "{tool} blocked because network access is disabled (safety.network = \"deny\" / --no-network)"
             ),
-            0.0,
+            None,
         ));
     }
     let mut request = ActionRequest::new(tool, category, summary);
@@ -370,7 +370,7 @@ pub async fn gate(
                              Re-run with --allow-untrusted-tools, or use a safety mode of auto/full_access.{readonly_web_hint}",
                             request.summary
                         ),
-                        0.0,
+                        None,
                     ))
                 }
             } else {
@@ -432,13 +432,13 @@ pub async fn gate(
                         "{} blocked by Auto-mode safety review: {}",
                         request.summary, verdict.reason
                     ),
-                    0.0,
+                    None,
                 ))
             }
         },
         PolicyDecision::Deny { reason, .. } => Gate::Block(ToolOutcome::error(
             format!("{} blocked by policy: {}", request.summary, reason),
-            0.0,
+            None,
         )),
     }
 }
@@ -692,7 +692,7 @@ async fn inline_decision(
         },
         ApprovalDecision::Deny => Gate::Block(ToolOutcome::error(
             format!("{} — denied by you", request.summary),
-            0.0,
+            None,
         )),
     }
 }
@@ -772,7 +772,7 @@ fn block_for_approval(
                         "{} checkpoint failed before approval: {}",
                         request.summary, error
                     ),
-                    0.0,
+                    None,
                 ));
             },
         }
@@ -832,7 +832,7 @@ fn block_for_approval(
                 .map(|id| format!(" (approval {id})"))
                 .unwrap_or_default()
         ),
-        0.0,
+        None,
     ))
 }
 
