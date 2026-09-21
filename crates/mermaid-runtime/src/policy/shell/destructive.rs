@@ -446,7 +446,7 @@ mod tests {
         for cmd in [
             // A `;` inside quotes is data, not a separator.
             r#"rm -rf "a;b" /"#,
-            r#"rm -rf 'a;b' /"#,
+            r"rm -rf 'a;b' /",
             // An escaped `;` is data too.
             r"rm -rf a\;b /",
             // A `|` or `&&` inside quotes.

@@ -40,6 +40,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Lint debt: one needless raw-string hash.** A test string added with the
+  per-segment hard-deny work used `r#"..."#` where the content holds no double
+  quote, so `r"..."` says the same thing. It was the only new
+  `clippy::needless_raw_string_hashes` site, and the only lint on `main` whose
+  count this codebase's recent changes moved.
+
 - **The shared runtime store follows `MERMAID_DATA_DIR` instead of pinning the
   first one it saw.** `with_shared_store` caches one handle per process, but the
   cache was keyed on nothing, so the first caller fixed the database for the
