@@ -40,6 +40,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An ordinary command is no longer hard-denied because of a neighbouring
+  segment.** `rm -rf build; ls /` was refused in every safety mode, including
+  `full_access` and including with an explicit allow override, because the
+  hard-deny rules matched against the whole command text and read the `/` from
+  the *next* segment as the target of the `rm`. `rm -rf node_modules; echo .`,
+  `rm -rf target && cd ..` and `git log --oneline; make reset --hard` failed the
+  same way. Rules that describe one command's argv — `mkfs`, a recursive
+  `rm`/`chmod`/`chown` on a root, `format`, `dd` to a device, a write to a
+  sensitive path, `git reset --hard` — are now matched per segment, while the
+  shapes that only mean anything across a whole line — a fork bomb, nesting too
+  deep to inspect, a listening socket, a download piped into a shell — still
+  read the entire text. Text that does not tokenize is still scanned whole, so
+  an unbalanced quote cannot hide a segment. The denial also names the rule that
+  fired (`git reset --hard is hard-denied and cannot be approved`) instead of
+  the opaque `hard-denied destructive pattern`, so the fix is to drop the one
+  offending segment rather than to guess at rewrites of the whole line.
+
 - **Landlock rules no longer fail on device files.** Granting a write root
   that is a file rather than a directory asked the kernel for directory-only
   rights (`MakeReg`, `RemoveFile`, …) on a non-directory and failed the whole

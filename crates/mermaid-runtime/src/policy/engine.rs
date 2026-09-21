@@ -69,9 +69,18 @@ impl PolicyEngine {
     pub fn decide(&self, request: &ActionRequest) -> PolicyDecision {
         let risk = classify(request, self.host_shell);
         if risk == RiskClass::Destructive {
+            // Name the shape that tripped, the same way the read-only denial
+            // below names the risk class. The old constant left a chained
+            // command's denial saying nothing about WHICH of its segments was
+            // the problem, so the model retried variants of the whole chain.
+            let what = request
+                .command
+                .as_deref()
+                .and_then(super::destructive_rule)
+                .unwrap_or("a destructive pattern");
             return PolicyDecision::Deny {
                 risk,
-                reason: "hard-denied destructive pattern".to_string(),
+                reason: format!("{what} is hard-denied and cannot be approved"),
             };
         }
 
@@ -455,13 +464,20 @@ mod tests {
         let mut request = ActionRequest::new("execute_command", ToolCategory::Shell, "reset");
         request.command = Some("git reset --hard".to_string());
         let decision = PolicyEngine::new(SafetyMode::FullAccess).decide(&request);
-        assert!(matches!(
-            decision,
+        let reason = match decision {
             PolicyDecision::Deny {
                 risk: RiskClass::Destructive,
-                ..
-            }
-        ));
+                reason,
+            } => reason,
+            other => format!("not a destructive deny: {other:?}"),
+        };
+        // The reason names the shape, not the command text, and says the
+        // verdict is final — a chained command's denial has to tell the model
+        // which segment to drop.
+        assert!(
+            reason.contains("git reset --hard") && reason.contains("cannot be approved"),
+            "reason should name the rule: {reason}"
+        );
     }
 
     #[test]
