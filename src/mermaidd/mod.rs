@@ -79,6 +79,17 @@ pub async fn run() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// `MERMAID_DATA_DIR` is process-global, and `temp_env`'s async helpers
+    /// cannot hold their lock across an await point. Two of these tests
+    /// overlapping means one of them reads the other's directory, so they take
+    /// this lock for their whole body and run one at a time. `cargo test` runs
+    /// the suite as threads in ONE process, which is what makes this necessary;
+    /// under nextest each test is its own process and never collides, which is
+    /// exactly why CI stayed green while the local suite failed.
+    /// A futures-aware mutex, not a `std` one: the guard is held across the
+    /// test's await points, which a `std::sync::MutexGuard` must never be.
+    static DATA_DIR_GUARD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     #[test]
     fn classify_args_handles_flags_help_and_unknowns() {
         use super::{CliAction, classify_args};
@@ -520,6 +531,7 @@ mod tests {
     #[tokio::test]
     async fn the_backlink_lands_when_the_run_announces_its_session() {
         let data_dir = temp_project("backlink_data");
+        let _guard = DATA_DIR_GUARD.lock().await;
         temp_env::async_with_vars(
             [(
                 mermaid_model::utils::DATA_DIR_ENV,
@@ -598,6 +610,7 @@ mod tests {
             mailboxes: std::sync::Mutex::new(std::collections::HashMap::new()),
         });
 
+        let _guard = DATA_DIR_GUARD.lock().await;
         let lines = temp_env::async_with_vars(
             [(
                 mermaid_model::utils::DATA_DIR_ENV,
@@ -721,6 +734,7 @@ mod tests {
             mailboxes: std::sync::Mutex::new(std::collections::HashMap::new()),
         });
 
+        let _guard = DATA_DIR_GUARD.lock().await;
         let lines = temp_env::async_with_vars(
             [(
                 mermaid_model::utils::DATA_DIR_ENV,

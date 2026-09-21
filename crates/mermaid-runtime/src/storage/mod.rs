@@ -28,7 +28,16 @@ use std::sync::{Mutex, PoisonError};
 /// running `mermaidd` share the database by design (WAL + the owner-kind
 /// column keep them out of each other's rows -- see `OWNER_KIND_DAEMON`).
 /// This helper unifies access WITHIN a process, not across processes.
-static SHARED_STORE: Mutex<Option<RuntimeStore>> = Mutex::new(None);
+/// Keyed by the data dir it was opened for. The handle is a cache, and a cache
+/// that ignores what it depends on serves stale data: `data_dir()` is read from
+/// the environment at open time, so a cached handle from an earlier dir would
+/// keep answering for a directory nobody is using any more. In production the
+/// dir never moves mid-process and this costs one `data_dir()` per call; under
+/// `cargo test` the whole suite shares one process, so without the key a test
+/// that points `MERMAID_DATA_DIR` at its own temp dir silently reads and writes
+/// whichever dir happened to be set when some earlier test opened the handle --
+/// in the worst case the developer's real database.
+static SHARED_STORE: Mutex<Option<(PathBuf, RuntimeStore)>> = Mutex::new(None);
 
 /// Run one operation against the process-wide shared store, opening it on
 /// first use. An open failure is returned and NOT cached, so a transient
@@ -38,16 +47,26 @@ static SHARED_STORE: Mutex<Option<RuntimeStore>> = Mutex::new(None);
 /// connection could not outlive its call -- eviction preserves that
 /// self-healing at the cost of one re-open after a genuine error.
 ///
+/// The handle is re-opened when `data_dir()` no longer matches the one it was
+/// opened for, so the cache can never answer for a directory that is no longer
+/// current.
+///
 /// # Errors
 ///
 /// Whatever `RuntimeStore::open_default` or the operation itself returns.
 pub fn with_shared_store<T>(op: impl FnOnce(&RuntimeStore) -> Result<T>) -> Result<T> {
+    let dir = data_dir()?;
     let mut guard = SHARED_STORE.lock().unwrap_or_else(PoisonError::into_inner);
-    let store = match guard.as_mut() {
-        Some(store) => store,
-        None => guard.insert(RuntimeStore::open_default()?),
+    // Evict first, then open through the same path a cold start takes, so
+    // there is only one construction site and no unreachable branch to assert.
+    if guard.as_ref().is_none_or(|(cached, _)| *cached != dir) {
+        *guard = None;
+    }
+    let entry = match guard.as_mut() {
+        Some(entry) => entry,
+        None => guard.insert((dir, RuntimeStore::open_default()?)),
     };
-    let result = op(store);
+    let result = op(&entry.1);
     if result.is_err() {
         *guard = None;
     }
@@ -907,6 +926,44 @@ impl RuntimeStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The shared handle is a cache over `data_dir()`, so it has to follow it.
+    /// Before this was keyed, the first caller pinned the handle for the life
+    /// of the process: a later caller under a different `MERMAID_DATA_DIR`
+    /// silently read and wrote the FIRST directory. Under `cargo test` that
+    /// meant one test's writes landing in another's temp dir -- or, when no
+    /// test had set the variable yet, in the developer's real database.
+    #[test]
+    fn the_shared_store_follows_the_data_dir() {
+        let first = temp_db("shared_follows_a").parent().unwrap().to_path_buf();
+        let second = temp_db("shared_follows_b").parent().unwrap().to_path_buf();
+        assert_ne!(first, second);
+
+        let id = temp_env::with_var(DATA_DIR_ENV, Some(first.display().to_string()), || {
+            with_shared_store(|store| {
+                store
+                    .tasks()
+                    .create(NewTask::new("pinned", "/tmp/proj", "ollama/test").daemon_owned())
+            })
+            .expect("create in the first dir")
+            .id
+        });
+
+        // A different dir must NOT see the row written into the first one.
+        temp_env::with_var(DATA_DIR_ENV, Some(second.display().to_string()), || {
+            let found = with_shared_store(|store| store.tasks().get(&id)).expect("read");
+            assert!(
+                found.is_none(),
+                "the shared handle served the previous data dir"
+            );
+        });
+
+        // Returning to the first dir must still find it.
+        temp_env::with_var(DATA_DIR_ENV, Some(first.display().to_string()), || {
+            let found = with_shared_store(|store| store.tasks().get(&id)).expect("read");
+            assert!(found.is_some(), "the row in the original dir went missing");
+        });
+    }
 
     #[test]
     pub(crate) fn open_enables_wal_and_busy_timeout() {

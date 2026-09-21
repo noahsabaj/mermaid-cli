@@ -40,6 +40,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The shared runtime store follows `MERMAID_DATA_DIR` instead of pinning the
+  first one it saw.** `with_shared_store` caches one handle per process, but the
+  cache was keyed on nothing, so the first caller fixed the database for the
+  life of the process and every later caller silently read and wrote *that*
+  directory even after the variable changed. It is now keyed on `data_dir()` and
+  re-opens when that moves. In a normal run the directory never moves and this
+  costs one environment read per call; the visible damage was in tests, which
+  share a single process under `cargo test`: a test pointing the variable at its
+  own temp dir could have its writes land in an earlier test's directory, or --
+  when nothing had set the variable yet -- in the developer's real database.
+  `cargo test --lib` was failing on `the_backlink_lands_when_the_run_announces_its_session`
+  for exactly this reason. CI never caught it because nextest gives every test
+  its own process, where a per-process cache cannot be stale.
+
 - **A tool that never ran no longer reports how long it took.** A rejected
   argument, a policy denial, a hard-denied command — none of them execute, yet
   each rendered `took 1ms` in the transcript. `ToolOutcome::error` took the
