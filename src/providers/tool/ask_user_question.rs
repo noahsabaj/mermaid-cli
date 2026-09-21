@@ -353,16 +353,24 @@ impl ToolExecutor for AskUserQuestionTool {
         let secs = || start.elapsed().as_secs_f64();
 
         let Some(questions_val) = args.get("questions").and_then(|v| v.as_array()) else {
-            return ToolOutcome::error("ask_user_question requires a `questions` array", secs());
+            return ToolOutcome::error(
+                "ask_user_question requires a `questions` array",
+                Some(secs()),
+            );
         };
         if questions_val.is_empty() {
-            return ToolOutcome::error("`questions` must contain at least one question", secs());
+            return ToolOutcome::error(
+                "`questions` must contain at least one question",
+                Some(secs()),
+            );
         }
         let mut questions = Vec::with_capacity(questions_val.len());
         for qv in questions_val {
             match parse_question(qv) {
                 Ok(q) => questions.push(q),
-                Err(e) => return ToolOutcome::error(format!("invalid question: {e}"), secs()),
+                Err(e) => {
+                    return ToolOutcome::error(format!("invalid question: {e}"), Some(secs()));
+                },
             }
         }
 

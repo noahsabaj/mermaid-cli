@@ -233,11 +233,11 @@ impl ToolExecutor for ExecuteCommandTool {
     )]
     async fn execute(&self, args: serde_json::Value, ctx: ExecContext) -> ToolOutcome {
         let Some(command) = args.get("command").and_then(|v| v.as_str()) else {
-            return ToolOutcome::error("execute_command requires 'command' (string)", 0.0);
+            return ToolOutcome::error("execute_command requires 'command' (string)", None);
         };
 
         if contains_dangerous_command(command) {
-            return ToolOutcome::error(format!("Dangerous command blocked: {command}"), 0.0);
+            return ToolOutcome::error(format!("Dangerous command blocked: {command}"), None);
         }
 
         // Resolve the effective working directory and decide containment. A
@@ -253,7 +253,7 @@ impl ToolExecutor for ExecuteCommandTool {
             Some(raw) => match super::path_safety::resolve_path_within(&ctx.workdir, raw) {
                 Ok(resolved) => resolved,
                 Err(e) => {
-                    return ToolOutcome::error(format!("execute_command working_dir: {e}"), 0.0);
+                    return ToolOutcome::error(format!("execute_command working_dir: {e}"), None);
                 },
             },
             None => (ctx.workdir.clone(), true),
@@ -334,7 +334,7 @@ impl ToolExecutor for ExecuteCommandTool {
 
         let mode = match CommandMode::parse(&args) {
             Ok(mode) => mode,
-            Err(error) => return ToolOutcome::error(error, 0.0),
+            Err(error) => return ToolOutcome::error(error, None),
         };
         let shell_payload = serde_json::json!({
             "task_id": ctx.task_id.clone(),
@@ -614,7 +614,7 @@ fn finish_foreground_command(
                         run.output
                     ),
                 };
-                ToolOutcome::error(message, duration_secs).with_metadata(metadata)
+                ToolOutcome::error(message, Some(duration_secs)).with_metadata(metadata)
             } else {
                 ToolOutcome::success(run.output.clone(), "command completed", duration_secs)
                     .with_metadata(metadata)
@@ -660,7 +660,7 @@ fn finish_foreground_command(
                      For dev servers, GUI apps, or other long-running commands, call execute_command with mode=\"background\"."
             );
             let duration_secs = start.elapsed().as_secs_f64();
-            ToolOutcome::error(message, duration_secs).with_metadata(command_metadata(
+            ToolOutcome::error(message, Some(duration_secs)).with_metadata(command_metadata(
                 CommandMetadataInput {
                     command: command.clone(),
                     working_dir: Some(effective_workdir.display().to_string()),
@@ -678,7 +678,7 @@ fn finish_foreground_command(
         },
         Err(e) => {
             let duration_secs = start.elapsed().as_secs_f64();
-            ToolOutcome::error(format!("Command failed: {e}"), duration_secs).with_metadata(
+            ToolOutcome::error(format!("Command failed: {e}"), Some(duration_secs)).with_metadata(
                 command_metadata(CommandMetadataInput {
                     command: command.clone(),
                     working_dir: Some(effective_workdir.display().to_string()),

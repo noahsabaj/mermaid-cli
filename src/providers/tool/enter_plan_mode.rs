@@ -37,7 +37,7 @@ impl ToolExecutor for EnterPlanModeTool {
     async fn execute(&self, _args: serde_json::Value, ctx: ExecContext) -> ToolOutcome {
         let start = Instant::now();
         if ctx.plan_file.is_some() {
-            return ToolOutcome::error("already in plan mode", start.elapsed().as_secs_f64());
+            return ToolOutcome::error("already in plan mode", Some(start.elapsed().as_secs_f64()));
         }
         ToolOutcome::success(
             "Plan mode is on: the read-only floor now applies and the next system prompt names \

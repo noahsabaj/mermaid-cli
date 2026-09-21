@@ -478,7 +478,7 @@ impl ToolExecutor for SubagentTool {
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
             else {
-                return ToolOutcome::error("action 'kill' requires `agent_id`", 0.0);
+                return ToolOutcome::error("action 'kill' requires `agent_id`", None);
             };
             return match self.spawner.kill_detached(id) {
                 KillResult::Killed => ToolOutcome::success(
@@ -509,7 +509,7 @@ impl ToolExecutor for SubagentTool {
                         "no background or cached agent '{id}' — it may have already \
                          finished and been evicted, or the id was never issued"
                     ),
-                    started.elapsed().as_secs_f64(),
+                    Some(started.elapsed().as_secs_f64()),
                 ),
             };
         }
@@ -518,7 +518,7 @@ impl ToolExecutor for SubagentTool {
         let prompt = match args.get("prompt").and_then(|v| v.as_str()) {
             Some(s) if !s.trim().is_empty() => s.to_string(),
             _ => {
-                return ToolOutcome::error("agent requires non-empty `prompt`", 0.0);
+                return ToolOutcome::error("agent requires non-empty `prompt`", None);
             },
         };
         let description = args
@@ -548,7 +548,7 @@ impl ToolExecutor for SubagentTool {
                 None => {
                     return ToolOutcome::error(
                         format!("isolation '{raw}' is not one of {}", Isolation::NAMES),
-                        started.elapsed().as_secs_f64(),
+                        Some(started.elapsed().as_secs_f64()),
                     );
                 },
             },
@@ -588,7 +588,7 @@ impl ToolExecutor for SubagentTool {
                 Ok(permit) => permit,
                 Err(_) => return ToolOutcome::error(
                     "subagent semaphore closed",
-                    started.elapsed().as_secs_f64(),
+                    Some(started.elapsed().as_secs_f64()),
                 ),
             },
         };
@@ -619,7 +619,7 @@ impl ToolExecutor for SubagentTool {
                              a continuation right now, or never have existed. Omit agent_id \
                              to start a new agent."
                         ),
-                        started.elapsed().as_secs_f64(),
+                        Some(started.elapsed().as_secs_f64()),
                     );
                 },
             },
@@ -643,7 +643,7 @@ impl ToolExecutor for SubagentTool {
                     let evicted = self.spawner.cache_store(agent_id, cached);
                     debug_assert!(evicted.is_empty());
                 }
-                return ToolOutcome::error(e, started.elapsed().as_secs_f64());
+                return ToolOutcome::error(e, Some(started.elapsed().as_secs_f64()));
             },
         };
 
@@ -667,7 +667,7 @@ impl ToolExecutor for SubagentTool {
                 match Workspace::create(isolation, ctx.workdir.clone(), &agent_id).await {
                     Ok(workspace) => (workspace, None),
                     Err(e) => {
-                        return ToolOutcome::error(e, started.elapsed().as_secs_f64());
+                        return ToolOutcome::error(e, Some(started.elapsed().as_secs_f64()));
                     },
                 }
             },
@@ -1087,7 +1087,7 @@ async fn finish_drive(
         // failed landing outranks the successful drive.
         Ok(summary) if workspace_report.needs_attention => ToolOutcome::error(
             format!("subagent ({description}) finished but its work did not land.\n\n{summary}\n\n{trailer}"),
-            elapsed,
+            Some(elapsed),
         )
         .with_metadata(metadata),
         Ok(summary) => ToolOutcome::success(
@@ -1102,11 +1102,11 @@ async fn finish_drive(
                 "subagent ({description}) exceeded {timeout_secs}s timeout; its context \
                  is preserved — {trailer}"
             ),
-            elapsed,
+            Some(elapsed),
         )
         .with_metadata(metadata),
         Err(DriveError::Errored(e)) => {
-            ToolOutcome::error(format!("subagent ({description}): {e} {trailer}"), elapsed)
+            ToolOutcome::error(format!("subagent ({description}): {e} {trailer}"), Some(elapsed))
                 .with_metadata(metadata)
         },
     }

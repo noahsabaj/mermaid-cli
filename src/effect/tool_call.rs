@@ -25,7 +25,7 @@ pub(super) async fn dispatch_execute_tool(
 
     let Some(registry) = tools else {
         let outcome =
-            mermaid_domain::ToolOutcome::error("EffectRunner has no ToolRegistry bound", 0.0);
+            mermaid_domain::ToolOutcome::error("EffectRunner has no ToolRegistry bound", None);
         send_finished(&msg_tx, turn, call_id, outcome).await;
         return;
     };
@@ -33,7 +33,7 @@ pub(super) async fn dispatch_execute_tool(
     let (tool_key, args) = match route_tool_call(&source) {
         Ok(routed) => routed,
         Err(message) => {
-            let outcome = mermaid_domain::ToolOutcome::error(message, 0.0);
+            let outcome = mermaid_domain::ToolOutcome::error(message, None);
             send_finished(&msg_tx, turn, call_id, outcome).await;
             return;
         },
@@ -85,7 +85,7 @@ pub(super) async fn dispatch_execute_tool(
         let reason = mermaid_model::utils::redact_secrets(&reason);
         let outcome = mermaid_domain::ToolOutcome::error(
             format!("Denied by plugin hook ({plugin}): {reason}"),
-            0.0,
+            None,
         );
         finish_runtime_tool_run(tool_run_id.as_deref(), &outcome);
         join_logged(progress_relay.take(), "tool_progress_relay").await;

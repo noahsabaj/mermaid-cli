@@ -40,6 +40,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A tool that never ran no longer reports how long it took.** A rejected
+  argument, a policy denial, a hard-denied command — none of them execute, yet
+  each rendered `took 1ms` in the transcript. `ToolOutcome::error` took the
+  duration as a plain `f64` and every one of these paths passed `0.0`, which
+  the sub-second formatter floors at 1ms, turning "no time at all" into a
+  real-looking measurement. The duration is now `Option<f64>`, so a call that
+  never happened carries `None` and renders nothing, matching what
+  `ToolOutcome::cancelled` already did.
+
 - **An ordinary command is no longer hard-denied because of a neighbouring
   segment.** `rm -rf build; ls /` was refused in every safety mode, including
   `full_access` and including with an explicit allow override, because the
