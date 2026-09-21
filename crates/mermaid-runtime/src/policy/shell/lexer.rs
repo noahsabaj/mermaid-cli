@@ -519,6 +519,16 @@ pub(crate) fn tokenize(command: &str) -> Vec<String> {
         .unwrap_or_else(|_| command.split_whitespace().map(str::to_string).collect())
 }
 
+/// Whether `command` tokenizes cleanly under POSIX word rules.
+///
+/// `false` means the lexer rejected it — most often an unbalanced quote — and
+/// `tokenize` fell back to whitespace splitting. That is also the signal that
+/// `split_command`'s segmentation is not trustworthy, so the hard-deny scans
+/// use it to fail closed rather than trusting segment boundaries.
+pub fn tokenizes_cleanly(command: &str) -> bool {
+    shell_words::split(command).is_ok()
+}
+
 pub(crate) fn basename(arg: &str) -> &str {
     arg.rsplit(['/', '\\']).next().unwrap_or(arg)
 }

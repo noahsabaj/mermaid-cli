@@ -24,4 +24,4 @@ pub use plan_gate::{
     is_plan_file_path, is_plan_safe_build_command, is_scratch_only_command,
     token_provably_in_scratch,
 };
-pub use shell::destructive::is_destructive_command;
+pub use shell::destructive::{destructive_rule, is_destructive_command};
