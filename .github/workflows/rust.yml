@@ -375,14 +375,20 @@ jobs:
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           workspaces: ". -> ../mermaid-target"
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@76c2e6406e52637deed7160d77bded76bd83e06e # v2.87.14
+        with:
+          tool: nextest
       - name: Build binaries
         run: cargo build --workspace
+      # `--run-ignored only` is `-- --ignored`; the trailing word is the same
+      # substring filter `cargo test` took.
       - name: Daemon integration tests (ignored)
-        run: "cargo test --test integration -- --ignored it::daemon_integration::"
+        run: "cargo nextest run --test integration --run-ignored only it::daemon_integration::"
       - name: Sandbox network kill-switch (ignored, Linux)
-        run: "cargo test --test integration -- --ignored it::sandbox_network::"
+        run: "cargo nextest run --test integration --run-ignored only it::sandbox_network::"
       - name: Sandbox filesystem confinement (ignored, Linux)
-        run: "cargo test --test integration -- --ignored it::sandbox_fs::"
+        run: "cargo nextest run --test integration --run-ignored only it::sandbox_fs::"
       - name: Self-test (deterministic, model-free)
         run: cargo run --bin mermaid -- self-test --format json
 
@@ -407,8 +413,13 @@ jobs:
         with:
           key: managed-searxng-${{ matrix.os }}
           workspaces: ". -> ../mermaid-target"
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@76c2e6406e52637deed7160d77bded76bd83e06e # v2.87.14
+        with:
+          tool: nextest
+      # `test(=...)` is the exact-name match `-- --exact` was.
       - name: Managed SearXNG end-to-end (ignored)
-        run: cargo test --lib searxng::tests::managed_searxng_end_to_end -- --ignored --exact
+        run: cargo nextest run --lib --run-ignored only -E 'test(=searxng::tests::managed_searxng_end_to_end)'
 
   # OS-sandbox enforcement on the non-Linux platforms with a real backend
   # (the Linux `integration` job above already runs these tests). macOS and
@@ -433,6 +444,10 @@ jobs:
         with:
           key: clipboard-macos
           workspaces: ". -> ../mermaid-target"
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@76c2e6406e52637deed7160d77bded76bd83e06e # v2.87.14
+        with:
+          tool: nextest
       - name: Arm the clipboard with a file reference, then probe it
         run: |
           set -uo pipefail
@@ -456,7 +471,7 @@ jobs:
           esac
           # Only now is the assertion meaningful: the pasteboard really holds a
           # file reference, so a failure here is mermaid's probe, not the runner.
-          cargo test --lib manual_file_reference_paste -- --ignored --nocapture
+          cargo nextest run --lib --run-ignored only --no-capture manual_file_reference_paste
 
   sandbox-integration:
     name: OS Sandbox
@@ -474,11 +489,15 @@ jobs:
         with:
           key: sandbox-${{ matrix.os }}
           workspaces: ". -> ../mermaid-target"
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@76c2e6406e52637deed7160d77bded76bd83e06e # v2.87.14
+        with:
+          tool: nextest
       - name: Build binaries
         run: cargo build --workspace
       - name: Sandbox network denial (ignored)
-        run: "cargo test --test integration -- --ignored it::sandbox_network::"
+        run: "cargo nextest run --test integration --run-ignored only it::sandbox_network::"
       - name: Sandbox filesystem confinement (ignored)
-        run: "cargo test --test integration -- --ignored it::sandbox_fs::"
+        run: "cargo nextest run --test integration --run-ignored only it::sandbox_fs::"
       - name: Self-test (real sandbox availability probes)
         run: cargo run --bin mermaid -- self-test --format json

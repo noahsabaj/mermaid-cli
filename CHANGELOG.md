@@ -40,6 +40,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A behavioural eval suite (`evals/`, `just eval <model>`).** Four fixed tasks
+  (fix a failing test, add a CLI flag, answer a question about a repo, and a
+  provider that silently ignores parameters), each run through `mermaid run`
+  in a throwaway copy of a fixture and scored only by outcome: tests pass,
+  files untouched, the answer is right. Pointing it at a new model needs no
+  code change, so it is the yardstick for deleting prompt coaching: if a
+  paragraph goes and the scores hold, it was not doing anything. CI runs every
+  task offline against a scripted OpenAI-compatible endpoint, which proves each
+  task is passable and that doing nothing fails it; it does not score a model.
+- **`tool_finished` events flag fuzzy edits.** An `edit_file` or `apply_patch`
+  that only applied through fuzzy (whitespace or Unicode) matching now carries
+  `"fuzzy": true` on its `mermaid run --format ndjson` line. Additive: the field
+  is omitted when false and the protocol stays version 1. The evals report the
+  rate per model, which says when the fuzzy matcher can be dropped.
+
 - **`context_archive`: search and read the session's full history.** Every
   message a session commits stays in its `.jsonl` log; compaction only moves
   messages out of the working context. The new tool searches that log
@@ -229,6 +244,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   into one change rather than eight: branch protection requires branches be up
   to date, so each separate merge would have put the other seven behind and
   forced a fresh check cycle for every one.
+
+- **Every test run is nextest now, the opt-in ones too.** The main suite has
+  run under `cargo nextest` for a while, but the CI jobs for the `#[ignore]`d
+  tests (daemon, OS sandbox, managed SearXNG, macOS clipboard) still called
+  `cargo test -- --ignored`, and so did every "run with" hint. They now use
+  `cargo nextest run --run-ignored only` with the same filters, so they get a
+  process per test and the retry and timeout policy in `.config/nextest.toml`.
+  The managed-SearXNG test, which downloads its bundle first, gets ten minutes
+  there instead of three. `docs/development.md` no longer offers
+  `cargo test --workspace` as a fallback. There are no doctests, so nothing
+  still needs `cargo test --doc`.
 
 - **"Unknown command" is gone as a concept.** A slash line the registry does
   not know is a message, so there is no error row to post and nothing the

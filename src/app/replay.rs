@@ -565,7 +565,7 @@ mod tests {
     /// Manual QA helper: writes a small recording to
     /// `$MERMAID_REPLAY_FIXTURE` (default `/tmp/mermaid-replay-fixture.jsonl`)
     /// so the real CLI can be exercised end to end:
-    /// `cargo test --lib write_replay_fixture -- --ignored && mermaid --replay <path>`
+    /// `cargo nextest run --lib --run-ignored only write_replay_fixture && mermaid --replay <path>`
     #[test]
     #[ignore = "writes a fixture for manual --replay QA"]
     fn write_replay_fixture() {

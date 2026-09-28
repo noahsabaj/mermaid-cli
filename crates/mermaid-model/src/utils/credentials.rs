@@ -181,7 +181,7 @@ mod tests {
     }
 
     /// Real-keyring round-trip. Ignored in CI (no Secret Service there);
-    /// run locally with `cargo test -- --ignored keyring_round_trip`.
+    /// run locally with `cargo nextest run -p mermaid-model --run-ignored only keyring_round_trip`.
     #[test]
     #[ignore]
     fn keyring_round_trip() {

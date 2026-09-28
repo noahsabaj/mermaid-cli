@@ -79,6 +79,12 @@ pub enum RunEvent {
         /// Structured, secret-safe web transport details for web tools.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         web: Option<Box<WebEventDetails>>,
+        /// An edit (`edit_file` / `apply_patch`) that only applied because its
+        /// context matched fuzzily (whitespace or Unicode drift). Counted by the
+        /// behavioural evals: once current models stop needing it, the fuzzy
+        /// matcher can go. Omitted when false. Additive (defaulted).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        fuzzy: bool,
     },
     /// A gated tool is waiting for approval. Headless runs surface this so a
     /// supervising process can decide.
@@ -224,6 +230,7 @@ impl RunEvent {
                 summary: outcome.summary.clone(),
                 error: outcome.error.clone(),
                 web: web_event_details(&outcome.metadata.detail).map(Box::new),
+                fuzzy: matched_fuzzily(&outcome.metadata.detail),
             },
             Msg::ApprovalRequested {
                 call_id,
@@ -399,6 +406,7 @@ fn push_action(out: &mut Vec<RunEvent>, calls: &mut usize, action: &ActionDispla
         summary: action_summary(action),
         error,
         web: detail.and_then(web_event_details).map(Box::new),
+        fuzzy: detail.is_some_and(matched_fuzzily),
     });
 }
 
@@ -495,6 +503,10 @@ fn tool_name(detail: &ToolMetadata) -> String {
         ToolMetadata::CompactionRequest { .. } => "compact_context".to_string(),
         ToolMetadata::Custom { name, .. } => name.clone(),
     }
+}
+
+fn matched_fuzzily(detail: &ToolMetadata) -> bool {
+    matches!(detail, ToolMetadata::ApplyPatch { fuzzy: true, .. })
 }
 
 fn web_event_details(detail: &ToolMetadata) -> Option<WebEventDetails> {
@@ -639,6 +651,7 @@ mod tests {
                 summary: "command completed".to_string(),
                 error: None,
                 web: None,
+                fuzzy: false,
             },
             RunEvent::ApprovalRequired {
                 call_id: "tool#4".to_string(),
@@ -860,8 +873,36 @@ mod tests {
                 summary: "command completed".to_string(),
                 error: None,
                 web: None,
+                fuzzy: false,
             })
         );
+    }
+
+    /// The evals read this flag to measure how often edits need the fuzzy
+    /// matcher, so an exact edit must stay silent and a fuzzy one must say so.
+    #[test]
+    fn a_fuzzy_edit_is_flagged_on_the_wire() {
+        let edit = |fuzzy| Msg::ToolFinished {
+            turn: TurnId(1),
+            call_id: ToolCallId(5),
+            outcome: ToolOutcome::success("Edited a.rs", "+1 -1", 0.0).with_metadata(
+                ToolRunMetadata {
+                    detail: ToolMetadata::ApplyPatch {
+                        added: vec![],
+                        modified: vec!["a.rs".to_string()],
+                        deleted: vec![],
+                        renamed: vec![],
+                        fuzzy,
+                    },
+                    ..ToolRunMetadata::default()
+                },
+            ),
+        };
+        let wire = |fuzzy| {
+            serde_json::to_string(&RunEvent::from_msg(&edit(fuzzy)).expect("mapped")).unwrap()
+        };
+        assert!(wire(true).contains(r#""fuzzy":true"#), "{}", wire(true));
+        assert!(!wire(false).contains("fuzzy"), "{}", wire(false));
     }
 
     #[test]
@@ -1072,6 +1113,7 @@ mod tests {
                     summary: "Read src/main.rs".to_string(),
                     error: None,
                     web: None,
+                    fuzzy: false,
                 },
             ]
         );

@@ -757,7 +757,7 @@ mod tests {
     /// command. **Copy an image file in Finder / Nautilus / Dolphin first**,
     /// then:
     ///
-    /// `cargo test manual_file_reference_paste -- --ignored --nocapture`
+    /// `cargo nextest run --lib --run-ignored only --no-capture manual_file_reference_paste`
     ///
     /// A pass means `has_image()` is true and the bytes come back with the
     /// file's own format. A failure prints what the probe actually saw, which
@@ -793,7 +793,7 @@ mod tests {
     /// Manual QA for a real display server (CI has none): round-trips a
     /// string through the system clipboard, then restores the previous text
     /// contents. Run with:
-    /// `cargo test manual_clipboard_roundtrip -- --ignored --nocapture`
+    /// `cargo nextest run --lib --run-ignored only --no-capture manual_clipboard_roundtrip`
     #[test]
     #[ignore = "needs a real display server + clipboard tools"]
     fn manual_clipboard_roundtrip() {
@@ -820,7 +820,7 @@ mod tests {
     /// bounded timeout error, not a read that never returns. Wayland-only;
     /// briefly replaces the clipboard, restoring text contents afterwards.
     /// Run with:
-    /// `cargo test manual_hung_owner_times_out -- --ignored --nocapture`
+    /// `cargo nextest run --lib --run-ignored only --no-capture manual_hung_owner_times_out`
     #[cfg(unix)]
     #[test]
     #[ignore = "needs Wayland + wl-copy; simulates a frozen selection owner"]
