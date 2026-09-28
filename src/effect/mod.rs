@@ -103,7 +103,6 @@ fn compaction_row(
         preserved_turns: Some(record.preserved_turn_count as i64),
         archive_path: Some(archive_path.display().to_string()),
         // Nothing verifies a checkpoint any more: one model call writes it.
-        verification_status: None,
     }
 }
 
@@ -2035,7 +2034,6 @@ mod tests {
         assert_eq!(row.summary_token_count, Some(450));
         assert_eq!(row.preserved_turns, Some(3));
         assert!(row.archive_path.is_some_and(|p| p.contains("archive.json")));
-        assert_eq!(row.verification_status, None);
     }
 
     use super::*;

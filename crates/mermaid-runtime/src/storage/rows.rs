@@ -189,7 +189,6 @@ pub(crate) fn compaction_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<C
         summary_token_count: row.get("summary_token_count")?,
         preserved_turns: row.get("preserved_turns")?,
         archive_path: row.get("archive_path")?,
-        verification_status: row.get("verification_status")?,
         created_at: row.get("created_at")?,
     })
 }

@@ -1058,16 +1058,15 @@ impl CompactionsRepo<'_> {
         self.conn.execute(
             "INSERT INTO compactions
              (id, task_id, session_id, source_token_estimate, summary_token_count,
-              preserved_turns, archive_path, verification_status, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+              preserved_turns, archive_path, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(id) DO UPDATE SET
                 task_id = excluded.task_id,
                 session_id = excluded.session_id,
                 source_token_estimate = excluded.source_token_estimate,
                 summary_token_count = excluded.summary_token_count,
                 preserved_turns = excluded.preserved_turns,
-                archive_path = excluded.archive_path,
-                verification_status = excluded.verification_status",
+                archive_path = excluded.archive_path",
             params![
                 id,
                 new.task_id,
@@ -1076,7 +1075,6 @@ impl CompactionsRepo<'_> {
                 new.summary_token_count,
                 new.preserved_turns,
                 new.archive_path,
-                new.verification_status,
                 now_rfc3339(),
             ],
         )?;
@@ -1092,7 +1090,7 @@ impl CompactionsRepo<'_> {
         self.conn
             .query_row(
                 "SELECT id, task_id, session_id, source_token_estimate, summary_token_count,
-                        preserved_turns, archive_path, verification_status, created_at
+                        preserved_turns, archive_path, created_at
                  FROM compactions WHERE id = ?1",
                 [id],
                 compaction_from_row,
@@ -1108,7 +1106,7 @@ impl CompactionsRepo<'_> {
     pub fn list(&self, limit: usize) -> Result<Vec<CompactionRecord>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, task_id, session_id, source_token_estimate, summary_token_count,
-                    preserved_turns, archive_path, verification_status, created_at
+                    preserved_turns, archive_path, created_at
              FROM compactions ORDER BY created_at DESC LIMIT ?1",
         )?;
         let rows = stmt.query_map([clamp_limit(limit)], compaction_from_row)?;
