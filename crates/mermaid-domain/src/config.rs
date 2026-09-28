@@ -277,6 +277,7 @@ impl PromptConfig {
 /// ```toml
 /// [output]
 /// style = "concise"  # "default" (stock prompt) or a custom style name
+/// guidance = "auto"  # "auto", "on", or "off"
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -285,13 +286,78 @@ pub struct OutputConfig {
     /// name resolves to a built-in (`proactive`, `concise`, `explanatory`,
     /// `learning`) or a custom `output-styles/<name>.md` file.
     pub style: String,
+    /// Whether the guidance pack (`prompts::GUIDANCE_PACK`) is layered onto
+    /// the core prompt. Read via [`Config::guidance_pack_enabled`].
+    pub guidance: GuidanceMode,
 }
 
 impl Default for OutputConfig {
     fn default() -> Self {
         Self {
             style: crate::prompts::DEFAULT_OUTPUT_STYLE.to_string(),
+            guidance: GuidanceMode::Auto,
         }
+    }
+}
+
+/// When the guidance pack applies. `Auto` decides per provider, not per
+/// model: on for a local provider (Ollama, or any provider whose `base_url`
+/// is a loopback or LAN host), off for hosted APIs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GuidanceMode {
+    #[default]
+    Auto,
+    On,
+    Off,
+}
+
+impl GuidanceMode {
+    /// The lowercase config-file spelling.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::On => "on",
+            Self::Off => "off",
+        }
+    }
+}
+
+impl Config {
+    /// Effective value of [`OutputConfig::guidance`] for `model_id`.
+    #[must_use]
+    pub fn guidance_pack_enabled(&self, model_id: &str) -> bool {
+        match self.output.guidance {
+            GuidanceMode::On => true,
+            GuidanceMode::Off => false,
+            GuidanceMode::Auto => self.provider_is_local(model_id),
+        }
+    }
+
+    /// True when `model_id`'s provider serves from this machine or its LAN:
+    /// Ollama (bare ids are Ollama by convention), or a provider whose
+    /// configured `base_url` host is loopback or private. Every built-in
+    /// registry default is a public API, so only a user override can make a
+    /// registry provider local.
+    #[must_use]
+    pub fn provider_is_local(&self, model_id: &str) -> bool {
+        let provider = model_id
+            .split_once('/')
+            .map_or("ollama", |(provider, _)| provider)
+            .to_ascii_lowercase();
+        if provider == "ollama" {
+            return true;
+        }
+        self.providers
+            .get(&provider)
+            .and_then(|p| p.base_url.as_deref())
+            .and_then(|url| url::Url::parse(url).ok())
+            .and_then(|url| {
+                url.host_str()
+                    .map(|host| mermaid_model::utils::classify_host(host).is_internal())
+            })
+            .unwrap_or(false)
     }
 }
 
