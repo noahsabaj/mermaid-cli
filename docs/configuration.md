@@ -88,6 +88,8 @@ auto_start = true
 # shell / network action. "full_access" auto-runs everything local;
 # write-shaped MCP tools (no read-only annotation) are still vetted against
 # your intent per `external_writes` below. "read_only" blocks mutations and
+# (on Linux 6.12+, where the OS sandbox enforces it) lets any shell command run
+# with writes, sockets and signals denied by the kernel; see docs/sandbox.md. It
 # requires one-shot approval for each web request because URLs and queries are
 # externally observable. Set allow_readonly_web = true only when unattended
 # web egress in read_only sessions is intentional; project config cannot set it.

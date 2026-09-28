@@ -484,7 +484,6 @@ pub struct CompactionRecord {
     pub summary_token_count: Option<i64>,
     pub preserved_turns: Option<i64>,
     pub archive_path: Option<String>,
-    pub verification_status: Option<String>,
     pub created_at: String,
 }
 
@@ -497,7 +496,6 @@ pub struct NewCompaction {
     pub summary_token_count: Option<i64>,
     pub preserved_turns: Option<i64>,
     pub archive_path: Option<String>,
-    pub verification_status: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -63,7 +63,8 @@ pub use policy::{
 };
 pub use redact::{redact_json, redact_json_text, redact_secrets, sanitize_url_for_display};
 pub use sandbox::{
-    Enforcement, SandboxPolicy, enforce, fs_confinement_available, network_killswitch_available,
+    Enforcement, SandboxPolicy, enforce, enforce_read_only, fs_confinement_available,
+    network_killswitch_available, read_only_containment_available,
 };
 pub use storage::{
     ApprovalRecord, CheckpointRecord, CompactionRecord, MessageRecord, NewApproval, NewCheckpoint,

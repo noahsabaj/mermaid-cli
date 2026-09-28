@@ -194,6 +194,15 @@ pub struct ActionRequest {
     /// cwd on the request keeps the wrong value out of reach: see
     /// [`ActionRequest::resolve_dir`].
     pub cwd: Option<std::path::PathBuf>,
+    /// For `ToolCategory::Shell` only: the caller will run this command inside
+    /// the read-only OS sandbox, where the kernel denies writes, sockets, IPC,
+    /// outward signals and privileges. In `read_only` mode that containment,
+    /// not the command's classification, is what keeps it read-only, so the
+    /// engine lets any command through that is not hard-denied or denied by
+    /// a user override. Only `execute_command` sets it, and only when its
+    /// launcher will enforce that sandbox for this very spawn.
+    #[serde(default)]
+    pub read_only_contained: bool,
 }
 
 impl ActionRequest {
@@ -211,6 +220,7 @@ impl ActionRequest {
             arguments: None,
             mcp_read_only_hint: false,
             cwd: None,
+            read_only_contained: false,
         }
     }
 
