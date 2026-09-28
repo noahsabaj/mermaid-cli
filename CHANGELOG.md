@@ -52,6 +52,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   checkpoint, optionally with a `focus`, and it runs before the model's next
   call. The 85% automatic trigger stays as the safety net.
 
+- **`web_fetch` `raw`.** The readability extractor stays the default, but it
+  sometimes guesses wrong about what matters on a page. `raw: true` returns the
+  page source as served, still bounded and pageable through the snapshot. It
+  needs the native fetch backend; the Ollama Cloud backend only returns its own
+  extraction and says so.
+
 ### Fixed
 
 - **The pedantic lint debt is back under its baseline.** Eleven lints had drifted

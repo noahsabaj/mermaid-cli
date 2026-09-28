@@ -46,6 +46,10 @@ By default MCP tools are **deferred**: instead of advertising every server's too
 
 `web_fetch` is registered natively with no key. `web_search` is registered when the selected backend is viable; the managed default is omitted with an actionable diagnostic on unsupported platforms.
 
+HTML is reduced to its main content by a readability pass. When that guesses wrong (a table,
+a nav-hosted index, attribute data), `raw: true` returns the page source as served instead;
+it needs the native fetch backend.
+
 Inspect an existing `web_fetch` snapshot with Unicode-caseless `pattern` matching, or page through it with stable `start_line`/`line_count` continuation, without refetching.
 
 Backend selection, redirect and provenance rules, and the transfer budgets are in
