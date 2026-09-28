@@ -7,8 +7,7 @@ An open-source AI coding assistant for the terminal. Multi-provider — Ollama (
 - **Native tool calling** — read, write, edit, delete, run commands, search the web, spawn subagents, call MCP tools
 - **Subagents** — spawn parallel autonomous agents; built-in `general` and read-only `explore` types, per-call model override, continuation handles
 - **Worktree isolation** — give a writing subagent its own git checkout, seeded with your uncommitted state. Its changes land as one patch, serialized against other children, so parallel writers report a conflict instead of interleaving
-- **Safety modes** — `plan`/`read_only`/`ask`/`auto`/`full_access`, cycled live with Shift+Tab; `auto` is classifier-backed, and gated actions prompt inline rather than erroring out
-- **Plan mode** — a hard read-only state where the agent explores and authors a plan file you approve before anything changes; `mermaid run --plan` does it headless
+- **Safety modes** — `read_only`/`ask`/`auto`/`full_access`, cycled live with Shift+Tab; `auto` is classifier-backed, and gated actions prompt inline rather than erroring out
 - **Checkpoints** — shadow-git snapshots before mutations; inspect with `/checkpoints`, roll back with `/restore <id>`
 - **Durable memory** — the agent remembers facts across sessions; a compact index auto-loads into every prompt
 - **Project instructions and skills** — auto-loads `AGENTS.md` and `MERMAID.md`, plus task-specific playbooks loaded on demand
@@ -91,7 +90,6 @@ mermaid add <name>                         # Add an MCP server (e.g., context7, 
 
 mermaid run "fix the tests"                # Non-interactive mode
 mermaid run "explain main.rs" -f json      # JSON output (or -f ndjson to stream events)
-mermaid run --plan "refactor the auth"     # Headless plan mode: read-only, delivers a plan file
 mermaid --sandbox run "refactor this"      # Confine writes to the project, deny network
 ```
 
@@ -108,7 +106,7 @@ Every flag, structured output, headless session resume, and record/replay: [docs
 | Esc Esc | (idle) Rewind: fork the session at an earlier message |
 | Ctrl+C | Quit (auto-saves the session) |
 | Alt+T | Cycle reasoning level |
-| Shift+Tab | Cycle safety mode: `plan → read_only → ask → auto → full_access` |
+| Shift+Tab | Cycle safety mode: `read_only → ask → auto → full_access` |
 | Ctrl+V | Paste image or text from clipboard |
 | Ctrl+O | Compose the prompt in `$VISUAL`/`$EDITOR` |
 | `/` | Open the slash-command palette (a line that names no command is sent as a message) |
@@ -135,13 +133,12 @@ The model calls these autonomously:
 | `agent` | Spawn an autonomous subagent for parallel tasks |
 | `task_create`, `task_update`, `task_list` | The live task checklist (`/todos`) |
 | `ask_user_question` | Multiple-choice questions when a decision is the user's to make |
-| `enter_plan_mode`, `exit_plan_mode` | Propose plan mode for large or risky work, and leave it with a plan |
 
 MCP servers contribute tools under the `mcp__<server>__<tool>` prefix, **deferred** by default: one `tool_search` tool promotes matches for the rest of the session, so unpromoted schemas never count against `/context`. Opt out with `mcp_defer_tools = false`.
 
 ## Safety
 
-Approval policy and OS confinement are independent. The policy (`plan`, `read_only`, `ask`, `auto`, `full_access`) decides what needs your say-so; the sandbox decides what the kernel permits regardless:
+Approval policy and OS confinement are independent. The policy (`read_only`, `ask`, `auto`, `full_access`) decides what needs your say-so; the sandbox decides what the kernel permits regardless:
 
 - `--no-network` — blocks web tools everywhere, and stops model-run commands from reaching the network
 - `--confine-fs` — write-class filesystem access only beneath the project root, cwd, and temp
@@ -164,7 +161,7 @@ name = "qwen3-coder:30b"
 reasoning = "medium"   # none | minimal | low | medium | high | xhigh | max
 
 [safety]
-mode = "auto"           # plan | read_only | ask | auto | full_access
+mode = "auto"           # read_only | ask | auto | full_access
 checkpoint_on_mutation = true
 ```
 

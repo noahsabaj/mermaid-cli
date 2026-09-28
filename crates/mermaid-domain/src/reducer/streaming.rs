@@ -719,16 +719,7 @@ pub fn handle_stream_done(
         // Captured once for the whole batch: the live safety mode + the
         // turn's intent (for the Auto-mode classifier).
         let intent = latest_user_intent(&state.session);
-        // `SafetyMode::Plan` carries its own read-only floor in the policy
-        // engine, so there is nothing to substitute here — the live mode is
-        // the effective mode, always. The plan carve-outs (plan file, memory,
-        // known-safe builds) key on `plan_file` inside the gate.
-        let effective_safety = state.session.safety_mode;
-        let plan_file = state
-            .session
-            .plan
-            .as_ref()
-            .map(|plan| plan.plan_path.clone());
+        let safety_mode = state.session.safety_mode;
         for call in &pending {
             if call.source.function.name == crate::tool_search::TOOL_SEARCH_NAME {
                 continue;
@@ -739,14 +730,7 @@ pub fn handle_stream_done(
                 source: call.source.clone(),
                 dispatch: crate::cmd::ToolDispatch {
                     model_id: state.session.model_id.clone(),
-                    safety_mode: effective_safety,
-                    plan_file: plan_file.clone(),
-                    plan_permissions: state.settings.plan.permissions,
-                    context_percent: state
-                        .session
-                        .context_usage
-                        .as_ref()
-                        .and_then(|c| c.used_percent),
+                    safety_mode,
                     intent: intent.clone(),
                     // Checkpoint anchoring: conversation id + length at
                     // DISPATCH. History here is [..., user@k,

@@ -26,8 +26,6 @@ mermaid --output-style concise                   # Use an output style for one r
 mermaid -c safety.mode=full_access               # Override any config key for this run (repeatable, TOML values)
 mermaid --profile ci                             # Apply the [profiles.ci] overlay from your user config
 mermaid -v                                       # Verbose logging
-mermaid run --plan "refactor the auth flow"      # Headless plan mode: read-only run that delivers a plan file
-mermaid run --plan --plan-autoaccept "..."       # ...and continue straight into implementation
 mermaid list                                    # List available models across providers
 mermaid doctor                                  # First-run readiness check
 mermaid status                                  # Lower-level Ollama, MCP, and provider config
@@ -72,7 +70,7 @@ documented in [runtime.md](runtime.md).
 | Ctrl+D | Quit when the input box is empty (auto-saves the session) |
 | Ctrl+B | While tools are running, send the foreground command to the background (it keeps running as a `/processes` entry) |
 | Alt+T | Cycle reasoning level: `None → Minimal → Low → Medium → High → XHigh → Max → None` |
-| Shift+Tab | Cycle safety mode: `plan → read_only → ask → auto → full_access → plan` (session-scoped). `plan` is read-only exploration plus an approvable plan file |
+| Shift+Tab | Cycle safety mode: `read_only → ask → auto → full_access → read_only` (session-scoped) |
 | Ctrl+V | Paste image or text from clipboard (a copied image *file* pastes as the image) |
 | Ctrl+O | Compose the prompt in `$VISUAL`/`$EDITOR` (TUI suspends, resumes on save-quit) |
 | Ctrl+Click | Open image from chat history |
@@ -153,8 +151,7 @@ Durable memory:
 
 Safety and recovery:
 
-- `/safety [plan|read_only|ask|auto|full_access]` (alias `/permission`) — show or set the session safety mode; Shift+Tab cycles it
-- `/plan [off|show|config]` — enter/leave plan mode (Shift+Tab cycles into it too; `off` returns to the configured `[safety] mode`), show the plan file, or open the plan settings picker (`/config` opens the same picker). Per-category permissions (builds, web, memory, task tools), plan-phase model and reasoning overrides, and approval behavior all live in `/plan config`. Approving a plan seeds the live task checklist from its Tasks section and can start implementation in place, in a cleared context, or hand off to a fork or fresh session on a different model — plan on a frontier model, execute locally
+- `/safety [read_only|ask|auto|full_access]` (alias `/permission`) — show or set the session safety mode; Shift+Tab cycles it
 - `/approvals`, `/approve <id>`, `/deny <id>`
 - `/checkpoint <path...>`, `/checkpoints`, `/restore <id>`
 

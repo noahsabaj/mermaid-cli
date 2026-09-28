@@ -101,14 +101,13 @@ fn model_picker_frame() {
     term.assert_frame("model_picker_filtered");
 }
 
-/// Every safety mode's footer, in one frame per mode. Plan is a cycle position
-/// like the rest — the band that used to read
-/// `plan mode on (alt+p to toggle) - restores: <mode>` is gone, and a golden
-/// frame is what makes its return impossible to miss.
+/// Every safety mode's footer, in one frame per mode. The band that used to
+/// read `plan mode on (alt+p to toggle) - restores: <mode>` is gone, and a
+/// golden frame is what makes its return impossible to miss.
 #[test]
 fn safety_mode_footers() {
     let mut term = Terminal::launch("frame-safety");
-    for mode in ["full_access", "plan", "read_only", "ask", "auto"] {
+    for mode in ["full_access", "read_only", "ask", "auto"] {
         term.press(harness::SHIFT_TAB);
         term.wait_for_text(&format!("safety: {mode}"), Duration::from_secs(10));
         term.assert_footer(&format!("footer_{mode}"));

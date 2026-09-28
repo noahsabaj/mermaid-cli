@@ -178,18 +178,6 @@ pub struct RuntimeState {
     /// session-only, reset by every `Msg::TasksUpdated`.
     #[serde(skip)]
     pub calls_since_task_update: u32,
-    /// Plan-mode doom-loop breaker, armed by the FIRST plan-policy denial of
-    /// the current stretch (a read-heavy Ground phase alone must never trip
-    /// it). While armed, `push_plan_reminder` counts model calls; at the
-    /// threshold the tail reminder escalates to a corrective. Disarmed by a
-    /// successful plan write (`write_file`/`apply_patch` — the only Edit that
-    /// can succeed under the plan floor) and cleared on plan entry/exit.
-    /// Session-only.
-    #[serde(skip)]
-    pub plan_thrash_armed: bool,
-    /// Model calls since the arming denial (see `plan_thrash_armed`).
-    #[serde(skip)]
-    pub plan_calls_since_denial: u32,
     /// Models we've already shown the no-vision-model notice for this session.
     /// Session-only (not persisted), so the one-shot warning behaves like the
     /// auto-fit hint and offload warning.
@@ -304,8 +292,6 @@ impl RuntimeState {
             hinted_models: HashSet::new(),
             offload_warned: HashSet::new(),
             calls_since_task_update: 0,
-            plan_thrash_armed: false,
-            plan_calls_since_denial: 0,
             vision_warned: HashSet::new(),
             ollama_converged_num_ctx: std::collections::HashMap::new(),
             run_started: None,

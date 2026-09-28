@@ -350,7 +350,6 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         }),
         BottomPane::Confirm => 6,
         BottomPane::ConversationList | BottomPane::Rewind => 12,
-        BottomPane::PlanConfig => widgets::PLAN_CONFIG_HEIGHT,
         BottomPane::ModelPicker => widgets::MODEL_PICKER_HEIGHT,
         BottomPane::FilePicker => {
             let rows = state.ui.file_picker_matches.len().clamp(1, 8);
@@ -654,18 +653,6 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
                 frame.render_widget(widget, chunks[4]);
             }
         },
-        BottomPane::PlanConfig => {
-            if let mermaid_domain::UiMode::PlanConfig { cursor } = &state.ui.mode {
-                use widgets::PlanConfigWidget;
-                let widget = PlanConfigWidget {
-                    theme: &rstate.theme,
-                    plan: &state.settings.plan,
-                    session_model: &state.session.model_id,
-                    cursor: *cursor,
-                };
-                frame.render_widget(widget, chunks[4]);
-            }
-        },
         BottomPane::FilePicker => {
             use widgets::FilePickerWidget;
             let widget = FilePickerWidget {
@@ -691,8 +678,6 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
                 model_name: &state.session.model_id,
                 reasoning_level: effective,
                 requested_level,
-                // Planning IS the mode — `plan` renders through the same
-                // `safety: <mode>` segment as every other level.
                 safety_mode: state.session.safety_mode,
             };
             frame.render_widget(status_widget, chunks[4]);
@@ -748,7 +733,6 @@ enum BottomPane<'a> {
     ModelPicker,
     ConversationList,
     Rewind,
-    PlanConfig,
     FilePicker,
     Palette(Vec<mermaid_domain::slash_commands::PaletteEntry<'a>>),
     Status,
@@ -764,8 +748,7 @@ fn bottom_pane(state: &mermaid_domain::State) -> BottomPane<'_> {
             UiMode::ModelPicker { .. } => BottomPane::ModelPicker,
             UiMode::ConversationList { .. } => BottomPane::ConversationList,
             UiMode::RewindPicker { .. } => BottomPane::Rewind,
-            UiMode::PlanConfig { .. } => BottomPane::PlanConfig,
-            // `Focus::Picker` only resolves for the four picker modes.
+            // `Focus::Picker` only resolves for the three picker modes.
             UiMode::EditingInput | UiMode::ModelList => BottomPane::Status,
         },
         Focus::Composer => {
@@ -1556,9 +1539,11 @@ mod tests {
     fn context_markers_are_hidden_from_the_transcript() {
         use mermaid_model::models::{ChatMessage, ChatMessageKind};
         let committed = vec![
-            ChatMessage::user("plan this"),
+            ChatMessage::user("switch to read-only"),
             kinded(
-                ChatMessage::system("Plan mode is now ON. Author the plan at x.md."),
+                ChatMessage::system(
+                    "Safety mode changed from auto to read_only (set by the user).",
+                ),
                 ChatMessageKind::ContextMarker,
             ),
             ChatMessage::assistant("Grounding first."),
@@ -1577,7 +1562,7 @@ mod tests {
         assert!(
             !stitched
                 .iter()
-                .any(|m| m.content.contains("Plan mode is now ON")),
+                .any(|m| m.content.contains("Safety mode changed")),
             "markers never render"
         );
     }

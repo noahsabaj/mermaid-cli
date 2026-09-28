@@ -1007,12 +1007,10 @@ impl EffectRunner {
                 if let Some(tools) = &self.tools
                     && request.output_schema.is_none()
                 {
-                    let mut enriched =
-                        filter_suppressed(tools.describe_all(), &request.suppressed_builtin_tools);
+                    let mut enriched = tools.describe_all();
                     // Report the built-in tool-schema token cost so the
                     // reducer's /context preview can fold it into its MCP-only
                     // estimate and agree with what the model actually sees.
-                    // Runs AFTER suppression so the estimate matches reality.
                     let builtin_tokens = mermaid_domain::estimate_tool_schema_tokens(&enriched);
                     // Best-effort and cosmetic (the /context preview). This is the
                     // synchronous dispatch path so we can't await; if the bounded
@@ -1140,13 +1138,8 @@ impl EffectRunner {
                 // actions. Only when a provider is bound (real wiring); the
                 // gate fails safe to "escalate" when it's `None`. The vet
                 // uses the configured classifier model, else the session model.
-                // Plan mode also gets one: profile levels set to `auto`
-                // resolve through `PolicyDecision::Classify`, which fails
-                // safe to escalate without a classifier bound.
                 let classifier: Option<Arc<dyn crate::providers::AutoClassifier>> =
-                    if dispatch.safety_mode == mermaid_runtime::SafetyMode::Auto
-                        || dispatch.plan_file.is_some()
-                    {
+                    if dispatch.safety_mode == mermaid_runtime::SafetyMode::Auto {
                         self.providers.as_ref().map(|p| {
                             let model = config
                                 .safety
@@ -1395,13 +1388,6 @@ impl EffectRunner {
                             health: None,
                         })
                     });
-                });
-            },
-            Cmd::PersistPlanConfig(plan) => {
-                self.detached.spawn(async move {
-                    if let Err(err) = crate::app::persist_plan_config(&plan) {
-                        tracing::warn!(error = %err, "failed to persist [plan] config");
-                    }
                 });
             },
             Cmd::PersistLastModel(model) => {
@@ -2003,22 +1989,6 @@ fn note_stream_usage(
     }
 }
 
-/// Drop the built-in tool definitions the reducer suppressed for this request
-/// (`ChatRequest::suppressed_builtin_tools` — e.g. the task-checklist writers
-/// while a plan is being drafted). Pure so it unit-tests without the runner.
-fn filter_suppressed(
-    tools: Vec<mermaid_domain::ToolDefinition>,
-    suppressed: &[&'static str],
-) -> Vec<mermaid_domain::ToolDefinition> {
-    if suppressed.is_empty() {
-        return tools;
-    }
-    tools
-        .into_iter()
-        .filter(|t| !suppressed.contains(&t.name.as_str()))
-        .collect()
-}
-
 mod compaction;
 mod memory;
 mod model_call;
@@ -2078,25 +2048,6 @@ mod tests {
 
     fn runner() -> (EffectRunner, mpsc::Receiver<Msg>) {
         EffectRunner::pair(PathBuf::from("/tmp"))
-    }
-
-    /// The reducer's `suppressed_builtin_tools` contract: named tools drop
-    /// out of the advertised set, everything else passes through in order.
-    #[test]
-    fn filter_suppressed_drops_only_the_named_tools() {
-        let def = |name: &str| mermaid_domain::ToolDefinition {
-            name: name.to_string(),
-            description: String::new(),
-            input_schema: serde_json::json!({}),
-        };
-        let tools = vec![def("task_create"), def("task_list"), def("task_update")];
-        let kept = filter_suppressed(tools.clone(), &["task_create", "task_update"]);
-        assert_eq!(
-            kept.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
-            vec!["task_list"]
-        );
-        let kept = filter_suppressed(tools, &[]);
-        assert_eq!(kept.len(), 3, "empty suppression list is a no-op");
     }
 
     #[test]
@@ -2361,7 +2312,6 @@ mod tests {
             resolved_max_output: None,
             output_schema: None,
             suppress_auto_compact: false,
-            suppressed_builtin_tools: Vec::new(),
         };
         r.dispatch(Cmd::CallModel { turn, request });
         assert_eq!(r.scope_count(), 1);
@@ -2390,7 +2340,6 @@ mod tests {
             resolved_max_output: None,
             output_schema: None,
             suppress_auto_compact: false,
-            suppressed_builtin_tools: Vec::new(),
         };
         r.dispatch(Cmd::CallModel { turn, request });
         assert_eq!(r.scope_count(), 1);
@@ -2436,9 +2385,6 @@ mod tests {
             dispatch: mermaid_domain::ToolDispatch {
                 model_id: "ollama/test".to_string(),
                 safety_mode: mermaid_runtime::SafetyMode::Ask,
-                plan_file: None,
-                plan_permissions: mermaid_domain::PlanPermissions::default(),
-                context_percent: None,
                 intent: None,
                 session_id: "sess-test".to_string(),
                 message_index: 0,
@@ -2480,7 +2426,6 @@ mod tests {
                 resolved_max_output: None,
                 output_schema: None,
                 suppress_auto_compact: false,
-                suppressed_builtin_tools: Vec::new(),
             },
         });
         assert_eq!(r.scope_count(), 1);
@@ -2512,7 +2457,6 @@ mod tests {
             resolved_max_output: None,
             output_schema: None,
             suppress_auto_compact: false,
-            suppressed_builtin_tools: Vec::new(),
         };
         let turn = TurnId(123);
 

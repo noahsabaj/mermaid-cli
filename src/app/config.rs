@@ -315,22 +315,10 @@ fn migrate_legacy_model_profiles(table: &mut toml::Table) {
 /// An empty table yields `Config::default()` (every field is `#[serde(default)]`).
 fn finalize_config(table: toml::Table) -> Result<(Config, Vec<String>)> {
     let mut ignored = Vec::new();
-    let mut config: Config = serde_ignored::deserialize(toml::Value::Table(table), |path| {
+    let config: Config = serde_ignored::deserialize(toml::Value::Table(table), |path| {
         ignored.push(path.to_string());
     })
     .context("Failed to interpret configuration. Run 'mermaid init' to regenerate.")?;
-    // `plan` is a live session mode, not a persistent default: entering it
-    // allocates a plan file, which config loading has no session to do it for.
-    // `safety.mode = "plan"` would otherwise start a session that reports
-    // "planning" with no plan to write. Fall back to the default and let
-    // `/plan`, `/safety plan`, or Shift+Tab do the real thing. It is also what
-    // `mode_after_plan` reads, so this must never be `plan` itself.
-    if config.safety.mode.is_planning() {
-        config.safety.mode = SafetyConfig::default().mode;
-        ignored.push(
-            "safety.mode (plan is entered with /plan or Shift+Tab, not configured)".to_string(),
-        );
-    }
     Ok((config, ignored))
 }
 
@@ -591,18 +579,6 @@ fn update_user_config_table_at(
 /// `persist_*` helper below inherits.
 pub fn update_user_config_key(path: &[&str], value: toml::Value) -> Result<()> {
     update_user_config_table(|table| deep_set_segments(table, path, value))
-}
-
-/// Persist the whole `[plan]` table (the `/plan config` picker). Values the
-/// user set through the picker are explicit choices, so writing them —
-/// including ones that currently match defaults — is correct; unset Options
-/// stay absent via `skip_serializing_if`.
-///
-/// # Errors
-///
-/// Serializing `plan` to TOML, then [`update_user_config_key`]'s.
-pub fn persist_plan_config(plan: &PlanConfig) -> Result<()> {
-    update_user_config_key(&["plan"], toml::Value::try_from(plan)?)
 }
 
 /// Remove one key (pre-split path segments) from the USER config file.
@@ -1896,31 +1872,6 @@ port = 11434
         let c: Config =
             toml::from_str("[compaction]\nauto_threshold_percent = 0\n").expect("parses");
         assert_eq!(c.compaction.policy().auto_threshold_percent, 1);
-    }
-
-    #[test]
-    fn plan_config_defaults_parse_and_do_not_freeze() {
-        // Absent section: dialog on, nothing pinned.
-        let c: Config = toml::from_str("").expect("empty config parses");
-        assert!(!c.plan.auto_approve);
-        assert!(c.plan.post_approve.is_none());
-        // Explicit values parse.
-        let c: Config = toml::from_str("[plan]\nauto_approve = true\npost_approve = \"start\"\n")
-            .expect("plan section parses");
-        assert!(c.plan.auto_approve);
-        assert_eq!(c.plan.post_approve, Some(PlanPostApprove::Start));
-        assert_eq!(
-            toml::from_str::<Config>("[plan]\npost_approve = \"wait\"\n")
-                .expect("wait parses")
-                .plan
-                .post_approve,
-            Some(PlanPostApprove::Wait)
-        );
-        // The unset pin is never frozen into a saved config (Option +
-        // skip_serializing_if), so a future default change still reaches
-        // existing files.
-        let blob = toml::to_string(&Config::default()).expect("serialize");
-        assert!(!blob.contains("post_approve"));
     }
 
     /// Config with one remote provider carrying an explicit `default_model`.

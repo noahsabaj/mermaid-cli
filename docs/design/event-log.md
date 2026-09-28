@@ -125,7 +125,7 @@ Variants (initial set):
   is not a compaction (safety valve; enumerated callers of `replace_messages` /
   `set_messages` decide between `compaction` and `reset` in PR B).
 - `state { ... }` — the scalar session state as one small struct: title, model,
-  safety mode, plan state, advertised context, token meters, context usage, and
+  safety mode, advertised context, token meters, context usage, and
   provenance (`git_branch`, `git_sha`, `cli_version`). Emitted only when it
   differs from the last emitted value. One coarse variant instead of ten fine
   ones: the struct is tiny next to a message, and a fold assigns rather than

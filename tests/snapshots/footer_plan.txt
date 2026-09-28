@@ -1,1 +1,0 @@
-safety: plan · reasoning: medium                                           anthropic/pty-visual-test

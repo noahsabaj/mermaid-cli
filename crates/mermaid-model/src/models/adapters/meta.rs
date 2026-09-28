@@ -707,7 +707,7 @@ mod tests {
     #[test]
     fn model_directed_system_messages_reach_the_wire_in_place() {
         let mut msgs = messages();
-        let mut nudge = ChatMessage::system("Reminder: plan mode is active.");
+        let mut nudge = ChatMessage::system("Reminder: the task checklist is stale.");
         nudge.kind = ChatMessageKind::RecoveryNudge;
         msgs.push(nudge);
         let body = build_request_body(&msgs, &config(), "muse-spark-1.1");
@@ -718,7 +718,7 @@ mod tests {
         assert!(
             serde_json::to_string(&last["content"])
                 .unwrap()
-                .contains("plan mode is active"),
+                .contains("the task checklist is stale"),
         );
     }
 

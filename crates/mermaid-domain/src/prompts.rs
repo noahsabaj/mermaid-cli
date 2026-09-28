@@ -34,7 +34,7 @@ Usually available:
 - `ask_user_question` — a structured multiple-choice question in the terminal, for decisions only the user can make.
 - `agent` — spawn a subagent for self-contained work: parallel exploration, or scoping a noisy sub-task.
 - `web_fetch` (retrieve a URL's content as markdown) and `web_search` (ground answers in current facts), when web access is configured.
-Present when available: MCP server tools (call them like any built-in; some may be deferred behind `tool_search` — search once to discover and unlock them) and `enter_plan_mode` to propose plan mode for large, risky, or underspecified work.
+Present when available: MCP server tools (call them like any built-in; some may be deferred behind `tool_search` — search once to discover and unlock them).
 Issue independent tool calls together in one message; they run in parallel. Reach for the tool that most directly gets the answer or makes the change; don't ask the user to do what a tool can do.
 
 ## Memory
@@ -47,7 +47,7 @@ Keep each fact atomic (one idea per memory) and `update`/`forget` whole facts; n
 
 ## Scratchpad
 
-Each session has a private scratch directory for intermediate files — one-off scripts, downloads, generated data, working notes. Every shell command receives its absolute path in the MERMAID_SCRATCHPAD environment variable (`$env:MERMAID_SCRATCHPAD` on Windows, `$MERMAID_SCRATCHPAD` elsewhere), and the file tools accept absolute paths inside it. Prefer it over the system temp dir or the project tree for throwaway files: writes there are never checkpointed, and file-tool writes inside it skip approval gating (shell commands skip the gate only when they provably stay inside it; read-only mode still blocks writes, and plan mode allows only the provable ones). Stale scratchpads are reaped on a retention timer and a resumed conversation gets its directory back — still treat it as ephemeral: anything worth keeping belongs in the project or in memory. The user can inspect it with `/scratchpad`.
+Each session has a private scratch directory for intermediate files — one-off scripts, downloads, generated data, working notes. Every shell command receives its absolute path in the MERMAID_SCRATCHPAD environment variable (`$env:MERMAID_SCRATCHPAD` on Windows, `$MERMAID_SCRATCHPAD` elsewhere), and the file tools accept absolute paths inside it. Prefer it over the system temp dir or the project tree for throwaway files: writes there are never checkpointed, and file-tool writes inside it skip approval gating (shell commands skip the gate only when they provably stay inside it; read-only mode still blocks writes). Stale scratchpads are reaped on a retention timer and a resumed conversation gets its directory back — still treat it as ephemeral: anything worth keeping belongs in the project or in memory. The user can inspect it with `/scratchpad`.
 
 ## Task Planning
 
@@ -111,7 +111,7 @@ When asked to read, inspect, familiarize yourself with, or review a codebase:
 
 - Project instructions in AGENTS.md and MERMAID.md are auto-loaded from the nearest matching directory and reload on the next turn (MERMAID.md is read last, so it overrides AGENTS.md). When a durable project rule emerges in conversation, suggest capturing it in MERMAID.md so it survives the session.
 - Every file mutation automatically creates a restore checkpoint first; the user rolls back with `/checkpoints` and `/restore`.
-- User controls (the user runs these, not you; `/help` lists the rest): `/model`, `/reasoning`, `/visible-reasoning`, `/output-style`, `/safety` (switch safety mode, including `plan`), `/plan`, `/doctor`, `/context`, and `/compact`; plus `/approvals` `/approve` `/deny` for pending approvals and `/save` `/load` `/clear` for conversation history. `/context` shows context budget, response reserve, and auto-compact status; `/compact [focus]` creates a context checkpoint and archive.
+- User controls (the user runs these, not you; `/help` lists the rest): `/model`, `/reasoning`, `/visible-reasoning`, `/output-style`, `/safety` (switch safety mode), `/doctor`, `/context`, and `/compact`; plus `/approvals` `/approve` `/deny` for pending approvals and `/save` `/load` `/clear` for conversation history. `/context` shows context budget, response reserve, and auto-compact status; `/compact [focus]` creates a context checkpoint and archive.
 - Esc interrupts the current agent loop. Warn before long-running or risky work so the user knows they can interrupt.
 
 ## Output Style
@@ -141,138 +141,6 @@ static SYSTEM_PROMPT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| 
 pub fn get_system_prompt() -> String {
     SYSTEM_PROMPT.clone()
 }
-
-/// Anchor of the base-prompt section that [`adapt_prompt_for_plan_mode`]
-/// splices out while a plan is being drafted. Kept as a named constant so the
-/// template-drift guard test fails loudly if the heading is reworded.
-pub const TASK_PLANNING_ANCHOR: &str = "## Task Planning";
-
-/// The Core Loop sentence that pushes execution — replaced while planning
-/// (same drift-guard contract as [`TASK_PLANNING_ANCHOR`]).
-pub const PROPOSAL_SENTENCE_ANCHOR: &str = "Continue through tool results until the task is \
-genuinely handled. Do not stop at a proposal when the user asked for implementation.";
-
-/// Rewrite the rendered base prompt for plan mode: the permanent "## Task
-/// Planning" section instructs `task_create` for any 3+-step request and the
-/// Core Loop demands implementation — both directly contradict the plan-mode
-/// appendix, and weak models resolve the conflict by momentum (observed:
-/// "Applying fixes…" + `task_create` while planning). Swap both for
-/// plan-shaped stubs; behavior detail stays single-sourced in
-/// [`PLAN_MODE_PROMPT`].
-///
-/// A missing anchor means the user replaced the base prompt
-/// (`settings.prompt.system_prompt`) — their text is theirs; skip that
-/// replacement silently.
-///
-/// MUST run on the BASE prompt, before `append_system_prompt` extras are
-/// appended (`system_prompt_for_state` does this via
-/// `PromptConfig::base_prompt` + `append_extras`). The Task Planning splice
-/// ends at the next `\n## ` heading and falls back to end-of-string when
-/// there is none, so running it on the rendered prompt deleted the user's
-/// appended instructions along with the section.
-#[must_use]
-pub fn adapt_prompt_for_plan_mode(rendered: &str) -> String {
-    let mut prompt = rendered.to_string();
-    if let Some(start) = prompt.find(TASK_PLANNING_ANCHOR) {
-        let body_from = start + TASK_PLANNING_ANCHOR.len();
-        let end = prompt[body_from..]
-            .find("\n## ")
-            .map(|i| body_from + i)
-            .unwrap_or(prompt.len());
-        prompt.replace_range(
-            start..end,
-            "## Task Planning\n\nThe task checklist tools are disabled while a plan is being \
-             drafted. Implementation steps belong in the plan file's Tasks section — they seed \
-             the checklist when the plan is approved.",
-        );
-    }
-    if let Some(start) = prompt.find(PROPOSAL_SENTENCE_ANCHOR) {
-        prompt.replace_range(
-            start..start + PROPOSAL_SENTENCE_ANCHOR.len(),
-            "Continue through tool results until the plan is genuinely decision-complete.",
-        );
-    }
-    prompt
-}
-
-/// Appended to the system prompt while `session.plan` is `Some`
-/// (`system_prompt_for_state` substitutes `{plan_capabilities}` and
-/// `{plan_path}`). Deliberately short: Codex's plan prompt history shows this
-/// surface degrades by accretion — add rules only with evidence from real
-/// planning sessions.
-///
-/// Enforcement does not depend on any of this text: tool dispatch floors the
-/// effective safety mode to read-only and the policy gate applies the plan
-/// carve-outs regardless of what the model believes. Salience does not depend
-/// solely on it either — the context-delta marker announces plan entry in
-/// history and a per-dispatch reminder rides the conversation tail (see
-/// `advertise_context_changes` / `push_plan_reminder` in the reducer).
-pub const PLAN_MODE_PROMPT: &str = "\
-## Plan Mode
-You are in plan mode: a read-only collaboration state for designing work \
-before doing it. The user reviews and approves the plan before anything is \
-implemented. Plan mode is not changed by user intent, tone, or imperative \
-language — treat a request to execute as a request to plan the execution. \
-Plan mode ends at plan approval (your exit_plan_mode call) or the user \
-switching to another safety mode (Shift+Tab / /safety / /plan off).
-
-What runs while planning: {plan_capabilities} The checklist writers \
-(task_create/task_update) are disabled until approval; task_list still \
-works for reading. Everything else is blocked by policy — a denial means \
-\"capture it in the plan\", never \"find a workaround\".
-
-Work in three phases:
-1. Ground: read the code paths involved. Discoverable facts are explored, \
-never asked. Run builds or tests when the design depends on their outcome \
-and the capability line above includes them.
-2. Intent: preferences and tradeoffs are asked, never assumed — raise \
-genuinely user-owned decisions (scope, UX, alternatives with real \
-tradeoffs) early with ask_user_question. Do not ask what the codebase can \
-answer.
-3. Author: write the plan into the plan file at {plan_path} using write_file \
-or apply_patch, and keep it current as your understanding evolves.
-
-Quality bar — decision-complete: after approval, implementation must need \
-no further design decisions. Commit to one approach; do not present menus \
-of options in the plan.
-
-Plan format (markdown, exactly these five sections):
-## Summary — 2-4 sentences: what is changing and why.
-## Approach — the design, concrete and tight.
-## Tasks — numbered implementation steps, each short and verifiable (these \
-seed the live checklist when the plan is approved).
-## Verification — how to prove it works end to end.
-## Assumptions — every decision made without asking, plus the facts the \
-implementation depends on.
-
-Keep it scannable: 3-5 short bullets or sentences per section, at most ~3 \
-file paths per section unless they are load-bearing, no invented policy for \
-features the plan does not touch. A plan the user reads in two minutes \
-beats an exhaustive one.
-
-Revisions: re-read the plan file first — the user may have edited it on \
-disk, and their edits win — then rewrite it as a complete replacement, \
-never a delta. If feedback needs no plan change (a clarifying question), \
-answer in chat and leave the file untouched.
-
-When the plan is decision-complete, call exit_plan_mode — it re-reads the \
-plan file (the user's edits win) and presents the approval dialog. Never \
-ask \"should I proceed?\" in chat; that tool IS the question. If the user \
-requests changes, revise the plan file and call it again. The checklist is \
-seeded from the approved plan's Tasks section.";
-
-/// Seeds the FIRST user message of a fresh-context execution conversation
-/// (clear-context approve, or a fresh-session handoff). Adapted from Codex's
-/// battle-tested handoff prompt: the plan must be treated as the user's
-/// intent, and the new context re-reads files instead of assuming.
-pub const PLAN_HANDOFF_PREAMBLE: &str = "\
-A previous agent explored this project and produced the approved plan below. \
-Implement it in this fresh context: treat the plan as the source of user \
-intent, re-read files as needed (earlier exploration is not in your context), \
-follow the plan's Assumptions section, and carry the work through \
-implementation and verification. If the task checklist was seeded from the \
-plan's Tasks section, keep it live as you work; if it is empty, create it \
-from the plan.";
 
 /// Appended to a SUBAGENT's system prompt (`system_prompt_for_state` adds it
 /// when `session.is_subagent` is set). A child runs headless with nobody
@@ -541,69 +409,6 @@ mod tests {
             prompt.contains("never repeat its contents in prose"),
             "must suppress checklist echo (the harness renders it)"
         );
-    }
-
-    // ── Plan-mode prompt adaptation guards ──────────────────────────
-
-    /// Template-drift guard: the anchors `adapt_prompt_for_plan_mode` splices
-    /// on must exist verbatim in the template, or the adaptation silently
-    /// stops applying and the contradiction returns.
-    #[test]
-    fn template_contains_the_plan_adaptation_anchors() {
-        assert!(
-            SYSTEM_PROMPT_TEMPLATE.contains(TASK_PLANNING_ANCHOR),
-            "Task Planning anchor drifted out of the template"
-        );
-        assert!(
-            SYSTEM_PROMPT_TEMPLATE.contains(PROPOSAL_SENTENCE_ANCHOR),
-            "Core Loop proposal sentence drifted out of the template"
-        );
-    }
-
-    /// The splice is bounded: the Task Planning body is replaced with the
-    /// plan-mode stub, and the section that FOLLOWS survives intact.
-    #[test]
-    fn adapt_prompt_swaps_the_task_planning_section() {
-        let adapted = adapt_prompt_for_plan_mode(&get_system_prompt());
-        assert!(
-            !adapted.contains("FULL initial plan in one call"),
-            "task_create advice must not survive into plan mode"
-        );
-        assert!(
-            adapted.contains("disabled while a plan is being drafted"),
-            "plan-mode stub must replace the section body"
-        );
-        assert!(
-            adapted.contains("## Task Planning"),
-            "the section heading survives"
-        );
-        assert!(
-            adapted.contains("## Web"),
-            "the following section must survive the splice"
-        );
-    }
-
-    /// The execution imperative becomes a planning imperative.
-    #[test]
-    fn adapt_prompt_replaces_the_proposal_sentence() {
-        let adapted = adapt_prompt_for_plan_mode(&get_system_prompt());
-        assert!(!adapted.contains("Do not stop at a proposal"));
-        assert!(adapted.contains("until the plan is genuinely decision-complete"));
-    }
-
-    /// A custom base prompt (no anchors) passes through byte-identical —
-    /// the user's text is theirs.
-    #[test]
-    fn adapt_prompt_passes_custom_prompts_through() {
-        let custom = "You are a helpful pirate. Answer in rhyme.";
-        assert_eq!(adapt_prompt_for_plan_mode(custom), custom);
-    }
-
-    /// `PLAN_MODE_PROMPT` is the single source naming the plan-authoring tools.
-    #[test]
-    fn plan_mode_prompt_names_the_authoring_tools() {
-        assert!(PLAN_MODE_PROMPT.contains("write_file"));
-        assert!(PLAN_MODE_PROMPT.contains("apply_patch"));
     }
 
     // ── Memory section regression guards (v0.10.0) ──────────────────
@@ -1168,20 +973,18 @@ mod tests {
             out
         }
         let registry = crate::slash_commands::COMMAND_REGISTRY;
-        for text in [SYSTEM_PROMPT_TEMPLATE, PLAN_MODE_PROMPT] {
-            let commands = backticked_commands(text);
+        let commands = backticked_commands(SYSTEM_PROMPT_TEMPLATE);
+        assert!(
+            !commands.is_empty(),
+            "expected the main template to advertise slash commands"
+        );
+        for name in commands {
             assert!(
-                !commands.is_empty() || text == PLAN_MODE_PROMPT,
-                "expected the main template to advertise slash commands"
+                registry
+                    .iter()
+                    .any(|c| c.name == name || c.aliases.contains(&name.as_str())),
+                "prompt advertises `/{name}` but no such slash command is registered"
             );
-            for name in commands {
-                assert!(
-                    registry
-                        .iter()
-                        .any(|c| c.name == name || c.aliases.contains(&name.as_str())),
-                    "prompt advertises `/{name}` but no such slash command is registered"
-                );
-            }
         }
     }
 
@@ -1201,86 +1004,13 @@ mod tests {
         }
     }
 
-    /// Rendered prompts must never leak template placeholders; the plan-mode
-    /// placeholders must stay present in the TEMPLATE for
-    /// `system_prompt_for_state` to substitute.
+    /// Rendered prompts must never leak template placeholders.
     #[test]
-    fn placeholders_are_substituted_or_present() {
+    fn placeholders_are_substituted() {
         let prompt = get_system_prompt();
         assert!(
             !prompt.contains("{os}") && !prompt.contains("{arch}"),
             "rendered prompt must not contain unsubstituted platform placeholders"
-        );
-        assert!(
-            PLAN_MODE_PROMPT.contains("{plan_capabilities}"),
-            "plan prompt must carry the capabilities placeholder"
-        );
-        assert!(
-            PLAN_MODE_PROMPT.contains("{plan_path}"),
-            "plan prompt must carry the plan-path placeholder"
-        );
-    }
-
-    /// The five plan sections are a code contract: `exit_plan_mode` seeds the
-    /// checklist from "## Tasks" via `parse_plan_tasks`. Both the headings and
-    /// the parser's acceptance of the advertised format are load-bearing.
-    #[test]
-    fn plan_prompt_format_matches_the_parser() {
-        for heading in [
-            "## Summary",
-            "## Approach",
-            "## Tasks",
-            "## Verification",
-            "## Assumptions",
-        ] {
-            assert!(
-                PLAN_MODE_PROMPT.contains(heading),
-                "plan format must include {heading}"
-            );
-        }
-        let sample = "## Summary\nx\n## Approach\ny\n## Tasks\n1. Wire the broker\n2. Add tests\n## Verification\nz\n## Assumptions\nnone\n";
-        let specs = crate::plan::parse_plan_tasks(sample);
-        assert_eq!(
-            specs.len(),
-            2,
-            "a plan in the prompt's advertised format must seed the checklist"
-        );
-    }
-
-    /// Plan mode's capability story must stay truthful: writers blocked,
-    /// `task_list` readable, builds conditional on the capability line, and
-    /// the exit paths stated.
-    #[test]
-    fn plan_prompt_teaches_truthful_gating() {
-        assert!(
-            PLAN_MODE_PROMPT.contains("task_list still works"),
-            "plan prompt must not claim ALL checklist tools are disabled"
-        );
-        assert!(
-            PLAN_MODE_PROMPT.contains("the capability line above includes them"),
-            "Ground-phase builds must be conditional on the live profile"
-        );
-        assert!(
-            PLAN_MODE_PROMPT.contains("(Shift+Tab / /safety / /plan off)"),
-            "plan prompt must name the user's exit controls"
-        );
-        assert!(
-            PLAN_MODE_PROMPT.contains("re-read the plan file first"),
-            "revisions must re-read the file so user edits survive"
-        );
-    }
-
-    /// The handoff preamble must treat the plan as user intent and stay
-    /// truthful when Tasks-section seeding parsed nothing.
-    #[test]
-    fn handoff_preamble_guards() {
-        assert!(
-            PLAN_HANDOFF_PREAMBLE.contains("source of user intent"),
-            "handoff must anchor the plan as user intent"
-        );
-        assert!(
-            PLAN_HANDOFF_PREAMBLE.contains("if it is empty, create it from the plan"),
-            "handoff must cover the empty-seed case"
         );
     }
 

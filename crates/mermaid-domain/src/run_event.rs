@@ -76,13 +76,6 @@ pub enum RunEvent {
         /// Error detail, when the tool failed.
         #[serde(default)]
         error: Option<String>,
-        /// Present when this call is `exit_plan_mode` resolving with an
-        /// APPROVED plan — first-class plan visibility for SDK/daemon
-        /// subscribers without breaking the started/finished pairing.
-        /// Additive: absent for every other tool, and omitted from the wire
-        /// when `None`.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        plan: Option<PlanApproved>,
         /// Structured, secret-safe web transport details for web tools.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         web: Option<Box<WebEventDetails>>,
@@ -146,23 +139,6 @@ pub enum RunEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         structured_output: Option<serde_json::Value>,
     },
-}
-
-/// Plan payload on a [`RunEvent::ToolFinished`] for `exit_plan_mode`: the
-/// approved plan's location and the execution disposition the user chose.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PlanApproved {
-    /// Plan-file path, project-relative.
-    pub path: String,
-    /// Implementation starts immediately.
-    #[serde(default)]
-    pub start: bool,
-    /// Execution continues in a fresh conversation.
-    #[serde(default)]
-    pub fresh: bool,
-    /// Execution continues in a forked conversation.
-    #[serde(default)]
-    pub fork: bool,
 }
 
 /// Stable, bounded web facts exposed to NDJSON consumers. Query text and page
@@ -247,7 +223,6 @@ impl RunEvent {
                 status: status_str(outcome.status).to_string(),
                 summary: outcome.summary.clone(),
                 error: outcome.error.clone(),
-                plan: plan_approved(&outcome.metadata.detail),
                 web: web_event_details(&outcome.metadata.detail).map(Box::new),
             },
             Msg::ApprovalRequested {
@@ -398,7 +373,7 @@ fn push_message(out: &mut Vec<RunEvent>, calls: &mut usize, message: &ChatMessag
 }
 
 /// A committed tool run, replayed as the started/finished pair the live
-/// stream emitted at the time. `name`, `plan`, and `web` come off the same
+/// stream emitted at the time. `name` and `web` come off the same
 /// run metadata [`RunEvent::from_msg`] reads, so a replayed line matches the
 /// live one wherever that metadata survived to disk.
 fn push_action(out: &mut Vec<RunEvent>, calls: &mut usize, action: &ActionDisplay) {
@@ -423,7 +398,6 @@ fn push_action(out: &mut Vec<RunEvent>, calls: &mut usize, action: &ActionDispla
         status: status_str(status).to_string(),
         summary: action_summary(action),
         error,
-        plan: detail.and_then(plan_approved),
         web: detail.and_then(web_event_details).map(Box::new),
     });
 }
@@ -457,27 +431,6 @@ fn action_summary(action: &ActionDisplay) -> String {
     let mut capped: String = summary.chars().take(MAX_CATCH_UP_SUMMARY_CHARS).collect();
     capped.push('…');
     capped
-}
-
-/// The approved-plan payload a `tool_finished` carries, when the call was
-/// `exit_plan_mode` resolving with a plan. Shared by the live projection and
-/// the catch-up so the two cannot drift.
-fn plan_approved(detail: &ToolMetadata) -> Option<PlanApproved> {
-    match detail {
-        ToolMetadata::Plan {
-            path,
-            start,
-            fresh,
-            fork,
-            ..
-        } => Some(PlanApproved {
-            path: path.clone(),
-            start: *start,
-            fresh: *fresh,
-            fork: *fork,
-        }),
-        _ => None,
-    }
 }
 
 /// One checklist row on the `tasks_updated` line. Flat and stringly-statused
@@ -538,7 +491,6 @@ fn tool_name(detail: &ToolMetadata) -> String {
         ToolMetadata::Subagent { .. } => "agent".to_string(),
         ToolMetadata::Tasks { action, .. } => format!("task_{action}"),
         ToolMetadata::Questions { .. } => "ask_user_question".to_string(),
-        ToolMetadata::Plan { .. } => "exit_plan_mode".to_string(),
         ToolMetadata::Custom { name, .. } => name.clone(),
     }
 }
@@ -684,7 +636,6 @@ mod tests {
                 status: "success".to_string(),
                 summary: "command completed".to_string(),
                 error: None,
-                plan: None,
                 web: None,
             },
             RunEvent::ApprovalRequired {
@@ -906,7 +857,6 @@ mod tests {
                 status: "success".to_string(),
                 summary: "command completed".to_string(),
                 error: None,
-                plan: None,
                 web: None,
             })
         );
@@ -1053,48 +1003,6 @@ mod tests {
         assert_eq!(web.failures[0].query_index, 1);
     }
 
-    #[test]
-    fn approved_plan_rides_tool_finished_as_an_additive_payload() {
-        let outcome =
-            ToolOutcome::success("approved", "plan approved", 0.1).with_metadata(ToolRunMetadata {
-                detail: ToolMetadata::Plan {
-                    path: ".mermaid/plans/x.md".to_string(),
-                    body: "## Summary".to_string(),
-                    start: true,
-                    fresh: true,
-                    fork: false,
-                    model: None,
-                },
-                ..ToolRunMetadata::default()
-            });
-        let event = RunEvent::from_msg(&Msg::ToolFinished {
-            turn: TurnId(1),
-            call_id: ToolCallId(7),
-            outcome,
-        })
-        .expect("mapped");
-        let RunEvent::ToolFinished { name, plan, .. } = &event else {
-            panic!("expected ToolFinished, got {event:?}");
-        };
-        assert_eq!(name, "exit_plan_mode");
-        let plan = plan.as_ref().expect("plan payload");
-        assert_eq!(plan.path, ".mermaid/plans/x.md");
-        assert!(plan.start && plan.fresh && !plan.fork);
-        // The wire stays clean for every other tool: `plan` is omitted, not
-        // null, so existing consumers see byte-identical lines.
-        let json = serde_json::to_string(&RunEvent::ToolFinished {
-            call_id: "tool#1".to_string(),
-            name: "read_file".to_string(),
-            status: "success".to_string(),
-            summary: "read".to_string(),
-            error: None,
-            plan: None,
-            web: None,
-        })
-        .unwrap();
-        assert!(!json.contains("\"plan\""));
-    }
-
     fn action(action_type: &str, target: &str, result: ActionResult) -> ActionDisplay {
         ActionDisplay {
             action_type: action_type.to_string(),
@@ -1161,7 +1069,6 @@ mod tests {
                     status: "success".to_string(),
                     summary: "Read src/main.rs".to_string(),
                     error: None,
-                    plan: None,
                     web: None,
                 },
             ]

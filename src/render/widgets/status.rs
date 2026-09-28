@@ -29,9 +29,8 @@ pub struct StatusWidget<'a> {
     /// User-requested level when it differs from `reasoning_level` (the snap
     /// case). `Some(requested)` shows `reasoning: high (max requested)`.
     pub requested_level: Option<ReasoningLevel>,
-    /// Live session safety mode — including `plan`, which is a mode like any
-    /// other and renders as plain `safety: plan`. Never the spinner/status
-    /// widget (#245 invariant) — this is the persistent mode line.
+    /// Live session safety mode. Never the spinner/status widget (#245
+    /// invariant) — this is the persistent mode line.
     pub safety_mode: SafetyMode,
 }
 
@@ -116,13 +115,6 @@ mod tests {
             Some(ReasoningLevel::Max),
         );
         assert_eq!(s, "safety: ask · reasoning: high (max requested)");
-    }
-
-    #[test]
-    fn footer_left_renders_plan_as_a_plain_safety_mode() {
-        let s = footer_left(SafetyMode::Plan, ReasoningLevel::Medium, None);
-        assert!(s.starts_with("safety: plan"), "{s}");
-        assert!(!s.contains("restores"));
     }
 
     #[test]

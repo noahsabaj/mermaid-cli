@@ -587,7 +587,6 @@ pub fn build_summary_request(
         resolved_max_output: base.resolved_max_output,
         output_schema: None,
         suppress_auto_compact: false,
-        suppressed_builtin_tools: Vec::new(),
     }
 }
 
@@ -624,7 +623,6 @@ pub fn build_verification_request(
         resolved_max_output: base.resolved_max_output,
         output_schema: None,
         suppress_auto_compact: false,
-        suppressed_builtin_tools: Vec::new(),
     }
 }
 
@@ -1117,7 +1115,6 @@ mod tests {
             resolved_max_output: None,
             output_schema: None,
             suppress_auto_compact: false,
-            suppressed_builtin_tools: Vec::new(),
         }
     }
 

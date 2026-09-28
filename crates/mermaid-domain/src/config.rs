@@ -4,9 +4,7 @@
 //! persisting them stays in `src/app/config.rs`.
 //!
 //! `State.settings: Config` is correct MVU, not a violation — the reducer
-//! MUTATES it (`/plan config` edits `settings.plan` live and emits
-//! `Cmd::PersistPlanConfig`), and `SessionHeader.config` is the `--replay`
-//! seed. The bug was only that the type was DEFINED in the application layer,
+//! reads it live, and `SessionHeader.config` is the `--replay` seed. The bug was only that the type was DEFINED in the application layer,
 //! which made `domain -> app` a cycle: `CompactionConfig::policy()` returns a
 //! `domain::CompactionPolicy`. Defining `Config` here dissolves that edge by
 //! construction rather than inverting it.
@@ -137,10 +135,6 @@ pub struct Config {
     #[serde(default)]
     pub exec: ExecConfig,
 
-    /// Plan-mode behavior (`/plan`, `/safety plan`, Shift+Tab).
-    #[serde(default)]
-    pub plan: PlanConfig,
-
     /// Subagent (`agent` tool) settings: drive timeout and user-defined
     /// agent types.
     #[serde(default)]
@@ -245,10 +239,9 @@ impl PromptConfig {
     /// The base prompt before any `append_system_prompt` extras: the user's
     /// override when set, else `default_prompt`.
     ///
-    /// Split out so callers that REWRITE the base (plan mode splices whole
-    /// sections out of it) can do so before the extras are appended. Rewriting
-    /// the rendered string instead let a section splice run past the end of
-    /// the base and delete the user's appended instructions.
+    /// Split out so callers that transform the base (an output style) can do
+    /// so before the extras are appended — the extras are the user's own
+    /// words and always win.
     #[must_use]
     pub fn base_prompt<'a>(&'a self, default_prompt: &'a str) -> &'a str {
         self.system_prompt.as_deref().unwrap_or(default_prompt)
@@ -481,154 +474,6 @@ impl Default for DaemonConfig {
             scratchpad_retention_days: mermaid_model::constants::SCRATCHPAD_RETENTION_DAYS as i64,
         }
     }
-}
-
-/// What approval does once granted, when the user has pinned it in config.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PlanPostApprove {
-    /// Approval immediately auto-submits "Implement the plan."
-    Start,
-    /// Approval finalizes the plan and returns to the idle prompt.
-    Wait,
-}
-
-/// Permission level for one plan-mode category. Mirrors the safety-mode
-/// ladder so the picker reads familiarly: `allow` runs, `auto` is vetted by
-/// the Auto classifier, `ask` raises the approval modal, `deny` blocks with
-/// the plan-flavored teaching denial.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PlanPermLevel {
-    Allow,
-    Auto,
-    Ask,
-    Deny,
-}
-
-impl PlanPermLevel {
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Allow => "allow",
-            Self::Auto => "auto",
-            Self::Ask => "ask",
-            Self::Deny => "deny",
-        }
-    }
-}
-
-/// Per-category permission profile applied while a plan is being drafted.
-///
-/// The read-only floor stays the base; these levels decide how far each carve-out
-/// opens. The plan file itself is not a category — being able to author the plan IS
-/// plan mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct PlanPermissions {
-    /// Known-safe build/test commands (`is_plan_safe_build_command`).
-    pub builds: PlanPermLevel,
-    /// `web_search` / `web_fetch` (GET-shaped reads).
-    pub web: PlanPermLevel,
-    /// Durable memory writes.
-    pub memory: PlanPermLevel,
-    /// The checklist writers (`task_create` / `task_update`). Only `allow`
-    /// unblocks them — `auto`/`ask` collapse to `deny` (they are ungated
-    /// tools with no approval path, and the checklist is seeded from the
-    /// approved plan anyway).
-    pub tasks: PlanPermLevel,
-    /// Commands that provably touch nothing outside the session scratchpad
-    /// (`is_scratch_only_command`), run under OS write-confinement. Unpacking
-    /// an archive into a private temp dir to read it is research, which is
-    /// what planning is for; the working tree stays read-only regardless.
-    pub scratchpad: PlanPermLevel,
-}
-
-impl Default for PlanPermissions {
-    fn default() -> Self {
-        Self {
-            builds: PlanPermLevel::Allow,
-            // Planning inherits the ReadOnly web posture: every externally
-            // observable URL/query needs one-shot approval unless the user
-            // explicitly opens this category in `/plan config`.
-            web: PlanPermLevel::Ask,
-            memory: PlanPermLevel::Allow,
-            tasks: PlanPermLevel::Deny,
-            scratchpad: PlanPermLevel::Allow,
-        }
-    }
-}
-
-impl PlanPermissions {
-    /// The top-level picker presets; `None` when the current values match
-    /// none of them (the picker shows "custom").
-    #[must_use]
-    pub fn preset_name(&self) -> Option<&'static str> {
-        if *self == Self::default() {
-            Some("default")
-        } else if *self == Self::strict() {
-            Some("strict")
-        } else if *self == Self::open() {
-            Some("open")
-        } else {
-            None
-        }
-    }
-
-    /// Everything denied: pure read-only exploration plus the plan file.
-    #[must_use]
-    pub fn strict() -> Self {
-        Self {
-            builds: PlanPermLevel::Deny,
-            web: PlanPermLevel::Deny,
-            memory: PlanPermLevel::Deny,
-            tasks: PlanPermLevel::Deny,
-            scratchpad: PlanPermLevel::Deny,
-        }
-    }
-
-    /// Everything allowed (the working tree stays read-only regardless).
-    #[must_use]
-    pub fn open() -> Self {
-        Self {
-            builds: PlanPermLevel::Allow,
-            web: PlanPermLevel::Allow,
-            memory: PlanPermLevel::Allow,
-            tasks: PlanPermLevel::Allow,
-            scratchpad: PlanPermLevel::Allow,
-        }
-    }
-}
-
-/// Plan-mode settings (`[plan]`).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub struct PlanConfig {
-    /// When true, `exit_plan_mode` skips the approval dialog entirely: the
-    /// plan is approved the moment the model presents it. Default false —
-    /// the dialog is the point of plan mode.
-    pub auto_approve: bool,
-    /// Pin what approval does. Unset (default) the dialog offers both
-    /// "Approve and start" and "Approve and wait" every time; set, it
-    /// collapses to a single Approve option with this behavior. Option +
-    /// `skip_serializing` keeps "unset" meaningful in saved configs (the
-    /// freeze-defaults rule).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub post_approve: Option<PlanPostApprove>,
-    /// Per-category permission profile while planning. Edited live in the
-    /// `/plan config` picker; the reducer threads the LIVE values onto each
-    /// tool dispatch (the startup `Config` snapshot in `ExecContext` would
-    /// go stale).
-    pub permissions: PlanPermissions,
-    /// Plan-phase model override: entering plan mode swaps the session to
-    /// this model and leaving restores the previous one — plan on a frontier
-    /// model, execute locally (or invert for privacy). Unset = plan with
-    /// whatever is running.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    /// Plan-phase reasoning override, same swap/restore contract as `model`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reasoning: Option<mermaid_model::models::ReasoningLevel>,
 }
 
 /// Durable semantic memory settings (v0.10.0).
@@ -1114,8 +959,8 @@ impl OllamaConfig {
     ///
     /// Scheme-less on purpose: the adapter's `normalize_url` picks http vs
     /// https by host class. One definition, so the CLI verbs, the effect
-    /// layer, the provider factory, and the plan-mode preview cannot drift
-    /// on where "the local Ollama" is.
+    /// layer, and the provider factory cannot drift on where "the local
+    /// Ollama" is.
     #[must_use]
     pub fn base_url(&self) -> String {
         format!("{}:{}", self.host, self.port)

@@ -89,8 +89,6 @@ async fn async_main(hardening: mermaid_runtime::hardening::Hardening) -> Result<
         format,
         no_execute,
         output_schema,
-        plan,
-        plan_autoaccept,
         ..
     }) = &cli.command
     {
@@ -108,8 +106,6 @@ async fn async_main(hardening: mermaid_runtime::hardening::Hardening) -> Result<
             output_schema,
             HeadlessFlags {
                 no_execute: *no_execute,
-                plan: *plan,
-                plan_autoaccept: *plan_autoaccept,
             },
         )
         .await;
@@ -291,8 +287,6 @@ fn load_output_schema(path: &std::path::Path) -> Result<serde_json::Value> {
 /// stays readable as flags accrue.
 struct HeadlessFlags {
     no_execute: bool,
-    plan: bool,
-    plan_autoaccept: bool,
 }
 
 async fn dispatch_non_interactive(
@@ -347,8 +341,6 @@ async fn dispatch_non_interactive(
             stream_ndjson: matches!(format, OutputFormat::Ndjson),
             seed,
             output_schema,
-            plan: flags.plan,
-            plan_autoaccept: flags.plan_autoaccept,
             ..RunOptions::default()
         },
     )

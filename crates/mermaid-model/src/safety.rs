@@ -17,32 +17,9 @@ use std::path::Path;
 /// mode has superseded, without re-hardcoding the wording in a second place.
 pub const READ_ONLY_DENIAL_MARKER: &str = "read-only safety mode";
 
-/// Marker embedded verbatim in every plan-mode policy-denial `reason` (the
-/// policy gate rewrites the read-only mode-default deny to a plan-flavored one
-/// while a plan is being drafted). Sibling of [`READ_ONLY_DENIAL_MARKER`]: the
-/// message-history layer matches `"blocked by policy: "` + this marker to
-/// neutralize denials once plan mode ends.
-pub const PLAN_DENIAL_MARKER: &str = "plan mode";
-
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SafetyMode {
-    /// A plan is being drafted: a read-only floor plus the plan-mode
-    /// carve-outs the policy gate layers on (the plan file is writable,
-    /// `[plan]` permissions may re-open memory/builds/web).
-    ///
-    /// Plan is a MODE, not a flag alongside one, and it is a full position in
-    /// the Shift+Tab cycle — the strictest one. It used to be a separate
-    /// `Session.plan: Option<_>` orthogonal to `safety_mode`, which meant the
-    /// two could disagree: Shift+Tab while planning set `full_access` and the
-    /// harness then told the model "safety mode changed to `full_access`" while
-    /// the plan read-only floor was still in force — a contradiction the model
-    /// resolved by attempting mutations and collecting denials. With one mode
-    /// value that state is unrepresentable. `Session.plan` still carries the
-    /// plan DATA (path, saved overrides), never the fact of being in plan mode,
-    /// and it never carries a mode to "restore": leaving plan means picking
-    /// another mode, like leaving any other.
-    Plan,
     ReadOnly,
     Ask,
     #[default]
@@ -55,7 +32,6 @@ impl SafetyMode {
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Plan => "plan",
             Self::ReadOnly => "read_only",
             Self::Ask => "ask",
             Self::Auto => "auto",
@@ -68,7 +44,6 @@ impl SafetyMode {
     #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
         match s {
-            "plan" => Some(Self::Plan),
             "read_only" => Some(Self::ReadOnly),
             "ask" => Some(Self::Ask),
             "auto" => Some(Self::Auto),
@@ -77,26 +52,32 @@ impl SafetyMode {
         }
     }
 
-    /// Is a plan being drafted? The single source of truth — never infer this
-    /// from `Session.plan`, which is the plan's DATA and outlives nothing.
-    #[must_use]
-    pub fn is_planning(self) -> bool {
-        matches!(self, Self::Plan)
-    }
-
-    /// Permissiveness rank for combining modes: `plan/read_only` are strictest,
-    /// `full_access` loosest. Plan ranks below read-only because its carve-outs
-    /// only ever open paths the gate re-checks, and a subagent must never
-    /// inherit "planning" as a ceiling (children explore, they don't plan).
+    /// Permissiveness rank for combining modes: `read_only` is strictest,
+    /// `full_access` loosest.
     #[must_use]
     pub fn permissiveness(self) -> u8 {
         match self {
-            Self::Plan => 0,
-            Self::ReadOnly => 1,
-            Self::Ask => 2,
-            Self::Auto => 3,
-            Self::FullAccess => 4,
+            Self::ReadOnly => 0,
+            Self::Ask => 1,
+            Self::Auto => 2,
+            Self::FullAccess => 3,
         }
+    }
+
+    /// Serde `deserialize_with` for a persisted `Option<SafetyMode>`: a mode
+    /// name this build does not know (one since retired) reads as `None`, so
+    /// the session falls back to the configured mode instead of failing to
+    /// load at all.
+    ///
+    /// # Errors
+    ///
+    /// Only when the value is neither null nor a string.
+    pub fn deserialize_optional_lenient<'de, D>(deserializer: D) -> Result<Option<Self>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw: Option<String> = Option::deserialize(deserializer)?;
+        Ok(raw.as_deref().and_then(Self::parse))
     }
 
     /// The stricter of two modes. Used to apply an agent type's safety
@@ -208,12 +189,10 @@ pub struct ActionRequest {
     /// project root — i.e. an explicit `working_dir` argument.
     ///
     /// Relative paths in a command resolve against THIS, not the project root.
-    /// The gate used to match the plan-file carve-out against the project root
-    /// while the shell ran the command elsewhere, so
-    /// `execute_command{command: "echo … > .mermaid/plans/x.md",
-    /// working_dir: "other/tree"}` was approved as a plan write and landed
-    /// somewhere else entirely. Carrying the cwd on the request keeps the
-    /// wrong value out of reach: see [`ActionRequest::resolve_dir`].
+    /// Matching them against the project root while the shell runs the
+    /// command elsewhere approves one path and writes another. Carrying the
+    /// cwd on the request keeps the wrong value out of reach: see
+    /// [`ActionRequest::resolve_dir`].
     pub cwd: Option<std::path::PathBuf>,
 }
 
@@ -345,13 +324,12 @@ pub enum FloorLevel {
 ///
 /// THE single answer to "what interpreter runs shell commands?": the exec
 /// tool's spawn (`shell_invocation`), risk classification
-/// (`classify_command_for`), the plan-mode carve-outs
-/// (`is_plan_safe_build_command`, `is_plan_file_only_write`), and the
-/// transcript label (`display_info_for`) all key on this one value, so they
-/// cannot drift apart again — classifying (or labeling) for a different
-/// interpreter than the one that executes is exactly the bug family that
-/// made plan mode deny every read-only PowerShell pipeline on Windows while
-/// the transcript wrapped those pipelines in `Bash(...)`.
+/// (`classify_command_for`), and the transcript label (`display_info_for`)
+/// all key on this one value, so they cannot drift apart again — classifying
+/// (or labeling) for a different interpreter than the one that executes is
+/// exactly the bug family that made `read_only` deny every read-only
+/// PowerShell pipeline on Windows while the transcript wrapped those
+/// pipelines in `Bash(...)`.
 ///
 /// Windows executes under PowerShell (`pwsh` when installed, Windows
 /// PowerShell 5.1 otherwise); everywhere else `sh`. [`Self::current`] is the

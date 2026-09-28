@@ -58,18 +58,6 @@ pub struct ToolRunMetadata {
     /// count the whole tree, not just the parent's own model calls.
     #[serde(default)]
     pub token_usage: Option<crate::models::TokenUsage>,
-    /// This call wrote the plan file while planning — the FACT the doom-loop
-    /// breaker disarms on.
-    ///
-    /// Recorded at the boundary that actually knows it (the policy gate
-    /// approved the write, or the file mutator targeted the plan path) rather
-    /// than inferred from the tool name. Inferring it missed the shell
-    /// spelling entirely: the escalated corrective tells the model "a shell
-    /// redirect writing ONLY that file works too", and when the model complied
-    /// the breaker stayed armed and kept re-injecting "the plan file does not
-    /// exist until you write it" at a model that had just written it.
-    #[serde(default)]
-    pub plan_file_written: bool,
 }
 
 /// Tool outcome status independent of how the result is rendered.
@@ -85,8 +73,6 @@ pub enum ToolStatus {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ToolMetadata {
-    #[default]
-    None,
     ReadFile {
         paths: Vec<String>,
         line_count: usize,
@@ -215,36 +201,17 @@ pub enum ToolMetadata {
         #[serde(default)]
         remembered: bool,
     },
-    /// `exit_plan_mode` resolved with an APPROVED plan: the transcript
-    /// renders the plan body as a markdown block, and `handle_tool_finished`
-    /// keys the post-approval mechanics (clear `session.plan`, seed the
-    /// checklist, optionally auto-submit) on this variant. A
-    /// request-for-changes outcome carries no metadata.
-    Plan {
-        /// Plan-file path as shown to the user (project-relative).
-        path: String,
-        /// The approved plan text, re-read from disk at approval time.
-        body: String,
-        /// True when the user chose to start implementing immediately.
-        #[serde(default)]
-        start: bool,
-        /// Execution begins in a FRESH conversation seeded with the handoff
-        /// preamble + plan (clear-context execute, or a fresh-session
-        /// handoff). The exploration context is left behind on disk.
-        #[serde(default)]
-        fresh: bool,
-        /// Handoff variant that copies the transcript into a new
-        /// conversation before starting (mutually exclusive with `fresh`).
-        #[serde(default)]
-        fork: bool,
-        /// Handoff: switch the session to this model for execution.
-        #[serde(default)]
-        model: Option<String>,
-    },
     Custom {
         name: String,
         data: Value,
     },
+    /// No tool-specific facts. Also the landing spot for a `kind` this build
+    /// does not model (one a newer build wrote, or one since retired), so an
+    /// old saved conversation still loads instead of failing the whole parse.
+    /// Last because `#[serde(other)]` must be.
+    #[default]
+    #[serde(other)]
+    None,
 }
 
 /// One failed item from an ordered web-search batch. The index preserves its

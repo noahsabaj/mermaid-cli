@@ -186,7 +186,6 @@ impl State {
                 context_usage: None,
                 is_subagent: false,
                 agent_preamble: None,
-                plan: None,
                 // Materialized by the effect layer after startup dispatches
                 // `Cmd::EnsureScratchpad`; the pure constructor never touches
                 // the filesystem.
@@ -239,9 +238,6 @@ impl State {
         if let Some(mode) = history.safety_mode {
             self.session.safety_mode = mode;
         }
-        // Restore planning-in-progress (None for sessions saved before the
-        // field existed, and for sessions that weren't planning).
-        self.session.plan.clone_from(&history.plan);
         self.session.last_token_usage = history.last_token_usage;
         self.session.cumulative_token_usage = history.cumulative_token_usage;
         self.session
@@ -579,48 +575,20 @@ pub fn estimate_tool_schema_tokens(tools: &[super::cmd::ToolDefinition]) -> usiz
         .unwrap_or(0)
 }
 
-/// The plan's DATA while `Session.safety_mode == SafetyMode::Plan` — never the
-/// fact of being in plan mode, which the mode value alone decides. Plan IS a
-/// safety mode (the strictest position in the Shift+Tab cycle), so there is no
-/// second flag and no remembered restore target here; the policy gate applies
-/// the plan carve-outs (the plan file itself, memory writes, known-safe builds)
-/// off the mode.
-///
-/// Serialized into `ConversationHistory` on every save (like `safety_mode`)
-/// so `--resume` restores planning-in-progress; sessions saved before this
-/// field existed deserialize to `None`.
-#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct PlanState {
-    /// Absolute path of the plan file the model authors — the single path the
-    /// policy gate exempts from the read-only floor.
-    pub plan_path: std::path::PathBuf,
-    /// Model to restore when plan mode ends. `Some` only when `[plan] model`
-    /// swapped the session onto a plan-phase model at entry.
-    #[serde(default)]
-    pub prev_model_id: Option<String>,
-    /// Reasoning level to restore when plan mode ends. `Some` only when
-    /// `[plan] reasoning` overrode it at entry.
-    #[serde(default)]
-    pub prev_reasoning: Option<mermaid_model::models::ReasoningLevel>,
-}
-
 /// The mode-defining facts the model was last told about, snapshotted at
 /// each dispatch by the context-delta injector
 /// (`reducer::advertise_context_changes`): the reducer diffs live state
 /// against this and injects one persistent history marker per change, then
-/// re-stamps it. One un-bypassable announcement path for plan entry/exit,
-/// safety-mode flips, and model swaps — transitions themselves stay
-/// message-log-free (the codex snapshot+diff pattern).
+/// re-stamps it. One un-bypassable announcement path for safety-mode flips
+/// and model swaps — transitions themselves stay message-log-free (the codex
+/// snapshot+diff pattern).
 ///
 /// Lives on `ConversationHistory` (persisted with the transcript) so a
 /// resumed session diffs against what THAT conversation's model last saw,
 /// and `/clear`/fresh forks start from `None` (= seed silently, announce
-/// nothing). Plan permissions stay out: a `/plan config` retune is already
-/// reflected live in the system prompt and never contradicts history.
+/// nothing).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AdvertisedContext {
-    /// `Some(plan_path)` while the model has been told it is planning.
-    pub plan_path: Option<std::path::PathBuf>,
     pub safety_mode: SafetyMode,
     pub model_id: String,
 }
@@ -630,10 +598,36 @@ impl AdvertisedContext {
     #[must_use]
     pub fn observe(session: &Session) -> Self {
         Self {
-            plan_path: session.plan.as_ref().map(|p| p.plan_path.clone()),
             safety_mode: session.safety_mode,
             model_id: session.model_id.clone(),
         }
+    }
+
+    /// Serde `deserialize_with` for a persisted `Option<AdvertisedContext>`:
+    /// a snapshot naming a safety mode this build does not know (one since
+    /// retired) reads as `None`, so the first dispatch restamps the baseline
+    /// silently (the system prompt states the live mode) instead of the whole
+    /// conversation failing to load.
+    ///
+    /// # Errors
+    ///
+    /// Only when the value is neither null nor a well-formed snapshot.
+    pub fn deserialize_optional_lenient<'de, D>(deserializer: D) -> Result<Option<Self>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        struct Raw {
+            safety_mode: String,
+            model_id: String,
+        }
+        let raw: Option<Raw> = serde::Deserialize::deserialize(deserializer)?;
+        Ok(raw.and_then(|raw| {
+            SafetyMode::parse(&raw.safety_mode).map(|safety_mode| Self {
+                safety_mode,
+                model_id: raw.model_id,
+            })
+        }))
     }
 }
 
@@ -671,9 +665,6 @@ pub struct Session {
     /// reconnaissance" charter), appended after the subagent contract.
     /// Only ever `Some` on subagent sessions.
     pub agent_preamble: Option<String>,
-    /// `Some` while the session is in plan mode (see [`PlanState`]). Never
-    /// `Some` on subagent sessions — children explore, they don't plan.
-    pub plan: Option<PlanState>,
     /// Per-session scratch directory, once the effect layer has materialized
     /// it on disk (`Cmd::EnsureScratchpad` -> `Msg::ScratchpadReady`). `None`
     /// until then, and reset whenever the conversation id changes (`/clear`,
@@ -705,7 +696,6 @@ impl Session {
     pub fn snapshot_conversation(&self) -> ConversationHistory {
         let mut history = self.conversation.clone();
         history.safety_mode = Some(self.safety_mode);
-        history.plan = self.plan.clone();
         history.last_token_usage = self.last_token_usage;
         history.cumulative_token_usage = self.cumulative_token_usage;
         history.context_usage = self.context_usage.clone();
@@ -800,8 +790,7 @@ impl Session {
         });
     }
 
-    /// Swap in a different conversation (seed, `/load`, rewind fork, plan
-    /// handoff). The event buffer belongs to the OLD conversation and must
+    /// Swap in a different conversation (seed, `/load`, rewind fork). The event buffer belongs to the OLD conversation and must
     /// not leak into the new one's log; the new conversation's log file is
     /// created by the appender's backfill on its first save.
     pub fn replace_conversation(&mut self, next: ConversationHistory) {
@@ -1393,8 +1382,7 @@ pub enum Focus {
     QuestionModal,
     /// A yes/no confirmation (`/clear`).
     ConfirmModal,
-    /// One of the `UiMode` pickers (model / conversations / rewind /
-    /// plan config).
+    /// One of the `UiMode` pickers (model / conversations / rewind).
     Picker,
     /// The plain composer.
     Composer,
@@ -1418,7 +1406,6 @@ impl State {
             UiMode::ModelPicker { .. }
                 | UiMode::ConversationList { .. }
                 | UiMode::RewindPicker { .. }
-                | UiMode::PlanConfig { .. }
         ) {
             Focus::Picker
         } else {
@@ -1458,10 +1445,6 @@ pub enum UiMode {
     /// at. Candidates are user-role Normal messages, newest first. Selecting
     /// one forks into a NEW session (original preserved, lineage stamped)
     /// with the composer pre-filled.
-    /// The `/plan config` settings picker: per-category permission levels,
-    /// model/reasoning overrides, approval behavior. `cursor` is the
-    /// highlighted row.
-    PlanConfig { cursor: usize },
     RewindPicker {
         candidates: Vec<RewindCandidate>,
         cursor: usize,
@@ -1911,7 +1894,10 @@ mod focus_tests {
         );
         assert_eq!(state.focus(), Focus::Composer);
 
-        state.ui.mode = UiMode::PlanConfig { cursor: 0 };
+        state.ui.mode = UiMode::RewindPicker {
+            candidates: Vec::new(),
+            cursor: 0,
+        };
         assert_eq!(state.focus(), Focus::Picker, "a picker beats the composer");
 
         state.confirm = Some(Confirmation {

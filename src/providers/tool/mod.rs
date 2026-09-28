@@ -18,9 +18,7 @@
 
 pub mod apply_patch;
 pub mod ask_user_question;
-pub mod enter_plan_mode;
 pub mod exec;
-pub mod exit_plan_mode;
 pub mod filesystem;
 pub mod mcp;
 pub mod memory;
@@ -220,8 +218,6 @@ impl ToolRegistry {
         r.register(Arc::new(exec::ExecuteCommandTool));
         r.register(Arc::new(memory::MemoryTool));
         r.register(Arc::new(ask_user_question::AskUserQuestionTool));
-        r.register(Arc::new(enter_plan_mode::EnterPlanModeTool));
-        r.register(Arc::new(exit_plan_mode::ExitPlanModeTool));
         r.register(Arc::new(tasks::TaskCreateTool));
         r.register(Arc::new(tasks::TaskUpdateTool));
         r.register(Arc::new(tasks::TaskListTool));
