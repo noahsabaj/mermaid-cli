@@ -1,0 +1,13 @@
+# Fix a bug that an existing test exposes, without weakening the test.
+fixture = "median"
+prompt = """
+`cargo test` fails in this project. Find the cause and fix it. Do not change the tests.
+"""
+
+[[check]]
+kind = "command"
+run = ["cargo", "test", "--offline", "--quiet"]
+
+[[check]]
+kind = "unchanged"
+paths = ["tests"]

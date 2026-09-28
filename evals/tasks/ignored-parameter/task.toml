@@ -1,0 +1,34 @@
+# A provider that accepts parameters it does not support and silently ignores
+# them, as many OpenAI-compatible and local servers do instead of returning a
+# 400. Nothing errors, so learning capabilities from errors never notices.
+#
+# The run asks for high reasoning effort and a JSON answer. The mock provider
+# accepts both, honours neither, and answers the formatting turn in prose. The
+# outcome that matters: the task still gets answered, and Mermaid reports the
+# schema miss instead of passing prose off as structured output.
+#
+# Offline only, because the quirk belongs to the mock provider.
+fixture = "widgets"
+offline_only = true
+args = ["--reasoning", "high"]
+output_schema = "schema.json"
+prompt = """
+When `WIDGET_PORT` is not set, which TCP port does this server listen on?
+"""
+
+[[check]]
+kind = "request_sent"
+fields = ["reasoning_effort", "response_format"]
+
+[[check]]
+kind = "answer_contains"
+any = ["7431"]
+
+[[check]]
+kind = "result"
+structured_output = false
+error_contains = "output_schema"
+
+[[check]]
+kind = "unchanged"
+paths = ["."]

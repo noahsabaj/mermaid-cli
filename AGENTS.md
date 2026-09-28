@@ -138,7 +138,12 @@ just guards   # the dependency-free source guards on their own
 just ratchet  # re-record the guard baselines after you fix something
 just fmt      # format the workspace
 just fix      # clippy --fix, then format
+just eval M   # behavioural evals against model(s) M; see evals/README.md
 ```
+
+Prompt and harness changes are judged by `evals/`, which scores fixed tasks by
+outcome. Add or extend a task there rather than a test that asserts on prompt
+wording.
 
 Or run the pieces directly:
 

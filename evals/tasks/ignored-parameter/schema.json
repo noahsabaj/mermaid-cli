@@ -1,0 +1,8 @@
+{
+  "type": "object",
+  "properties": {
+    "port": { "type": "integer" }
+  },
+  "required": ["port"],
+  "additionalProperties": false
+}
