@@ -5,7 +5,8 @@
 //! process asks the platform backend ([`mermaid_runtime::enforce`]) to enforce
 //! the requested sandbox — network denial (`--no-network`) and/or filesystem
 //! write-confinement (`--confine-fs`, plus a repeatable
-//! `--confine-writes <dir>` per allowed root) — from ordinary
+//! `--confine-writes <dir>` per allowed root), or the fixed read-only
+//! containment behind `read_only` mode (`--read-only`) — from ordinary
 //! single-threaded code, then runs the real command. On Linux the seccomp /
 //! Landlock restrictions are installed on this process and survive `execve`;
 //! on macOS the command is exec'd under `/usr/bin/sandbox-exec` instead. Either
@@ -39,6 +40,7 @@ pub fn maybe_dispatch<I: IntoIterator<Item = OsString>>(args: I) -> Option<i32> 
     }
 
     let mut no_network = false;
+    let mut read_only = false;
     // `None` until the flag is seen even once: the launcher must be able to
     // say "confine writes to nothing" (an empty `Some`), which is a deny-all,
     // distinctly from "confinement was never requested".
@@ -52,6 +54,8 @@ pub fn maybe_dispatch<I: IntoIterator<Item = OsString>>(args: I) -> Option<i32> 
             in_argv = true;
         } else if arg == "--no-network" {
             no_network = true;
+        } else if arg == "--read-only" {
+            read_only = true;
         } else if arg == "--confine-fs" {
             // Marks write-confinement as REQUESTED. Separate from the roots so
             // an empty root list stays a deny-all rather than collapsing into
@@ -80,15 +84,32 @@ pub fn maybe_dispatch<I: IntoIterator<Item = OsString>>(args: I) -> Option<i32> 
         return Some(2);
     }
 
+    // Read-only containment is a fixed policy that already denies what the
+    // other flags would, so a mix is a caller bug rather than something to
+    // reconcile here.
+    if read_only && (no_network || confine_writes.is_some()) {
+        eprintln!(
+            "mermaid {SANDBOX_EXEC_SUBCOMMAND}: --read-only cannot be combined with --no-network or --confine-fs"
+        );
+        return Some(2);
+    }
+
     // Platform enforcement lives behind one facade (Linux: seccomp/Landlock
     // self-applied here; macOS: argv rewritten onto sandbox-exec). Fail
     // closed: if the caller asked for confinement and the platform cannot
     // apply it, exit 126 — never run the command unconfined.
-    let policy = mermaid_runtime::SandboxPolicy {
-        deny_network: no_network,
-        confine_writes,
+    let enforcement = if read_only {
+        mermaid_runtime::enforce_read_only(&argv)
+    } else {
+        mermaid_runtime::enforce(
+            &mermaid_runtime::SandboxPolicy {
+                deny_network: no_network,
+                confine_writes,
+            },
+            &argv,
+        )
     };
-    match mermaid_runtime::enforce(&policy, &argv) {
+    match enforcement {
         Ok(mermaid_runtime::Enforcement::SelfApplied { fs_enforced }) => {
             // A kernel that simply can't enforce Landlock degrades to a
             // warned no-op (documented best-effort — pre-5.13 kernels).
@@ -162,6 +183,24 @@ mod tests {
             maybe_dispatch(os(&["mermaid", "__sandbox-exec", "--bogus", "--", "true"])),
             Some(2)
         );
+    }
+
+    #[test]
+    fn read_only_does_not_mix_with_the_other_policies() {
+        for extra in ["--no-network", "--confine-fs"] {
+            assert_eq!(
+                maybe_dispatch(os(&[
+                    "mermaid",
+                    "__sandbox-exec",
+                    "--read-only",
+                    extra,
+                    "--",
+                    "true"
+                ])),
+                Some(2),
+                "--read-only with {extra}"
+            );
+        }
     }
 
     #[test]

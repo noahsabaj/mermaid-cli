@@ -79,10 +79,36 @@ pub(crate) struct SandboxPlan {
     /// (out-of-project commands, separately gated by policy), the system
     /// temp dir, and -- unix only -- /dev (`>/dev/null` is a write).
     pub(crate) confine_writes: Option<Vec<PathBuf>>,
+    /// `read_only` mode on a platform that can contain it: the command runs
+    /// under the fixed read-only sandbox (no writes, sockets, IPC, outward
+    /// signals or privileges), which subsumes both dimensions above, so they
+    /// stay off. The policy gate lets any command through on the strength of
+    /// this, via `ActionRequest::read_only_contained`.
+    pub(crate) read_only: bool,
 }
 
 impl SandboxPlan {
+    /// No confinement: the plain shell.
+    #[cfg(test)]
+    pub(crate) const NONE: Self = Self {
+        network: false,
+        fs: false,
+        confine_writes: None,
+        read_only: false,
+    };
+
     pub(crate) fn resolve(ctx: &ExecContext, effective_workdir: &Path) -> Self {
+        // `read_only` mode is contained by the OS wherever the platform can
+        // enforce it; elsewhere the shell allowlists decide, as before, and
+        // the configured sandbox below applies.
+        if ctx.safety_mode == mermaid_runtime::SafetyMode::ReadOnly && read_only_probe() {
+            return Self {
+                network: false,
+                fs: false,
+                confine_writes: None,
+                read_only: true,
+            };
+        }
         // The sandbox is REQUIRED on the three platforms with a backend when a
         // policy is requested -- if the probe says the backend is broken, the
         // launcher fails closed (exit 126) rather than running unconfined.
@@ -128,6 +154,7 @@ impl SandboxPlan {
             network,
             fs,
             confine_writes,
+            read_only: false,
         }
     }
 }
@@ -238,6 +265,11 @@ impl ToolExecutor for ExecuteCommandTool {
         // this command actually runs in (`cmd.current_dir` below), not the
         // project root — see `ActionRequest::cwd`.
         policy_request.cwd = Some(effective_workdir.clone());
+        // Resolved before the gate so the gate and the spawn agree on whether
+        // this command runs contained: the flag below is only ever set for a
+        // spawn that will carry `--read-only`.
+        let sandbox = SandboxPlan::resolve(&ctx, &effective_workdir);
+        policy_request.read_only_contained = sandbox.read_only;
         if containment == CwdContainment::External {
             policy_request.path = Some(effective_workdir.display().to_string());
         }
@@ -293,7 +325,6 @@ impl ToolExecutor for ExecuteCommandTool {
             "working_dir": effective_workdir.display().to_string(),
         });
         let _ = mermaid_runtime::run_plugin_hooks("before_shell", &shell_payload);
-        let sandbox = SandboxPlan::resolve(&ctx, &effective_workdir);
         if mode == CommandMode::Background {
             let startup_timeout_secs = args
                 .get("startup_timeout_secs")
@@ -367,8 +398,7 @@ impl ToolExecutor for ExecuteCommandTool {
         // failure falls back to the pipe path below, which stays fully
         // intact.
         if ctx.config.exec.pty_enabled() {
-            let invocation =
-                shell_invocation(&command, sandbox.network, sandbox.confine_writes.as_deref());
+            let invocation = shell_invocation(&command, &sandbox);
             match run_command_pty(
                 &invocation,
                 &effective_workdir,
@@ -387,8 +417,7 @@ impl ToolExecutor for ExecuteCommandTool {
                         &effective_workdir,
                         start,
                         timeout_secs,
-                        sandbox.network,
-                        sandbox.fs,
+                        &sandbox,
                     );
                     let _ = mermaid_runtime::run_plugin_hooks(
                         "after_shell",
@@ -408,8 +437,7 @@ impl ToolExecutor for ExecuteCommandTool {
             }
         }
 
-        let mut cmd =
-            build_sandboxed_shell(&command, sandbox.network, sandbox.confine_writes.as_deref());
+        let mut cmd = build_sandboxed_shell(&command, &sandbox);
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -466,8 +494,7 @@ impl ToolExecutor for ExecuteCommandTool {
             &effective_workdir,
             start,
             timeout_secs,
-            sandbox.network,
-            sandbox.fs,
+            &sandbox,
         );
         let _ = mermaid_runtime::run_plugin_hooks(
             "after_shell",
@@ -497,8 +524,7 @@ fn finish_foreground_command(
     effective_workdir: &Path,
     start: Instant,
     timeout_secs: u64,
-    sandbox_network: bool,
-    sandbox_fs: bool,
+    sandbox: &SandboxPlan,
 ) -> ToolOutcome {
     let command = command.to_string();
     match result {
@@ -518,7 +544,7 @@ fn finish_foreground_command(
                 log_path: None,
                 byte_count: Some(output_len),
             });
-            if let Some(kind) = detect_denial(&run, sandbox_network, sandbox_fs) {
+            if let Some(kind) = detect_denial(&run, sandbox) {
                 // The sandbox stopped (or very likely stopped) this command.
                 // Surface a clear, actionable error instead of a confusing
                 // "killed" / opaque permission failure.
@@ -545,6 +571,11 @@ fn finish_foreground_command(
                     ),
                     DenialKind::Ambiguous => format!(
                         "{AMBIGUOUS_DENIED_MESSAGE}\n\n--- original output ---\n{}",
+                        run.output
+                    ),
+                    DenialKind::ReadOnlyNetwork => READ_ONLY_NETWORK_DENIED_MESSAGE.to_string(),
+                    DenialKind::ReadOnly => format!(
+                        "{READ_ONLY_DENIED_MESSAGE}\n\n--- original output ---\n{}",
                         run.output
                     ),
                 };
@@ -650,6 +681,101 @@ mod tests {
     use mermaid_domain::{ToolCallId, TurnId};
     use std::path::PathBuf;
 
+    /// A configured sandbox (`--no-network` / `--confine-fs`) with these
+    /// write roots, outside read-only mode.
+    fn plan(network: bool, confine_writes: Option<Vec<PathBuf>>) -> SandboxPlan {
+        SandboxPlan {
+            network,
+            fs: confine_writes.is_some(),
+            confine_writes,
+            read_only: false,
+        }
+    }
+
+    /// Just the two dimensions denial detection keys on.
+    fn flags(network: bool, fs: bool) -> SandboxPlan {
+        SandboxPlan {
+            network,
+            fs,
+            confine_writes: None,
+            read_only: false,
+        }
+    }
+
+    const READ_ONLY_PLAN: SandboxPlan = SandboxPlan {
+        read_only: true,
+        ..SandboxPlan::NONE
+    };
+
+    #[test]
+    fn read_only_denials_name_the_read_only_sandbox() {
+        let out = |exit: Option<i32>, signal: Option<i32>, output: &str| CommandRunOutput {
+            output: output.to_string(),
+            exit_code: exit,
+            signal,
+            stdout_lines: 0,
+            stderr_lines: 0,
+        };
+        assert_eq!(
+            detect_denial(&out(None, Some(31), ""), &READ_ONLY_PLAN),
+            Some(DenialKind::ReadOnlyNetwork)
+        );
+        assert_eq!(
+            detect_denial(
+                &out(Some(1), None, "touch: Permission denied"),
+                &READ_ONLY_PLAN
+            ),
+            Some(DenialKind::ReadOnly)
+        );
+        assert_eq!(
+            detect_denial(&out(Some(1), None, "no such file"), &READ_ONLY_PLAN),
+            None
+        );
+        assert_eq!(
+            detect_denial(&out(Some(0), None, ""), &READ_ONLY_PLAN),
+            None
+        );
+    }
+
+    #[test]
+    fn read_only_plan_asks_the_launcher_for_read_only_alone() {
+        let wrapped = build_sandboxed_shell("echo hi", &READ_ONLY_PLAN);
+        let args: Vec<String> = wrapped
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args[..2],
+            ["__sandbox-exec", "--read-only"],
+            "args: {args:?}"
+        );
+        for other in ["--no-network", "--confine-fs", "--confine-writes"] {
+            assert!(!args.contains(&other.to_string()), "args: {args:?}");
+        }
+    }
+
+    /// `read_only` mode resolves to the read-only sandbox exactly where the
+    /// platform can enforce it, and every other mode never does.
+    #[test]
+    fn sandbox_plan_contains_read_only_mode_where_enforceable() {
+        let workdir = std::env::temp_dir();
+        let (mut ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), workdir.clone());
+        ctx.safety_mode = mermaid_runtime::SafetyMode::ReadOnly;
+        assert_eq!(
+            SandboxPlan::resolve(&ctx, &workdir).read_only,
+            mermaid_runtime::read_only_containment_available()
+        );
+        for mode in [
+            mermaid_runtime::SafetyMode::Ask,
+            mermaid_runtime::SafetyMode::Auto,
+            mermaid_runtime::SafetyMode::FullAccess,
+        ] {
+            ctx.safety_mode = mode;
+            assert!(!SandboxPlan::resolve(&ctx, &workdir).read_only, "{mode:?}");
+        }
+    }
+
     #[test]
     pub(crate) fn network_denial_detects_sigsys_and_reaped_child_exit() {
         let out = |exit: Option<i32>, signal: Option<i32>| CommandRunOutput {
@@ -681,28 +807,43 @@ mod tests {
         // Sandbox off for this spawn: nothing is ever labeled a denial, no
         // matter how denial-shaped the failure looks.
         assert_eq!(
-            detect_denial(&out(Some(159), None, "Permission denied"), false, false),
+            detect_denial(
+                &out(Some(159), None, "Permission denied"),
+                &flags(false, false)
+            ),
             None
         );
-        assert_eq!(detect_denial(&out(None, Some(31), ""), false, false), None);
+        assert_eq!(
+            detect_denial(&out(None, Some(31), ""), &flags(false, false)),
+            None
+        );
         // A clean success is never a denial even with both policies active.
-        assert_eq!(detect_denial(&out(Some(0), None, ""), true, true), None);
+        assert_eq!(
+            detect_denial(&out(Some(0), None, ""), &flags(true, true)),
+            None
+        );
         #[cfg(target_os = "linux")]
         {
             // Precise SIGSYS signature maps to Network; permission text with
             // only the FS sandbox active maps to Filesystem.
             assert_eq!(
-                detect_denial(&out(None, Some(31), ""), true, true),
+                detect_denial(&out(None, Some(31), ""), &flags(true, true)),
                 Some(DenialKind::Network)
             );
             assert_eq!(
-                detect_denial(&out(Some(1), None, "Permission denied"), false, true),
+                detect_denial(
+                    &out(Some(1), None, "Permission denied"),
+                    &flags(false, true)
+                ),
                 Some(DenialKind::Filesystem)
             );
             // Linux network denials are SIGSYS-only: permission text alone
             // does not implicate the network sandbox.
             assert_eq!(
-                detect_denial(&out(Some(1), None, "Permission denied"), true, false),
+                detect_denial(
+                    &out(Some(1), None, "Permission denied"),
+                    &flags(true, false)
+                ),
                 None
             );
         }
@@ -711,15 +852,15 @@ mod tests {
             // Seatbelt: hedged EPERM text; both-active is ambiguous.
             let eperm = out(Some(1), None, "curl: Operation not permitted");
             assert_eq!(
-                detect_denial(&eperm, true, false),
+                detect_denial(&eperm, &flags(true, false)),
                 Some(DenialKind::Network)
             );
             assert_eq!(
-                detect_denial(&eperm, false, true),
+                detect_denial(&eperm, &flags(false, true)),
                 Some(DenialKind::Filesystem)
             );
             assert_eq!(
-                detect_denial(&eperm, true, true),
+                detect_denial(&eperm, &flags(true, true)),
                 Some(DenialKind::Ambiguous)
             );
         }
@@ -755,14 +896,14 @@ mod tests {
 
     #[test]
     pub(crate) fn sandboxed_shell_wraps_only_when_requested() {
-        let plain = build_sandboxed_shell("echo hi", false, None);
+        let plain = build_sandboxed_shell("echo hi", &SandboxPlan::NONE);
         let plain_prog = plain.as_std().get_program().to_string_lossy().into_owned();
         assert!(
             ["sh", "pwsh", "powershell"].contains(&plain_prog.as_str()),
             "plain shell program: {plain_prog}"
         );
 
-        let wrapped = build_sandboxed_shell("echo hi", true, None);
+        let wrapped = build_sandboxed_shell("echo hi", &plan(true, None));
         let args: Vec<String> = wrapped
             .as_std()
             .get_args()
@@ -786,7 +927,7 @@ mod tests {
     /// `fs_enforced: true`. The `--confine-fs` marker is what closes that.
     #[test]
     pub(crate) fn empty_confine_writes_still_requests_confinement() {
-        let wrapped = build_sandboxed_shell("echo hi", false, Some(&[]));
+        let wrapped = build_sandboxed_shell("echo hi", &plan(false, Some(Vec::new())));
         let args: Vec<String> = wrapped
             .as_std()
             .get_args()
@@ -806,7 +947,7 @@ mod tests {
     #[test]
     pub(crate) fn sandboxed_shell_passes_confine_writes_dirs() {
         let dirs = vec![PathBuf::from("/proj"), PathBuf::from("/dev")];
-        let wrapped = build_sandboxed_shell("echo hi", false, Some(&dirs));
+        let wrapped = build_sandboxed_shell("echo hi", &plan(false, Some(dirs)));
         let args: Vec<String> = wrapped
             .as_std()
             .get_args()
@@ -839,7 +980,7 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     pub(crate) fn windows_shell_invocation_is_powershell() {
-        let inv = shell_invocation("echo hi", false, None);
+        let inv = shell_invocation("echo hi", &SandboxPlan::NONE);
         let prog = inv.program.to_string_lossy().into_owned();
         assert!(prog == "pwsh" || prog == "powershell", "program: {prog}");
         let args: Vec<String> = inv
@@ -1786,7 +1927,7 @@ mod tests {
         let run = |scratchpad: Option<PathBuf>| {
             let dir = dir.clone();
             async move {
-                let mut cmd = build_sandboxed_shell(probe, false, None);
+                let mut cmd = build_sandboxed_shell(probe, &SandboxPlan::NONE);
                 cmd.current_dir(&dir)
                     .stdin(Stdio::null())
                     .stdout(Stdio::piped())

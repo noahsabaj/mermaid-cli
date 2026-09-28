@@ -91,7 +91,7 @@ pub use rows::*;
 //
 // History: v2 added the additive `tasks.owner_kind` column (F18/RC-E); v3 added
 // the F75 covering indexes; v4 added the `outcomes` table.
-pub(crate) const SCHEMA_VERSION: i32 = 7;
+pub(crate) const SCHEMA_VERSION: i32 = 8;
 
 /// Windows ACL hardening for the data directory, and the repair path for
 /// machines an earlier version locked out of their own database.
@@ -362,7 +362,6 @@ const BASELINE_SCHEMA: &str = r#"
         summary_token_count INTEGER,
         preserved_turns INTEGER,
         archive_path TEXT,
-        verification_status TEXT,
         created_at TEXT NOT NULL
     );
 
@@ -870,7 +869,9 @@ impl RuntimeStore {
                 6 => {},
                 // v7: the first genuinely NON-additive step — see below.
                 7 => self.migrate_to_v7()?,
-                // A future v8+ adds its non-additive step here.
+                // v8: drop `compactions.verification_status`.
+                8 => self.migrate_to_v8()?,
+                // A future v9+ adds its non-additive step here.
                 _ => {},
             }
         }
@@ -919,6 +920,29 @@ impl RuntimeStore {
         self.conn.execute_batch(
             "DROP INDEX IF EXISTS idx_messages_session_id; DROP TABLE IF EXISTS messages;",
         )?;
+        Ok(())
+    }
+
+    /// v8: drop `compactions.verification_status`.
+    ///
+    /// It recorded the verdict of the second model call that re-read every
+    /// checkpoint. That pass is gone (compaction is now one free-form call),
+    /// so nothing writes the column any more.
+    ///
+    /// Guarded on the column being there: a fresh DB gets its table from the
+    /// baseline above, which no longer has it, and still runs this step on
+    /// the way up from 0.
+    pub(crate) fn migrate_to_v8(&self) -> Result<()> {
+        let present: bool = self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM pragma_table_info('compactions')
+                            WHERE name = 'verification_status')",
+            [],
+            |row| row.get(0),
+        )?;
+        if present {
+            self.conn
+                .execute_batch("ALTER TABLE compactions DROP COLUMN verification_status;")?;
+        }
         Ok(())
     }
 }
@@ -1420,6 +1444,39 @@ mod tests {
     }
 
     #[test]
+    pub(crate) fn v8_drops_the_verification_column_and_keeps_the_rows() {
+        let path = temp_db("v8_drop_verification");
+        {
+            let store = RuntimeStore::open(&path).expect("first open");
+            downgrade_schema_to(&store.conn, 7);
+            store
+                .conn
+                .execute_batch(
+                    "INSERT INTO compactions (id, verification_status, created_at)
+                         VALUES ('comp-v7', 'verified', '2026-01-01T00:00:00Z');",
+                )
+                .expect("seed a v7 row");
+        }
+
+        let store = RuntimeStore::open(&path).expect("upgrade open");
+        let has_column: bool = store
+            .conn
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM pragma_table_info('compactions')
+                                WHERE name = 'verification_status')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(!has_column, "the column must be dropped");
+        assert!(
+            store.compactions().get("comp-v7").unwrap().is_some(),
+            "the row that carried it must survive"
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
     pub(crate) fn v5_database_upgrades_with_null_checkpoint_anchors() {
         // A DB created by the previous build (schema v5, no anchor columns)
         // must open cleanly, gain the columns, and load old rows as None.
@@ -1584,6 +1641,10 @@ mod tests {
     /// still has every column a current table has. A v1 `tasks` table does not
     /// have `owner_kind`, and that is exactly what broke.
     fn downgrade_schema_to(conn: &Connection, version: i32) {
+        if version < 8 {
+            conn.execute_batch("ALTER TABLE compactions ADD COLUMN verification_status TEXT;")
+                .expect("undo v8");
+        }
         // Indexes before the columns they cover: SQLite refuses to drop an
         // indexed column.
         if version < 6 {
@@ -1966,7 +2027,6 @@ mod tests {
                 summary_token_count: Some(800),
                 preserved_turns: Some(6),
                 archive_path: Some(".mermaid/compactions/session-1/compaction-1.json".to_string()),
-                verification_status: Some("verified".to_string()),
             })
             .expect("create compaction");
         assert_eq!(compaction.summary_token_count, Some(800));
@@ -2605,7 +2665,6 @@ mod tests {
                 summary_token_count: None,
                 preserved_turns: None,
                 archive_path: None,
-                verification_status: None,
             })
             .expect("compaction");
         store

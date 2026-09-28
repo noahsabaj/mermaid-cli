@@ -56,8 +56,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fails rather than replacing history with nothing. `CompactionEvent` loses
   `review_status` / `review_error` (older logs still load; the fields are
   ignored), the transcript's `Compact(...)` line and `/context` drop the review
-  note, and the runtime store's `compactions.verification_status` column is
-  written as `NULL`.
+  note, and the runtime store drops its `compactions.verification_status`
+  column (schema v8).
 
 - **Compaction no longer throws tool output away.** The summarizer's excerpt
   used to cut every archived tool result to 2,000 characters (8,000 for prose),
@@ -73,6 +73,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   all skipped with "not enough conversation history" however full the window
   got. The tail now also shrinks at assistant-message boundaries inside the run,
   which keeps every tool call with its result.
+
+- **`read_only` mode is enforced by the kernel on Linux 6.12+, not predicted by
+  the shell allowlists.** Every shell command now runs inside a fixed read-only
+  sandbox (`mermaid __sandbox-exec --read-only`): Landlock denies every
+  filesystem write except the discard devices and the terminal, and scopes
+  signals to the sandbox; seccomp refuses sockets of every family, `io_uring`,
+  System V and POSIX IPC, the keyring, and file metadata changes; every
+  capability is dropped, so running as root grants nothing. With the kernel
+  holding that line, `read_only` lets any command run instead of only the ones
+  the allowlists recognise as reads, and one that tries to change something
+  fails with a message naming the read-only sandbox. The destructive hard-deny
+  and user `deny` overrides still come first. Every restriction is a hard
+  requirement, so there is no best-effort degrade: where the kernel cannot
+  enforce all of it (macOS, Windows, older Linux), `read_only` keeps the
+  allowlists exactly as before, and `mermaid self-test` says which applies.
 
 ### Added
 

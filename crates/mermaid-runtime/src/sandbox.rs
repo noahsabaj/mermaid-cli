@@ -27,6 +27,11 @@
 //! everything the command spawns. Platforms without a backend return `Err`
 //! when confinement was requested, so the launcher fails closed (exit 126)
 //! instead of ever running the command unconfined.
+//!
+//! A third, fixed policy backs `read_only` mode: [`enforce_read_only`] denies
+//! writes, sockets, IPC, outward signals and privileges all at once, so a
+//! command runs read-only because the kernel says so rather than because a
+//! parser predicted it would.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -128,6 +133,63 @@ pub fn enforce(policy: &SandboxPolicy, argv: &[OsString]) -> anyhow::Result<Enfo
     {
         let _ = argv;
         anyhow::bail!("no OS sandbox backend on this platform; refusing to run unconfined")
+    }
+}
+
+/// Enforce read-only containment for the command `argv`.
+///
+/// The OS, not a command parser, is what keeps a `read_only`-mode command
+/// from changing anything. Called from single-threaded launcher code, like
+/// [`enforce`].
+///
+/// The contract is "the command may read, and nothing else": no filesystem
+/// writes (bar the discard and terminal devices a shell redirects to), no
+/// metadata changes, no sockets of any family (so no network and no local
+/// daemons such as Docker, D-Bus or a database socket), no System V or POSIX
+/// IPC, no signals to processes outside the sandbox, and no capabilities even
+/// when run as root. Every part is a hard requirement: unlike `--confine-fs`
+/// there is no best-effort degrade, because `read_only` mode lets any command
+/// through on the strength of this containment.
+///
+/// Linux only for now (Landlock ABI 6, kernel 6.12+, plus seccomp). macOS and
+/// Windows keep the shell allowlists until their backends are verified to meet
+/// the same contract; [`read_only_containment_available`] is `false` there.
+///
+/// # Errors
+///
+/// The platform cannot install every restriction. The caller MUST fail
+/// closed (exit 126), never run the command unconfined.
+pub fn enforce_read_only(argv: &[OsString]) -> anyhow::Result<Enforcement> {
+    #[cfg(target_os = "linux")]
+    {
+        // Self-applied: the caller execs its own argv afterwards.
+        let _ = argv;
+        linux::apply_read_only()?;
+        Ok(Enforcement::SelfApplied { fs_enforced: true })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = argv;
+        anyhow::bail!("read-only containment is not available on this platform")
+    }
+}
+
+/// Whether [`enforce_read_only`] can succeed here.
+///
+/// On Linux, the kernel must support Landlock ABI 6 (write rights plus
+/// signal scoping) and both seccomp filters must assemble; `false`
+/// everywhere else. `read_only` mode lets arbitrary
+/// shell commands run only when this is `true`, and falls back to the shell
+/// allowlists otherwise. Creates a ruleset fd and drops it; restricts nothing.
+#[must_use]
+pub fn read_only_containment_available() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        linux::read_only_supported()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
     }
 }
 
@@ -549,6 +611,262 @@ mod linux {
             .is_ok()
     }
 
+    /// Paths a read-only command may still open for writing: the discard
+    /// devices a shell redirects to and the terminal it runs on. Each gets the
+    /// file-level write rights only, so nothing can be created beneath
+    /// `/dev/pts`, only the existing terminals written to.
+    const READ_ONLY_WRITABLE: &[&str] = &[
+        "/dev/null",
+        "/dev/zero",
+        "/dev/full",
+        "/dev/tty",
+        "/dev/ptmx",
+        "/dev/pts",
+    ];
+
+    // Newer than the `libc` constants, and numbered the same on every arch.
+    const SYS_FCHMODAT2: i64 = 452;
+    const SYS_SETXATTRAT: i64 = 463;
+    const SYS_REMOVEXATTRAT: i64 = 466;
+
+    /// `ioctl` requests that change a file's attributes through a read-only
+    /// descriptor (`chattr`): `FS_IOC_SETFLAGS`, its 32-bit form, and
+    /// `FS_IOC_FSSETXATTR`. Landlock does not see them.
+    const ATTR_SETTING_IOCTLS: &[u64] = &[0x4008_6602, 0x4004_6602, 0x401c_5820];
+
+    /// Syscalls a read-only command is refused outright (`EPERM`), because
+    /// each changes state without a filesystem write that Landlock would see:
+    /// sockets of every family (the internet ones are also killed by
+    /// [`network_filter`], which wins when both match), `io_uring` (which can
+    /// open sockets without `socket(2)`), System V and POSIX IPC, the kernel
+    /// keyring, and file metadata (mode, owner, extended attributes, times).
+    fn read_only_denied_syscalls() -> Vec<i64> {
+        let mut denied = legacy_metadata_syscalls();
+        denied.extend([
+            libc::SYS_socket,
+            libc::SYS_io_uring_setup,
+            libc::SYS_io_uring_enter,
+            libc::SYS_io_uring_register,
+            libc::SYS_msgget,
+            libc::SYS_msgsnd,
+            libc::SYS_msgrcv,
+            libc::SYS_msgctl,
+            libc::SYS_semget,
+            libc::SYS_semop,
+            libc::SYS_semtimedop,
+            libc::SYS_semctl,
+            libc::SYS_shmget,
+            libc::SYS_shmat,
+            libc::SYS_shmctl,
+            libc::SYS_mq_open,
+            libc::SYS_mq_unlink,
+            libc::SYS_mq_timedsend,
+            libc::SYS_mq_timedreceive,
+            libc::SYS_mq_notify,
+            libc::SYS_mq_getsetattr,
+            libc::SYS_add_key,
+            libc::SYS_request_key,
+            libc::SYS_keyctl,
+            libc::SYS_fchmod,
+            libc::SYS_fchmodat,
+            SYS_FCHMODAT2,
+            libc::SYS_fchown,
+            libc::SYS_fchownat,
+            libc::SYS_setxattr,
+            libc::SYS_lsetxattr,
+            libc::SYS_fsetxattr,
+            libc::SYS_removexattr,
+            libc::SYS_lremovexattr,
+            libc::SYS_fremovexattr,
+            SYS_SETXATTRAT,
+            SYS_REMOVEXATTRAT,
+            libc::SYS_utimensat,
+        ]);
+        denied
+    }
+
+    /// The legacy path-based metadata syscalls, which only the older syscall
+    /// tables have; `aarch64` offers the `*at` forms alone.
+    fn legacy_metadata_syscalls() -> Vec<i64> {
+        #[cfg(target_arch = "x86_64")]
+        {
+            vec![
+                libc::SYS_chmod,
+                libc::SYS_chown,
+                libc::SYS_lchown,
+                libc::SYS_utime,
+                libc::SYS_utimes,
+                libc::SYS_futimesat,
+            ]
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            Vec::new()
+        }
+    }
+
+    /// Refuse the x32 ABI outright (`x86_64` only). x32 reaches the same
+    /// syscalls with bit 30 set in the number, under the same audit arch, so
+    /// the number-keyed filters here would not see them. Hand-assembled
+    /// because `seccompiler` matches exact numbers, not ranges: load the
+    /// number, and fail anything at or above the x32 bit with `EPERM`.
+    #[cfg(target_arch = "x86_64")]
+    fn x32_filter() -> BpfProgram {
+        use seccompiler::sock_filter;
+        const BPF_LD_W_ABS: u16 = 0x20;
+        const BPF_JMP_JGE_K: u16 = 0x35;
+        const BPF_RET_K: u16 = 0x06;
+        const X32_SYSCALL_BIT: u32 = 0x4000_0000;
+        let insn = |code, jt, jf, k| sock_filter { code, jt, jf, k };
+        vec![
+            // `seccomp_data.nr` is at offset 0.
+            insn(BPF_LD_W_ABS, 0, 0, 0),
+            insn(BPF_JMP_JGE_K, 0, 1, X32_SYSCALL_BIT),
+            insn(
+                BPF_RET_K,
+                0,
+                0,
+                libc::SECCOMP_RET_ERRNO | libc::EPERM as u32,
+            ),
+            insn(BPF_RET_K, 0, 0, libc::SECCOMP_RET_ALLOW),
+        ]
+    }
+
+    /// Build the read-only seccomp program: every syscall in
+    /// [`read_only_denied_syscalls`] and the attribute-setting `ioctl`s fail
+    /// with `EPERM`; everything else is allowed. An error rather than a kill,
+    /// so a tool that probes (a local socket for a name-service cache, say)
+    /// falls back instead of dying.
+    pub(super) fn read_only_filter() -> anyhow::Result<BpfProgram> {
+        let mut rules: BTreeMap<i64, Vec<SeccompRule>> = read_only_denied_syscalls()
+            .into_iter()
+            // An empty rule list matches the syscall unconditionally.
+            .map(|nr| (nr, Vec::new()))
+            .collect();
+        let ioctl_rules = ATTR_SETTING_IOCTLS
+            .iter()
+            .map(|&request| {
+                SeccompRule::new(vec![SeccompCondition::new(
+                    1,
+                    SeccompCmpArgLen::Dword,
+                    SeccompCmpOp::Eq,
+                    request,
+                )?])
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        rules.insert(libc::SYS_ioctl, ioctl_rules);
+
+        let filter = SeccompFilter::new(
+            rules,
+            SeccompAction::Allow,
+            SeccompAction::Errno(libc::EPERM as u32),
+            std::env::consts::ARCH
+                .try_into()
+                .context("seccomp: unsupported target arch")?,
+        )
+        .context("seccomp: build read-only filter")?;
+        let program: BpfProgram = filter
+            .try_into()
+            .context("seccomp: assemble read-only BPF")?;
+        Ok(program)
+    }
+
+    /// The Landlock ruleset for read-only containment, as a hard requirement:
+    /// every V3 write right is handled, and signals and abstract unix sockets
+    /// are scoped to the sandbox (ABI 6). A kernel that cannot enforce all of
+    /// it makes this an `Err` rather than a quieter ruleset.
+    fn read_only_ruleset() -> anyhow::Result<landlock::RulesetCreated> {
+        use landlock::{
+            ABI, Access, AccessFs, CompatLevel, Compatible, Ruleset, RulesetAttr, Scope,
+        };
+        Ruleset::default()
+            .set_compatibility(CompatLevel::HardRequirement)
+            .handle_access(AccessFs::from_write(LANDLOCK_ABI))
+            .context("landlock: handle write access")?
+            .scope(Scope::from_all(ABI::V6))
+            .context("landlock: scope signals and abstract sockets")?
+            .create()
+            .context("landlock: create read-only ruleset")
+    }
+
+    /// Whether read-only containment can be enforced on this kernel. Builds
+    /// the ruleset (an fd, then dropped) and both seccomp programs; installs
+    /// nothing.
+    pub(super) fn read_only_supported() -> bool {
+        read_only_ruleset().is_ok() && network_filter().is_ok() && read_only_filter().is_ok()
+    }
+
+    /// Give up every capability, so a command run as root cannot use them
+    /// (rebooting, setting the clock, clearing the kernel log, raw I/O).
+    /// Ambient and bounding sets first, while `CAP_SETPCAP` may still be
+    /// held; then the thread's own sets. Without `CAP_SETPCAP` the bounding
+    /// set cannot shrink, and needs not: `no_new_privs`, which Landlock sets
+    /// below, already stops an `execve` from gaining anything.
+    fn drop_capabilities() -> anyhow::Result<()> {
+        use rustix::thread::{CapabilitySet, CapabilitySets, set_capabilities};
+        // SAFETY: plain prctl calls with integer arguments.
+        unsafe {
+            libc::prctl(
+                libc::PR_CAP_AMBIENT,
+                libc::PR_CAP_AMBIENT_CLEAR_ALL,
+                0,
+                0,
+                0,
+            );
+            // Capability numbers run to `cap_last_cap`; past it the kernel
+            // answers EINVAL, which ends the loop.
+            for cap in 0..64 {
+                if libc::prctl(libc::PR_CAPBSET_DROP, cap, 0, 0, 0) != 0
+                    && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINVAL)
+                {
+                    break;
+                }
+            }
+        }
+        set_capabilities(
+            None,
+            CapabilitySets {
+                effective: CapabilitySet::empty(),
+                permitted: CapabilitySet::empty(),
+                inheritable: CapabilitySet::empty(),
+            },
+        )
+        .context("capset: drop every capability")?;
+        Ok(())
+    }
+
+    /// Install read-only containment on the current process: capabilities
+    /// dropped, the Landlock ruleset (with `no_new_privs`), then the network
+    /// kill-switch and the read-only seccomp filter. Stacked seccomp filters
+    /// take the strictest verdict, so an internet socket still dies with the
+    /// kill-switch's `SIGSYS` and keeps its precise denial message.
+    pub(super) fn apply_read_only() -> anyhow::Result<()> {
+        use landlock::{AccessFs, RulesetCreatedAttr, RulesetStatus, path_beneath_rules};
+
+        drop_capabilities()?;
+
+        let file_write = AccessFs::from_write(LANDLOCK_ABI) & AccessFs::from_file(LANDLOCK_ABI);
+        let status = read_only_ruleset()?
+            // `path_beneath_rules` skips paths that cannot be opened, so a
+            // missing device narrows the sandbox instead of erroring.
+            .add_rules(path_beneath_rules(READ_ONLY_WRITABLE, file_write))
+            .context("landlock: allow device writes")?
+            .restrict_self()
+            .context("landlock: restrict self")?;
+        anyhow::ensure!(
+            status.ruleset == RulesetStatus::FullyEnforced,
+            "landlock: read-only ruleset not fully enforced ({:?})",
+            status.ruleset
+        );
+
+        apply_network_killswitch()?;
+        let program = read_only_filter()?;
+        apply_filter(&program).context("seccomp: install read-only filter")?;
+        #[cfg(target_arch = "x86_64")]
+        apply_filter(&x32_filter()).context("seccomp: install x32 filter")?;
+        Ok(())
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -671,6 +989,142 @@ mod linux {
                 code, 0,
                 "confined child: 10 = allowed write failed, 11 = outside write \
                  succeeded, 77 = apply failed"
+            );
+        }
+
+        /// Fork a child, install read-only containment, run `probe` in it,
+        /// and return the child's raw wait status. `probe` answers with an
+        /// exit code; 77 means the containment itself failed to apply.
+        fn read_only_child_status(probe: impl FnOnce() -> i32) -> libc::c_int {
+            // SAFETY: single-threaded test path; the child only installs the
+            // containment, runs the probe's few syscalls, and `_exit`s.
+            unsafe {
+                let pid = libc::fork();
+                assert!(pid >= 0, "fork failed");
+                if pid == 0 {
+                    let code = if apply_read_only().is_ok() {
+                        probe()
+                    } else {
+                        77
+                    };
+                    libc::_exit(code);
+                }
+                let mut status: libc::c_int = 0;
+                assert_eq!(
+                    libc::waitpid(pid, &raw mut status, 0),
+                    pid,
+                    "waitpid failed"
+                );
+                status
+            }
+        }
+
+        fn errno() -> Option<i32> {
+            std::io::Error::last_os_error().raw_os_error()
+        }
+
+        /// Everything read-only containment promises, one probe each: reads
+        /// and discard-device writes work; file writes, metadata changes,
+        /// local sockets, and signals to a process outside the sandbox fail.
+        #[test]
+        fn read_only_containment_allows_reads_and_denies_changes() {
+            use std::ffi::CString;
+            if !read_only_supported() {
+                eprintln!("skipping: kernel cannot enforce read-only containment");
+                return;
+            }
+            let base = std::env::temp_dir().join(format!(
+                "mermaid-readonly-test-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&base).unwrap();
+            let existing = base.join("existing.txt");
+            std::fs::write(&existing, b"before").unwrap();
+            let existing_c = CString::new(existing.to_str().unwrap()).unwrap();
+            let fresh = base.join("fresh.txt");
+
+            let status = read_only_child_status(|| {
+                // SAFETY: plain syscalls on owned, NUL-terminated paths.
+                unsafe {
+                    if std::fs::read(&existing).ok().as_deref() != Some(b"before".as_slice()) {
+                        return 10;
+                    }
+                    if std::fs::OpenOptions::new()
+                        .write(true)
+                        .open("/dev/null")
+                        .is_err()
+                    {
+                        return 11;
+                    }
+                    if std::fs::write(&fresh, b"x").is_ok() {
+                        return 12;
+                    }
+                    if std::fs::write(&existing, b"after").is_ok() {
+                        return 13;
+                    }
+                    if libc::chmod(existing_c.as_ptr(), 0o777) == 0 || errno() != Some(libc::EPERM)
+                    {
+                        return 14;
+                    }
+                    if libc::utimensat(libc::AT_FDCWD, existing_c.as_ptr(), std::ptr::null(), 0)
+                        == 0
+                    {
+                        return 15;
+                    }
+                    let fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
+                    if fd >= 0 || errno() != Some(libc::EPERM) {
+                        return 16;
+                    }
+                    if libc::kill(libc::getppid(), 0) == 0 {
+                        return 17;
+                    }
+                    let caps_dropped = rustix::thread::capabilities(None)
+                        .is_ok_and(|c| c.effective.is_empty() && c.permitted.is_empty());
+                    if !caps_dropped {
+                        return 18;
+                    }
+                    0
+                }
+            });
+            let unchanged = std::fs::read(&existing).unwrap();
+            let _ = std::fs::remove_dir_all(&base);
+
+            assert!(
+                libc::WIFEXITED(status),
+                "child should exit, status={status}"
+            );
+            assert_eq!(
+                libc::WEXITSTATUS(status),
+                0,
+                "10 read failed, 11 /dev/null write failed, 12 new file written, \
+                 13 existing file written, 14 chmod allowed, 15 utimensat allowed, \
+                 16 unix socket allowed, 17 signal left the sandbox, \
+                 18 capabilities kept, 77 apply failed"
+            );
+            assert_eq!(unchanged, b"before");
+        }
+
+        /// An internet socket under read-only containment still dies with the
+        /// kill-switch's `SIGSYS`: the stricter of the stacked filters wins,
+        /// which is what keeps the precise network-denial message.
+        #[test]
+        fn read_only_containment_kills_internet_sockets() {
+            if !read_only_supported() {
+                eprintln!("skipping: kernel cannot enforce read-only containment");
+                return;
+            }
+            let status = read_only_child_status(|| {
+                // SAFETY: a plain socket syscall.
+                let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
+                if fd >= 0 { 1 } else { 2 }
+            });
+            assert!(
+                libc::WIFSIGNALED(status) && libc::WTERMSIG(status) == libc::SIGSYS,
+                "AF_INET socket should die with SIGSYS, status={status}"
             );
         }
     }
