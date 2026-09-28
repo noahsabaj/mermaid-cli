@@ -491,6 +491,8 @@ fn tool_name(detail: &ToolMetadata) -> String {
         ToolMetadata::Subagent { .. } => "agent".to_string(),
         ToolMetadata::Tasks { action, .. } => format!("task_{action}"),
         ToolMetadata::Questions { .. } => "ask_user_question".to_string(),
+        ToolMetadata::ContextArchive { .. } => "context_archive".to_string(),
+        ToolMetadata::CompactionRequest { .. } => "compact_context".to_string(),
         ToolMetadata::Custom { name, .. } => name.clone(),
     }
 }

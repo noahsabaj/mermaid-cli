@@ -61,9 +61,9 @@ pub use checklist::{
 pub use cmd::{ChatRequest, Cmd, ToolDefinition, ToolDispatch};
 pub use compaction::{
     CompactionBoundary, CompactionEvent, CompactionPolicy, CompactionRequest, CompactionResult,
-    CompactionTrigger, PreparedCompaction, build_replacement_messages, build_summary_request,
-    compaction_receipt, context_exceeds_hard_limit, format_compact_count, normalize_summary,
-    prepare_compaction, should_auto_compact,
+    CompactionTrigger, PreparedCompaction, RequestedCompaction, build_replacement_messages,
+    build_summary_request, compaction_receipt, context_exceeds_hard_limit, format_compact_count,
+    normalize_summary, prepare_compaction, should_auto_compact,
 };
 pub use config::{
     ActiveStyle, AgentTypeConfig, AgentsConfig, CompactionConfig, Config, ConfigLayer, ExecConfig,

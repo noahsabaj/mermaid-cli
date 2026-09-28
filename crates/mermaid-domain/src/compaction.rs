@@ -6,6 +6,8 @@
 //! messages. This keeps compaction observable instead of hiding it inside
 //! a provider adapter.
 
+use std::fmt::Write as _;
+
 use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 
@@ -13,7 +15,6 @@ use mermaid_model::constants::{
     COMPACTION_AUTO_THRESHOLD_PERCENT, COMPACTION_MAX_RESPONSE_RESERVE_TOKENS,
     COMPACTION_MIN_RESPONSE_RESERVE_TOKENS, COMPACTION_SUMMARIZER_INPUT_TOKEN_BUDGET,
     COMPACTION_SUMMARY_MAX_TOKENS, COMPACTION_TAIL_TOKEN_BUDGET, COMPACTION_TAIL_TURNS,
-    COMPACTION_TOOL_OUTPUT_MAX_CHARS,
 };
 use mermaid_model::models::{
     ChatMessage, ChatMessageKind, MessageRole, ReasoningLevel, TokenUsage,
@@ -33,6 +34,9 @@ pub enum CompactionTrigger {
     /// A response was truncated because the context window filled mid-turn;
     /// compact and resume the run (see the reducer's truncation-recovery path).
     TruncationRecovery,
+    /// The model called `compact_context`: it judged its own context noisy
+    /// enough to checkpoint before the next step.
+    ModelRequested,
 }
 
 impl CompactionTrigger {
@@ -43,6 +47,7 @@ impl CompactionTrigger {
             Self::AutoThreshold => "auto_threshold",
             Self::ContextLimitRetry => "context_limit_retry",
             Self::TruncationRecovery => "truncation_recovery",
+            Self::ModelRequested => "model_requested",
         }
     }
 
@@ -53,8 +58,17 @@ impl CompactionTrigger {
             Self::AutoThreshold => "automatic",
             Self::ContextLimitRetry => "context-limit retry",
             Self::TruncationRecovery => "truncation recovery",
+            Self::ModelRequested => "requested by the model",
         }
     }
+}
+
+/// A checkpoint the model asked for with `compact_context`, carried from the
+/// tool result to the next model call.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RequestedCompaction {
+    /// What the model wants the handoff to emphasize, if it said.
+    pub focus: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,7 +77,6 @@ pub struct CompactionPolicy {
     pub auto_threshold_percent: u8,
     pub tail_turns: usize,
     pub tail_token_budget: usize,
-    pub tool_output_max_chars: usize,
     pub summary_max_tokens: usize,
     pub summarizer_input_token_budget: usize,
     pub min_response_reserve_tokens: usize,
@@ -77,7 +90,6 @@ impl Default for CompactionPolicy {
             auto_threshold_percent: COMPACTION_AUTO_THRESHOLD_PERCENT,
             tail_turns: COMPACTION_TAIL_TURNS,
             tail_token_budget: COMPACTION_TAIL_TOKEN_BUDGET,
-            tool_output_max_chars: COMPACTION_TOOL_OUTPUT_MAX_CHARS,
             summary_max_tokens: COMPACTION_SUMMARY_MAX_TOKENS,
             summarizer_input_token_budget: COMPACTION_SUMMARIZER_INPUT_TOKEN_BUDGET,
             min_response_reserve_tokens: COMPACTION_MIN_RESPONSE_RESERVE_TOKENS,
@@ -227,6 +239,22 @@ impl CompactionRequest {
         }
     }
 
+    /// The checkpoint the model asked for, with its focus as the
+    /// instructions — the same slot a user's `/compact <focus>` fills.
+    #[must_use]
+    pub fn requested(
+        chat: ChatRequest,
+        requested: RequestedCompaction,
+        policy: CompactionPolicy,
+    ) -> Self {
+        Self {
+            chat,
+            trigger: CompactionTrigger::ModelRequested,
+            instructions: requested.focus,
+            policy,
+        }
+    }
+
     #[must_use]
     pub fn auto(chat: ChatRequest, trigger: CompactionTrigger, policy: CompactionPolicy) -> Self {
         Self {
@@ -290,7 +318,6 @@ impl CompactionBoundary {
     #[must_use]
     pub fn fingerprint_of(message: &ChatMessage) -> String {
         use sha2::{Digest, Sha256};
-        use std::fmt::Write as _;
         let mut hasher = Sha256::new();
         hasher.update(format!("{:?}", message.role).as_bytes());
         hasher.update([0u8]);
@@ -522,13 +549,12 @@ pub fn prepare_compaction(
     }
     summary_images.reverse();
 
-    let history = format_history_excerpt(
+    let history_excerpt = format_history_excerpt(
         &archived_messages,
-        request.policy,
         all_images.len(),
         summary_images.len(),
+        remaining_tokens.saturating_mul(4),
     );
-    let history_excerpt = truncate_middle(&history, remaining_tokens.saturating_mul(4));
 
     Ok(PreparedCompaction {
         archived_messages,
@@ -568,6 +594,7 @@ pub fn build_summary_request(
         resolved_max_output: base.resolved_max_output,
         output_schema: None,
         suppress_auto_compact: false,
+        requested_compaction: None,
     }
 }
 
@@ -795,6 +822,17 @@ pub(crate) fn drop_orphan_tool_calls(messages: &mut Vec<ChatMessage>, preserve_p
     });
 }
 
+/// Where the verbatim tail starts: the last `tail_turns` user turns, shrunk
+/// turn by turn until it fits `tail_token_budget`.
+///
+/// When a single user turn is itself over budget — one prompt followed by a
+/// long agentic run, the normal shape of a big task — the tail keeps shrinking
+/// at assistant-message boundaries inside that turn. Without this the split
+/// landed on the run's only user message, the head was empty, and the run
+/// could never be compacted however full the window got. An assistant message
+/// is a safe cut: its tool results follow it, so no call is separated from its
+/// result, and adapters already coalesce the checkpoint's assistant receipt
+/// with an assistant message that follows it.
 fn tail_start_index(messages: &[ChatMessage], policy: CompactionPolicy) -> Option<usize> {
     let mut user_turns = 0usize;
     let mut start = None;
@@ -808,14 +846,18 @@ fn tail_start_index(messages: &[ChatMessage], policy: CompactionPolicy) -> Optio
         }
     }
     let mut start = start?;
-    while estimate_messages_tokens(&messages[start..]) > policy.tail_token_budget {
-        let next_user = messages
+    let next_boundary = |from: usize, role: MessageRole| {
+        messages
             .iter()
             .enumerate()
-            .skip(start + 1)
-            .find(|(_, msg)| msg.role == MessageRole::User)
-            .map(|(idx, _)| idx);
-        match next_user {
+            .skip(from + 1)
+            .find(|(_, msg)| msg.role == role)
+            .map(|(idx, _)| idx)
+    };
+    while estimate_messages_tokens(&messages[start..]) > policy.tail_token_budget {
+        match next_boundary(start, MessageRole::User)
+            .or_else(|| next_boundary(start, MessageRole::Assistant))
+        {
             Some(idx) => start = idx,
             None => break,
         }
@@ -823,77 +865,135 @@ fn tail_start_index(messages: &[ChatMessage], policy: CompactionPolicy) -> Optio
     Some(start)
 }
 
+/// Project the archived messages into the summarizer's excerpt, fitted to
+/// `max_chars`.
+///
+/// Every message keeps its header, and when the whole history does not fit,
+/// each message body is trimmed to one shared cap derived from the budget: the
+/// largest cap at which everything fits. Short messages stay whole and only
+/// the longest are cut, so no fixed per-message constant decides what the
+/// summarizer sees, and a larger window simply shows more. Nothing here is
+/// lost for good: the originals stay in the session log, which the model can
+/// search after compaction.
 fn format_history_excerpt(
     messages: &[ChatMessage],
-    policy: CompactionPolicy,
     total_images: usize,
     included_images: usize,
+    max_chars: usize,
 ) -> String {
-    let mut out = String::new();
+    let mut preamble = String::new();
     if total_images > 0 {
-        out.push_str(&format!(
+        let _ = write!(
+            preamble,
             "\n[Visual context: {included_images} of {total_images} archived image attachment(s) supplied with this request; {} omitted by the input budget.]\n",
             total_images.saturating_sub(included_images)
-        ));
+        );
     }
-    for (idx, msg) in messages.iter().enumerate() {
-        let role = match msg.role {
-            MessageRole::User => "USER",
-            MessageRole::Assistant => "ASSISTANT",
-            MessageRole::System => "SYSTEM",
-            MessageRole::Tool => "TOOL",
-        };
-        out.push_str(&format!("\n\n--- MESSAGE {} [{}] ---\n", idx + 1, role));
-        if msg.kind != ChatMessageKind::Normal {
-            out.push_str(&format!("kind: {:?}\n", msg.kind));
+    let entries: Vec<(String, String)> = messages
+        .iter()
+        .enumerate()
+        .map(|(idx, msg)| excerpt_entry(idx, msg))
+        .collect();
+
+    let fixed = preamble.chars().count()
+        + entries
+            .iter()
+            .map(|(header, _)| header.chars().count())
+            .sum::<usize>();
+    let body_lengths: Vec<usize> = entries
+        .iter()
+        .map(|(_, body)| body.chars().count())
+        .collect();
+    let cap = fair_share_cap(&body_lengths, max_chars.saturating_sub(fixed));
+
+    let mut out = preamble;
+    for (header, body) in &entries {
+        out.push_str(header);
+        match cap {
+            Some(cap) => out.push_str(&truncate_middle(body, cap)),
+            None => out.push_str(body),
         }
-        if let Some(name) = &msg.tool_name {
-            out.push_str(&format!("tool_name: {name}\n"));
-        }
-        if let Some(id) = &msg.tool_call_id {
-            out.push_str(&format!("tool_call_id: {id}\n"));
-        }
-        if let Some(calls) = &msg.tool_calls {
-            for call in calls {
-                let mut arguments = call.function.arguments.clone();
-                mermaid_model::utils::redact_json(&mut arguments);
-                let arguments = truncate_middle(
-                    &arguments.to_string(),
-                    policy.tool_output_max_chars.saturating_mul(4),
-                );
-                out.push_str(&format!(
-                    "tool_call: id={} name={} arguments={}\n",
-                    call.id.as_deref().unwrap_or("<missing>"),
-                    call.function.name,
-                    arguments
-                ));
-            }
-        }
-        if let Some(images) = &msg.images
-            && !images.is_empty()
-        {
-            out.push_str(&format!(
-                "[{} image attachment(s) referenced above]\n",
-                images.len()
-            ));
-        }
-        for action in &msg.actions {
-            out.push_str(&format!(
-                "action: {}({}) duration={:?}\n",
-                action.action_type, action.target, action.duration_seconds
-            ));
-            if let Some(metadata) = &action.metadata {
-                out.push_str(&format!("action_metadata: {metadata:?}\n"));
-            }
-        }
-        let cap = if msg.role == MessageRole::Tool {
-            policy.tool_output_max_chars
-        } else {
-            policy.tool_output_max_chars.saturating_mul(4)
-        };
-        out.push_str(&truncate_middle(&msg.content, cap));
     }
-    out
+    // Headers alone can outgrow a tiny budget; the middle goes first then.
+    truncate_middle(&out, max_chars)
+}
+
+/// One archived message as (header, body) for the excerpt. The header is the
+/// part that always survives fitting.
+fn excerpt_entry(idx: usize, msg: &ChatMessage) -> (String, String) {
+    let role = match msg.role {
+        MessageRole::User => "USER",
+        MessageRole::Assistant => "ASSISTANT",
+        MessageRole::System => "SYSTEM",
+        MessageRole::Tool => "TOOL",
+    };
+    let mut header = format!("\n\n--- MESSAGE {} [{}] ---\n", idx + 1, role);
+    if msg.kind != ChatMessageKind::Normal {
+        let _ = writeln!(header, "kind: {:?}", msg.kind);
+    }
+    if let Some(name) = &msg.tool_name {
+        let _ = writeln!(header, "tool_name: {name}");
+    }
+    if let Some(id) = &msg.tool_call_id {
+        let _ = writeln!(header, "tool_call_id: {id}");
+    }
+    let mut body = String::new();
+    if let Some(calls) = &msg.tool_calls {
+        for call in calls {
+            let mut arguments = call.function.arguments.clone();
+            mermaid_model::utils::redact_json(&mut arguments);
+            let _ = writeln!(
+                body,
+                "tool_call: id={} name={} arguments={}",
+                call.id.as_deref().unwrap_or("<missing>"),
+                call.function.name,
+                arguments
+            );
+        }
+    }
+    if let Some(images) = &msg.images
+        && !images.is_empty()
+    {
+        let _ = writeln!(
+            body,
+            "[{} image attachment(s) referenced above]",
+            images.len()
+        );
+    }
+    for action in &msg.actions {
+        let _ = writeln!(
+            body,
+            "action: {}({}) duration={:?}",
+            action.action_type, action.target, action.duration_seconds
+        );
+        if let Some(metadata) = &action.metadata {
+            let _ = writeln!(body, "action_metadata: {metadata:?}");
+        }
+    }
+    body.push_str(&msg.content);
+    (header, body)
+}
+
+/// The largest per-item cap at which `lengths` fit in `budget`, or `None`
+/// when they already fit uncapped. Items shorter than the cap are untouched,
+/// so their unused share goes to the longer ones.
+fn fair_share_cap(lengths: &[usize], budget: usize) -> Option<usize> {
+    if lengths.iter().sum::<usize>() <= budget {
+        return None;
+    }
+    let mut sorted = lengths.to_vec();
+    sorted.sort_unstable();
+    let mut remaining = budget;
+    let mut left = sorted.len();
+    for len in sorted {
+        let share = remaining / left;
+        if len > share {
+            return Some(share);
+        }
+        remaining -= len;
+        left -= 1;
+    }
+    None
 }
 
 fn estimate_message_tokens(msg: &ChatMessage) -> usize {
@@ -925,7 +1025,8 @@ fn truncate_middle(text: &str, max_chars: usize) -> String {
     if max_chars < 128 {
         return text.chars().take(max_chars).collect();
     }
-    let marker = "\n\n[... truncated during context compaction ...]\n\n";
+    let marker =
+        "\n\n[... truncated for the checkpoint; the full text stays in the session log ...]\n\n";
     let keep = max_chars.saturating_sub(marker.len());
     let head = keep / 2;
     let tail = keep.saturating_sub(head);
@@ -969,6 +1070,7 @@ mod tests {
             resolved_max_output: None,
             output_schema: None,
             suppress_auto_compact: false,
+            requested_compaction: None,
         }
     }
 
@@ -1659,6 +1761,80 @@ mod tests {
                 .any(|m| m.content == "calling a tool"),
             "the assistant text is kept even though the orphan call is dropped"
         );
+    }
+
+    /// One prompt followed by a long agentic run: the only user message is
+    /// the first, so a split on user turns alone archives nothing. The tail
+    /// must shrink at assistant boundaries instead, keeping each tool call
+    /// with its result.
+    #[test]
+    fn a_single_prompt_run_splits_inside_the_run() {
+        let mut messages = vec![ChatMessage::user("refactor the parser")];
+        for i in 0..30 {
+            let mut call = ChatMessage::assistant(format!("step {i}"));
+            call.tool_calls = Some(vec![tool_call(&format!("call_{i}"), "read_file")]);
+            messages.push(call);
+            messages.push(ChatMessage::tool(
+                format!("call_{i}"),
+                "read_file",
+                "line of source\n".repeat(200),
+            ));
+        }
+        let request =
+            CompactionRequest::manual(request_with(messages), None, CompactionPolicy::default());
+        let prepared = prepare_compaction(&request, Some(200_000)).expect("the run compacts");
+        assert!(prepared.archived_messages.len() > 1);
+        assert_eq!(prepared.preserved_messages[0].role, MessageRole::Assistant);
+        assert!(
+            estimate_messages_tokens(&prepared.preserved_messages)
+                <= CompactionPolicy::default().tail_token_budget
+        );
+        // Every preserved call still has its result, and every result its call.
+        let calls: Vec<&str> = prepared
+            .preserved_messages
+            .iter()
+            .flat_map(|m| m.tool_calls.iter().flatten())
+            .filter_map(|c| c.id.as_deref())
+            .collect();
+        let results: Vec<&str> = prepared
+            .preserved_messages
+            .iter()
+            .filter_map(|m| m.tool_call_id.as_deref())
+            .collect();
+        assert!(!calls.is_empty());
+        assert_eq!(calls, results);
+    }
+
+    #[test]
+    fn fair_share_cap_trims_only_the_longest() {
+        assert_eq!(fair_share_cap(&[10, 20, 30], 60), None);
+        // 10 and 20 fit whole; the 1,000 gets what is left.
+        assert_eq!(fair_share_cap(&[10, 1_000, 20], 130), Some(100));
+        // Two big ones split what the small one leaves.
+        assert_eq!(fair_share_cap(&[1_000, 10, 1_000], 210), Some(100));
+        assert_eq!(fair_share_cap(&[5, 5], 0), Some(0));
+    }
+
+    /// Over budget, every message keeps its header and the short ones stay
+    /// whole; only the oversized tool output is cut.
+    #[test]
+    fn excerpt_fits_the_budget_by_trimming_the_longest_messages() {
+        let messages = vec![
+            ChatMessage::user("keep this whole"),
+            ChatMessage::tool("c1", "execute_command", "noise ".repeat(20_000)),
+            ChatMessage::assistant("and this too"),
+        ];
+        let excerpt = format_history_excerpt(&messages, 0, 0, 4_000);
+        assert!(excerpt.chars().count() <= 4_000);
+        for n in 1..=3 {
+            assert!(excerpt.contains(&format!("--- MESSAGE {n} ")), "{excerpt}");
+        }
+        assert!(excerpt.contains("keep this whole"));
+        assert!(excerpt.contains("and this too"));
+        assert!(excerpt.contains("full text stays in the session log"));
+        // Under budget nothing is cut, however long a message is.
+        let roomy = format_history_excerpt(&messages, 0, 0, 1_000_000);
+        assert!(!roomy.contains("full text stays in the session log"));
     }
 
     #[test]

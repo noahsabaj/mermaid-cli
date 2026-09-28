@@ -201,6 +201,21 @@ pub enum ToolMetadata {
         #[serde(default)]
         remembered: bool,
     },
+    /// `context_archive`: a search or read over the session's own log.
+    ContextArchive {
+        #[serde(default)]
+        query: Option<String>,
+        /// Messages matched (search) or returned (list/read).
+        #[serde(default)]
+        result_count: usize,
+    },
+    /// `compact_context`: the model asked for a checkpoint before its next
+    /// step. The reducer turns this into the next request's
+    /// `requested_compaction`.
+    CompactionRequest {
+        #[serde(default)]
+        focus: Option<String>,
+    },
     Custom {
         name: String,
         data: Value,

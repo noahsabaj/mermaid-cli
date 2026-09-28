@@ -6,7 +6,8 @@ The tool table lives in the [README](../README.md#tools). This covers the behavi
 
 Always registered: `read_file`, `write_file`, `edit_file`, `apply_patch`, `delete_file`,
 `create_directory`, `execute_command`, `memory`, `agent`, the checklist trio (`task_create`,
-`task_update`, `task_list`), and `ask_user_question`.
+`task_update`, `task_list`), `ask_user_question`, and the context pair (`context_archive`,
+`compact_context`, below).
 `web_search` and `web_fetch` register when their backend is viable (below); MCP tools when a
 server is configured.
 
@@ -19,6 +20,19 @@ the resolved root, snapshot a checkpoint for `/undo`, and replay through the app
 Paths outside the project (absolute, or traversing out of it) resolve to where they point and
 are gated as external access: `read_only` denies, `ask` prompts with a per-directory
 "don't ask again", `auto` classifies, `full_access` allows. See the README's [Safety](../README.md#safety) section.
+
+## Context tools
+
+Compaction summarizes older history out of the working context, but nothing is deleted: every
+message stays in the session's `.mermaid/conversations/<id>.jsonl` log. `context_archive`
+searches that log (case-insensitive `query`), reads any message back whole (`message`, paged
+with `char_offset` past 32,000 characters), or lists it. Messages are numbered in the order they
+happened and marked with the compaction that removed them, so the checkpoint summary is never
+the only copy of anything.
+
+`compact_context` lets the model checkpoint when it judges its context noisy, with an optional
+`focus` for the handoff; it runs before the model's next call. The automatic trigger
+(`[compaction] auto_threshold_percent`, 85% by default) stays as the safety net.
 
 ## MCP tools
 

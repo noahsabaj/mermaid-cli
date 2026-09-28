@@ -108,6 +108,15 @@ pub fn handle_tool_finished(
                     UsageFold::Subagent,
                 );
             }
+            // The model asked to checkpoint: the follow-up model call this
+            // turn ends in compacts first (see `push_call_model`).
+            if outcome.is_success()
+                && let crate::ToolMetadata::CompactionRequest { focus } = &outcome.metadata.detail
+            {
+                state.runtime.requested_compaction = Some(crate::RequestedCompaction {
+                    focus: focus.clone(),
+                });
+            }
             // Fold this mutation's exact line counts into the run totals for
             // the end-of-run `+N/-M` summary (zero for non-mutating tools).
             state
@@ -292,6 +301,8 @@ pub fn push_call_model(state: &mut State, cmds: &mut Vec<Cmd>, turn: TurnId) {
     let request = build_chat_request(state);
     state.pending_hook_context.clear();
     state.pending_task_notices.clear();
+    // A requested checkpoint rides exactly one dispatch, like hook context.
+    state.runtime.requested_compaction = None;
     cmds.push(Cmd::CallModel { turn, request });
 }
 

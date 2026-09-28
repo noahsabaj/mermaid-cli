@@ -220,3 +220,49 @@ async fn a_conversation_too_short_to_compact_is_a_note_not_an_error() {
     );
     runner.shutdown().await;
 }
+
+#[tokio::test]
+async fn a_model_requested_checkpoint_runs_before_the_call_whatever_the_fill() {
+    // Nowhere near the threshold, but the model asked (`compact_context`):
+    // the checkpoint runs first, then the turn goes out on the compacted
+    // history.
+    let model = ScriptedModel::new([
+        Turn::say("Handoff: parser rewrite, lexer done. Marker: requested"),
+        Turn::say("continuing"),
+    ]);
+    let providers = Arc::new(ProviderFactory::with_seeded_providers(
+        mermaid_domain::Config::default(),
+        [(STUB.to_string(), model.clone() as Arc<dyn ModelProvider>)],
+    ));
+    let (mut runner, mut rx) =
+        EffectRunner::pair_from(PathBuf::from("."), providers, Arc::new(ToolRegistry::new()));
+    let mut request = compaction_request().chat;
+    request.requested_compaction = Some(mermaid_domain::RequestedCompaction {
+        focus: Some("the parser".to_string()),
+    });
+    runner.dispatch(Cmd::CallModel {
+        turn: TurnId(1),
+        request,
+    });
+
+    let finished = tokio::time::timeout(Duration::from_secs(20), async {
+        while let Some(msg) = rx.recv().await {
+            match msg {
+                Msg::CompactionFinished { result, .. } => return result,
+                Msg::CompactionFailed { message, .. } => panic!("compaction failed: {message}"),
+                _ => {},
+            }
+        }
+        panic!("the runner closed without a compaction result");
+    })
+    .await
+    .expect("no compaction result");
+    assert_eq!(
+        finished.record.trigger,
+        mermaid_domain::CompactionTrigger::ModelRequested
+    );
+    assert_eq!(finished.record.focus.as_deref(), Some("the parser"));
+    assert!(landed_summary(&finished).contains("Marker: requested"));
+    runner.shutdown().await;
+    assert_eq!(model.calls(), 2, "the checkpoint, then the turn itself");
+}
