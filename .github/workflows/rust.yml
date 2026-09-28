@@ -389,6 +389,8 @@ jobs:
         run: "cargo nextest run --test integration --run-ignored only it::sandbox_network::"
       - name: Sandbox filesystem confinement (ignored, Linux)
         run: "cargo nextest run --test integration --run-ignored only it::sandbox_fs::"
+      - name: Sandbox read-only containment (ignored, Linux; skips below kernel 6.12)
+        run: "cargo nextest run --test integration --run-ignored only it::sandbox_read_only::"
       - name: Self-test (deterministic, model-free)
         run: cargo run --bin mermaid -- self-test --format json
 

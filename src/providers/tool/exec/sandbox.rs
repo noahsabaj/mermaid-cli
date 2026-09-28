@@ -52,6 +52,13 @@ pub(crate) fn sandbox_probes() -> (bool, bool) {
     })
 }
 
+/// Whether `read_only` mode can run commands inside the read-only OS
+/// sandbox here. Probed once per process, like [`sandbox_probes`].
+pub(crate) fn read_only_probe() -> bool {
+    static PROBE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *PROBE.get_or_init(mermaid_runtime::read_only_containment_available)
+}
+
 /// SIGSYS on Linux (`x86_64/aarch64`) — the signal the seccomp kill-switch raises.
 pub(crate) const SANDBOX_KILL_SIGNAL: i32 = 31;
 
@@ -64,6 +71,11 @@ pub(crate) enum DenialKind {
     Network,
     Filesystem,
     Ambiguous,
+    /// The read-only sandbox's network kill-switch (precise SIGSYS).
+    ReadOnlyNetwork,
+    /// A permission error under the read-only sandbox: a write, a socket, a
+    /// metadata change or an outward signal, most likely.
+    ReadOnly,
 }
 
 /// Map a completed run onto a sandbox-denial kind, gated on which policies
@@ -77,11 +89,15 @@ pub(crate) enum DenialKind {
 /// - macOS (Seatbelt): both dimensions are hedged `EPERM` "Operation not
 ///   permitted" text with no signal; with both policies active the match is
 ///   [`DenialKind::Ambiguous`].
-pub(crate) fn detect_denial(
-    run: &CommandRunOutput,
-    sandbox_network: bool,
-    sandbox_fs: bool,
-) -> Option<DenialKind> {
+pub(crate) fn detect_denial(run: &CommandRunOutput, sandbox: &SandboxPlan) -> Option<DenialKind> {
+    if sandbox.read_only {
+        // Linux-only for now, where the network half is the precise SIGSYS.
+        if is_sigsys_denial(run) {
+            return Some(DenialKind::ReadOnlyNetwork);
+        }
+        return is_permission_denial(run).then_some(DenialKind::ReadOnly);
+    }
+    let (sandbox_network, sandbox_fs) = (sandbox.network, sandbox.fs);
     if cfg!(target_os = "linux") {
         if sandbox_network && is_sigsys_denial(run) {
             return Some(DenialKind::Network);
@@ -121,6 +137,15 @@ pub(crate) const FS_DENIED_MESSAGE: &str = "Command failed with a permission err
 /// policies active — the EPERM signature cannot say which one fired). No
 /// emojis.
 pub(crate) const AMBIGUOUS_DENIED_MESSAGE: &str = "Command failed with a permission error while the network and filesystem sandboxes were active (--no-network / --confine-fs); a network access or a write outside the allowed directories was likely denied. Write inside the project, or re-run without the sandbox flags to allow it.";
+
+/// Message shown when the read-only sandbox's network kill-switch stops a
+/// command (the precise SIGSYS signature). No emojis.
+pub(crate) const READ_ONLY_NETWORK_DENIED_MESSAGE: &str = "Blocked by the read-only sandbox: this command tried to open an internet socket, and read_only mode runs every command with network access off. Switch to another safety mode (Shift+Tab or /safety) to allow network access.";
+
+/// Message shown when a command fails with a permission error inside the
+/// read-only sandbox. Hedged ("likely") because the kernel's refusals are
+/// ordinary EACCES / EPERM text. No emojis.
+pub(crate) const READ_ONLY_DENIED_MESSAGE: &str = "Command failed with a permission error inside the read-only sandbox, so it likely tried to change something. read_only mode runs every command with file writes, metadata changes, sockets (network and local daemons), IPC, and signals to other processes denied by the OS. Reading works; to make changes, switch to another safety mode (Shift+Tab or /safety).";
 
 /// Whether a completed command was terminated by the Linux seccomp
 /// kill-switch: the shell itself died with SIGSYS, or (more often) it reaped a

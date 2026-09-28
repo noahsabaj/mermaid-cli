@@ -817,6 +817,16 @@ fn run_self_test(config: &Config, format: OutputFormat, keep_workspace: bool) ->
             "{fs_check}: {}",
             if fs_sandbox_available { "yes" } else { "no" }
         ),
+        // Informational: a "no" is expected on macOS, Windows and Linux
+        // kernels before 6.12, where read_only mode keeps the allowlists.
+        format!(
+            "read_only mode runs commands in the OS sandbox: {}",
+            if mermaid_runtime::read_only_containment_available() {
+                "yes"
+            } else {
+                "no (shell allowlists decide)"
+            }
+        ),
     ];
     // Platforms with a sandbox backend must have it working; platforms
     // without one truthfully report "no" above without failing the whole self-test.

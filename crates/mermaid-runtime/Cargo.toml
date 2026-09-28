@@ -89,9 +89,13 @@ libc = "0.2"
 # supplies the syscall/AF_* constants and the fork/socket/waitpid used by the
 # sandbox unit tests. No system library — matches the FFI-free `rustix` style
 # already used by `hardening.rs`.
+#
+# `rustix`'s `thread` feature adds `capset`, which read-only containment uses
+# to drop every capability before running a command.
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = "0.4"
 libc = "0.2"
+rustix = { version = "1.1.4", features = ["thread"] }
 seccompiler = "0.5"
 
 [dev-dependencies]
