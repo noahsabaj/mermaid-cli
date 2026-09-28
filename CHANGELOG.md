@@ -133,9 +133,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   converts counts to floats exactly, its timeout is written in minutes, its
   public helpers carry `#[must_use]` and `# Panics` docs, the mock provider
   drops its lock before building a reply, three tool signatures stop binding
-  `_`-prefixed parameters that `async_trait` re-binds, and a test drops a
-  redundant clone. The baseline only moves down: 2039 occurrences to 2035. No
-  behaviour changes.
+  `_`-prefixed parameters that `async_trait` re-binds, a test drops a
+  redundant clone, and the adapters' test-only mock HTTP provider declares its
+  types `pub` inside its private module instead of `pub(crate)`. The baseline
+  only moves down: 2039 occurrences to 2033. No behaviour changes.
 
 - **The pedantic lint debt is back under its baseline.** Eleven lints had drifted
   above `.github/baselines/clippy_pedantic.txt` — 22 occurrences in total — and

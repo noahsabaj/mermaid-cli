@@ -3,7 +3,7 @@
 # Debt that predates the guard. This file may only SHRINK.
 # Regenerate with: just clippy-debt-record
 #
-# 77 keys / 2035 occurrences
+# 77 keys / 2033 occurrences
 clippy::assigning_clones 24
 clippy::bool_to_int_with_if 2
 clippy::borrow_as_ptr 2
@@ -53,7 +53,7 @@ clippy::panic 136
 clippy::range_plus_one 2
 clippy::redundant_clone 37
 clippy::redundant_closure_for_method_calls 145
-clippy::redundant_pub_crate 185
+clippy::redundant_pub_crate 183
 clippy::ref_option 3
 clippy::return_self_not_must_use 6
 clippy::semicolon_if_nothing_returned 7
