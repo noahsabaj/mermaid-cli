@@ -149,6 +149,10 @@ max_truncation_recoveries = 3
 # compaction entirely to `/compact`.
 # auto_enabled = true
 # auto_threshold_percent = 85        # clamped to 1..=100
+# Let a provider that compacts server-side (Anthropic) do the automatic
+# compaction at the same threshold, with its own summary. A model that
+# refuses it falls back to Mermaid's. false always compacts client-side.
+# provider_native = true
 # tail_turns = 2                     # user turns kept verbatim (min 1)
 # tail_token_budget = 8000           # token ceiling on that tail
 # summary_max_tokens = 8000          # ceiling on the checkpoint produced

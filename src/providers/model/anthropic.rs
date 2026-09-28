@@ -65,17 +65,23 @@ impl ModelProvider for AnthropicProvider {
     /// {id}` → `max_input_tokens` window + `max_tokens` output ceiling).
     /// Cache-first via `provider_probes` (TTL-bounded), one live fetch on a
     /// miss; a fetch failure resolves all-`None` (adapter floors apply).
+    /// Also whether the model takes server-side compaction, which it does
+    /// unless it refused it here or in an earlier session.
     async fn resolve_context_window(&self, request: &ChatRequest) -> ContextSizing {
         let _ = request;
         let model = Model::name(&self.adapter).to_string();
         let limits =
             resolve_limits_cached("anthropic", &model, || self.adapter.fetch_model_limits()).await;
         let window = limits.as_ref().and_then(|l| l.max_context_tokens);
+        self.rejections
+            .seed("anthropic", &model, self.adapter.param_memory())
+            .await;
         ContextSizing {
             model_max: window,
             effective: window,
             source: None,
             max_output: limits.as_ref().and_then(|l| l.max_output_tokens),
+            compacts_natively: self.adapter.compacts_natively(),
         }
     }
 

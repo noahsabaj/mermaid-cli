@@ -81,9 +81,7 @@ async fn a_provider_continuation_rides_the_next_request() {
     // assistant message, so turn two carries it upstream. Nothing errors when
     // this breaks — the model just quietly loses its reasoning.
     let model = ScriptedModel::new([Turn::say("Thinking about it.").with_continuation(
-        ProviderContinuation::Anthropic {
-            signature: "opaque-thinking-signature".to_string(),
-        },
+        ProviderContinuation::anthropic("opaque-thinking-signature".to_string()),
     )]);
     let (mut runner, mut rx) = runner_with(model.clone());
 
@@ -102,9 +100,9 @@ async fn a_provider_continuation_rides_the_next_request() {
     .await;
     assert_eq!(
         continuation,
-        Some(ProviderContinuation::Anthropic {
-            signature: "opaque-thinking-signature".to_string()
-        }),
+        Some(ProviderContinuation::anthropic(
+            "opaque-thinking-signature".to_string()
+        )),
         "the effect layer must surface the provider's continuation to the reducer"
     );
     runner.shutdown().await;
@@ -118,9 +116,7 @@ async fn a_continuation_attached_to_history_is_sent_back_upstream() {
     let (mut runner, mut rx) = runner_with(model.clone());
 
     let prior = ChatMessage::assistant("Step one done.").with_provider_continuation(
-        ProviderContinuation::Anthropic {
-            signature: "carried-signature".to_string(),
-        },
+        ProviderContinuation::anthropic("carried-signature".to_string()),
     );
     runner.dispatch(Cmd::CallModel {
         turn: TurnId(1),
@@ -144,9 +140,9 @@ async fn a_continuation_attached_to_history_is_sent_back_upstream() {
         .collect::<Vec<_>>();
     assert_eq!(
         carried,
-        vec![ProviderContinuation::Anthropic {
-            signature: "carried-signature".to_string()
-        }],
+        vec![ProviderContinuation::anthropic(
+            "carried-signature".to_string()
+        )],
         "the request that left the process dropped the continuation"
     );
     runner.shutdown().await;

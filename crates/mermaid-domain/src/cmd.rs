@@ -387,6 +387,10 @@ pub struct ChatRequest {
     /// dispatch: compact before sending this request, whatever the fill.
     /// Rides on the request for the same reason `suppress_auto_compact` does.
     pub requested_compaction: Option<crate::RequestedCompaction>,
+    /// Let the provider compact this turn itself. Set by the effect layer,
+    /// never the reducer, when `[compaction] provider_native` is on and the
+    /// provider has not refused it; the automatic threshold is then skipped.
+    pub native_compaction: Option<mermaid_model::models::NativeCompaction>,
 }
 
 /// Provider-agnostic tool definition sent in the request. Concrete
@@ -439,6 +443,7 @@ impl From<&ChatRequest> for mermaid_model::models::ModelConfig {
             resolved_context_window: request.resolved_context_window,
             resolved_max_output: request.resolved_max_output,
             output_schema: request.output_schema.clone(),
+            native_compaction: request.native_compaction,
             ..Self::default()
         }
     }
@@ -769,6 +774,7 @@ mod tests {
             output_schema: None,
             suppress_auto_compact: false,
             requested_compaction: None,
+            native_compaction: None,
         };
         assert!(
             Cmd::CallModel {
@@ -835,6 +841,7 @@ mod model_config_tests {
             output_schema: Some(serde_json::json!({"type": "object"})),
             suppress_auto_compact: false,
             requested_compaction: None,
+            native_compaction: None,
         };
         let cfg = ModelConfig::from(&req);
         assert_eq!(cfg.model, "anthropic/claude-test");

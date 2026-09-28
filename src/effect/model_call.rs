@@ -138,6 +138,14 @@ pub(super) async fn dispatch_call_model(
     // one path the user never invokes by hand, so it is the one that most needs
     // to honor their settings.
     let policy = factory.config().compaction.policy();
+    // Where the provider compacts server-side, it takes the automatic
+    // threshold over: same trigger point, its summary instead of ours.
+    let native_compaction = native_compaction_for(
+        sizing.compacts_natively,
+        factory.config(),
+        policy,
+        max_context_tokens,
+    );
     let mut compacted_before_stream = false;
     // A checkpoint the model asked for (`compact_context`) runs whatever the
     // fill; the threshold is the safety net for when it doesn't ask.
@@ -147,6 +155,7 @@ pub(super) async fn dispatch_call_model(
             requested,
             policy,
         )),
+        None if native_compaction.is_some() => None,
         None => mermaid_domain::should_auto_compact(&context_snapshot, &request, policy)
             .is_ok()
             .then(|| {
@@ -216,6 +225,10 @@ pub(super) async fn dispatch_call_model(
             Err(_) => {},
         }
     }
+
+    // Set after any client-side compaction above, whose summary call must not
+    // inherit it.
+    request.native_compaction = native_compaction;
 
     // Build a StreamContext — provider writes typed events into the
     // internal sink; we relay each to the reducer as a Msg.
@@ -504,4 +517,23 @@ pub(super) async fn run_provider_error_hook(
         }),
     )
     .await;
+}
+
+/// Server-side compaction for this turn: when automatic compaction is on, the
+/// user lets the provider do it (`[compaction] provider_native`), the window is
+/// known, and the provider can. It triggers at the same fill the client-side
+/// threshold would.
+fn native_compaction_for(
+    provider_can: bool,
+    config: &Config,
+    policy: mermaid_domain::CompactionPolicy,
+    window: Option<usize>,
+) -> Option<mermaid_model::models::NativeCompaction> {
+    if !(provider_can && policy.auto_enabled && config.compaction.provider_native) {
+        return None;
+    }
+    let window = window?;
+    Some(mermaid_model::models::NativeCompaction {
+        trigger_tokens: window * usize::from(policy.auto_threshold_percent) / 100,
+    })
 }

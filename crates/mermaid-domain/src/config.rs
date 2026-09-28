@@ -589,6 +589,12 @@ pub struct CompactionConfig {
     /// context limit then becomes the only backstop.
     pub auto_enabled: bool,
 
+    /// Let a provider that compacts server-side do the automatic compaction
+    /// instead (Anthropic today), at the same threshold. Its summary replaces
+    /// Mermaid's for those turns, and a model that refuses it falls back to
+    /// Mermaid's own. `false` always compacts client-side.
+    pub provider_native: bool,
+
     /// Window fill (percent) at which auto-compaction triggers. Clamped to
     /// `1..=100`; a value of 100 effectively means "only when the response
     /// reserve no longer fits".
@@ -627,6 +633,7 @@ impl Default for CompactionConfig {
             max_truncation_recoveries:
                 mermaid_model::constants::COMPACTION_MAX_TRUNCATION_RECOVERIES,
             auto_enabled: policy.auto_enabled,
+            provider_native: true,
             auto_threshold_percent: policy.auto_threshold_percent,
             tail_turns: policy.tail_turns,
             tail_token_budget: policy.tail_token_budget,

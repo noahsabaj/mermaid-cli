@@ -501,8 +501,8 @@ pub fn estimate_context_usage_for_request(
         .as_deref()
         .map(approx_tokens)
         .unwrap_or(0);
-    let message_tokens = request
-        .messages
+    // A server-side compaction replaced everything before it for the model.
+    let message_tokens = ChatMessage::since_provider_compaction(&request.messages)
         .iter()
         .map(|msg| {
             let image_chars = msg

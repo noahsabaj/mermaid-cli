@@ -17,7 +17,7 @@ use mermaid_model::constants::{
     COMPACTION_SUMMARY_MAX_TOKENS, COMPACTION_TAIL_TOKEN_BUDGET, COMPACTION_TAIL_TURNS,
 };
 use mermaid_model::models::{
-    ChatMessage, ChatMessageKind, MessageRole, ReasoningLevel, TokenUsage,
+    ChatMessage, ChatMessageKind, MessageRole, ProviderContinuation, ReasoningLevel, TokenUsage,
 };
 
 use super::cmd::ChatRequest;
@@ -595,6 +595,7 @@ pub fn build_summary_request(
         output_schema: None,
         suppress_auto_compact: false,
         requested_compaction: None,
+        native_compaction: None,
     }
 }
 
@@ -639,7 +640,15 @@ pub fn build_replacement_messages(
     let mut messages = Vec::with_capacity(2 + prepared.preserved_messages.len());
     messages.push(user);
     messages.push(assistant);
-    messages.extend(prepared.preserved_messages.clone());
+    // A provider's own compaction block left in the kept tail would make the
+    // API discard this checkpoint with everything else before it. The
+    // checkpoint already covers that history, so the block goes.
+    messages.extend(prepared.preserved_messages.iter().cloned().map(|mut m| {
+        m.provider_continuation = m
+            .provider_continuation
+            .and_then(ProviderContinuation::without_compaction);
+        m
+    }));
     messages
 }
 
@@ -1071,6 +1080,7 @@ mod tests {
             output_schema: None,
             suppress_auto_compact: false,
             requested_compaction: None,
+            native_compaction: None,
         }
     }
 
@@ -1864,5 +1874,46 @@ mod tests {
         assert_eq!(messages[0].kind, ChatMessageKind::ContextCheckpoint);
         assert!(messages[0].content.contains(CHECKPOINT_MARKER));
         assert_eq!(messages[2].content, "new");
+    }
+
+    #[test]
+    fn a_provider_compaction_block_does_not_survive_into_the_kept_tail() {
+        // Left in, the API would read it in place of our own checkpoint.
+        let compacted = |signature: &str| {
+            ChatMessage::assistant("kept").with_provider_continuation(
+                ProviderContinuation::Anthropic {
+                    signature: signature.to_string(),
+                    compaction: Some(serde_json::json!({"type": "compaction", "content": "s"})),
+                },
+            )
+        };
+        let prepared = PreparedCompaction {
+            archived_messages: vec![ChatMessage::user("old")],
+            preserved_messages: vec![compacted(""), compacted("sig")],
+            previous_summary: None,
+            history_excerpt: "old".to_string(),
+            summary_images: Vec::new(),
+        };
+        let record = CompactionEvent {
+            id: "c1".to_string(),
+            trigger: CompactionTrigger::Manual,
+            created_at: Local::now(),
+            before_tokens: 100,
+            after_tokens: 25,
+            archived_message_count: 1,
+            preserved_message_count: 2,
+            preserved_turn_count: 1,
+            summary_tokens: 10,
+            duration_secs: 1.0,
+            focus: None,
+            archive_path: None,
+        };
+        let messages = build_replacement_messages("summary", &prepared, &record);
+        assert_eq!(messages[2].provider_continuation, None);
+        assert_eq!(
+            messages[3].provider_continuation,
+            Some(ProviderContinuation::anthropic("sig".to_string())),
+            "the thinking signature stays"
+        );
     }
 }

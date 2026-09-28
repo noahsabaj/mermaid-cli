@@ -75,6 +75,20 @@ pub struct ModelConfig {
     /// (adapters that require `max_tokens` fall back to a floor).
     #[serde(skip)]
     pub resolved_max_output: Option<usize>,
+
+    /// Let the provider compact the conversation itself, where it can.
+    /// Runtime-only; set by the effect layer on an agent turn when the
+    /// provider has not refused it. Adapters without a native shape ignore it.
+    #[serde(skip)]
+    pub native_compaction: Option<NativeCompaction>,
+}
+
+/// Provider-side compaction for one turn: once the prompt passes
+/// `trigger_tokens`, the provider summarizes the earlier conversation itself
+/// and hands back the summary for the client to replay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NativeCompaction {
+    pub trigger_tokens: usize,
 }
 
 impl Default for ModelConfig {
@@ -99,6 +113,7 @@ impl Default for ModelConfig {
             resolved_context_window: None,
             resolved_max_output: None,
             output_schema: None,
+            native_compaction: None,
         }
     }
 }

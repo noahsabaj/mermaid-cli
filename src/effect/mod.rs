@@ -2309,6 +2309,7 @@ mod tests {
             output_schema: None,
             suppress_auto_compact: false,
             requested_compaction: None,
+            native_compaction: None,
         };
         r.dispatch(Cmd::CallModel { turn, request });
         assert_eq!(r.scope_count(), 1);
@@ -2338,6 +2339,7 @@ mod tests {
             output_schema: None,
             suppress_auto_compact: false,
             requested_compaction: None,
+            native_compaction: None,
         };
         r.dispatch(Cmd::CallModel { turn, request });
         assert_eq!(r.scope_count(), 1);
@@ -2425,6 +2427,7 @@ mod tests {
                 output_schema: None,
                 suppress_auto_compact: false,
                 requested_compaction: None,
+                native_compaction: None,
             },
         });
         assert_eq!(r.scope_count(), 1);
@@ -2457,6 +2460,7 @@ mod tests {
             output_schema: None,
             suppress_auto_compact: false,
             requested_compaction: None,
+            native_compaction: None,
         };
         let turn = TurnId(123);
 

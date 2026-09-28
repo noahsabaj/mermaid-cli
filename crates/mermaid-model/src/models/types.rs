@@ -7,17 +7,56 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "provider", rename_all = "snake_case")]
 pub enum ProviderContinuation {
-    /// Anthropic's signed extended-thinking block.
-    Anthropic { signature: String },
+    /// Anthropic's signed extended-thinking block, and the `compaction` block
+    /// the API returns when it compacts the conversation server-side. Either
+    /// can be absent; an empty `signature` means no thinking to replay.
+    Anthropic {
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        signature: String,
+        /// The `compaction` content block exactly as the API returned it. The
+        /// API reads it back in place of everything before it, so it is
+        /// replayed verbatim, never rebuilt.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        compaction: Option<serde_json::Value>,
+    },
     /// Meta Responses output items, including encrypted reasoning state.
     MetaResponses { output: Vec<MetaResponseItem> },
 }
 
 impl ProviderContinuation {
+    /// An Anthropic continuation carrying only a thinking signature.
+    #[must_use]
+    pub const fn anthropic(signature: String) -> Self {
+        Self::Anthropic {
+            signature,
+            compaction: None,
+        }
+    }
+
     #[must_use]
     pub fn anthropic_signature(&self) -> Option<&str> {
         match self {
-            Self::Anthropic { signature } => Some(signature),
+            Self::Anthropic { signature, .. } => Some(signature.as_str()).filter(|s| !s.is_empty()),
+            Self::MetaResponses { .. } => None,
+        }
+    }
+
+    /// The same continuation without its server-side compaction block;
+    /// `None` when that block was all it held.
+    #[must_use]
+    pub fn without_compaction(self) -> Option<Self> {
+        match self {
+            Self::Anthropic { signature, .. } if signature.is_empty() => None,
+            Self::Anthropic { signature, .. } => Some(Self::anthropic(signature)),
+            meta @ Self::MetaResponses { .. } => Some(meta),
+        }
+    }
+
+    /// The server-side `compaction` block this turn carried, if any.
+    #[must_use]
+    pub const fn anthropic_compaction(&self) -> Option<&serde_json::Value> {
+        match self {
+            Self::Anthropic { compaction, .. } => compaction.as_ref(),
             Self::MetaResponses { .. } => None,
         }
     }
@@ -151,6 +190,24 @@ pub struct ChatMessage {
 }
 
 impl ChatMessage {
+    /// The part of `history` the provider still reads: everything from the
+    /// last turn that carried a server-side compaction block onward, since the
+    /// API replaces what precedes that block with the block itself. The whole
+    /// history when the provider never compacted it.
+    #[must_use]
+    pub fn since_provider_compaction(history: &[Self]) -> &[Self] {
+        let start = history
+            .iter()
+            .rposition(|m| {
+                m.provider_continuation
+                    .as_ref()
+                    .and_then(ProviderContinuation::anthropic_compaction)
+                    .is_some()
+            })
+            .unwrap_or(0);
+        &history[start..]
+    }
+
     /// Create a user message
     pub fn user(content: impl Into<String>) -> Self {
         Self::new(MessageRole::User, content.into())
@@ -628,9 +685,7 @@ mod tests {
         // Anthropic encrypted server state — must survive
         // serialize/deserialize so saved conversations resume cleanly.
         let msg = ChatMessage::assistant("Step 3 lives.").with_provider_continuation(
-            ProviderContinuation::Anthropic {
-                signature: "sig_abc123_encrypted_blob".to_string(),
-            },
+            ProviderContinuation::anthropic("sig_abc123_encrypted_blob".to_string()),
         );
         let json = serde_json::to_string(&msg).expect("serialize");
         let back: ChatMessage = serde_json::from_str(&json).expect("deserialize");

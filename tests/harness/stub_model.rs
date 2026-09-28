@@ -34,7 +34,7 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use mermaid_cli::providers::model::ModelProvider;
+use mermaid_cli::providers::model::{ContextSizing, ModelProvider};
 use mermaid_cli::providers::{FinalResponse, StreamContext, StreamEvent};
 use mermaid_domain::ChatRequest;
 use mermaid_model::models::ModelCapabilities;
@@ -135,11 +135,17 @@ pub struct ScriptedModel {
     /// Every request the loop made, in order. Lets a test assert on what the
     /// agent actually asked for — the system prompt a child was given, say.
     seen: Mutex<Vec<ChatRequest>>,
+    /// Whether it reports compacting server-side (`ContextSizing`).
+    native_compaction: bool,
 }
 
 impl ScriptedModel {
     pub fn new(script: impl IntoIterator<Item = Turn>) -> Arc<Self> {
-        Arc::new(Self {
+        Arc::new(Self::build(script))
+    }
+
+    fn build(script: impl IntoIterator<Item = Turn>) -> Self {
+        Self {
             name: "stub/scripted".to_string(),
             capabilities: ModelCapabilities {
                 supports_tools: true,
@@ -151,7 +157,17 @@ impl ScriptedModel {
             },
             script: Mutex::new(script.into_iter().collect()),
             seen: Mutex::new(Vec::new()),
-        })
+            native_compaction: false,
+        }
+    }
+
+    /// A model with a `window`-token context that, like Anthropic's API,
+    /// compacts the conversation itself when the request asks.
+    pub fn natively_compacting(script: impl IntoIterator<Item = Turn>, window: usize) -> Arc<Self> {
+        let mut model = Self::build(script);
+        model.capabilities.max_context_tokens = Some(window);
+        model.native_compaction = true;
+        Arc::new(model)
     }
 
     /// How many model calls the loop made. A cheap regression guard against
@@ -176,6 +192,17 @@ impl ScriptedModel {
 impl ModelProvider for ScriptedModel {
     fn capabilities(&self) -> &ModelCapabilities {
         &self.capabilities
+    }
+
+    async fn resolve_context_window(&self, request: &ChatRequest) -> ContextSizing {
+        let _ = request;
+        ContextSizing {
+            model_max: self.capabilities.max_context_tokens,
+            effective: self.capabilities.max_context_tokens,
+            max_output: self.capabilities.max_output_tokens,
+            compacts_natively: self.native_compaction,
+            ..ContextSizing::default()
+        }
     }
 
     async fn chat(&self, request: ChatRequest, ctx: StreamContext) -> Result<FinalResponse> {

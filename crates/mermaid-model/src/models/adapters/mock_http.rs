@@ -16,8 +16,21 @@ use tokio::net::{TcpListener, TcpStream};
 #[derive(Debug, Clone)]
 pub(crate) struct Received {
     pub(crate) path: String,
+    /// Header names lowercased, in arrival order.
+    pub(crate) headers: Vec<(String, String)>,
     /// The JSON body, or `Value::Null` for a bodyless request.
     pub(crate) body: Value,
+}
+
+impl Received {
+    /// The value of header `name` (case-insensitive), if it was sent.
+    pub(crate) fn header(&self, name: &str) -> Option<&str> {
+        let name = name.to_ascii_lowercase();
+        self.headers
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, v)| v.as_str())
+    }
 }
 
 /// What the provider answers.
@@ -149,11 +162,16 @@ async fn read_request(socket: &mut TcpStream) -> Option<Received> {
     };
     let head = String::from_utf8_lossy(&buf[..header_end]).to_string();
     let path = head.lines().next()?.split_whitespace().nth(1)?.to_string();
-    let length = head
+    let headers: Vec<(String, String)> = head
         .lines()
+        .skip(1)
         .filter_map(|line| line.split_once(':'))
-        .find(|(name, _)| name.trim().eq_ignore_ascii_case("content-length"))
-        .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+        .map(|(name, value)| (name.trim().to_ascii_lowercase(), value.trim().to_string()))
+        .collect();
+    let length = headers
+        .iter()
+        .find(|(name, _)| name == "content-length")
+        .and_then(|(_, value)| value.parse::<usize>().ok())
         .unwrap_or(0);
     while buf.len() < header_end + length {
         let n = socket.read(&mut chunk).await.ok()?;
@@ -163,5 +181,9 @@ async fn read_request(socket: &mut TcpStream) -> Option<Received> {
         buf.extend_from_slice(&chunk[..n]);
     }
     let body = serde_json::from_slice(&buf[header_end..]).unwrap_or(Value::Null);
-    Some(Received { path, body })
+    Some(Received {
+        path,
+        headers,
+        body,
+    })
 }
