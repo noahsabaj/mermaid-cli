@@ -291,6 +291,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `/runtime` shows whether it is active. A `--system-prompt` replacement never
   gets the pack.
 
+  The 38 tests that asserted the prompt's exact wording are deleted. They froze
+  the coaching in place; the behavioural eval suite under `evals/` now measures
+  whether a prompt change makes the agent better or worse. Two structural guards
+  remain: the core stays within 40 non-blank lines, and every safety boundary
+  lives in the core rather than the pack.
+
 - **BREAKING: plan mode is gone; `read_only` stays.** The `plan` safety mode,
   the `enter_plan_mode` / `exit_plan_mode` tools, `/plan`, `/config` (whose
   only section was plan settings), the `[plan]` config table, and
