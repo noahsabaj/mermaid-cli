@@ -822,6 +822,12 @@ impl ToolExecutor for WebFetchTool {
                         "pattern": "^web-[0-9]+$",
                         "description": "Snapshot returned by an earlier web_fetch call"
                     },
+                    "raw": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "With url: return the page source as served instead of \
+                                        the extracted main content"
+                    },
                     "pattern": {
                         "type": "string",
                         "minLength": 1,
@@ -901,7 +907,11 @@ impl ToolExecutor for WebFetchTool {
                 {
                     return blocked;
                 }
-                let fetch = self.backend.fetch(url.as_str(), ctx.web_budget());
+                let fetch = if request.raw {
+                    self.backend.fetch_raw(url.as_str(), ctx.web_budget())
+                } else {
+                    self.backend.fetch(url.as_str(), ctx.web_budget())
+                };
                 let page = tokio::select! {
                     biased;
                     _ = ctx.token.cancelled() => return ToolOutcome::cancelled(),
@@ -1017,10 +1027,44 @@ enum FetchTarget {
 
 struct ParsedFetchArgs {
     target: FetchTarget,
+    /// Skip main-content extraction and return the page as served.
+    raw: bool,
     pattern: Option<String>,
     context_lines: usize,
     start_line: Option<usize>,
     line_count: usize,
+}
+
+/// Every argument `web_fetch` accepts; anything else is refused by name.
+const FETCH_ARGS: [&str; 7] = [
+    "url",
+    "snapshot_id",
+    "raw",
+    "pattern",
+    "context_lines",
+    "start_line",
+    "line_count",
+];
+
+/// `raw` is a fetch-time choice, so it only makes sense with a url.
+fn parse_raw(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    target: &FetchTarget,
+) -> Result<bool, String> {
+    let raw = match obj.get("raw") {
+        None => false,
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| "web_fetch: 'raw' must be a boolean".to_string())?,
+    };
+    if raw && matches!(target, FetchTarget::Snapshot(_)) {
+        return Err(
+            "web_fetch: 'raw' applies when fetching a url; a snapshot keeps the form it was \
+             fetched in"
+                .to_string(),
+        );
+    }
+    Ok(raw)
 }
 
 fn parse_fetch_args(args: &serde_json::Value) -> Result<ParsedFetchArgs, String> {
@@ -1028,10 +1072,7 @@ fn parse_fetch_args(args: &serde_json::Value) -> Result<ParsedFetchArgs, String>
         .as_object()
         .ok_or_else(|| "web_fetch arguments must be an object".to_string())?;
     for key in obj.keys() {
-        if !matches!(
-            key.as_str(),
-            "url" | "snapshot_id" | "pattern" | "context_lines" | "start_line" | "line_count"
-        ) {
+        if !FETCH_ARGS.contains(&key.as_str()) {
             return Err(format!("web_fetch: unknown argument '{key}'"));
         }
     }
@@ -1103,9 +1144,11 @@ fn parse_fetch_args(args: &serde_json::Value) -> Result<ParsedFetchArgs, String>
         .then(|| parse_bounded_usize(obj, "start_line", 1, 1, usize::MAX))
         .transpose()?;
     let line_count = parse_bounded_usize(obj, "line_count", 200, 1, 500)?;
+    let raw = parse_raw(obj, &target)?;
 
     Ok(ParsedFetchArgs {
         target,
+        raw,
         pattern,
         context_lines,
         start_line,
@@ -1854,6 +1897,8 @@ mod tests {
             serde_json::json!({"snapshot_id": "web-1", "context_lines": 2}),
             serde_json::json!({"snapshot_id": "web-1", "pattern": "x", "start_line": 1}),
             serde_json::json!({"snapshot_id": "web-1", "unknown": true}),
+            serde_json::json!({"snapshot_id": "web-1", "raw": true}),
+            serde_json::json!({"url": "https://example.com", "raw": "yes"}),
         ] {
             assert!(parse_fetch_args(&invalid).is_err(), "accepted {invalid}");
         }
@@ -1870,6 +1915,48 @@ mod tests {
         assert_eq!(url.as_str(), "https://example.com/page");
         assert_eq!(parsed.start_line, Some(4));
         assert_eq!(parsed.line_count, 2);
+        assert!(!parsed.raw);
+        let raw = parse_fetch_args(&serde_json::json!({
+            "url": "https://example.com/page",
+            "raw": true
+        }))
+        .unwrap();
+        assert!(raw.raw);
+    }
+
+    /// `raw` routes to the backend's raw fetch; a backend that only returns
+    /// its own extraction says so instead of quietly extracting anyway.
+    #[tokio::test]
+    async fn raw_fetch_needs_a_backend_that_can_serve_it() {
+        use crate::providers::ctx::test_exec_context;
+        use mermaid_domain::{ToolCallId, TurnId};
+
+        struct ExtractOnly;
+
+        #[async_trait]
+        impl FetchProvider for ExtractOnly {
+            async fn fetch(
+                &self,
+                url: &str,
+                _budget: crate::providers::ctx::WebByteBudget,
+            ) -> Result<WebFetchResult, WebFetchError> {
+                let mut result = page("extracted");
+                result.requested_url = url.to_string();
+                Ok(result)
+            }
+        }
+
+        let tool = WebFetchTool::new_with_test_snapshots(Arc::new(ExtractOnly), "mock");
+        let (ctx, _rx) =
+            test_exec_context(TurnId(9), ToolCallId(9), std::path::PathBuf::from("/tmp"));
+        let outcome = tool
+            .execute(
+                serde_json::json!({"url": "https://example.com/page", "raw": true}),
+                ctx,
+            )
+            .await;
+        assert!(!outcome.is_success());
+        assert!(outcome.output().contains("native"), "{}", outcome.output());
     }
 
     #[tokio::test]

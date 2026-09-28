@@ -383,6 +383,10 @@ pub struct ChatRequest {
     /// by a successful compaction, a manual `/compact`, or a conversation
     /// switch.
     pub suppress_auto_compact: bool,
+    /// The model asked for a checkpoint (`compact_context`) since the last
+    /// dispatch: compact before sending this request, whatever the fill.
+    /// Rides on the request for the same reason `suppress_auto_compact` does.
+    pub requested_compaction: Option<crate::RequestedCompaction>,
 }
 
 /// Provider-agnostic tool definition sent in the request. Concrete
@@ -764,6 +768,7 @@ mod tests {
             resolved_max_output: None,
             output_schema: None,
             suppress_auto_compact: false,
+            requested_compaction: None,
         };
         assert!(
             Cmd::CallModel {
@@ -829,6 +834,7 @@ mod model_config_tests {
             resolved_max_output: Some(32_000),
             output_schema: Some(serde_json::json!({"type": "object"})),
             suppress_auto_compact: false,
+            requested_compaction: None,
         };
         let cfg = ModelConfig::from(&req);
         assert_eq!(cfg.model, "anthropic/claude-test");

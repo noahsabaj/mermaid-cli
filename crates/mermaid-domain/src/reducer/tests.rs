@@ -3779,8 +3779,6 @@ fn fake_recovery_result(replacement: Vec<ChatMessage>) -> CompactionResult {
                 .count(),
             summary_tokens: 10,
             duration_secs: 0.0,
-            review_status: crate::CompactionReviewStatus::Reviewed,
-            review_error: None,
             focus: None,
             archive_path: None,
         },
@@ -5977,6 +5975,67 @@ fn system_prompt_applies_the_active_style_except_for_subagents() {
 }
 
 #[test]
+fn guidance_pack_defaults_on_for_local_providers_only() {
+    let pack_marker = "# Working Guidance";
+    let mut state = fresh_state();
+    assert!(
+        system_prompt_for_state(&state).contains(pack_marker),
+        "ollama is local: the pack is on by default"
+    );
+    state.session.model_id = "qwen3-coder:30b".to_string();
+    assert!(
+        system_prompt_for_state(&state).contains(pack_marker),
+        "a bare id is ollama by convention"
+    );
+    state.session.model_id = "anthropic/some-model".to_string();
+    assert!(
+        !system_prompt_for_state(&state).contains(pack_marker),
+        "a hosted API gets the core prompt alone"
+    );
+    // A provider pointed at the LAN is local, whatever its name.
+    state.session.model_id = "my-vllm/coder".to_string();
+    state.settings.providers.insert(
+        "my-vllm".to_string(),
+        crate::UserProviderConfig {
+            base_url: Some("http://192.168.1.42:8000/v1".to_string()),
+            ..Default::default()
+        },
+    );
+    assert!(system_prompt_for_state(&state).contains(pack_marker));
+    state.settings.providers.insert(
+        "my-vllm".to_string(),
+        crate::UserProviderConfig {
+            base_url: Some("https://vllm.example.com/v1".to_string()),
+            ..Default::default()
+        },
+    );
+    assert!(!system_prompt_for_state(&state).contains(pack_marker));
+}
+
+#[test]
+fn guidance_pack_is_user_overridable() {
+    let pack_marker = "# Working Guidance";
+    let mut state = fresh_state();
+    state.settings.output =
+        toml::from_str::<crate::OutputConfig>("guidance = \"off\"").expect("guidance parses");
+    assert!(
+        !system_prompt_for_state(&state).contains(pack_marker),
+        "off wins over a local provider"
+    );
+    state.settings.output.guidance = crate::config::GuidanceMode::On;
+    state.session.model_id = "openai/some-model".to_string();
+    assert!(
+        system_prompt_for_state(&state).contains(pack_marker),
+        "on wins over a hosted API"
+    );
+    // A `--system-prompt` replacement is the user's whole prompt.
+    state.settings.prompt.system_prompt = Some("REPLACED".to_string());
+    let prompt = system_prompt_for_state(&state);
+    assert!(prompt.starts_with("REPLACED"), "got {prompt}");
+    assert!(!prompt.contains(pack_marker));
+}
+
+#[test]
 fn ctrl_o_composes_draft_in_editor() {
     let ctrl_o = Msg::Key(Key {
         code: KeyCode::Char('o'),
@@ -6719,6 +6778,55 @@ fn steering_delivers_all_queued_messages_at_the_tool_boundary() {
     assert!(
         cmds.iter()
             .any(|c| matches!(c, Cmd::SaveConversation { .. }))
+    );
+}
+
+/// `compact_context` succeeding asks the very next model call to checkpoint
+/// first, with the model's focus, and only that one call.
+#[test]
+fn a_compact_context_result_rides_the_next_request_once() {
+    let mut state = fresh_state();
+    state
+        .session
+        .append(ChatMessage::assistant("checkpointing"), state.now);
+    let mut call = pending_read_file_call();
+    call.source.function.name = "compact_context".to_string();
+    state.turn = crate::transition::start_executing_tools(
+        TurnId(1),
+        vec![call],
+        std::time::SystemTime::now(),
+    );
+    let outcome =
+        ToolOutcome::success("requested", "requested", 0.0).with_metadata(crate::ToolRunMetadata {
+            detail: crate::ToolMetadata::CompactionRequest {
+                focus: Some("the parser".to_string()),
+            },
+            ..crate::ToolRunMetadata::default()
+        });
+    let (state, cmds) = update(
+        state,
+        Msg::ToolFinished {
+            turn: TurnId(1),
+            call_id: crate::ToolCallId(1),
+            outcome,
+        },
+    );
+    let request = cmds
+        .iter()
+        .find_map(|c| match c {
+            Cmd::CallModel { request, .. } => Some(request),
+            _ => None,
+        })
+        .expect("follow-up CallModel");
+    assert_eq!(
+        request.requested_compaction,
+        Some(crate::RequestedCompaction {
+            focus: Some("the parser".to_string())
+        })
+    );
+    assert_eq!(
+        state.runtime.requested_compaction, None,
+        "the ask is consumed by the dispatch that carries it"
     );
 }
 

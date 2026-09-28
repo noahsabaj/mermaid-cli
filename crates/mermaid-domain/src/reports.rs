@@ -156,6 +156,18 @@ pub(crate) fn doctor_text(state: &State) -> String {
         }
     ));
     lines.push(format!("Output style: {}", output_style_display(state)));
+    lines.push(format!(
+        "Guidance pack: {} ([output] guidance = {})",
+        if state
+            .settings
+            .guidance_pack_enabled(&state.session.model_id)
+        {
+            "on"
+        } else {
+            "off"
+        },
+        state.settings.output.guidance.as_str()
+    ));
     match &state.instructions {
         Some(instructions) => lines.push(format!(
             "Project instructions: {} bytes from {} source(s){}",
@@ -548,17 +560,6 @@ fn push_last_compaction_lines(lines: &mut Vec<String>, state: &State) {
     lines.push(format!(
         "- preserved: {} messages",
         last.preserved_message_count
-    ));
-    lines.push(format!(
-        "- review: {}",
-        match last.review_status {
-            crate::CompactionReviewStatus::Reviewed => "reviewed".to_string(),
-            crate::CompactionReviewStatus::DraftValidated => last
-                .review_error
-                .as_ref()
-                .map(|err| format!("validated draft ({err})"))
-                .unwrap_or_else(|| "validated draft".to_string()),
-        }
     ));
     if let Some(path) = &last.archive_path {
         lines.push(format!("- archive: {path}"));

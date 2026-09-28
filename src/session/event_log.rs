@@ -726,8 +726,6 @@ mod tests {
                 preserved_turn_count: 1,
                 summary_tokens: 5,
                 duration_secs: 0.1,
-                review_status: mermaid_domain::CompactionReviewStatus::Reviewed,
-                review_error: None,
                 focus: None,
                 archive_path: None,
             },

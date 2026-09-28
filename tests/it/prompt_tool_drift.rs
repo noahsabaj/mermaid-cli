@@ -31,6 +31,9 @@ fn advertised_tools_exist_in_the_registry() {
         "create_directory",
         "execute_command",
         "memory",
+        "task_create",
+        "task_update",
+        "task_list",
         "ask_user_question",
     ] {
         assert!(

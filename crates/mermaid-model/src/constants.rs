@@ -39,8 +39,6 @@ pub const COMPACTION_AUTO_THRESHOLD_PERCENT: u8 = 85;
 pub const COMPACTION_TAIL_TURNS: usize = 2;
 /// Maximum estimated tokens to preserve as the recent tail.
 pub const COMPACTION_TAIL_TOKEN_BUDGET: usize = 8_000;
-/// Maximum characters of old tool output included in the summarization prompt.
-pub const COMPACTION_TOOL_OUTPUT_MAX_CHARS: usize = 2_000;
 /// Maximum tokens requested from the compaction summarizer.
 pub const COMPACTION_SUMMARY_MAX_TOKENS: usize = 8_000;
 /// Maximum estimated input tokens sent to the summarizer.

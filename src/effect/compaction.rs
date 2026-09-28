@@ -119,27 +119,14 @@ pub(super) async fn run_compaction(
         max_context_tokens,
     );
     ensure_compaction_request_fits(&summary_request, max_context_tokens)?;
-    let (draft, draft_usage) =
-        collect_compaction_text(Arc::clone(&provider), turn, summary_request, token.clone())
-            .await?;
-    let draft_summary = mermaid_domain::normalize_summary(&draft);
-    let draft_validation = mermaid_domain::validate_summary_structure(&draft_summary);
-
-    let verify_request = mermaid_domain::build_verification_request(
-        &request.chat,
-        &prepared,
-        &draft_summary,
-        request.instructions.as_deref(),
-        request.policy,
-        max_context_tokens,
-    );
-    let review = if compaction_request_fits(&verify_request, max_context_tokens) {
-        Some(collect_compaction_text(Arc::clone(&provider), turn, verify_request, token).await)
-    } else {
-        None
-    };
-    let (final_summary, verify_usage, review_status, review_error) =
-        settle_review(draft_summary, draft_validation, review)?;
+    let (text, usage) =
+        collect_compaction_text(Arc::clone(&provider), turn, summary_request, token).await?;
+    let final_summary = mermaid_domain::normalize_summary(&text);
+    if final_summary.is_empty() {
+        return Err(ModelError::InvalidRequest(
+            "compaction produced an empty checkpoint".to_string(),
+        ));
+    }
 
     let id = format!(
         "compact_{}",
@@ -160,8 +147,6 @@ pub(super) async fn run_compaction(
             .count(),
         summary_tokens: final_summary.len().div_ceil(4),
         duration_secs: started.elapsed().as_secs_f64(),
-        review_status,
-        review_error,
         focus: request.instructions.clone(),
         archive_path: None,
     };
@@ -199,7 +184,7 @@ pub(super) async fn run_compaction(
         archived_messages: prepared.archived_messages,
         before_snapshot,
         after_snapshot,
-        usage: mermaid_domain::combine_usage(draft_usage, verify_usage),
+        usage,
         source_boundaries: request
             .chat
             .messages
@@ -254,77 +239,6 @@ fn settle_after_tokens(
     let after_snapshot =
         mermaid_domain::estimate_context_usage_for_request(&compacted_request, max_context_tokens);
     (replacement, compacted_request, after_snapshot)
-}
-
-/// Choose the checkpoint the compaction ships: the reviewed summary when the
-/// review ran and came back well-formed, else the validated draft with the
-/// reason review did not count (`None` review = it would not fit the window).
-/// Errors only when neither the review nor the draft is structurally valid.
-fn settle_review(
-    draft_summary: String,
-    draft_validation: Result<(), String>,
-    review: Option<Result<(String, Option<TokenUsage>), ModelError>>,
-) -> Result<
-    (
-        String,
-        Option<TokenUsage>,
-        mermaid_domain::CompactionReviewStatus,
-        Option<String>,
-    ),
-    ModelError,
-> {
-    let Some(review) = review else {
-        return match draft_validation {
-            Ok(()) => Ok((
-                draft_summary,
-                None,
-                mermaid_domain::CompactionReviewStatus::DraftValidated,
-                Some(
-                    "review skipped because the complete request would exceed the context window"
-                        .to_string(),
-                ),
-            )),
-            Err(error) => Err(ModelError::InvalidRequest(format!(
-                "compaction draft was invalid and the review request did not fit: {error}"
-            ))),
-        };
-    };
-    match review {
-        Ok((verified_text, verify_usage)) => {
-            let verified_summary = mermaid_domain::normalize_summary(&verified_text);
-            match mermaid_domain::validate_summary_structure(&verified_summary) {
-                Ok(()) => Ok((
-                    verified_summary,
-                    verify_usage,
-                    mermaid_domain::CompactionReviewStatus::Reviewed,
-                    None,
-                )),
-                Err(error) => match draft_validation {
-                    Ok(()) => Ok((
-                        draft_summary,
-                        verify_usage,
-                        mermaid_domain::CompactionReviewStatus::DraftValidated,
-                        Some(format!("review returned an invalid checkpoint: {error}")),
-                    )),
-                    Err(draft_error) => Err(ModelError::InvalidRequest(format!(
-                        "compaction produced no structurally valid checkpoint (draft: {draft_error}; review: {error})"
-                    ))),
-                },
-            }
-        },
-        Err(ModelError::Cancelled) => Err(ModelError::Cancelled),
-        Err(err) => match draft_validation {
-            Ok(()) => Ok((
-                draft_summary,
-                None,
-                mermaid_domain::CompactionReviewStatus::DraftValidated,
-                Some(format!("review failed: {err}")),
-            )),
-            Err(draft_error) => Err(ModelError::InvalidRequest(format!(
-                "compaction draft was invalid and review failed (draft: {draft_error}; review: {err})"
-            ))),
-        },
-    }
 }
 
 pub(super) fn compaction_request_fits(

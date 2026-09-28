@@ -133,6 +133,8 @@ The model calls these autonomously:
 | `agent` | Spawn an autonomous subagent for parallel tasks |
 | `task_create`, `task_update`, `task_list` | The live task checklist (`/todos`) |
 | `ask_user_question` | Multiple-choice questions when a decision is the user's to make |
+| `context_archive` | Search or read back the session's full history, including what compaction removed |
+| `compact_context` | Checkpoint the context now instead of waiting for the automatic threshold |
 
 MCP servers contribute tools under the `mcp__<server>__<tool>` prefix, **deferred** by default: one `tool_search` tool promotes matches for the rest of the session, so unpromoted schemas never count against `/context`. Opt out with `mcp_defer_tools = false`.
 

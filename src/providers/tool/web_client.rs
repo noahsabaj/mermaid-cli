@@ -55,6 +55,9 @@ pub enum ExtractionMode {
     Json,
     Xml,
     Cloud,
+    /// The decoded response body as served, with no extraction — `web_fetch`
+    /// `raw`, for when readability guessed wrong about what matters.
+    Raw,
 }
 
 impl ExtractionMode {
@@ -68,6 +71,7 @@ impl ExtractionMode {
             Self::Json => "json",
             Self::Xml => "xml",
             Self::Cloud => "cloud",
+            Self::Raw => "raw",
         }
     }
 }
@@ -278,6 +282,17 @@ pub trait SearchProvider: Send + Sync {
 #[async_trait]
 pub trait FetchProvider: Send + Sync {
     async fn fetch(&self, url: &str, budget: WebByteBudget) -> FetchResult<WebFetchResult>;
+
+    /// The page as served, without main-content extraction. Only a backend
+    /// that sees the response body can offer it; the rest say so.
+    async fn fetch_raw(&self, url: &str, budget: WebByteBudget) -> FetchResult<WebFetchResult> {
+        let _ = (url, budget);
+        Err(WebFetchError::Backend(
+            "this fetch backend returns only its own extraction; `raw` needs \
+             [web] fetch_backend = \"native\""
+                .to_string(),
+        ))
+    }
 }
 
 /// Ollama web search API response
@@ -753,12 +768,14 @@ impl NativeFetchClient {
     async fn fetch_validated(
         &self,
         requested: ValidatedWebUrl,
+        raw: bool,
         budget: WebByteBudget,
     ) -> FetchResult<WebFetchResult> {
         self.fetch_with_validator(
             requested,
             ValidatedWebUrl::from_url,
             mermaid_model::constants::MAX_WEB_BODY_BYTES,
+            raw,
             budget,
         )
         .await
@@ -769,6 +786,7 @@ impl NativeFetchClient {
         requested: ValidatedWebUrl,
         validate: fn(reqwest::Url) -> FetchResult<ValidatedWebUrl>,
         max_body_bytes: usize,
+        raw: bool,
         budget: WebByteBudget,
     ) -> FetchResult<WebFetchResult> {
         let requested_url = requested.as_str().to_string();
@@ -833,7 +851,7 @@ impl NativeFetchClient {
                 // async caller drops its JoinHandle but cannot stop an already
                 // running blocking parser; the task must remain accounted for.
                 let _extraction_permit = extraction_permit;
-                decode_and_extract(body, &final_url_for_extract, &media_for_extract)
+                decode_and_extract(body, &final_url_for_extract, &media_for_extract, raw)
             })
             .await
             .map_err(|error| {
@@ -909,7 +927,12 @@ fn validated_redirect_destination(
 #[async_trait]
 impl FetchProvider for NativeFetchClient {
     async fn fetch(&self, url: &str, budget: WebByteBudget) -> FetchResult<WebFetchResult> {
-        self.fetch_validated(ValidatedWebUrl::parse(url)?, budget)
+        self.fetch_validated(ValidatedWebUrl::parse(url)?, false, budget)
+            .await
+    }
+
+    async fn fetch_raw(&self, url: &str, budget: WebByteBudget) -> FetchResult<WebFetchResult> {
+        self.fetch_validated(ValidatedWebUrl::parse(url)?, true, budget)
             .await
     }
 }
@@ -1115,6 +1138,7 @@ fn decode_and_extract(
     body: Vec<u8>,
     final_url: &str,
     media: &ResponseMedia,
+    raw: bool,
 ) -> FetchResult<(String, String, ExtractionMode, String)> {
     if media.media_type.is_none() && body.contains(&0) {
         return Err(WebFetchError::UnsupportedMedia(
@@ -1123,6 +1147,11 @@ fn decode_and_extract(
     }
     let (decoded, charset) = decode_body(&body, media)?;
     let (title, content, extraction) = match media.kind {
+        // Every other kind is already returned as served; only markup has an
+        // extraction step to skip.
+        MediaKind::Html | MediaKind::Xhtml if raw => {
+            (fallback_title(&decoded), decoded, ExtractionMode::Raw)
+        },
         MediaKind::Html | MediaKind::Xhtml => extract_readable(&decoded, final_url)?,
         MediaKind::PlainText => (
             String::new(),
@@ -1632,6 +1661,7 @@ mod tests {
                 requested,
                 ValidatedWebUrl::from_fixture_url,
                 max_body_bytes,
+                false,
                 budget,
             )
             .await?)
@@ -2105,6 +2135,30 @@ mod tests {
         assert_eq!(parsed.results[1].content, "");
     }
 
+    /// `raw` hands back the markup as served: nothing readability would drop
+    /// (nav, scripts, attributes) is gone, and the title still comes along.
+    #[test]
+    fn raw_html_skips_extraction() {
+        let html = response_media(Some("text/html; charset=utf-8")).unwrap();
+        let page = "<html><head><title>Docs</title></head><body><nav>Menu</nav>\
+                    <table data-version=\"2\"><tr><td>cell</td></tr></table></body></html>";
+        let (title, content, mode, _) = decode_and_extract(
+            page.as_bytes().to_vec(),
+            "https://example.com/docs",
+            &html,
+            true,
+        )
+        .unwrap();
+        assert_eq!(mode, ExtractionMode::Raw);
+        assert_eq!(title, "Docs");
+        assert_eq!(content, page);
+        // Non-markup is served as-is either way.
+        let plain = response_media(Some("text/plain")).unwrap();
+        let (_, text, mode, _) =
+            decode_and_extract(b"hello".to_vec(), "https://example.com", &plain, true).unwrap();
+        assert_eq!((text.as_str(), mode), ("hello", ExtractionMode::PlainText));
+    }
+
     #[test]
     fn extract_readable_produces_markdown() {
         let html = r#"<html><head><title>My Page</title></head>
@@ -2266,6 +2320,7 @@ mod tests {
             json_source.as_bytes().to_vec(),
             "https://example.com/data",
             &json_media,
+            false,
         )
         .unwrap();
         assert_eq!(mode, ExtractionMode::Json);
@@ -2275,6 +2330,7 @@ mod tests {
             br#"{"markup": "unterminated}"#.to_vec(),
             "https://example.com/data",
             &json_media,
+            false,
         )
         .unwrap_err();
         assert!(matches!(invalid, WebFetchError::Extraction(_)));
@@ -2285,6 +2341,7 @@ mod tests {
             xml_source.as_bytes().to_vec(),
             "https://example.com/data",
             &xml_media,
+            false,
         )
         .unwrap();
         assert_eq!(mode, ExtractionMode::Xml);
@@ -2294,13 +2351,16 @@ mod tests {
     #[test]
     fn empty_extractions_are_errors() {
         let plain = response_media(Some("text/plain")).unwrap();
-        assert!(decode_and_extract(b"  \r\n".to_vec(), "https://example.com", &plain).is_err());
+        assert!(
+            decode_and_extract(b"  \r\n".to_vec(), "https://example.com", &plain, false).is_err()
+        );
         let html = response_media(Some("text/html")).unwrap();
         assert!(
             decode_and_extract(
                 b"<html><head></head><body></body></html>".to_vec(),
                 "https://example.com",
                 &html,
+                false,
             )
             .is_err()
         );
@@ -2310,6 +2370,7 @@ mod tests {
                 b"GIF89a\0binary".to_vec(),
                 "https://example.com/image",
                 &unlabeled,
+                false,
             )
             .is_err()
         );

@@ -309,7 +309,7 @@ pub fn handle_compaction_failed(
         // Auto-compaction is best-effort preflight: Mermaid proceeds with the
         // un-compacted request (the provider's own context limit is the real
         // gate). But a failing summarizer must not silently retry — and pay
-        // for — a draft + review model call on every later turn: pause it
+        // for — a summarizer model call on every later turn: pause it
         // until a compaction succeeds, `/compact` runs, or the conversation
         // switches, and tell the user once.
         CompactionTrigger::AutoThreshold => {
@@ -324,6 +324,17 @@ pub fn handle_compaction_failed(
             }
             return;
         },
+        // The model asked for a checkpoint; the run goes on un-compacted either
+        // way. Say so in the history so the model does not assume its earlier
+        // context is gone.
+        CompactionTrigger::ModelRequested if matches!(kind, StatusKind::Info) => {
+            state.session.append(
+                ChatMessage::system(format!("Requested compaction skipped — {message}.")),
+                state.now,
+            );
+            return;
+        },
+        CompactionTrigger::ModelRequested => "Requested compaction failed",
         CompactionTrigger::ContextLimitRetry => "Context-limit compaction failed",
         // The response truncated and recovery couldn't reduce the context (e.g. the
         // preserved tail already fills the window). Stop the run cleanly with the
