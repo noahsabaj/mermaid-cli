@@ -1,7 +1,7 @@
-//! The conversation value: messages, usage totals, checklist, plan state.
+//! The conversation value: messages, usage totals, checklist.
 //!
 //! Pure data, and every field is already a domain type (`CompactionEvent`,
-//! `PlanState`, `ChecklistStore`, `TokenUsageTotals`), so this is a downward
+//! `ChecklistStore`, `TokenUsageTotals`), so this is a downward
 //! move rather than a new dependency.
 //!
 //! It lived in `src/session/`, in the same file as `ConversationManager`'s
@@ -56,20 +56,21 @@ pub struct ConversationHistory {
     /// safety mode and token/context meters instead of resetting them. All
     /// `#[serde(default)]`: sessions saved before these existed omit them, and
     /// a `None` safety mode falls back to the config default on resume.
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "mermaid_model::safety::SafetyMode::deserialize_optional_lenient"
+    )]
     pub safety_mode: Option<mermaid_model::safety::SafetyMode>,
-    /// Plan-mode-in-progress (see `domain::PlanState`): `Some` only when the
-    /// session was saved mid-planning, so `--resume` re-enters plan mode with
-    /// the same plan file and restore target.
-    #[serde(default)]
-    pub plan: Option<crate::PlanState>,
     /// The mode-defining facts the model was last told about (see
     /// `domain::AdvertisedContext`) — the dispatch-time context-delta
     /// injector's baseline. Rides the conversation (not `Session`) so
     /// save/resume, `/clear`, and forks inherit the right baseline for
     /// free. `None` on fresh conversations and pre-field saves: the first
     /// dispatch stamps it silently instead of announcing current state.
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::AdvertisedContext::deserialize_optional_lenient"
+    )]
     pub advertised_context: Option<crate::AdvertisedContext>,
     #[serde(default)]
     pub last_token_usage: Option<crate::TokenUsageTotals>,
@@ -155,7 +156,6 @@ impl ConversationHistory {
             git_branch: None,
             // Snapshotted from `Session` on save (see `snapshot_conversation`).
             safety_mode: None,
-            plan: None,
             // Stamped by the injector at the first dispatch (silent seed).
             advertised_context: None,
             last_token_usage: None,

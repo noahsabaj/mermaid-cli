@@ -50,22 +50,10 @@ pub struct ToolDispatch {
     /// so tools like `SubagentTool` spawn children against the same
     /// provider the parent is using (F7).
     pub model_id: String,
-    /// Effective live safety mode at the moment this call was emitted
-    /// (`state.session.safety_mode`, floored to `ReadOnly` while a plan
-    /// is being drafted). The runner builds the policy gate / Auto
-    /// classifier from this rather than the static config.
+    /// Live safety mode at the moment this call was emitted
+    /// (`state.session.safety_mode`). The runner builds the policy gate /
+    /// Auto classifier from this rather than the static config.
     pub safety_mode: SafetyMode,
-    /// `Some(path)` while the session is in plan mode: the one path the
-    /// policy gate exempts from the read-only floor, and the flag the
-    /// plan carve-outs (memory writes, known-safe builds) key on.
-    pub plan_file: Option<std::path::PathBuf>,
-    /// LIVE per-category plan permission levels (`/plan config` edits
-    /// them mid-session; the startup `Config` snapshot in the exec context
-    /// would go stale). Only consulted while `plan_file` is `Some`.
-    pub plan_permissions: crate::PlanPermissions,
-    /// Context-window fill at dispatch, when known. `exit_plan_mode`
-    /// shows it on the clear-context option so the tradeoff is legible.
-    pub context_percent: Option<u8>,
     /// The user's stated intent for the turn (latest user message),
     /// passed to the Auto-mode classifier as alignment context.
     pub intent: Option<String>,
@@ -149,10 +137,6 @@ pub enum Cmd {
     /// cycle: rewind/fork and `/clear` (both clear it) and `--replay`
     /// re-seeding. Fire-and-forget to the broker, not turn-scoped.
     SyncTaskStore(crate::checklist::ChecklistStore),
-    /// Persist the `[plan]` table to the user config file (the `/plan
-    /// config` picker edits live state; this writes it through the
-    /// key-scoped updater so unrelated keys and defaults stay unfrozen).
-    PersistPlanConfig(crate::PlanConfig),
 
     /// A user `/tasks` edit. Routed through the effect runner to the
     /// `TaskBroker` (the single writer) instead of mutating reducer state
@@ -348,7 +332,7 @@ pub enum Cmd {
 /// Pure data — no provider-specific knowledge here (that's in
 /// `providers::model::*::chat`). `Default` exists so adding a field costs one line
 /// here instead of a mechanical edit in every construction site across providers,
-/// the CLI and the tests (adding `suppressed_builtin_tools` took 15). Use
+/// the CLI and the tests (one field once took 15). Use
 /// `..ChatRequest::default()` for the fields a caller does not care about.
 #[derive(Debug, Clone, Default)]
 pub struct ChatRequest {
@@ -399,13 +383,6 @@ pub struct ChatRequest {
     /// by a successful compaction, a manual `/compact`, or a conversation
     /// switch.
     pub suppress_auto_compact: bool,
-    /// Built-in tool names the effect layer must NOT advertise on this
-    /// request. Mirrors the `output_schema` empty-tools gate: the reducer
-    /// (which knows the mode) decides, the effect layer (which owns the
-    /// registry) enforces. Plan mode hides the checklist WRITERS here —
-    /// advertising a tool whose description says "create the full initial
-    /// plan" while the gate hard-errors it invites exactly that call.
-    pub suppressed_builtin_tools: Vec<&'static str>,
 }
 
 /// Provider-agnostic tool definition sent in the request. Concrete
@@ -477,7 +454,6 @@ impl Cmd {
             Self::ResolveApproval { .. } => "resolve_approval",
             Self::ResolveQuestion { .. } => "resolve_question",
             Self::SyncTaskStore(_) => "sync_task_store",
-            Self::PersistPlanConfig(_) => "persist_plan_config",
             Self::UserTaskEdit(_) => "user_task_edit",
             Self::NotifyTaskCompleted { .. } => "notify_task_completed",
             Self::EnsureScratchpad { .. } => "ensure_scratchpad",
@@ -570,7 +546,6 @@ impl Cmd {
             | Self::ResolveApproval { .. }
             | Self::ResolveQuestion { .. }
             | Self::SyncTaskStore(_)
-            | Self::PersistPlanConfig(_)
             | Self::UserTaskEdit(_)
             | Self::NotifyTaskCompleted { .. }
             | Self::EnsureScratchpad { .. }
@@ -668,7 +643,6 @@ impl Cmd {
                 };
                 format!("resolve_question(call={call_id}, {kind})")
             },
-            Self::PersistPlanConfig(_) => "persist_plan_config".to_string(),
             Self::SyncTaskStore(store) => {
                 format!("sync_task_store(tasks={})", store.tasks.len())
             },
@@ -790,7 +764,6 @@ mod tests {
             resolved_max_output: None,
             output_schema: None,
             suppress_auto_compact: false,
-            suppressed_builtin_tools: Vec::new(),
         };
         assert!(
             Cmd::CallModel {
@@ -856,7 +829,6 @@ mod model_config_tests {
             resolved_max_output: Some(32_000),
             output_schema: Some(serde_json::json!({"type": "object"})),
             suppress_auto_compact: false,
-            suppressed_builtin_tools: Vec::new(),
         };
         let cfg = ModelConfig::from(&req);
         assert_eq!(cfg.model, "anthropic/claude-test");

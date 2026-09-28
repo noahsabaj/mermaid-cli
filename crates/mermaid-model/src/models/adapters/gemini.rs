@@ -1356,7 +1356,7 @@ mod tests {
     #[test]
     fn model_directed_system_messages_reach_the_wire_as_tagged_user_parts() {
         use crate::models::ChatMessageKind;
-        let mut nudge = ChatMessage::system("Reminder: plan mode is active.");
+        let mut nudge = ChatMessage::system("Reminder: the task checklist is stale.");
         nudge.kind = ChatMessageKind::RecoveryNudge;
         let messages = vec![ChatMessage::user("ok"), nudge];
 
@@ -1366,7 +1366,7 @@ mod tests {
         assert_eq!(parts.len(), 2);
         let tagged = parts[1]["text"].as_str().unwrap();
         assert!(
-            tagged.contains("<system-reminder>") && tagged.contains("plan mode is active"),
+            tagged.contains("<system-reminder>") && tagged.contains("the task checklist is stale"),
             "steering must be delivered and tagged: {tagged}",
         );
     }
@@ -1380,7 +1380,7 @@ mod tests {
     fn convert_messages_never_emits_consecutive_same_role_turns() {
         use crate::models::ChatMessageKind;
         let steering = || {
-            let mut m = ChatMessage::system("Reminder: plan mode is active.");
+            let mut m = ChatMessage::system("Reminder: the task checklist is stale.");
             m.kind = ChatMessageKind::ContextMarker;
             m
         };

@@ -1868,12 +1868,12 @@ mod tests {
     /// Adapter contract (see `MessageAudience`): harness steering must reach
     /// the model. This shape carries a native mid-conversation system role, so
     /// it passes through in place — at the history TAIL, which is the position
-    /// the plan-mode reminder depends on.
+    /// harness reminders depend on.
     #[test]
     fn model_directed_system_messages_reach_the_wire_in_place() {
         use crate::models::ChatMessageKind;
         let adapter = test_adapter();
-        let mut nudge = ChatMessage::system("Reminder: plan mode is active.");
+        let mut nudge = ChatMessage::system("Reminder: the task checklist is stale.");
         nudge.kind = ChatMessageKind::RecoveryNudge;
         let messages = vec![ChatMessage::user("ok"), nudge];
         let body = adapter.build_request_body(&messages, &ModelConfig::default(), false);
@@ -1885,7 +1885,7 @@ mod tests {
             last["content"]
                 .as_str()
                 .unwrap()
-                .contains("plan mode is active"),
+                .contains("the task checklist is stale"),
         );
     }
 

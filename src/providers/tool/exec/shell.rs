@@ -100,8 +100,7 @@ pub(crate) fn shell_invocation(
         ShellInvocation { program: exe, args }
     } else if mermaid_runtime::HostShell::current() == mermaid_runtime::HostShell::PowerShell {
         // `HostShell::current()` is the shared predicate: risk
-        // classification, the plan-mode carve-outs, and the transcript label
-        // all read the command in the grammar of the interpreter chosen
+        // classification and the transcript label all read the command in the grammar of the interpreter chosen
         // HERE. A new host shell must be taught to all of them through that
         // one enum.
         ShellInvocation {
@@ -187,9 +186,8 @@ pub(crate) fn command_provably_in_scratch(command: &str, scratch: &Path) -> bool
     tokens.iter().all(|t| token_provably_in_scratch(t, scratch))
 }
 
-/// Re-exported so the exec-side prover and the plan-mode carve-out cannot
-/// drift: there is ONE containment rule, and it lives in the policy crate
-/// next to `is_scratch_only_command`.
+/// Re-exported from the policy crate: there is ONE containment rule, and it
+/// lives there.
 pub(crate) use mermaid_runtime::token_provably_in_scratch;
 
 /// Advertised to spawned commands so scripts have a ready-made place for

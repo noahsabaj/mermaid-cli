@@ -634,7 +634,7 @@ pub fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: K
         return;
     }
 
-    // Shift+Tab cycles the safety mode (plan → read-only → ask → auto →
+    // Shift+Tab cycles the safety mode (read-only → ask → auto →
     // full-access). Session-scoped: the `[safety]` config value stays the
     // persistent default, so a session never silently inherits a more-permissive
     // mode from a previous run. Mirrors the Alt+T reasoning cycle above.
@@ -961,7 +961,6 @@ pub fn handle_picker_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode) 
         UiMode::ModelPicker { .. } => handle_model_picker_key(state, cmds, code),
         UiMode::ConversationList { .. } => handle_conversation_list_key(state, cmds, code),
         UiMode::RewindPicker { .. } => handle_rewind_picker_key(state, cmds, code),
-        UiMode::PlanConfig { .. } => handle_plan_config_key(state, cmds, code),
         UiMode::EditingInput | UiMode::ModelList => {},
     }
 }
@@ -1134,7 +1133,7 @@ pub fn fork_conversation_at(state: &mut State, cmds: &mut Vec<Cmd>, message_inde
     // 3. Swap. Cumulative token meters continue (same spend, same session of
     //    work); last-usage described a model call on the dropped suffix, so it
     //    has no successor here — reset.
-    // The fork starts with an empty checklist (a rewound plan describes
+    // The fork starts with an empty checklist (a rewound checklist describes
     // dropped work); the broker must forget it too or the next task tool
     // call would republish the stale list.
     state.session.replace_conversation(fork);
@@ -1485,23 +1484,17 @@ pub fn cycle_reasoning(
 }
 
 /// Cycle `SafetyMode` by increasing permissiveness, wrapping around. Used by
-/// Shift+Tab: Plan → `ReadOnly` → Ask → Auto → `FullAccess` → Plan.
-///
-/// Plan is a position in the cycle like any other mode — it is the strictest
-/// one (`permissiveness() == 0`), so the walk starts there. Entering it still
-/// allocates a plan path and may swap the model; that side of the transition
-/// lives in [`apply_safety_mode`], which every mode switch routes through.
+/// Shift+Tab: `ReadOnly` → Ask → Auto → `FullAccess` → `ReadOnly`.
 #[must_use]
 pub fn cycle_safety(
     current: mermaid_model::safety::SafetyMode,
 ) -> mermaid_model::safety::SafetyMode {
     use mermaid_model::safety::SafetyMode as S;
     match current {
-        S::Plan => S::ReadOnly,
         S::ReadOnly => S::Ask,
         S::Ask => S::Auto,
         S::Auto => S::FullAccess,
-        S::FullAccess => S::Plan,
+        S::FullAccess => S::ReadOnly,
     }
 }
 

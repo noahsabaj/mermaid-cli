@@ -29,7 +29,7 @@
 
 pub(crate) mod input;
 pub(crate) mod lifecycle;
-pub(crate) mod plan_flow;
+pub(crate) mod safety_mode;
 pub(crate) mod slash;
 pub(crate) mod streaming;
 pub(crate) mod subagents;
@@ -40,7 +40,7 @@ mod tests;
 
 pub use input::*;
 pub use lifecycle::*;
-pub use plan_flow::*;
+pub use safety_mode::*;
 pub use slash::*;
 pub use streaming::*;
 pub use subagents::*;

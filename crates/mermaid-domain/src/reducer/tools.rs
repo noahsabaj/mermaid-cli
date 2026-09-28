@@ -8,7 +8,6 @@ use crate::transition::{
 };
 use crate::{ProgressEvent, SubagentPhase};
 use mermaid_model::ids::TurnId;
-use mermaid_model::models::ChatMessage;
 
 /// Route a typed `ProgressEvent`.
 ///
@@ -118,12 +117,6 @@ pub fn handle_tool_finished(
             // Attach action display to the last assistant message so
             // the renderer can show it.
             if let Some(call) = calls.iter().find(|c| c.call_id == call_id) {
-                note_plan_tool_outcome(
-                    &mut state.runtime,
-                    state.session.plan.is_some(),
-                    &call.source.function.name,
-                    &outcome,
-                );
                 // A finished shell command may have scribbled on the terminal
                 // (a child that opened /dev/tty writes straight past ratatui's
                 // back buffer). Request a full repaint. Exec only: read/edit/
@@ -147,24 +140,6 @@ pub fn handle_tool_finished(
         },
         _ => None,
     };
-
-    // Plan-tool transitions happen at this boundary — after the outcome slots
-    // are filled, before the follow-up model call is built — so the next
-    // request's system prompt, tool list, and dispatch flooring all see the
-    // new plan state, and an approval's queued kickoff rides the drain below.
-    if plan_tool_transition(state, cmds, call_id, &outcome) {
-        // A handoff replaced the conversation. The executing turn belongs to
-        // the exploration transcript (already saved); cancel its scope and go
-        // Idle — the handoff's queued kickoff drives the next turn in the new
-        // conversation. Appending this turn's tool results would strand them
-        // in the wrong transcript.
-        if let Some(id) = state.turn.id() {
-            cmds.push(Cmd::CancelScope(id));
-        }
-        state.turn = TurnState::Idle;
-        state.ui.live_tool_status.clear();
-        return;
-    }
 
     if let Some(completed_outcomes) = completed
         && let TurnState::ExecutingTools { id, calls, .. } =
@@ -234,73 +209,19 @@ pub fn handle_hook_context(state: &mut State, turn: TurnId, texts: Vec<String>) 
 /// context), then CLEAR the hook-context buffer — it is consumed exactly once,
 /// by the next real dispatch. Display-only builders (`/context` estimates) and
 /// the compaction request call `build_chat_request` directly and do not clear.
-/// Prefix of the plan-mode tail reminder — how `push_plan_reminder` retracts
-/// the previous instance before re-appending at the tail (and how plan-exit
-/// paths retract a stale one).
-pub const PLAN_REMINDER_PREFIX: &str = "Reminder: plan mode is active";
-
-/// Model calls after an arming plan denial before the tail reminder escalates
-/// to the corrective variant. Lower than `TASK_STALENESS_CALLS`: the observed
-/// doom loop burned 7+ minutes of pure denials, and the escalation is cheap
-/// (hidden, swept at turn-end).
-pub const PLAN_THRASH_CALLS: u32 = 3;
-
-/// Tools whose denial means the model tried to CHANGE something. Only these
-/// arm the doom-loop breaker.
-///
-/// The breaker's whole premise is "mutation attempts that never produce a
-/// plan write". Arming on any denial carrying `PLAN_DENIAL_MARKER` also
-/// caught the plan profile's capability denials — `[plan] web = deny` or
-/// `memory = deny` — so a purely read-only Ground phase could trip the
-/// "STOP attempting other mutations" corrective and cut research short.
-pub const PLAN_MUTATING_TOOLS: &[&str] =
-    &["write_file", "edit_file", "apply_patch", "execute_command"];
-
-/// Plan doom-loop bookkeeping at the tool boundary: the FIRST denied MUTATION
-/// arms the breaker (a read-heavy Ground phase alone must never trip it — the
-/// doom-loop signature is mutation denials without a subsequent plan write);
-/// a call that actually WROTE THE PLAN disarms it.
-///
-/// Both conditions are facts recorded upstream, not proxies. The disarm reads
-/// `ToolRunMetadata::plan_file_written`, stamped by the gate that approved the
-/// write, so it covers all three authoring spellings — including the shell
-/// redirect the escalated corrective itself recommends, which the old
-/// tool-name check missed, leaving the breaker armed forever and re-injecting
-/// "the plan file does not exist" at a model that had just written it.
-pub fn note_plan_tool_outcome(
-    runtime: &mut crate::RuntimeState,
-    planning: bool,
-    tool: &str,
-    outcome: &ToolOutcome,
-) {
-    if !planning {
-        return;
-    }
-    if outcome.status == crate::ToolStatus::Error
-        && PLAN_MUTATING_TOOLS.contains(&tool)
-        && outcome.model_content.contains(&plan_denial_signature())
-    {
-        runtime.plan_thrash_armed = true;
-    }
-    if outcome.metadata.plan_file_written && outcome.status == crate::ToolStatus::Success {
-        runtime.plan_thrash_armed = false;
-        runtime.plan_calls_since_denial = 0;
-    }
-}
-
 /// Dispatch-time context-delta injector: diff the mode-defining facts against
 /// what the model was last told (`AdvertisedContext`, persisted on the
 /// conversation), inject ONE persistent `ContextMarker` describing every
 /// change, and re-stamp the snapshot. The single un-bypassable announcement
-/// path for plan entry/exit, safety flips, and model swaps — the transitions
-/// themselves stay message-log-free, and rapid flips between dispatches
-/// (plan on, plan off) collapse to no marker at all.
+/// path for safety flips and model swaps — the transitions themselves stay
+/// message-log-free, and rapid flips between dispatches (read-only on, off)
+/// collapse to no marker at all.
 ///
 /// A `None` snapshot (fresh conversation, `/clear`, fresh handoff, or a save
 /// from before the field existed) establishes the baseline silently: the
 /// system prompt already states current modes; only CHANGES need a timeline
-/// event. Subagents re-stamp silently too — children don't plan and their
-/// modes are fixed by the parent.
+/// event. Subagents re-stamp silently too — their modes are fixed by the
+/// parent.
 pub fn advertise_context_changes(state: &mut State, cmds: &mut Vec<Cmd>) {
     let live = crate::state::AdvertisedContext::observe(&state.session);
     let prev = match state
@@ -315,7 +236,7 @@ pub fn advertise_context_changes(state: &mut State, cmds: &mut Vec<Cmd>) {
     if state.session.is_subagent || prev == live {
         return;
     }
-    let text = context_delta_text(&prev, &live, state.session.messages());
+    let text = context_delta_text(&prev, &live);
     push_system_kind(
         state,
         cmds,
@@ -325,51 +246,14 @@ pub fn advertise_context_changes(state: &mut State, cmds: &mut Vec<Cmd>) {
 }
 
 /// Compose the single coalesced marker for every delta between two advertised
-/// contexts. Plan entry with a `[plan]` model override yields ONE message
-/// covering both; plan exit already names the live safety mode, so a safety
-/// sentence is added only when the mode changed without a plan flip.
+/// contexts.
 #[must_use]
 pub fn context_delta_text(
     prev: &crate::state::AdvertisedContext,
     live: &crate::state::AdvertisedContext,
-    messages: &[ChatMessage],
 ) -> String {
     let mut parts: Vec<String> = Vec::new();
-    match (&prev.plan_path, &live.plan_path) {
-        (None, Some(path)) => parts.push(format!(
-            "Plan mode is now ON. A read-only policy floor is in effect: do not implement, \
-             edit files, or run mutating commands. Author the plan at {} using write_file or \
-             apply_patch — the only writable path. Task checklist tools are disabled (the \
-             checklist is seeded from the approved plan's Tasks section). Call exit_plan_mode \
-             when the plan is decision-complete.",
-            path.display()
-        )),
-        (Some(_), None) => parts.push(format!(
-            "Plan mode is now OFF; safety mode is {}.",
-            live.safety_mode.as_str()
-        )),
-        // Path change without an exit is not currently reachable; treat it
-        // as a re-entry for totality.
-        (Some(a), Some(b)) if a != b => parts.push(format!(
-            "The plan file moved: author the plan at {} now.",
-            b.display()
-        )),
-        _ => {},
-    }
-    // A real mode switch the model must know about. Plan entry and exit each
-    // already say what the mode is, so a redundant second sentence is
-    // suppressed for those transitions.
-    //
-    // This is also where the contradiction used to be born: Shift+Tab while
-    // planning changed `safety_mode` out from under the still-active plan
-    // floor, and this emitted a permanent, never-swept "Safety mode changed to
-    // full_access" that the model read as permission to mutate. It cannot
-    // happen now — while planning the live mode IS `Plan`, and Shift+Tab
-    // re-targets the staged resume mode instead of this value.
-    if prev.safety_mode != live.safety_mode
-        && !prev.safety_mode.is_planning()
-        && !live.safety_mode.is_planning()
-    {
+    if prev.safety_mode != live.safety_mode {
         parts.push(format!(
             "Safety mode changed from {} to {} (set by the user).",
             prev.safety_mode.as_str(),
@@ -379,104 +263,19 @@ pub fn context_delta_text(
     if prev.model_id != live.model_id {
         parts.push(format!("The active model is now {}.", live.model_id));
     }
-    // Leaving plan mode past standing plan denials: fold the re-attempt
-    // steering into the marker so the model does not trust stale blocks.
-    // (`neutralize_superseded_plan_denials` also rewrites the denials
-    // themselves per-request; this sentence covers the model's own memory
-    // of them within the live context.)
-    if prev.plan_path.is_some() && live.plan_path.is_none() && history_has_plan_denial(messages) {
-        parts.push(
-            "Earlier plan-mode policy blocks no longer apply — re-attempt gated actions \
-             instead of assuming they'll fail."
-                .to_string(),
-        );
-    }
     parts.join(" ")
-}
-
-/// Per-dispatch plan reminder: while a plan is being drafted, keep a compact
-/// steering note at the HISTORY TAIL — the one position weak models reliably
-/// read (the observed failure mode was ignoring the same rules at the system
-/// tail behind ~70k tokens of history). Retract-then-reappend keeps exactly
-/// one instance, always last; `RecoveryNudge` kind means it is hidden from
-/// the transcript and swept at every turn-end for free. Byte-stable per plan
-/// session (the path is fixed at entry), so prompt-cache churn stays confined
-/// to the already-churning tail region.
-pub fn push_plan_reminder(state: &mut State, cmds: &mut Vec<Cmd>) {
-    let Some(plan) = &state.session.plan else {
-        return;
-    };
-    if state.session.is_subagent {
-        return;
-    }
-    let plan_path = plan.plan_path.display().to_string();
-    state.session.conversation.messages_mut().retain(|m| {
-        m.kind != mermaid_model::models::ChatMessageKind::RecoveryNudge
-            || !m.content.starts_with(PLAN_REMINDER_PREFIX)
-    });
-    // Doom-loop escalation: once a plan denial armed the breaker, count model
-    // calls; at the threshold, swap this dispatch's reminder for the
-    // corrective and re-arm (the task-staleness pattern). A successful plan
-    // write disarms via `note_plan_tool_outcome`.
-    let escalate = state.runtime.plan_thrash_armed && {
-        state.runtime.plan_calls_since_denial += 1;
-        if state.runtime.plan_calls_since_denial >= PLAN_THRASH_CALLS {
-            state.runtime.plan_calls_since_denial = 0;
-            true
-        } else {
-            false
-        }
-    };
-    let text = if escalate {
-        format!(
-            "{PLAN_REMINDER_PREFIX} and you keep hitting plan-mode policy blocks without \
-             writing the plan. STOP attempting other mutations — they will all be denied. \
-             Write your current plan to {plan_path} NOW by calling the write_file tool \
-             (apply_patch also works; a shell redirect writing ONLY that file works too). \
-             The plan file does not exist until you write it, and exit_plan_mode fails \
-             until it does."
-        )
-    } else {
-        format!(
-            "{PLAN_REMINDER_PREFIX} — read-only floor; do not implement. Author or update the \
-             plan at {plan_path} with write_file or apply_patch (the only writable path). Call \
-             exit_plan_mode when the plan is decision-complete."
-        )
-    };
-    push_system_kind(
-        state,
-        cmds,
-        text,
-        mermaid_model::models::ChatMessageKind::RecoveryNudge,
-    );
-}
-
-/// Are the checklist WRITERS (`task_create`/`task_update`) withdrawn right now?
-///
-/// One predicate, two consumers: the advertised tool set and the task-staleness
-/// nudge. They disagreed — the nudge kept telling the model to "update it
-/// (`task_update`)" for a tool that was neither advertised nor permitted, and
-/// since only a successful update resets the counter, the contradiction
-/// re-injected itself every `TASK_STALENESS_CALLS` dispatches for the whole
-/// planning session.
-#[must_use]
-pub fn checklist_writers_suppressed(state: &State) -> bool {
-    state.session.safety_mode.is_planning()
-        && state.settings.plan.permissions.tasks != crate::PlanPermLevel::Allow
 }
 
 pub fn push_call_model(state: &mut State, cmds: &mut Vec<Cmd>, turn: TurnId) {
     // Mode changes become history events BEFORE anything else rides this
-    // request — the marker must precede the tail reminder.
+    // request.
     advertise_context_changes(state, cmds);
     // Structural plan-rot guard: count model-call cycles while a task sits
     // in_progress with no checklist update (`handle_tasks_updated` resets the
     // counter). At the threshold, inject a targeted nudge into THIS request
     // and re-arm — prompt discipline alone demonstrably decays mid-run.
-    // ...unless the writers are withdrawn, in which case the nudge would name
-    // a tool the model cannot call and the counter could never be reset.
     match state.session.conversation.tasks.active() {
-        Some(active) if !checklist_writers_suppressed(state) => {
+        Some(active) => {
             state.runtime.calls_since_task_update += 1;
             if state.runtime.calls_since_task_update >= TASK_STALENESS_CALLS {
                 state.runtime.calls_since_task_update = 0;
@@ -487,13 +286,9 @@ pub fn push_call_model(state: &mut State, cmds: &mut Vec<Cmd>, turn: TurnId) {
                 push_task_notice(state, notice);
             }
         },
-        // No active task, or the writers are withdrawn: hold the counter at
-        // zero so planning never leaves a primed nudge for the run after it.
-        _ => state.runtime.calls_since_task_update = 0,
+        // No active task: hold the counter at zero.
+        None => state.runtime.calls_since_task_update = 0,
     }
-    // The plan tail reminder is appended LAST so it is the most recent thing
-    // the model reads.
-    push_plan_reminder(state, cmds);
     let request = build_chat_request(state);
     state.pending_hook_context.clear();
     state.pending_task_notices.clear();
@@ -560,5 +355,3 @@ pub fn note_safety_mode_change(
     // No save here for the retract-only path: both callers persist the mode
     // switch right after this returns.
 }
-
-// ---------- Plan mode ----------

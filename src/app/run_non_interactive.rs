@@ -89,12 +89,6 @@ pub struct RunOptions {
     /// An `mpsc` rather than a `oneshot` only because `RunOptions` is `Clone`
     /// and a `oneshot::Sender` is not.
     pub handle_tx: Option<tokio::sync::mpsc::Sender<EngineHandle<RunEvent>>>,
-    /// `mermaid run --plan`: enter plan mode before the prompt seeds, so the
-    /// run explores read-only and delivers a plan file.
-    pub plan: bool,
-    /// `--plan-autoaccept`: the headless approval starts implementation
-    /// immediately instead of ending the run at the plan.
-    pub plan_autoaccept: bool,
 }
 
 /// Drive one prompt to completion with explicit per-call options. Bounded by a
@@ -121,14 +115,6 @@ pub async fn run_non_interactive_with(
     prompt: String,
     opts: RunOptions,
 ) -> Result<RunResult> {
-    // `--plan-autoaccept`: the headless exit_plan_mode path consults these —
-    // auto-approve with post_approve=start flows the run straight from the
-    // approved plan into implementation.
-    if opts.plan_autoaccept {
-        config.plan.auto_approve = true;
-        config.plan.post_approve = Some(mermaid_domain::PlanPostApprove::Start);
-    }
-
     // Fold enabled plugins' MCP servers + agent types into the merged
     // config before anything consumes it (same policy as the interactive
     // path; warnings go to stderr — there is no transcript here yet).
@@ -265,21 +251,10 @@ pub async fn run_non_interactive_with(
         event_tx: event_tx.clone(),
     });
 
-    // `--plan`: flip into plan mode BEFORE the prompt seeds, through the
-    // same reducer path as the interactive `/plan` (path allocation, model
-    // swap, prompt injection all included).
-    //
-    // Both this and the seed below go through `reduce`, not `step`: they are
-    // synthetic inputs the driver manufactures, and projecting them onto the
-    // public stream would announce events no client sent.
-    if opts.plan {
-        engine.reduce(
-            chrono::Local::now(),
-            Msg::Slash(mermaid_domain::SlashCmd::Plan(None)),
-        );
-    }
-
     // Seed the turn. The clock is injected as data so the reducer stays pure.
+    // It goes through `reduce`, not `step`: it is a synthetic input the driver
+    // manufactures, and projecting it onto the public stream would announce
+    // an event no client sent.
     engine.reduce(
         chrono::Local::now(),
         Msg::SubmitPrompt {

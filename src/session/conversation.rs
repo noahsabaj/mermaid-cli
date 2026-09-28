@@ -728,20 +728,45 @@ mod tests {
     }
 
     #[test]
+    fn a_save_from_the_retired_plan_mode_still_loads() {
+        // Written by a build that still had plan mode, mid-plan: the live mode
+        // and the advertised baseline both name it, and the baseline carries
+        // the plan path. Each unknown piece degrades instead of failing the
+        // load: the mode falls back to the config default on resume, and the
+        // baseline restamps silently on the first dispatch.
+        let json = r#"{
+            "id": "20260101_120000_003",
+            "title": "Planning",
+            "messages": [],
+            "model_name": "m",
+            "project_path": "/tmp/proj",
+            "created_at": "2026-01-01T12:00:00-05:00",
+            "updated_at": "2026-01-01T12:00:00-05:00",
+            "total_tokens": null,
+            "safety_mode": "plan",
+            "advertised_context": {
+                "safety_mode": "plan",
+                "model_id": "ollama/test",
+                "plan_path": "/tmp/plans/p.md"
+            },
+            "plan": { "file": "/tmp/plans/p.md", "restore_mode": "auto" }
+        }"#;
+        let conv: ConversationHistory = serde_json::from_str(json).expect("plan-era json loads");
+        assert_eq!(conv.safety_mode, None);
+        assert!(conv.advertised_context.is_none());
+    }
+
+    #[test]
     fn advertised_context_round_trips_through_conversation_json() {
         let mut fresh = touched("/tmp/proj");
         fresh.advertised_context = Some(mermaid_domain::AdvertisedContext {
-            plan_path: Some(std::path::PathBuf::from("/tmp/proj/.mermaid/plans/x.md")),
             safety_mode: mermaid_runtime::SafetyMode::Ask,
             model_id: "ollama/test".to_string(),
         });
         let round: ConversationHistory =
             serde_json::from_str(&serde_json::to_string(&fresh).unwrap()).unwrap();
         let ctx = round.advertised_context.expect("field survives");
-        assert_eq!(
-            ctx.plan_path.as_deref(),
-            Some(std::path::Path::new("/tmp/proj/.mermaid/plans/x.md"))
-        );
+        assert_eq!(ctx.safety_mode, mermaid_runtime::SafetyMode::Ask);
         assert_eq!(ctx.model_id, "ollama/test");
     }
 

@@ -216,23 +216,9 @@ pub struct ExecContext {
     /// construction on the live path — `None` in tests and before the
     /// directory is confirmed on disk.
     pub scratchpad: Option<PathBuf>,
-    /// Effective live safety mode for this call (from the session, not the
-    /// static config; floored to `ReadOnly` while a plan is being drafted).
-    /// The policy gate builds its `PolicyEngine` from this.
+    /// Live safety mode for this call (from the session, not the static
+    /// config). The policy gate builds its `PolicyEngine` from this.
     pub safety_mode: SafetyMode,
-    /// `Some(path)` while the session is in plan mode: the one path the
-    /// policy gate exempts from the read-only floor, and the flag the plan
-    /// carve-outs (memory writes, known-safe builds) and the task tools key
-    /// on. Defaults to `None` in `new` — the live dispatch path sets it,
-    /// like `background`/`notify`.
-    pub plan_file: Option<std::path::PathBuf>,
-    /// LIVE per-category plan permission levels, threaded from the reducer
-    /// (the frozen startup `config` would go stale under `/plan config`
-    /// edits). Only consulted while `plan_file` is `Some`; defaults in `new`.
-    pub plan_permissions: mermaid_domain::PlanPermissions,
-    /// Context-window fill at dispatch, when known (`exit_plan_mode` shows
-    /// it on the clear-context approval option). Defaults to `None` in `new`.
-    pub context_percent: Option<u8>,
     /// The user's stated intent for the turn (latest user message), passed to
     /// the Auto-mode classifier so it can judge whether an action is aligned.
     pub intent: Option<String>,
@@ -324,9 +310,6 @@ impl ExecContext {
             session_id,
             scratchpad: dispatch.scratchpad,
             safety_mode: dispatch.safety_mode,
-            plan_file: dispatch.plan_file,
-            plan_permissions: dispatch.plan_permissions,
-            context_percent: dispatch.context_percent,
             intent: dispatch.intent,
             classifier: services.classifier,
             approval: services.approval,
@@ -428,9 +411,6 @@ pub fn test_exec_context_with_config(
             mermaid_domain::ToolDispatch {
                 model_id: String::new(),
                 safety_mode,
-                plan_file: None,
-                plan_permissions: mermaid_domain::PlanPermissions::default(),
-                context_percent: None,
                 intent: None,
                 session_id: String::new(),
                 message_index: 0,

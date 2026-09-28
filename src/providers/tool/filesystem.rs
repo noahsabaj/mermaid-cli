@@ -519,13 +519,6 @@ impl ToolExecutor for WriteFileTool {
         )
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "the gated write path in order: parse, resolve in roots, policy gate, per-path \
-         lock, checkpoint, then the blocking write with its display diff; each step is a guard \
-         returning its own outcome, and the closing select needs everything the earlier steps \
-         produced (path, counts, plan flag, timer)"
-    )]
     async fn execute(&self, args: serde_json::Value, ctx: ExecContext) -> ToolOutcome {
         let Some(path) = args.get("path").and_then(|v| v.as_str()) else {
             return ToolOutcome::error("write_file requires 'path' (string)", None);
@@ -555,7 +548,7 @@ impl ToolExecutor for WriteFileTool {
             "call_id": ctx.call_id.0,
             "task_id": ctx.task_id.clone(),
         });
-        let plan_write = match mutation_policy_outcome(
+        if let MutationGate::Blocked(outcome) = mutation_policy_outcome(
             &ctx,
             "write_file",
             path,
@@ -565,9 +558,8 @@ impl ToolExecutor for WriteFileTool {
         )
         .await
         {
-            MutationGate::Blocked(outcome) => return *outcome,
-            MutationGate::Proceed { plan_write } => plan_write,
-        };
+            return *outcome;
+        }
         // Serialize writers to this canonical path: two write_file/edit calls to
         // the same file in one turn run concurrently, so without this the last
         // atomic rename silently wins (lost update). Distinct paths still overlap.
@@ -626,7 +618,6 @@ impl ToolExecutor for WriteFileTool {
                             diff_truncated: write.diff.truncated,
                             lines_added: write.diff.added,
                             lines_removed: write.diff.removed,
-                            plan_file_written: plan_write,
                             ..ToolRunMetadata::default()
                         })
                     },
@@ -722,7 +713,7 @@ impl ToolExecutor for EditFileTool {
             "call_id": ctx.call_id.0,
             "task_id": ctx.task_id.clone(),
         });
-        let plan_write = match mutation_policy_outcome(
+        if let MutationGate::Blocked(outcome) = mutation_policy_outcome(
             &ctx,
             "edit_file",
             path,
@@ -732,9 +723,8 @@ impl ToolExecutor for EditFileTool {
         )
         .await
         {
-            MutationGate::Blocked(outcome) => return *outcome,
-            MutationGate::Proceed { plan_write } => plan_write,
-        };
+            return *outcome;
+        }
 
         let _write_guard = tokio::select! {
             biased;
@@ -769,7 +759,7 @@ impl ToolExecutor for EditFileTool {
                     Ok(Ok(edit)) => {
                         let duration_secs = start.elapsed().as_secs_f64();
                         after_file_mutation(&ctx, "edit_file", &display_path);
-                        edit_success_outcome(&display_path, edit, plan_write, duration_secs)
+                        edit_success_outcome(&display_path, edit, duration_secs)
                     },
                     Ok(Err(e)) => ToolOutcome::error(
                         format!("edit_file({display_path}): {e}"),
@@ -785,12 +775,7 @@ impl ToolExecutor for EditFileTool {
     }
 }
 
-fn edit_success_outcome(
-    display_path: &str,
-    edit: EditResult,
-    plan_write: bool,
-    duration_secs: f64,
-) -> ToolOutcome {
+fn edit_success_outcome(display_path: &str, edit: EditResult, duration_secs: f64) -> ToolOutcome {
     let fuzzy_note = if edit.fuzzy {
         "\nnote: matched with fuzzy (whitespace/Unicode) context; verify the result."
     } else {
@@ -813,7 +798,6 @@ fn edit_success_outcome(
         diff_truncated: edit.diff.truncated,
         lines_added: edit.diff.added,
         lines_removed: edit.diff.removed,
-        plan_file_written: plan_write,
         ..ToolRunMetadata::default()
     })
 }
@@ -949,8 +933,7 @@ fn resolve_read_target(roots: &AllowedRoots<'_>, raw: &str) -> std::io::Result<R
 /// Filed as `ToolCategory::ExternalDirectory` — an external side effect, the
 /// same class an out-of-project `working_dir` gets from the exec tool — so
 /// `ask` prompts (allowlistable per directory), `auto` consults the intent
-/// classifier, `full_access` proceeds, and the read-only floor (read-only and
-/// plan modes) denies. Not replayable: a read has nothing to replay, so a
+/// classifier, `full_access` proceeds, and read-only mode denies. Not replayable: a read has nothing to replay, so a
 /// headless `ask` session refuses it unless untrusted tools were allowed.
 ///
 /// Returns the blocking outcome, or `None` to proceed.
@@ -971,14 +954,7 @@ async fn external_read_gate(ctx: &ExecContext, raw: &str, abs: &Path) -> Option<
     });
     match super::policy_gate::gate(ctx, request, &[], pending_action, false, false).await {
         super::policy_gate::Gate::Block(outcome) => Some(outcome),
-        super::policy_gate::Gate::Proceed { confine, .. } => {
-            debug_assert_eq!(
-                confine,
-                super::policy_gate::Confinement::Inherit,
-                "read gate cannot honor a confinement directive"
-            );
-            None
-        },
+        super::policy_gate::Gate::Proceed { .. } => None,
     }
 }
 
@@ -1113,19 +1089,11 @@ fn edit_file_blocking(
     })
 }
 
-/// Outcome of gating a file mutation. `Proceed` carries `plan_write`: whether
-/// the allowance came from plan mode's plan-file carve-out, which the caller
-/// stamps onto `ToolRunMetadata::plan_file_written`.
-///
-/// The tool NAME is not a usable stand-in for this. "Under the plan floor the
-/// only Edit that can succeed is the plan file" stops being true as soon as
-/// `[plan] memory = allow` lets a `write_file` to a memory path succeed.
+/// Outcome of gating a file mutation.
 pub(super) enum MutationGate {
     /// Blocked — return this outcome verbatim. Boxed to keep the enum small.
     Blocked(Box<ToolOutcome>),
-    Proceed {
-        plan_write: bool,
-    },
+    Proceed,
 }
 
 /// Gate a file mutation by where its target landed.
@@ -1171,21 +1139,7 @@ pub(super) async fn mutation_policy_outcome(
     .await
     {
         super::policy_gate::Gate::Block(outcome) => MutationGate::Blocked(Box::new(outcome)),
-        super::policy_gate::Gate::Proceed {
-            plan_write,
-            confine,
-            ..
-        } => {
-            // File tools write with `std::fs`/`open_beneath` and have no
-            // launcher to wrap, so they cannot honor a confinement directive.
-            // The scratchpad carve-out only matches shell requests, so this is
-            // unreachable — assert it rather than drop it silently, which is
-            // exactly how a "confined" write would have run unconfined.
-            debug_assert_eq!(
-                confine,
-                super::policy_gate::Confinement::Inherit,
-                "file mutations cannot honor a confinement directive"
-            );
+        super::policy_gate::Gate::Proceed { .. } => {
             let _ = mermaid_runtime::run_plugin_hooks(
                 "before_file_mutation",
                 &serde_json::json!({
@@ -1196,7 +1150,7 @@ pub(super) async fn mutation_policy_outcome(
                     "path": path,
                 }),
             );
-            MutationGate::Proceed { plan_write }
+            MutationGate::Proceed
         },
     }
 }
@@ -2156,30 +2110,25 @@ mod tests {
     }
 
     /// The read-only floor: an out-of-project read is an external side effect,
-    /// denied in `read_only` and in plan mode. Before the gate, `read_file`
-    /// handed back `~/.ssh/id_rsa` in every mode without a prompt.
+    /// denied in `read_only`. Before the gate, `read_file` handed back
+    /// `~/.ssh/id_rsa` in every mode without a prompt.
     #[tokio::test]
     async fn read_outside_the_project_is_denied_under_the_read_only_floor() {
-        for mode in [
-            mermaid_runtime::SafetyMode::ReadOnly,
-            mermaid_runtime::SafetyMode::Plan,
-        ] {
-            let (workdir, external_file) = external_read_fixture("read_ext_readonly");
-            let (ctx, _rx) = ctx_in_mode(mode, workdir.clone());
-            let outcome = read_external(ctx, &external_file).await;
-            assert_eq!(
-                outcome.status,
-                mermaid_domain::ToolStatus::Error,
-                "{mode:?} must deny an external read: {outcome:?}"
-            );
-            assert!(
-                !outcome.output().contains("external content"),
-                "{mode:?} leaked the file body: {}",
-                outcome.output()
-            );
-            let _ = fs::remove_dir_all(&workdir);
-            let _ = fs::remove_dir_all(external_file.parent().unwrap());
-        }
+        let (workdir, external_file) = external_read_fixture("read_ext_readonly");
+        let (ctx, _rx) = ctx_in_mode(mermaid_runtime::SafetyMode::ReadOnly, workdir.clone());
+        let outcome = read_external(ctx, &external_file).await;
+        assert_eq!(
+            outcome.status,
+            mermaid_domain::ToolStatus::Error,
+            "read_only must deny an external read: {outcome:?}"
+        );
+        assert!(
+            !outcome.output().contains("external content"),
+            "read_only leaked the file body: {}",
+            outcome.output()
+        );
+        let _ = fs::remove_dir_all(&workdir);
+        let _ = fs::remove_dir_all(external_file.parent().unwrap());
     }
 
     /// Inside the project nothing changes: a `read_only` session still reads

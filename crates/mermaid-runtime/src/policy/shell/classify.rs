@@ -295,7 +295,7 @@ fn positional_args(segment: &[String]) -> Vec<&str> {
 /// to `HostShell::current()`, the same predicate `shell_invocation` spawns
 /// with — so risk is always read for the interpreter that executes.
 /// Classifying for a different one is exactly the bug that made
-/// plan/read-only mode deny every read-only PowerShell pipeline on Windows
+/// read-only mode deny every read-only PowerShell pipeline on Windows
 /// while missing PS-only writes (`*> file`).
 pub(in crate::policy) fn classify_command_for(
     host_shell: super::super::HostShell,

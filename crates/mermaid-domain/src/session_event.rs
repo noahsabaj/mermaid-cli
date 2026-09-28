@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use crate::checklist::ChecklistStore;
 use crate::compaction::CompactionEvent;
 use crate::conversation::ConversationHistory;
-use crate::state::{AdvertisedContext, ContextUsageSnapshot, PlanState, TokenUsageTotals};
+use crate::state::{AdvertisedContext, ContextUsageSnapshot, TokenUsageTotals};
 use mermaid_model::action::ActionDisplay;
 use mermaid_model::models::{ChatMessage, MessageRole};
 use mermaid_model::safety::SafetyMode;
@@ -126,11 +126,17 @@ pub enum SessionEvent {
 pub struct SessionScalars {
     pub title: String,
     pub model_name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "SafetyMode::deserialize_optional_lenient"
+    )]
     pub safety_mode: Option<SafetyMode>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub plan: Option<PlanState>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "AdvertisedContext::deserialize_optional_lenient"
+    )]
     pub advertised_context: Option<AdvertisedContext>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_token_usage: Option<TokenUsageTotals>,
@@ -160,7 +166,6 @@ impl SessionScalars {
             title: snapshot.title.clone(),
             model_name: snapshot.model_name.clone(),
             safety_mode: snapshot.safety_mode,
-            plan: snapshot.plan.clone(),
             advertised_context: snapshot.advertised_context.clone(),
             last_token_usage: snapshot.last_token_usage,
             cumulative_token_usage: snapshot.cumulative_token_usage,
@@ -177,7 +182,6 @@ impl SessionScalars {
         conversation.title.clone_from(&self.title);
         conversation.model_name.clone_from(&self.model_name);
         conversation.safety_mode = self.safety_mode;
-        conversation.plan.clone_from(&self.plan);
         conversation
             .advertised_context
             .clone_from(&self.advertised_context);
@@ -351,7 +355,6 @@ mod tests {
             title: "t".to_string(),
             model_name: "m".to_string(),
             safety_mode: None,
-            plan: None,
             advertised_context: None,
             last_token_usage: None,
             cumulative_token_usage: TokenUsageTotals::default(),
@@ -659,7 +662,7 @@ mod tests {
             .attach_action(*sample_action("read_file", "src/lib.rs"));
         state.session.attach_image("QUJD".to_string());
         // A steering nudge: excluded from the log by design.
-        let mut nudge = ChatMessage::system("plan reminder");
+        let mut nudge = ChatMessage::system("safety reminder");
         nudge.kind = mermaid_model::models::ChatMessageKind::RecoveryNudge;
         state.session.append(nudge, fixed_ts());
 

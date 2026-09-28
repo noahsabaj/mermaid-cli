@@ -39,7 +39,6 @@ pub mod image_token;
 pub mod input_kind;
 pub mod msg;
 pub mod picker;
-pub mod plan;
 pub mod progress;
 pub mod prompts;
 pub mod query;
@@ -70,9 +69,8 @@ pub use compaction::{
 pub use config::{
     ActiveStyle, AgentTypeConfig, AgentsConfig, CompactionConfig, Config, ConfigLayer, ExecConfig,
     FetchBackend, FilesystemPolicy, McpServerConfig, MemoryConfig, NetworkPolicy, OutputConfig,
-    OutputStyleSummary, PlanConfig, PlanPermLevel, PlanPermissions, PlanPostApprove, SafetyConfig,
-    SearchBackend, SessionFlags, ThemeChoice, TransportKind, UiConfig, UserProviderConfig,
-    WebConfig,
+    OutputStyleSummary, SafetyConfig, SearchBackend, SessionFlags, ThemeChoice, TransportKind,
+    UiConfig, UserProviderConfig, WebConfig,
 };
 pub use context::{
     InstructionSource, LoadedInstructions, LoadedMemory, LoadedSkills, MemoryEntry, MemoryScope,
@@ -112,7 +110,7 @@ pub use state::{
     AdvertisedContext, ApprovalChoice, ApprovalKind, Attachment, Confirmation, ConfirmationTarget,
     ContextUsageSnapshot, ConversationSummary, Focus, GenPhase, LiveToolStatus, McpServerEntry,
     McpServerStatus, McpState, McpToolSpec, ModelChoice, PendingApproval, PendingToolCall,
-    PlanState, PluginCommand, PromptTokenBreakdown, QueuedMessage, RewindCandidate, Session, State,
+    PluginCommand, PromptTokenBreakdown, QueuedMessage, RewindCandidate, Session, State,
     StatusKind, TokenUsageTotals, ToolOutcome, TurnState, UiMode, UiState,
     estimate_context_usage_for_request, estimate_tool_schema_tokens,
 };

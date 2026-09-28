@@ -45,7 +45,6 @@ pub struct ThemeColors {
     // Mode colors
     pub mode_normal: ColorValue,
     pub mode_accept_edits: ColorValue,
-    pub mode_plan: ColorValue,
     pub mode_bypass_all: ColorValue,
 
     // Status colors
@@ -201,7 +200,6 @@ impl Theme {
 
                 mode_normal: ColorValue::Named("green".to_string()),
                 mode_accept_edits: ColorValue::Named("yellow".to_string()),
-                mode_plan: ColorValue::Named("blue".to_string()),
                 mode_bypass_all: ColorValue::Named("red".to_string()),
 
                 success: ColorValue::Named("green".to_string()),
@@ -282,7 +280,6 @@ impl Theme {
 
                 mode_normal: ColorValue::Named("green".to_string()),
                 mode_accept_edits: ColorValue::Named("yellow".to_string()),
-                mode_plan: ColorValue::Named("blue".to_string()),
                 mode_bypass_all: ColorValue::Named("red".to_string()),
 
                 success: ColorValue::Named("green".to_string()),
@@ -332,7 +329,6 @@ impl Theme {
                 code_comment: d(),
                 mode_normal: d(),
                 mode_accept_edits: d(),
-                mode_plan: d(),
                 mode_bypass_all: d(),
                 success: d(),
                 warning: d(),

@@ -118,7 +118,7 @@ pub(crate) fn scan_heredoc_operator(
 /// comment, an exotic quoting shape the scanner misreads — produces a
 /// delimiter that never appears on its own line (`2]`), so the operator stays
 /// ordinary text and the lines after it remain REAL segments instead of being
-/// swallowed as inert data. That swallowing was a read-only/plan-mode bypass:
+/// swallowed as inert data. That swallowing was a read-only-mode bypass:
 /// `echo $[1<<2]\ngit push origin main` classified as `ReadOnly`.
 ///
 /// A genuinely unterminated heredoc is refused by the same rule. The shell

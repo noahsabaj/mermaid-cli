@@ -357,7 +357,7 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<Value>) {
             {
                 // Anthropic has no mid-conversation system role, but this
                 // content exists to steer the model and must not be dropped
-                // (it silently was — plan reminders, context markers,
+                // (it silently was — context markers, checklist reminders,
                 // auto-continue and stalled-turn nudges all vanished here).
                 // Deliver it as a tagged block on the adjacent user turn:
                 // that keeps the tail position the steering depends on and
@@ -1955,13 +1955,13 @@ mod tests {
 
     /// Harness steering (`RecoveryNudge`, `ContextMarker`) MUST reach the
     /// model. Anthropic has no mid-conversation system role, and this adapter
-    /// used to drop such messages outright — silently deleting the plan-mode
-    /// reminder, context markers, and the auto-continue and stalled-turn
+    /// used to drop such messages outright — silently deleting context
+    /// markers, checklist reminders, and the auto-continue and stalled-turn
     /// nudges on every `claude/*` model.
     #[test]
     fn model_directed_system_messages_reach_the_wire_as_tagged_user_blocks() {
         use crate::models::ChatMessageKind;
-        let mut nudge = ChatMessage::system("Reminder: plan mode is active.");
+        let mut nudge = ChatMessage::system("Reminder: the task checklist is stale.");
         nudge.kind = ChatMessageKind::RecoveryNudge;
         let messages = vec![ChatMessage::user("ok"), nudge];
 
@@ -1973,7 +1973,7 @@ mod tests {
         assert_eq!(blocks[0]["text"], "ok");
         let tagged = blocks[1]["text"].as_str().unwrap();
         assert!(
-            tagged.contains("<system-reminder>") && tagged.contains("plan mode is active"),
+            tagged.contains("<system-reminder>") && tagged.contains("the task checklist is stale"),
             "steering must be delivered and tagged: {tagged}",
         );
     }
@@ -2012,7 +2012,7 @@ mod tests {
     fn convert_messages_never_emits_consecutive_same_role_turns() {
         use crate::models::ChatMessageKind;
         let steering = || {
-            let mut m = ChatMessage::system("Reminder: plan mode is active.");
+            let mut m = ChatMessage::system("Reminder: the task checklist is stale.");
             m.kind = ChatMessageKind::ContextMarker;
             m
         };

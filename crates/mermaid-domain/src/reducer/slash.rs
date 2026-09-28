@@ -327,40 +327,15 @@ pub fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
                 state,
                 cmds,
                 format!(
-                    "Safety: {} — options: plan, read_only, ask, auto, full_access (Shift+Tab \
-                     cycles)",
+                    "Safety: {} — options: read_only, ask, auto, full_access (Shift+Tab cycles)",
                     state.session.safety_mode.as_str()
                 ),
             );
         },
         SlashCmd::Safety(Some(mode)) => {
-            // `plan` is a mode like any other here — `apply_safety_mode` runs
-            // the plan-file allocation / teardown that entering or leaving it
-            // needs. Session-scoped (mirrors Shift+Tab) — not written to config.
+            // Session-scoped (mirrors Shift+Tab) — not written to config.
             apply_safety_mode(state, cmds, mode);
             // The bottom status bar shows the new mode — no banner.
-        },
-        SlashCmd::Plan(arg) => match arg.as_deref().map(str::trim) {
-            None | Some("") | Some("on") => enter_plan_mode(state, cmds),
-            Some("off") => exit_plan_mode(state, cmds),
-            Some("show") => match &state.session.plan {
-                Some(plan) => {
-                    let path = plan_path_display(state, &plan.plan_path.clone());
-                    push_system(state, cmds, format!("Plan file (drafting): {path}"));
-                },
-                None => push_system(
-                    state,
-                    cmds,
-                    "Not in plan mode (/plan or Shift+Tab enters it)",
-                ),
-            },
-            Some("config") => {
-                state.ui.mode = UiMode::PlanConfig { cursor: 0 };
-            },
-            Some(_) => push_system(state, cmds, "Usage: /plan [off|show|config]"),
-        },
-        SlashCmd::Config => {
-            state.ui.mode = UiMode::PlanConfig { cursor: 0 };
         },
         SlashCmd::VisibleReasoning(arg) => {
             match visible_reasoning_value(arg.as_deref(), state.ui.show_reasoning) {
@@ -993,10 +968,8 @@ pub fn push_system_kind(
         state.session.append(msg, state.now);
     }
     // A `RecoveryNudge` is swept at the next turn end, so persisting it buys
-    // nothing and costs a full transcript re-serialization. The plan-mode
-    // reminder is one of these and rides EVERY model call, so this fired once
-    // per dispatch for a byte-identical message that is guaranteed to be gone
-    // before the save could ever be read back. Durable kinds still save.
+    // nothing and costs a full transcript re-serialization. Durable kinds
+    // still save.
     if kind != mermaid_model::models::ChatMessageKind::RecoveryNudge {
         cmds.push(state.session.save_conversation_cmd());
     }

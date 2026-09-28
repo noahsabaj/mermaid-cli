@@ -82,7 +82,7 @@ impl ToolExecutor for ApplyPatchTool {
         // Only project files are checkpointable; the gate bypasses entirely
         // when EVERY hunk lands in the session scratchpad, and escalates when
         // any hunk lands outside the project.
-        let plan_write = match mutation_policy_outcome(
+        if let MutationGate::Blocked(outcome) = mutation_policy_outcome(
             &ctx,
             "apply_patch",
             &summary_path,
@@ -92,9 +92,8 @@ impl ToolExecutor for ApplyPatchTool {
         )
         .await
         {
-            MutationGate::Blocked(outcome) => return *outcome,
-            MutationGate::Proceed { plan_write } => plan_write,
-        };
+            return *outcome;
+        }
 
         // Serialize writers to every affected path (sorted ⇒ deadlock-free),
         // raced against cancellation so a contended lock stays responsive.
@@ -133,7 +132,7 @@ impl ToolExecutor for ApplyPatchTool {
             }
         };
         after_file_mutation(&ctx, "apply_patch", &summary_path);
-        build_outcome(report, start.elapsed().as_secs_f64(), plan_write)
+        build_outcome(report, start.elapsed().as_secs_f64())
     }
 }
 
@@ -408,7 +407,7 @@ impl ApplyReport {
     }
 }
 
-fn build_outcome(report: ApplyReport, duration_secs: f64, plan_write: bool) -> ToolOutcome {
+fn build_outcome(report: ApplyReport, duration_secs: f64) -> ToolOutcome {
     let total =
         report.added.len() + report.modified.len() + report.deleted.len() + report.renamed.len();
     let mut lines = vec![format!("Applied patch: {total} file(s)")];
@@ -440,7 +439,6 @@ fn build_outcome(report: ApplyReport, duration_secs: f64, plan_write: bool) -> T
         diff_truncated: report.diff_truncated,
         lines_added: report.added_lines,
         lines_removed: report.removed_lines,
-        plan_file_written: plan_write,
         ..ToolRunMetadata::default()
     })
 }

@@ -53,8 +53,8 @@ fn body(i: usize) -> String {
 
 /// A transcript of `pairs` user/assistant exchanges.
 ///
-/// `marker` inserts a persistent `ContextMarker` (what a plan toggle leaves
-/// behind). `continuation` marks the final assistant message as an
+/// `marker` inserts a persistent `ContextMarker` (what a safety-mode switch
+/// leaves behind). `continuation` marks the final assistant message as an
 /// auto-continue half, which is the only thing that still forces the stitch.
 fn state_with(pairs: usize, marker: bool, continuation: bool) -> State {
     let mut state = State::new(
@@ -72,7 +72,8 @@ fn state_with(pairs: usize, marker: bool, continuation: bool) -> State {
         state.session.append(ChatMessage::assistant(body(i)), now);
     }
     if marker {
-        let mut m = ChatMessage::system("Plan mode is now ON. Author the plan at x.md.");
+        let mut m =
+            ChatMessage::system("Safety mode changed from auto to read_only (set by the user).");
         m.kind = ChatMessageKind::ContextMarker;
         state.session.append(m, now);
     }

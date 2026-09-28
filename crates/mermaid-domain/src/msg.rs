@@ -563,17 +563,8 @@ pub enum SlashCmd {
     Reasoning(Option<ReasoningLevel>),
     VisibleReasoning(Option<String>),
     /// No arg → show current safety mode; `Some` → switch it for this
-    /// session, `plan` included (`Shift+Tab` cycles the same field).
-    /// Session-scoped.
+    /// session (`Shift+Tab` cycles the same field). Session-scoped.
     Safety(Option<SafetyMode>),
-    /// Plan mode: no arg / `on` → enter; `off` → leave; `show` → print the
-    /// plan-file path; `config` → open the settings picker. `plan` is a
-    /// `SafetyMode`, so `Shift+Tab` and `/safety plan` reach the same state.
-    /// Session-scoped.
-    Plan(Option<String>),
-    /// Open the settings picker (currently the plan-mode section; more
-    /// sections join it as they exist).
-    Config,
     Clear,
     Save(Option<String>),
     Load(Option<String>),

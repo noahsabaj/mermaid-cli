@@ -11,7 +11,5 @@ pub(crate) mod lexer;
 pub(in crate::policy) mod powershell;
 pub(crate) mod tables;
 
-pub(crate) use classify::*;
 pub(crate) use destructive::*;
 pub(crate) use lexer::*;
-pub(crate) use tables::*;

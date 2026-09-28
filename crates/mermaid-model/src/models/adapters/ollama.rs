@@ -1334,7 +1334,7 @@ mod tests {
     async fn model_directed_system_messages_reach_the_wire_in_place() {
         use crate::models::ChatMessageKind;
         let adapter = make_adapter().await;
-        let mut nudge = ChatMessage::system("Reminder: plan mode is active.");
+        let mut nudge = ChatMessage::system("Reminder: the task checklist is stale.");
         nudge.kind = ChatMessageKind::RecoveryNudge;
         let messages = vec![ChatMessage::user("ok"), nudge];
         let body = adapter.build_request_body(&messages, &ModelConfig::default(), false, false);
@@ -1346,7 +1346,7 @@ mod tests {
             last["content"]
                 .as_str()
                 .unwrap()
-                .contains("plan mode is active"),
+                .contains("the task checklist is stale"),
         );
     }
 

@@ -1,7 +1,7 @@
 //! Building the outgoing `ChatRequest` from `State`.
 //!
-//! `build_chat_request` plus the four helpers only it uses: the system prompt,
-//! the plan-capabilities line, stale tool-image eviction, and neutralising
+//! `build_chat_request` plus the helpers only it uses: the system prompt,
+//! stale tool-image eviction, and neutralising
 //! superseded policy denials so a `grep` hit that once tripped read-only mode
 //! does not keep tripping it.
 
@@ -91,17 +91,7 @@ pub fn build_chat_request(state: &State) -> ChatRequest {
     // see `domain::tool_search`. The effect runner prepends built-in tools
     // before dispatching, so this vector is the MCP-only portion. Ordering
     // is byte-stable across runs for prompt-cache warmth (#F68).
-    let mut mcp_tools = super::tool_search::mcp_tool_definitions(state);
-    // Plan-mode tools are registered `is_internal` (never in the effect
-    // layer's `describe_all`), so which one the model sees is decided HERE,
-    // where the plan state lives: `exit_plan_mode` only while planning,
-    // `enter_plan_mode` only while not (and never for subagents — children
-    // explore, they don't plan).
-    if state.session.plan.is_some() {
-        mcp_tools.push(super::plan::exit_plan_mode_definition());
-    } else if !state.session.is_subagent {
-        mcp_tools.push(super::plan::enter_plan_mode_definition());
-    }
+    let mcp_tools = super::tool_search::mcp_tool_definitions(state);
 
     // Run-summary lines ("Worked for …") are display-only UI — never send them
     // to the model. Then repair tool_use/tool_result pairing as the FINAL pass
@@ -121,15 +111,7 @@ pub fn build_chat_request(state: &State) -> ChatRequest {
     // earlier read-only denials in history, contradicting the now-current mode;
     // rewrite them so the wire history matches the live mode (else the model
     // keeps refusing edits / claims "still read-only" after a switch up).
-    // While a plan is being drafted the EFFECTIVE mode is the read-only floor,
-    // so pre-plan read-only denials still describe reality — pass the floor,
-    // not the (possibly looser) restore target, so they stay untouched.
-    // `Plan` IS the read-only floor, so the live mode already describes
-    // reality — there is no separate floor to substitute.
     neutralize_superseded_policy_denials(&mut messages, state.session.safety_mode);
-    // Same contract for plan-mode denials: they stop applying the moment plan
-    // mode ends (approve or cancel).
-    neutralize_superseded_plan_denials(&mut messages, state.session.safety_mode.is_planning());
     super::compaction::normalize_history(&mut messages);
 
     ChatRequest {
@@ -174,71 +156,28 @@ pub fn build_chat_request(state: &State) -> ChatRequest {
         // compaction, manual /compact, or a conversation switch). Rides on the
         // request because the effect preflight never sees RuntimeState.
         suppress_auto_compact: state.runtime.auto_compact_suppressed,
-        // Plan mode hides the checklist WRITERS (their descriptions actively
-        // recommend the call the gate then hard-errors); `task_list` stays
-        // (post-compaction re-anchoring is legitimate while planning), and
-        // the policy-gated tools (write_file, execute_command, …) stay too —
-        // their teaching denials are part of the plan-mode surface. An
-        // explicit `tasks = allow` in the plan profile restores the writers,
-        // matching the runtime backstop in `tasks::plan_mode_block`.
-        suppressed_builtin_tools: if checklist_writers_suppressed(state) {
-            vec!["task_create", "task_update"]
-        } else {
-            Vec::new()
-        },
     }
 }
 
 pub(crate) fn system_prompt_for_state(state: &State) -> String {
-    // While planning, the base prompt's execution imperatives ("task_create
-    // the FULL initial plan", "do not stop at a proposal") contradict the
-    // plan appendix; swap them for plan-shaped stubs so the model never has
-    // to resolve the conflict.
-    //
-    // The adaptation runs on the BASE prompt, BEFORE `append_system_prompt`
-    // extras are appended. Running it on the rendered string let the section
-    // splice — which extends to the next `\n## ` heading, or to end-of-string
-    // when there is none — delete the user's appended instructions along with
-    // the section. A base prompt whose last section is `## Task Planning` was
-    // enough to silently drop every `append_system_prompt` entry while
-    // planning. A fully custom base prompt misses the anchors and passes
-    // through untouched, which is the intended behavior for user-owned text.
     let default_prompt = get_system_prompt();
     let chosen = state.settings.prompt.base_prompt(&default_prompt);
-    let planning = state.session.safety_mode.is_planning();
-    let adapted = if planning {
-        crate::prompts::adapt_prompt_for_plan_mode(chosen)
-    } else {
-        chosen.to_string()
-    };
     // Output styles (`/output-style`) shape the main conversation's voice.
     // Subagents keep the stock prompt: a child runs headless with its own
     // contract, and a voice preset would only bloat its context. The style
-    // applies AFTER the plan-mode adaptation (which owns the base) and
-    // BEFORE `append_system_prompt` extras (which are the user's own words
-    // and always win).
+    // applies BEFORE `append_system_prompt` extras (which are the user's own
+    // words and always win).
     let styled = match output_style_for(state) {
-        Some((body, keep)) => crate::prompts::apply_output_style(&adapted, &body, keep),
-        None => adapted,
+        Some((body, keep)) => crate::prompts::apply_output_style(chosen, &body, keep),
+        None => chosen.to_string(),
     };
     let base = state.settings.prompt.append_extras(&styled);
-    // While a plan is being drafted the live-mode line would mislead ("attempt
-    // gated actions") — the effective policy is the plan-mode read-only floor.
-    // There is no restore target to name: plan is one position in the same
-    // Shift+Tab cycle, and the user leaves it by picking another mode.
-    let safety_line = if planning {
-        "Safety mode: plan (the strictest mode: a plan is being drafted and the plan-mode \
-         read-only floor is in effect; the user leaves it with Shift+Tab or /safety like any \
-         other mode)."
-            .to_string()
-    } else {
-        format!(
-            "Safety mode: {} (live — the user can switch it anytime with Shift+Tab or /safety; \
-             trust this over any earlier tool error, and attempt gated actions rather than \
-             assuming they will fail).",
-            state.session.safety_mode.as_str()
-        )
-    };
+    let safety_line = format!(
+        "Safety mode: {} (live — the user can switch it anytime with Shift+Tab or /safety; \
+         trust this over any earlier tool error, and attempt gated actions rather than assuming \
+         they will fail).",
+        state.session.safety_mode.as_str()
+    );
     let mut prompt = format!(
         "{}\n\n## Current Session\nCurrent working directory: {}\n{}\nTreat this as the project root unless the user specifies a different path.",
         base,
@@ -252,19 +191,6 @@ pub(crate) fn system_prompt_for_state(state: &State) -> String {
             "\nScratchpad directory: {}\nUse it for ALL temporary files instead of /tmp or the system temp dir.",
             scratch.display()
         ));
-        // While a plan is being drafted the gate only permits scratch commands
-        // it can PROVE stay inside — telling the model "use it for everything"
-        // without that qualifier is what produced a plan-mode denial for a
-        // command the prompt had just asked for.
-        if state.session.plan.is_some()
-            && state.settings.plan.permissions.scratchpad != crate::PlanPermLevel::Deny
-        {
-            prompt.push_str(
-                "\nWhile planning, a shell command may write there when it provably stays \
-                 inside it: run it with working_dir set to the scratchpad, use only reads and \
-                 archive/inspection tools, and avoid command substitution, globs and `~`.",
-            );
-        }
     }
     if state.session.is_subagent {
         prompt.push_str("\n\n");
@@ -273,17 +199,6 @@ pub(crate) fn system_prompt_for_state(state: &State) -> String {
     if let Some(preamble) = &state.session.agent_preamble {
         prompt.push_str("\n\n");
         prompt.push_str(preamble);
-    }
-    if let Some(plan) = &state.session.plan {
-        prompt.push_str("\n\n");
-        prompt.push_str(
-            &crate::prompts::PLAN_MODE_PROMPT
-                .replace("{plan_path}", &plan.plan_path.display().to_string())
-                .replace(
-                    "{plan_capabilities}",
-                    &plan_capabilities_line(state.settings.plan.permissions),
-                ),
-        );
     }
     prompt
 }
@@ -305,39 +220,6 @@ fn output_style_for(state: &State) -> Option<(String, bool)> {
     // replay reproduces them while customs fall back to `default`.
     crate::prompts::builtin_output_style(state.settings.output.style.trim())
         .map(|style| (style.body.to_string(), true))
-}
-
-/// Compose the "what runs while planning" sentence from the LIVE permission
-/// profile, so the prompt never promises a capability the gate will deny
-/// (`/plan config` can retune the profile mid-session).
-pub(crate) fn plan_capabilities_line(perms: crate::PlanPermissions) -> String {
-    use crate::PlanPermLevel as L;
-    // Read-only subagent fan-out is always allowed under the plan-mode floor
-    // (policy_gate leaves the Subagent Allow untouched) — without naming it,
-    // "everything else is blocked" suppresses legitimate parallel exploration.
-    let mut parts =
-        vec!["reads and inspection (including spawning read-only subagents)".to_string()];
-    let mut push = |label: &str, level: L| match level {
-        L::Allow => parts.push(label.to_string()),
-        L::Auto | L::Ask => parts.push(format!("{label} (each use is reviewed first)")),
-        L::Deny => {},
-    };
-    push(
-        "known-safe build and test commands (cargo check/build/test/clippy, go build/test/vet, npm test, make test, and similar)",
-        perms.builds,
-    );
-    push("web search/fetch", perms.web);
-    push("memory writes", perms.memory);
-    push(
-        "shell commands that provably write only inside the session scratchpad (run them with working_dir set to it)",
-        perms.scratchpad,
-    );
-    let mut line = parts.join(", ");
-    line.push_str(
-        ", and authoring the plan file (write_file or apply_patch on the plan path). The working \
-         tree itself stays read-only.",
-    );
-    line
 }
 
 /// Walk the message log and retain only the `MAX_RETAINED_TOOL_IMAGES`
@@ -406,9 +288,7 @@ pub(crate) fn neutralize_superseded_policy_denials(
     mode: mermaid_model::safety::SafetyMode,
 ) {
     use mermaid_model::safety::SafetyMode;
-    // `Plan` carries the same read-only floor, so a read-only denial recorded
-    // earlier still describes reality and must NOT be retired.
-    if matches!(mode, SafetyMode::ReadOnly | SafetyMode::Plan) {
+    if mode == SafetyMode::ReadOnly {
         return;
     }
     let signature = readonly_denial_signature();

@@ -6,7 +6,7 @@ The tool table lives in the [README](../README.md#tools). This covers the behavi
 
 Always registered: `read_file`, `write_file`, `edit_file`, `apply_patch`, `delete_file`,
 `create_directory`, `execute_command`, `memory`, `agent`, the checklist trio (`task_create`,
-`task_update`, `task_list`), `ask_user_question`, and `enter_plan_mode`/`exit_plan_mode`.
+`task_update`, `task_list`), and `ask_user_question`.
 `web_search` and `web_fetch` register when their backend is viable (below); MCP tools when a
 server is configured.
 
@@ -17,7 +17,7 @@ new-file work and takes a unified diff, range headers included. Both write atomi
 the resolved root, snapshot a checkpoint for `/undo`, and replay through the approval queue.
 
 Paths outside the project (absolute, or traversing out of it) resolve to where they point and
-are gated as external access: `read_only` and `plan` deny, `ask` prompts with a per-directory
+are gated as external access: `read_only` denies, `ask` prompts with a per-directory
 "don't ask again", `auto` classifies, `full_access` allows. See the README's [Safety](../README.md#safety) section.
 
 ## MCP tools

@@ -344,7 +344,7 @@ pub enum ChatMessageKind {
     /// transcript and swept from history at the next turn-end — it must never
     /// outlive the request it steers.
     RecoveryNudge,
-    /// A persistent mode-change marker ("Plan mode is now ON …") injected by
+    /// A persistent mode-change marker ("Safety mode changed from …") injected by
     /// the dispatch-time context-delta injector. Sent to the model on every
     /// request — the durable timeline record that keeps history consistent
     /// with the mode — hidden from the transcript (the status band is the
@@ -366,7 +366,7 @@ pub enum ChatMessageKind {
 /// inline, while Anthropic and Gemini — whose APIs have exactly one top-level
 /// system field — dropped it as "a TUI affordance, not model input". That
 /// silently deleted every harness steering message on those two providers: the
-/// plan-mode reminder and context markers, but also the pre-existing
+/// context markers, but also the pre-existing
 /// auto-continue resume and stalled-turn nudges.
 ///
 /// Making it explicit means an adapter can no longer guess, and
