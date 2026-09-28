@@ -39,10 +39,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   answers `max_tokens` with "use `max_completion_tokens` instead" gets the
   other spelling from then on.
 
-  The pedantic lint baseline is re-recorded at 77 keys / 2030 occurrences
-  (from 2116): this change adds no new pedantic debt, and the counts that fell
-  since the last recording, mostly with plan mode's removal, had not been
-  lowered yet.
+  The pedantic lint baseline is lowered to 77 keys / 2039 occurrences (from
+  2116): this change adds no new pedantic debt, and the counts that fell since
+  the last recording, mostly with plan mode's removal, had not been lowered
+  yet. Each key only moves down, so lints already above the baseline stay
+  above it.
 
 - **Compaction is one free-form model call.** The checkpoint used to be a fixed
   ten-heading template that `validate_summary_structure` graded (retrying on a
