@@ -136,9 +136,11 @@ pub fn enforce(policy: &SandboxPolicy, argv: &[OsString]) -> anyhow::Result<Enfo
     }
 }
 
-/// Enforce read-only containment for the command `argv`: the OS, not a
-/// command parser, is what keeps a `read_only`-mode command from changing
-/// anything. Called from single-threaded launcher code, like [`enforce`].
+/// Enforce read-only containment for the command `argv`.
+///
+/// The OS, not a command parser, is what keeps a `read_only`-mode command
+/// from changing anything. Called from single-threaded launcher code, like
+/// [`enforce`].
 ///
 /// The contract is "the command may read, and nothing else": no filesystem
 /// writes (bar the discard and terminal devices a shell redirects to), no
@@ -172,9 +174,11 @@ pub fn enforce_read_only(argv: &[OsString]) -> anyhow::Result<Enforcement> {
     }
 }
 
-/// Whether [`enforce_read_only`] can succeed here: on Linux, the kernel
-/// supports Landlock ABI 6 (write rights plus signal scoping) and both seccomp
-/// filters assemble; `false` everywhere else. `read_only` mode lets arbitrary
+/// Whether [`enforce_read_only`] can succeed here.
+///
+/// On Linux, the kernel must support Landlock ABI 6 (write rights plus
+/// signal scoping) and both seccomp filters must assemble; `false`
+/// everywhere else. `read_only` mode lets arbitrary
 /// shell commands run only when this is `true`, and falls back to the shell
 /// allowlists otherwise. Creates a ruleset fd and drops it; restricts nothing.
 #[must_use]
@@ -1006,7 +1010,11 @@ mod linux {
                     libc::_exit(code);
                 }
                 let mut status: libc::c_int = 0;
-                assert_eq!(libc::waitpid(pid, &mut status, 0), pid, "waitpid failed");
+                assert_eq!(
+                    libc::waitpid(pid, &raw mut status, 0),
+                    pid,
+                    "waitpid failed"
+                );
                 status
             }
         }

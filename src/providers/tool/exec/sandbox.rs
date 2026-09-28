@@ -54,7 +54,7 @@ pub(crate) fn sandbox_probes() -> (bool, bool) {
 
 /// Whether `read_only` mode can run commands inside the read-only OS
 /// sandbox here. Probed once per process, like [`sandbox_probes`].
-pub(crate) fn read_only_probe() -> bool {
+pub fn read_only_probe() -> bool {
     static PROBE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *PROBE.get_or_init(mermaid_runtime::read_only_containment_available)
 }
@@ -140,12 +140,12 @@ pub(crate) const AMBIGUOUS_DENIED_MESSAGE: &str = "Command failed with a permiss
 
 /// Message shown when the read-only sandbox's network kill-switch stops a
 /// command (the precise SIGSYS signature). No emojis.
-pub(crate) const READ_ONLY_NETWORK_DENIED_MESSAGE: &str = "Blocked by the read-only sandbox: this command tried to open an internet socket, and read_only mode runs every command with network access off. Switch to another safety mode (Shift+Tab or /safety) to allow network access.";
+pub const READ_ONLY_NETWORK_DENIED_MESSAGE: &str = "Blocked by the read-only sandbox: this command tried to open an internet socket, and read_only mode runs every command with network access off. Switch to another safety mode (Shift+Tab or /safety) to allow network access.";
 
 /// Message shown when a command fails with a permission error inside the
 /// read-only sandbox. Hedged ("likely") because the kernel's refusals are
 /// ordinary EACCES / EPERM text. No emojis.
-pub(crate) const READ_ONLY_DENIED_MESSAGE: &str = "Command failed with a permission error inside the read-only sandbox, so it likely tried to change something. read_only mode runs every command with file writes, metadata changes, sockets (network and local daemons), IPC, and signals to other processes denied by the OS. Reading works; to make changes, switch to another safety mode (Shift+Tab or /safety).";
+pub const READ_ONLY_DENIED_MESSAGE: &str = "Command failed with a permission error inside the read-only sandbox, so it likely tried to change something. read_only mode runs every command with file writes, metadata changes, sockets (network and local daemons), IPC, and signals to other processes denied by the OS. Reading works; to make changes, switch to another safety mode (Shift+Tab or /safety).";
 
 /// Whether a completed command was terminated by the Linux seccomp
 /// kill-switch: the shell itself died with SIGSYS, or (more often) it reaped a

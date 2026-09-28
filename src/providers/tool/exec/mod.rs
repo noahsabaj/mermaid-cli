@@ -708,7 +708,7 @@ mod tests {
     };
 
     #[test]
-    pub(crate) fn read_only_denials_name_the_read_only_sandbox() {
+    fn read_only_denials_name_the_read_only_sandbox() {
         let out = |exit: Option<i32>, signal: Option<i32>, output: &str| CommandRunOutput {
             output: output.to_string(),
             exit_code: exit,
@@ -738,7 +738,7 @@ mod tests {
     }
 
     #[test]
-    pub(crate) fn read_only_plan_asks_the_launcher_for_read_only_alone() {
+    fn read_only_plan_asks_the_launcher_for_read_only_alone() {
         let wrapped = build_sandboxed_shell("echo hi", &READ_ONLY_PLAN);
         let args: Vec<String> = wrapped
             .as_std()
@@ -758,7 +758,7 @@ mod tests {
     /// `read_only` mode resolves to the read-only sandbox exactly where the
     /// platform can enforce it, and every other mode never does.
     #[test]
-    pub(crate) fn sandbox_plan_contains_read_only_mode_where_enforceable() {
+    fn sandbox_plan_contains_read_only_mode_where_enforceable() {
         let workdir = std::env::temp_dir();
         let (mut ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), workdir.clone());
         ctx.safety_mode = mermaid_runtime::SafetyMode::ReadOnly;
