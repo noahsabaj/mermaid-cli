@@ -43,6 +43,7 @@ use crate::models::tool_call::{FunctionCall, ToolCall};
 use crate::models::traits::Model;
 
 use super::ModelLimits;
+use super::learning::{Learning, Optional, ParamMemory, Rejections};
 use super::output_budget::{OutputBudgetInputs, OutputCapMode, resolve_output_budget};
 use crate::models::types::{
     ChatMessage, FinishReason, MessageAudience, MessageRole, ModelResponse, ProviderContinuation,
@@ -120,18 +121,34 @@ enum ThinkingFormat {
     Legacy,
 }
 
-/// Pick the thinking-config shape this Claude model accepts, from the
-/// capability catalog. The 4.6+ line uses adaptive; the 4.5 family
-/// (Sonnet 4.5 / Opus 4.5 / Haiku 4.5) uses legacy `budget_tokens`.
-/// Defaults to `Legacy` for genuinely unknown models — if a future model
-/// rejects legacy, the API's 400 names the fix, and the catalog should gain
-/// a row when that model is added (the pre-catalog table predated Opus 4.8 /
-/// Fable 5 and wrongly sent them legacy → 400).
-fn thinking_format_for(model: &str) -> ThinkingFormat {
-    match crate::models::catalog::lookup(model).thinking {
-        crate::models::catalog::ThinkingShape::AnthropicAdaptive => ThinkingFormat::Adaptive,
-        _ => ThinkingFormat::Legacy,
+impl ThinkingFormat {
+    /// What a rejection of this shape is remembered as — the wire `type`.
+    const fn rejection(self) -> &'static str {
+        match self {
+            Self::Adaptive => "thinking:adaptive",
+            Self::Legacy => "thinking:enabled",
+        }
     }
+}
+
+/// Pick the thinking-config shape to send, or `None` for no thinking field.
+///
+/// Newest first: adaptive, then legacy `budget_tokens`, skipping any shape
+/// this model's provider already rejected. A catalog hint only reorders
+/// (the 4.5 family tries legacy first) or empties (Claude 2) the list, so a
+/// model newer than the catalog gets adaptive and a wrong hint costs one
+/// rejection, not a broken request.
+fn thinking_format_for(model: &str, rejected: &Rejections) -> Option<ThinkingFormat> {
+    use crate::models::catalog::ThinkingShape;
+    let order: &[ThinkingFormat] = match crate::models::catalog::lookup(model).thinking {
+        ThinkingShape::Unsupported => &[],
+        ThinkingShape::AnthropicBudget => &[ThinkingFormat::Legacy, ThinkingFormat::Adaptive],
+        _ => &[ThinkingFormat::Adaptive, ThinkingFormat::Legacy],
+    };
+    order
+        .iter()
+        .copied()
+        .find(|format| !rejected.contains(format.rejection()))
 }
 
 /// Translate `ReasoningLevel` to a legacy `budget_tokens` value, clamped
@@ -177,23 +194,34 @@ fn estimate_prompt_tokens(messages: &[ChatMessage], system: Option<&str>) -> usi
     chars / 4
 }
 
-/// Translate `ReasoningLevel` to Anthropic's `effort` string, gated by the
-/// catalog's per-model [`EffortCeiling`]. The `effort` parameter shapes
-/// overall token spend including text + tool calls (not just thinking); per
-/// the official effort doc it's accepted by Mythos, Fable 5, Opus 4.5–4.8,
-/// and Sonnet 4.6 — it ERRORS on Sonnet 4.5 / Haiku 4.5 and older, so those
-/// get no effort field at all.
+/// Translate `ReasoningLevel` to Anthropic's `effort` string. The `effort`
+/// parameter shapes overall token spend including text + tool calls (not
+/// just thinking); per the official effort doc it's accepted by Mythos,
+/// Fable 5, Opus 4.5–4.8, and Sonnet 4.6 — it ERRORS on Sonnet 4.5 / Haiku
+/// 4.5 and older, so those get no effort field at all.
+///
+/// Optimistic: a model the catalog has no ceiling for gets the tier the user
+/// asked for. What the provider rejected (`effort` outright, or the
+/// `effort:xhigh` / `effort:max` tiers) steps it down, and the catalog's
+/// [`EffortCeiling`] hint does the same for known models without the
+/// round trip.
 ///
 /// Snap semantics: `XHigh` sits BETWEEN `High` and `Max` — when a model's
 /// ceiling doesn't cover the requested tier we snap DOWN to `"high"`, never
 /// UP (the user picked something below max; delivering max would over-spend
 /// their intent).
-fn adaptive_effort_for(level: ReasoningLevel, model: &str) -> Option<&'static str> {
+fn adaptive_effort_for(
+    level: ReasoningLevel,
+    model: &str,
+    rejected: &Rejections,
+) -> Option<&'static str> {
     use crate::models::catalog::EffortCeiling;
-    let ceiling = crate::models::catalog::lookup(model).effort_ceiling;
+    let ceiling = crate::models::catalog::lookup(model)
+        .effort_ceiling
+        .unwrap_or(EffortCeiling::XHigh);
     // Models that don't accept `effort` at all must get no effort field —
     // sending one 400s the request.
-    if ceiling == EffortCeiling::None {
+    if ceiling == EffortCeiling::NoEffort || rejected.contains("effort") {
         return None;
     }
     match level {
@@ -202,20 +230,62 @@ fn adaptive_effort_for(level: ReasoningLevel, model: &str) -> Option<&'static st
         ReasoningLevel::Medium => Some("medium"),
         ReasoningLevel::High => Some("high"),
         ReasoningLevel::XHigh => {
-            if ceiling >= EffortCeiling::XHigh {
+            if ceiling >= EffortCeiling::XHigh && !rejected.contains("effort:xhigh") {
                 Some("xhigh")
             } else {
                 Some("high")
             }
         },
         ReasoningLevel::Max => {
-            if ceiling >= EffortCeiling::Max {
+            if ceiling >= EffortCeiling::Max && !rejected.contains("effort:max") {
                 Some("max")
             } else {
                 Some("high")
             }
         },
     }
+}
+
+/// The optional items a built request carries, for blaming a rejection.
+/// Read back off the body so it can't drift from what was actually sent.
+fn sent_optionals(body: &Value) -> Vec<Optional> {
+    let mut sent = Vec::new();
+    if body.get("temperature").is_some() {
+        sent.push(Optional::new(
+            "temperature",
+            "temperature",
+            &["temperature"],
+        ));
+    }
+    if let Some(effort) = body
+        .pointer("/output_config/effort")
+        .and_then(Value::as_str)
+    {
+        // Only the tiers above "high" are steps; rejecting a base tier means
+        // the parameter itself is unsupported.
+        let remember = match effort {
+            "xhigh" | "max" => format!("effort:{effort}"),
+            _ => "effort".to_string(),
+        };
+        sent.push(Optional::new(
+            &remember,
+            &format!("effort \"{effort}\""),
+            &["effort"],
+        ));
+    }
+    if let Some(kind) = body.pointer("/thinking/type").and_then(Value::as_str) {
+        // A signature that failed to round-trip also names thinking; it is a
+        // history bug, not an unsupported shape.
+        sent.push(
+            Optional::new(
+                &format!("thinking:{kind}"),
+                &format!("thinking type \"{kind}\""),
+                &["thinking", "budget_tokens"],
+            )
+            .unless(&["signature"]),
+        );
+    }
+    sent
 }
 
 /// Convert Mermaid's OpenAI-shaped tool definitions to Anthropic's flat
@@ -508,6 +578,8 @@ pub struct AnthropicAdapter {
     base_url: String,
     model_name: String,
     capabilities: ModelCapabilities,
+    /// What this model's provider rejected (see `learning`).
+    memory: ParamMemory,
 }
 
 impl AnthropicAdapter {
@@ -561,11 +633,32 @@ impl AnthropicAdapter {
             base_url,
             model_name,
             capabilities,
+            memory: ParamMemory::default(),
         })
     }
 
-    /// Build the JSON request body for `POST /v1/messages`.
+    /// What this model's provider has rejected, for the wrapper to persist
+    /// and to seed from the cache.
+    #[must_use]
+    pub const fn param_memory(&self) -> &ParamMemory {
+        &self.memory
+    }
+
+    /// Build the JSON request body for `POST /v1/messages`, avoiding what the
+    /// provider already rejected for this model.
+    #[cfg(test)]
     fn build_request_body(&self, messages: &[ChatMessage], config: &ModelConfig) -> Value {
+        self.build_request_body_with(messages, config, &self.memory.snapshot())
+    }
+
+    /// [`Self::build_request_body`] against an explicit rejection set — the
+    /// learning loop's staged one mid-call.
+    fn build_request_body_with(
+        &self,
+        messages: &[ChatMessage],
+        config: &ModelConfig,
+        rejected: &Rejections,
+    ) -> Value {
         let (system_from_msgs, anthropic_messages) = convert_messages(messages);
         // ModelConfig.system_prompt wins over any system message in the
         // history (matches the OpenAICompatAdapter pattern). Falls back
@@ -642,10 +735,11 @@ impl AnthropicAdapter {
         // Clamp defensively so a user with `temperature = 1.5` in their
         // config doesn't get a 400. The 4.6+ adaptive line removed sampling
         // params entirely (Opus 4.7/4.8, Fable 5, Mythos) — sending any
-        // temperature there is itself a 400, so only emit it where accepted.
-        // The 4.6+ adaptive line removed sampling params — temperature 400s
-        // on Opus 4.7/4.8, Fable 5, and Mythos (catalog column).
-        if crate::models::catalog::lookup(&self.model_name).supports_temperature {
+        // temperature there is itself a 400. Sent unless the catalog hints
+        // otherwise or the provider already rejected it for this model.
+        if crate::models::catalog::lookup(&self.model_name).supports_temperature
+            && !rejected.contains("temperature")
+        {
             let temp = config.temperature.clamp(0.0, 1.0);
             body["temperature"] = json!(temp);
         }
@@ -684,7 +778,7 @@ impl AnthropicAdapter {
         // NOT top-level. (We were sending it top-level prior to Step
         // 5c — silently ignored by the API, the model defaulted to
         // `high`. Bug fix.)
-        if let Some(effort) = adaptive_effort_for(effective_reasoning, &self.model_name) {
+        if let Some(effort) = adaptive_effort_for(effective_reasoning, &self.model_name, rejected) {
             body["output_config"] = json!({"effort": effort});
         }
 
@@ -701,9 +795,9 @@ impl AnthropicAdapter {
             });
         }
 
-        // Thinking format: per-model dispatch.
-        match thinking_format_for(&self.model_name) {
-            ThinkingFormat::Adaptive => {
+        // Thinking format: newest accepted shape (see `thinking_format_for`).
+        match thinking_format_for(&self.model_name, rejected) {
+            Some(ThinkingFormat::Adaptive) => {
                 // For adaptive, only emit `thinking` when the user
                 // actually wants thinking — adaptive models accept
                 // omission as disabled. Bundle the `display` field so
@@ -716,7 +810,7 @@ impl AnthropicAdapter {
                     });
                 }
             },
-            ThinkingFormat::Legacy => {
+            Some(ThinkingFormat::Legacy) => {
                 if let Some(budget) = legacy_budget_for(effective_reasoning, max_tokens) {
                     body["thinking"] = json!({
                         "type": "enabled",
@@ -724,6 +818,8 @@ impl AnthropicAdapter {
                     });
                 }
             },
+            // Every shape rejected (or the model predates thinking).
+            None => {},
         }
 
         body
@@ -1316,11 +1412,22 @@ impl Model for AnthropicAdapter {
         config: &ModelConfig,
         sink: Option<StreamSink>,
     ) -> Result<ModelResponse> {
-        let mut body = self.build_request_body(messages, config);
-        if sink.is_none() {
-            body["stream"] = json!(false);
-        }
-        let response = self.send_chat(&body).await?;
+        // Optimistic send; a 400 naming an optional parameter takes it back
+        // and retries (see `learning`).
+        let mut learning = Learning::start(&self.memory, &self.model_name, sink.as_ref());
+        let response = loop {
+            let mut body = self.build_request_body_with(messages, config, learning.rejections());
+            if sink.is_none() {
+                body["stream"] = json!(false);
+            }
+            let response = self.send_chat(&body).await?;
+            if !learning.is_retryable(&response) {
+                break response;
+            }
+            let err = http_error_from_response(response).await;
+            learning.retry_or_fail(err, &sent_optionals(&body)).await?;
+        };
+        learning.settle(&response);
         if let Some(sink) = sink {
             self.handle_stream(response, Some(&sink)).await
         } else {
@@ -1604,48 +1711,121 @@ mod tests {
     #[test]
     fn thinking_format_dispatch() {
         assert_eq!(
-            thinking_format_for("claude-opus-4-7"),
-            ThinkingFormat::Adaptive
+            thinking_format_for("claude-opus-4-7", &Rejections::new()),
+            Some(ThinkingFormat::Adaptive)
         );
         assert_eq!(
-            thinking_format_for("claude-sonnet-4-6"),
-            ThinkingFormat::Adaptive
+            thinking_format_for("claude-sonnet-4-6", &Rejections::new()),
+            Some(ThinkingFormat::Adaptive)
         );
         assert_eq!(
-            thinking_format_for("claude-opus-4-6"),
-            ThinkingFormat::Adaptive
+            thinking_format_for("claude-opus-4-6", &Rejections::new()),
+            Some(ThinkingFormat::Adaptive)
         );
         // Current models that the old table misclassified as Legacy → 400.
         assert_eq!(
-            thinking_format_for("claude-opus-4-8"),
-            ThinkingFormat::Adaptive
+            thinking_format_for("claude-opus-4-8", &Rejections::new()),
+            Some(ThinkingFormat::Adaptive)
         );
         assert_eq!(
-            thinking_format_for("claude-fable-5"),
-            ThinkingFormat::Adaptive
+            thinking_format_for("claude-fable-5", &Rejections::new()),
+            Some(ThinkingFormat::Adaptive)
         );
         assert_eq!(
-            thinking_format_for("claude-sonnet-4-5"),
-            ThinkingFormat::Legacy
+            thinking_format_for("claude-sonnet-4-5", &Rejections::new()),
+            Some(ThinkingFormat::Legacy)
         );
         assert_eq!(
-            thinking_format_for("claude-opus-4-5"),
-            ThinkingFormat::Legacy
+            thinking_format_for("claude-opus-4-5", &Rejections::new()),
+            Some(ThinkingFormat::Legacy)
         );
         assert_eq!(
-            thinking_format_for("claude-haiku-4-5"),
-            ThinkingFormat::Legacy
+            thinking_format_for("claude-haiku-4-5", &Rejections::new()),
+            Some(ThinkingFormat::Legacy)
         );
         // Case insensitive.
         assert_eq!(
-            thinking_format_for("Claude-Opus-4-7-Special"),
-            ThinkingFormat::Adaptive
+            thinking_format_for("Claude-Opus-4-7-Special", &Rejections::new()),
+            Some(ThinkingFormat::Adaptive)
         );
-        // Unknown defaults to Legacy.
+        // Unknown gets the newest shape: a model released after the catalog
+        // was written must not be sent the deprecated one.
         assert_eq!(
-            thinking_format_for("claude-future-99"),
-            ThinkingFormat::Legacy
+            thinking_format_for("claude-future-99", &Rejections::new()),
+            Some(ThinkingFormat::Adaptive)
         );
+        // Claude 2 takes none.
+        assert_eq!(thinking_format_for("claude-2.1", &Rejections::new()), None);
+    }
+
+    #[test]
+    fn thinking_format_steps_past_what_the_provider_rejected() {
+        let adaptive_rejected = Rejections::from(["thinking:adaptive"]);
+        assert_eq!(
+            thinking_format_for("claude-future-99", &adaptive_rejected),
+            Some(ThinkingFormat::Legacy)
+        );
+        // A hint that turned out wrong (legacy-first model that now wants
+        // adaptive) steps the other way.
+        let legacy_rejected = Rejections::from(["thinking:enabled"]);
+        assert_eq!(
+            thinking_format_for("claude-sonnet-4-5", &legacy_rejected),
+            Some(ThinkingFormat::Adaptive)
+        );
+        let both = Rejections::from(["thinking:adaptive", "thinking:enabled"]);
+        assert_eq!(thinking_format_for("claude-future-99", &both), None);
+    }
+
+    #[test]
+    fn unknown_model_gets_the_effort_it_asked_for_until_rejected() {
+        let none = Rejections::new();
+        let m = "claude-future-99";
+        assert_eq!(
+            adaptive_effort_for(ReasoningLevel::XHigh, m, &none),
+            Some("xhigh")
+        );
+        assert_eq!(
+            adaptive_effort_for(ReasoningLevel::Max, m, &none),
+            Some("max")
+        );
+        let no_xhigh = Rejections::from(["effort:xhigh"]);
+        assert_eq!(
+            adaptive_effort_for(ReasoningLevel::XHigh, m, &no_xhigh),
+            Some("high")
+        );
+        assert_eq!(
+            adaptive_effort_for(ReasoningLevel::Max, m, &no_xhigh),
+            Some("max")
+        );
+        let no_max = Rejections::from(["effort:max"]);
+        assert_eq!(
+            adaptive_effort_for(ReasoningLevel::Max, m, &no_max),
+            Some("high")
+        );
+        let no_effort = Rejections::from(["effort"]);
+        assert_eq!(
+            adaptive_effort_for(ReasoningLevel::Medium, m, &no_effort),
+            None
+        );
+    }
+
+    #[test]
+    fn sent_optionals_reads_the_body_back() {
+        let body = json!({
+            "temperature": 0.7,
+            "output_config": {"effort": "xhigh"},
+            "thinking": {"type": "adaptive"},
+        });
+        let sent = sent_optionals(&body);
+        let remembered: Vec<&str> = sent.iter().map(|o| o.remember.as_str()).collect();
+        assert_eq!(
+            remembered,
+            ["temperature", "effort:xhigh", "thinking:adaptive"]
+        );
+        // A base tier rejected means the parameter itself is unsupported.
+        let base = sent_optionals(&json!({"output_config": {"effort": "medium"}}));
+        assert_eq!(base[0].remember, "effort");
+        assert!(sent_optionals(&json!({})).is_empty());
     }
 
     #[test]
@@ -1673,16 +1853,31 @@ mod tests {
     #[test]
     fn adaptive_effort_per_level() {
         let m = "claude-sonnet-4-6";
-        assert_eq!(adaptive_effort_for(ReasoningLevel::None, m), None);
-        assert_eq!(adaptive_effort_for(ReasoningLevel::Minimal, m), Some("low"));
-        assert_eq!(adaptive_effort_for(ReasoningLevel::Low, m), Some("low"));
         assert_eq!(
-            adaptive_effort_for(ReasoningLevel::Medium, m),
+            adaptive_effort_for(ReasoningLevel::None, m, &Rejections::new()),
+            None
+        );
+        assert_eq!(
+            adaptive_effort_for(ReasoningLevel::Minimal, m, &Rejections::new()),
+            Some("low")
+        );
+        assert_eq!(
+            adaptive_effort_for(ReasoningLevel::Low, m, &Rejections::new()),
+            Some("low")
+        );
+        assert_eq!(
+            adaptive_effort_for(ReasoningLevel::Medium, m, &Rejections::new()),
             Some("medium")
         );
-        assert_eq!(adaptive_effort_for(ReasoningLevel::High, m), Some("high"));
+        assert_eq!(
+            adaptive_effort_for(ReasoningLevel::High, m, &Rejections::new()),
+            Some("high")
+        );
         // Sonnet 4.6 supports `max` per the effort-doc table.
-        assert_eq!(adaptive_effort_for(ReasoningLevel::Max, m), Some("max"));
+        assert_eq!(
+            adaptive_effort_for(ReasoningLevel::Max, m, &Rejections::new()),
+            Some("max")
+        );
     }
 
     /// Opus 4.7 supports the `xhigh` effort tier (between `high` and
@@ -1692,20 +1887,20 @@ mod tests {
     #[test]
     fn adaptive_effort_uses_xhigh_on_opus_4_7_for_xhigh() {
         assert_eq!(
-            adaptive_effort_for(ReasoningLevel::XHigh, "claude-opus-4-7"),
+            adaptive_effort_for(ReasoningLevel::XHigh, "claude-opus-4-7", &Rejections::new()),
             Some("xhigh")
         );
         // Opus 4.7 also supports `max` — verify Max still maps to max
         // (distinct tier from xhigh).
         assert_eq!(
-            adaptive_effort_for(ReasoningLevel::Max, "claude-opus-4-7"),
+            adaptive_effort_for(ReasoningLevel::Max, "claude-opus-4-7", &Rejections::new()),
             Some("max")
         );
         // XHigh on Opus 4.6 (no xhigh support): XHigh sits between High
         // and Max in our enum, so we snap DOWN to "high" — never up to
         // "max". Upgrading would over-spend the user's explicit choice.
         assert_eq!(
-            adaptive_effort_for(ReasoningLevel::XHigh, "claude-opus-4-6"),
+            adaptive_effort_for(ReasoningLevel::XHigh, "claude-opus-4-6", &Rejections::new()),
             Some("high")
         );
     }
@@ -1718,24 +1913,24 @@ mod tests {
     fn adaptive_effort_gates_max_on_4_5_family() {
         for m in ["claude-sonnet-4-5", "claude-haiku-4-5"] {
             assert_eq!(
-                adaptive_effort_for(ReasoningLevel::Max, m),
+                adaptive_effort_for(ReasoningLevel::Max, m, &Rejections::new()),
                 None,
                 "model {m} does not support the effort parameter at all"
             );
             assert_eq!(
-                adaptive_effort_for(ReasoningLevel::XHigh, m),
+                adaptive_effort_for(ReasoningLevel::XHigh, m, &Rejections::new()),
                 None,
                 "model {m} does not support the effort parameter at all"
             );
         }
         // Opus 4.5: supports effort but not `max` → snap down to `high`.
         assert_eq!(
-            adaptive_effort_for(ReasoningLevel::Max, "claude-opus-4-5"),
+            adaptive_effort_for(ReasoningLevel::Max, "claude-opus-4-5", &Rejections::new()),
             Some("high"),
             "Opus 4.5 should snap Max → high (no max effort support)"
         );
         assert_eq!(
-            adaptive_effort_for(ReasoningLevel::XHigh, "claude-opus-4-5"),
+            adaptive_effort_for(ReasoningLevel::XHigh, "claude-opus-4-5", &Rejections::new()),
             Some("high"),
             "Opus 4.5 should snap XHigh → high"
         );

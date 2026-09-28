@@ -17,7 +17,7 @@ use mermaid_model::models::adapters::anthropic::AnthropicAdapter;
 use mermaid_model::models::{Model, ModelConfig, ModelError, Result};
 
 use super::super::ctx::{FinalResponse, StreamContext, StreamEvent};
-use super::{ContextSizing, ModelProvider, resolve_limits_cached};
+use super::{ContextSizing, ModelProvider, RejectionCache, resolve_limits_cached};
 use mermaid_model::models::ModelCapabilities;
 
 /// Anthropic's Messages-API root, and the env var its key lives in.
@@ -32,6 +32,8 @@ pub const DEFAULT_API_KEY_ENV: &str = "ANTHROPIC_API_KEY";
 pub struct AnthropicProvider {
     adapter: AnthropicAdapter,
     capabilities: ModelCapabilities,
+    /// Links the adapter's learned rejections to the cross-session cache.
+    rejections: RejectionCache,
 }
 
 impl AnthropicProvider {
@@ -48,6 +50,7 @@ impl AnthropicProvider {
         Ok(Self {
             adapter,
             capabilities,
+            rejections: RejectionCache::default(),
         })
     }
 }
@@ -82,12 +85,23 @@ impl ModelProvider for AnthropicProvider {
             .adapter
             .chat(&request.messages, &config, Some(ctx.sink.clone()));
 
+        // Seed what earlier sessions learned this model rejects, and persist
+        // whatever this turn learns (see `learning`).
+        let learned_model = Model::name(&self.adapter).to_string();
+        let memory = self.adapter.param_memory();
+        self.rejections
+            .seed("anthropic", &learned_model, memory)
+            .await;
+
         let response = tokio::select! {
             biased;
             _ = ctx.token.cancelled() => {
                 return Err(ModelError::Cancelled);
             },
-            r = chat_fut => r?,
+            r = chat_fut => {
+                self.rejections.persist("anthropic", &learned_model, memory).await;
+                r?
+            },
         };
 
         let usage = response.usage.clone();

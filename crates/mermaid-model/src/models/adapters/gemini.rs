@@ -61,6 +61,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::accumulator::{CappedText, ended_without_terminal, error_body};
+use super::learning::{Learning, Optional, ParamMemory, Rejections};
 use crate::models::ModelCapabilities;
 use crate::models::adapters::driver::{Flow, Framing, StreamProtocol, drive_stream};
 use crate::models::config::ModelConfig;
@@ -124,14 +125,91 @@ fn thinking_level_for(level: ReasoningLevel) -> &'static str {
     }
 }
 
-// Per-model thinking dispatch lives in the capability catalog
-// (`crate::models::catalog`): Gemini 3.x rows carry
-// `ThinkingShape::GeminiLevel` (the `thinkingLevel` enum — cannot truly
-// disable), Gemini 2.5 rows carry `ThinkingShape::GeminiBudget {min,
-// can_disable}` (integer `thinkingBudget` with the per-model floor/disable
-// rules from `ai.google.dev/gemini-api/docs/thinking`), and everything else
-// — including 2.0 and earlier, which 400 on any `thinkingConfig` — falls to
-// `ProviderDefault`, meaning the field is omitted entirely.
+/// The `thinkingConfig` shape to send.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GeminiThinking {
+    /// Gemini 3.x `thinkingLevel` enum (cannot truly disable).
+    Level,
+    /// Gemini 2.5 integer `thinkingBudget`, clamped to the model's floor.
+    Budget { min: i32, can_disable: bool },
+}
+
+impl GeminiThinking {
+    /// What a rejection of this shape is remembered as.
+    const fn rejection(self) -> &'static str {
+        match self {
+            Self::Level => "thinking:level",
+            Self::Budget { .. } => "thinking:budget",
+        }
+    }
+}
+
+/// A budget shape with no per-model floor — for a model the catalog has no
+/// budget row for, reached only after it rejected `thinkingLevel`.
+const GENERIC_BUDGET: GeminiThinking = GeminiThinking::Budget {
+    min: 0,
+    can_disable: true,
+};
+
+/// Pick the `thinkingConfig` shape to send, or `None` to omit the field.
+///
+/// Newest first: `thinkingLevel`, then `thinkingBudget`, skipping any shape
+/// the provider already rejected for this model. The catalog hint reorders
+/// the list (2.5 rows carry their budget floor and disable rule from
+/// `ai.google.dev/gemini-api/docs/thinking`) or empties it (2.0 and earlier
+/// 400 on any `thinkingConfig`). With no hint and no reasoning asked for,
+/// nothing is sent: there is nothing to control.
+fn gemini_thinking_for(
+    model: &str,
+    level: ReasoningLevel,
+    rejected: &Rejections,
+) -> Option<GeminiThinking> {
+    use crate::models::catalog::ThinkingShape;
+    let order: Vec<GeminiThinking> = match crate::models::catalog::lookup(model).thinking {
+        ThinkingShape::Unsupported => Vec::new(),
+        ThinkingShape::GeminiLevel => vec![GeminiThinking::Level, GENERIC_BUDGET],
+        ThinkingShape::GeminiBudget { min, can_disable } => vec![
+            GeminiThinking::Budget { min, can_disable },
+            GeminiThinking::Level,
+        ],
+        _ if level == ReasoningLevel::None => Vec::new(),
+        _ => vec![GeminiThinking::Level, GENERIC_BUDGET],
+    };
+    order
+        .into_iter()
+        .find(|shape| !rejected.contains(shape.rejection()))
+}
+
+/// The optional items a built request carries, for blaming a rejection.
+/// Read back off the body so it can't drift from what was actually sent.
+fn sent_optionals(body: &Value) -> Vec<Optional> {
+    let config = &body["generationConfig"];
+    let mut sent = Vec::new();
+    if config.get("temperature").is_some() {
+        sent.push(Optional::new(
+            "temperature",
+            "temperature",
+            &["temperature"],
+        ));
+    }
+    // Gemini names the field (`Unknown name "thinkingLevel"`) or the feature
+    // ("thinking is not supported"); only one shape is ever sent.
+    if config.pointer("/thinkingConfig/thinkingLevel").is_some() {
+        sent.push(Optional::new(
+            "thinking:level",
+            "thinkingLevel",
+            &["thinking"],
+        ));
+    }
+    if config.pointer("/thinkingConfig/thinkingBudget").is_some() {
+        sent.push(Optional::new(
+            "thinking:budget",
+            "thinkingBudget",
+            &["thinking"],
+        ));
+    }
+    sent
+}
 
 /// Convert Mermaid's OpenAI-shaped tool definitions to Gemini's nested
 /// `[{functionDeclarations: [{name, description, parameters}]}]` shape.
@@ -331,6 +409,8 @@ pub struct GeminiAdapter {
     base_url: String,
     model_name: String,
     capabilities: ModelCapabilities,
+    /// What this model's provider rejected (see `learning`).
+    memory: ParamMemory,
 }
 
 impl GeminiAdapter {
@@ -384,13 +464,34 @@ impl GeminiAdapter {
             base_url,
             model_name,
             capabilities,
+            memory: ParamMemory::default(),
         })
     }
 
+    /// What this model's provider has rejected, for the wrapper to persist
+    /// and to seed from the cache.
+    #[must_use]
+    pub const fn param_memory(&self) -> &ParamMemory {
+        &self.memory
+    }
+
     /// Build the JSON request body for `:generateContent` /
-    /// `:streamGenerateContent`. The model name lives in the URL, not
-    /// the body, so it doesn't appear here.
+    /// `:streamGenerateContent`, avoiding what the provider already rejected
+    /// for this model. The model name lives in the URL, not the body, so it
+    /// doesn't appear here.
+    #[cfg(test)]
     fn build_request_body(&self, messages: &[ChatMessage], config: &ModelConfig) -> Value {
+        self.build_request_body_with(messages, config, &self.memory.snapshot())
+    }
+
+    /// [`Self::build_request_body`] against an explicit rejection set — the
+    /// learning loop's staged one mid-call.
+    fn build_request_body_with(
+        &self,
+        messages: &[ChatMessage],
+        config: &ModelConfig,
+        rejected: &Rejections,
+    ) -> Value {
         let (system_from_msgs, gemini_contents) = convert_messages(messages);
         // ModelConfig.system_prompt (+ optional MERMAID.md suffix) overrides
         // any system message in the history (matches Anthropic / OpenAI-compat
@@ -416,7 +517,9 @@ impl GeminiAdapter {
         let mut gen_config = json!({});
         // Gemini accepts 0.0..=2.0 — same as OpenAI; no clamping needed
         // beyond what the user already validated, but be defensive.
-        gen_config["temperature"] = json!(config.temperature.clamp(0.0, 2.0));
+        if !rejected.contains("temperature") {
+            gen_config["temperature"] = json!(config.temperature.clamp(0.0, 2.0));
+        }
         if config.max_tokens > 0 {
             gen_config["maxOutputTokens"] = json!(config.max_tokens);
         }
@@ -431,19 +534,16 @@ impl GeminiAdapter {
             _ => config.reasoning,
         };
 
-        // Per-model thinking dispatch from the capability catalog. Gemini 3
-        // uses the `thinkingLevel` enum; 2.5 uses `thinkingBudget` int with
-        // per-model floors + can-disable rules; older models don't support
-        // thinkingConfig at all and would 400 if we sent one.
-        match crate::models::catalog::lookup(&self.model_name).thinking {
-            crate::models::catalog::ThinkingShape::GeminiLevel => {
+        // Thinking: newest accepted shape (see `gemini_thinking_for`).
+        match gemini_thinking_for(&self.model_name, effective_reasoning, rejected) {
+            Some(GeminiThinking::Level) => {
                 let level_str = thinking_level_for(effective_reasoning);
                 gen_config["thinkingConfig"] = json!({
                     "thinkingLevel": level_str,
                     "includeThoughts": effective_reasoning != ReasoningLevel::None,
                 });
             },
-            crate::models::catalog::ThinkingShape::GeminiBudget { min, can_disable } => {
+            Some(GeminiThinking::Budget { min, can_disable }) => {
                 let raw = thinking_budget_for(effective_reasoning);
                 let budget = if effective_reasoning == ReasoningLevel::None {
                     // None: disable entirely if the model allows;
@@ -462,9 +562,8 @@ impl GeminiAdapter {
                     "includeThoughts": budget != 0,
                 });
             },
-            // No gemini thinking shape for this model (2.0 and earlier, or a
-            // non-gemini id) — omit thinkingConfig entirely; sending it 400s.
-            _ => {},
+            // No thinking controls for this model — omit thinkingConfig.
+            None => {},
         }
         // `--output-schema` formatting turn: native constrained output.
         // The reducer guarantees no tools ride this request (Gemini errors
@@ -1000,8 +1099,19 @@ impl Model for GeminiAdapter {
         config: &ModelConfig,
         sink: Option<StreamSink>,
     ) -> Result<ModelResponse> {
-        let body = self.build_request_body(messages, config);
-        let response = self.send_chat(&body, sink.is_some()).await?;
+        // Optimistic send; a 400 naming an optional parameter takes it back
+        // and retries (see `learning`).
+        let mut learning = Learning::start(&self.memory, &self.model_name, sink.as_ref());
+        let response = loop {
+            let body = self.build_request_body_with(messages, config, learning.rejections());
+            let response = self.send_chat(&body, sink.is_some()).await?;
+            if !learning.is_retryable(&response) {
+                break response;
+            }
+            let err = http_error_from_response(response).await;
+            learning.retry_or_fail(err, &sent_optionals(&body)).await?;
+        };
+        learning.settle(&response);
         if let Some(sink) = sink {
             self.handle_stream(response, Some(&sink)).await
         } else {
@@ -1854,18 +1964,67 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_is_provider_default_for_legacy_gemini_models() {
+    fn dispatch_is_unsupported_for_legacy_gemini_models() {
         use crate::models::catalog::{ThinkingShape, lookup};
-        // 2.0 and earlier get no thinkingConfig (the build path omits the
-        // field for ProviderDefault — pinned end-to-end by the request test).
+        // 2.0 and earlier get no thinkingConfig (pinned end-to-end by the
+        // request test).
         assert_eq!(
             lookup("gemini-2.0-flash").thinking,
-            ThinkingShape::ProviderDefault
+            ThinkingShape::Unsupported
         );
         assert_eq!(
             lookup("gemini-1.5-pro").thinking,
-            ThinkingShape::ProviderDefault
+            ThinkingShape::Unsupported
         );
+    }
+
+    #[test]
+    fn unknown_gemini_tries_level_then_budget_then_nothing() {
+        let m = "gemini-9-ultra";
+        let medium = ReasoningLevel::Medium;
+        assert_eq!(
+            gemini_thinking_for(m, medium, &Rejections::new()),
+            Some(GeminiThinking::Level)
+        );
+        assert_eq!(
+            gemini_thinking_for(m, medium, &Rejections::from(["thinking:level"])),
+            Some(GENERIC_BUDGET)
+        );
+        assert_eq!(
+            gemini_thinking_for(
+                m,
+                medium,
+                &Rejections::from(["thinking:level", "thinking:budget"])
+            ),
+            None
+        );
+        // No reasoning asked for and no hint: nothing to control.
+        assert_eq!(
+            gemini_thinking_for(m, ReasoningLevel::None, &Rejections::new()),
+            None
+        );
+        // A budget-hinted model whose budget was rejected tries the level.
+        assert_eq!(
+            gemini_thinking_for(
+                "gemini-2.5-pro",
+                medium,
+                &Rejections::from(["thinking:budget"])
+            ),
+            Some(GeminiThinking::Level)
+        );
+    }
+
+    #[test]
+    fn sent_optionals_reads_the_generation_config() {
+        let body = json!({"generationConfig": {
+            "temperature": 0.7,
+            "thinkingConfig": {"thinkingLevel": "high", "includeThoughts": true},
+        }});
+        let remembered: Vec<String> = sent_optionals(&body)
+            .into_iter()
+            .map(|o| o.remember)
+            .collect();
+        assert_eq!(remembered, ["temperature", "thinking:level"]);
     }
 
     // --- thinking_level_for ---
