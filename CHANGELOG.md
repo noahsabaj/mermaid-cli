@@ -56,8 +56,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fails rather than replacing history with nothing. `CompactionEvent` loses
   `review_status` / `review_error` (older logs still load; the fields are
   ignored), the transcript's `Compact(...)` line and `/context` drop the review
-  note, and the runtime store's `compactions.verification_status` column is
-  written as `NULL`.
+  note, and the runtime store drops its `compactions.verification_status`
+  column (schema v8).
 
 - **Compaction no longer throws tool output away.** The summarizer's excerpt
   used to cut every archived tool result to 2,000 characters (8,000 for prose),
