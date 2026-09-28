@@ -1163,8 +1163,6 @@ fn run_qa_compact_smoke(
             .count(),
         summary_tokens: summary.len().div_ceil(4),
         duration_secs: 0.0,
-        review_status: mermaid_domain::CompactionReviewStatus::DraftValidated,
-        review_error: None,
         focus: Some("qa compact smoke".to_string()),
         archive_path: None,
     };
@@ -1391,7 +1389,10 @@ fn deterministic_compaction_summary(
     turns: usize,
 ) -> String {
     format!(
-        "## Goal\n- Verify Mermaid can compact a multi-turn conversation through the reducer path.\n\n## User Preferences And Constraints\n- Headless QA must not require a human to open the TUI.\n\n## Project State\n- Synthetic QA conversation seeded with {turns} user/assistant turns.\n\n## Completed Work\n- Prepared compaction archived {} messages and preserved {} messages.\n\n## Current Work\n- Running deterministic compact smoke from the hidden QA command.\n\n## Key Decisions\n- Use deterministic summary text so fast QA does not call a real model.\n\n## Critical Files And Symbols\n- src/domain/compaction.rs: compaction preparation and replacement shape.\n- src/domain/reducer.rs: manual compaction completion handling.\n- scripts/qa_mermaid.py: headless QA harness.\n\n## Commands Tests And Results\n- mermaid qa compact-smoke --format json: running inside this smoke.\n\n## Open Questions Or Risks\n- Full TUI automation remains intentionally deferred.\n\n## Next Steps\n- Keep using the real-model QA tier for end-to-end dogfood checks.",
+        "QA compact smoke: a synthetic conversation of {turns} user/assistant turns, compacted \
+         through the reducer path with a deterministic summary so fast QA needs no model. \
+         Archived {} messages and preserved {}. Next: keep using the real-model QA tier \
+         for end-to-end checks.",
         prepared.archived_messages.len(),
         prepared.preserved_messages.len()
     )

@@ -309,7 +309,7 @@ pub fn handle_compaction_failed(
         // Auto-compaction is best-effort preflight: Mermaid proceeds with the
         // un-compacted request (the provider's own context limit is the real
         // gate). But a failing summarizer must not silently retry — and pay
-        // for — a draft + review model call on every later turn: pause it
+        // for — a summarizer model call on every later turn: pause it
         // until a compaction succeeds, `/compact` runs, or the conversation
         // switches, and tell the user once.
         CompactionTrigger::AutoThreshold => {

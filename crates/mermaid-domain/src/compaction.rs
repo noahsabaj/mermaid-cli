@@ -95,8 +95,8 @@ impl Default for CompactionPolicy {
 /// `summary_max_tokens` is still the ceiling — while making small ones work.
 const SUMMARY_OUTPUT_WINDOW_SHARE: usize = 4;
 
-/// Floor for the scaled output cap. Below this a checkpoint cannot carry the
-/// ten required sections, so the window is genuinely too small to compact and
+/// Floor for the scaled output cap. Below this there is no room for a useful
+/// handoff, so the window is genuinely too small to compact and
 /// [`prepare_compaction`] skips instead of emitting a request that must fail.
 const SUMMARY_OUTPUT_FLOOR_TOKENS: usize = 512;
 
@@ -238,23 +238,6 @@ impl CompactionRequest {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CompactionReviewStatus {
-    Reviewed,
-    DraftValidated,
-}
-
-impl CompactionReviewStatus {
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Reviewed => "reviewed",
-            Self::DraftValidated => "draft_validated",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactionEvent {
     pub id: String,
@@ -267,8 +250,6 @@ pub struct CompactionEvent {
     pub preserved_turn_count: usize,
     pub summary_tokens: usize,
     pub duration_secs: f64,
-    pub review_status: CompactionReviewStatus,
-    pub review_error: Option<String>,
     #[serde(default)]
     pub focus: Option<String>,
     #[serde(default)]
@@ -591,42 +572,6 @@ pub fn build_summary_request(
 }
 
 #[must_use]
-pub fn build_verification_request(
-    base: &ChatRequest,
-    prepared: &PreparedCompaction,
-    draft_summary: &str,
-    focus: Option<&str>,
-    policy: CompactionPolicy,
-    window: Option<usize>,
-) -> ChatRequest {
-    let prompt = format!(
-        "{}\n\n# Draft Summary\n{}\n\n# Verification Task\nCritically check the draft against the conversation excerpt. If it omitted specific file paths, commands, test results, tool results, user constraints, current state, or next steps, return an improved complete checkpoint. Otherwise return the draft unchanged. Return only the final checkpoint markdown.",
-        summary_prompt(prepared, focus),
-        draft_summary.trim()
-    );
-    let mut message = ChatMessage::user(prompt);
-    if !prepared.summary_images.is_empty() {
-        message.images = Some(prepared.summary_images.clone());
-    }
-    ChatRequest {
-        model_id: base.model_id.clone(),
-        messages: vec![message],
-        system_prompt: compaction_system_prompt().to_string(),
-        instructions: None,
-        reasoning: compaction_reasoning(base.reasoning),
-        temperature: 0.0,
-        max_tokens: policy.summary_output_tokens(window),
-        tools: Vec::new(),
-        ollama_num_ctx: base.ollama_num_ctx,
-        ollama_allow_ram_offload: base.ollama_allow_ram_offload,
-        resolved_context_window: base.resolved_context_window,
-        resolved_max_output: base.resolved_max_output,
-        output_schema: None,
-        suppress_auto_compact: false,
-    }
-}
-
-#[must_use]
 pub fn build_replacement_messages(
     summary: &str,
     prepared: &PreparedCompaction,
@@ -658,8 +603,6 @@ pub fn build_replacement_messages(
         "preserved_message_count": record.preserved_message_count,
         "preserved_turn_count": record.preserved_turn_count,
         "duration_secs": record.duration_secs,
-        "review_status": record.review_status.as_str(),
-        "review_error": record.review_error,
     }));
 
     let mut assistant = ChatMessage::assistant(compaction_receipt(record));
@@ -675,21 +618,13 @@ pub fn build_replacement_messages(
 
 #[must_use]
 pub fn compaction_receipt(record: &CompactionEvent) -> String {
-    let review = match record.review_status {
-        CompactionReviewStatus::Reviewed => "Reviewed in a second pass.".to_string(),
-        CompactionReviewStatus::DraftValidated => match &record.review_error {
-            Some(error) => format!("Used the structurally validated draft: {error}."),
-            None => "Used the structurally validated draft.".to_string(),
-        },
-    };
     format!(
-        "Context compacted: {} -> {} tokens, archived {} messages, preserved {} messages, took {:.1}s. {} I will continue from this checkpoint.",
+        "Context compacted: {} -> {} tokens, archived {} messages, preserved {} messages, took {:.1}s. I will continue from this checkpoint.",
         format_compact_count(record.before_tokens),
         format_compact_count(record.after_tokens),
         record.archived_message_count,
         record.preserved_message_count,
         record.duration_secs,
-        review
     )
 }
 
@@ -700,87 +635,6 @@ pub fn normalize_summary(text: &str) -> String {
         return summary.trim().to_string();
     }
     trimmed.to_string()
-}
-
-/// # Errors
-///
-/// Returns the rejection message to show the model on a retry: either the ten
-/// required headings are missing, reordered, or duplicated, or one of them has
-/// a body that is empty, a bare `-`, or an unfilled `- [...]` placeholder.
-/// Only the ten known headings count as structure — a checkpoint that quotes
-/// other `## ` markdown in its body is valid.
-pub fn validate_summary_structure(summary: &str) -> Result<(), String> {
-    const HEADINGS: [&str; 10] = [
-        "## Goal",
-        "## User Preferences And Constraints",
-        "## Project State",
-        "## Completed Work",
-        "## Current Work",
-        "## Key Decisions",
-        "## Critical Files And Symbols",
-        "## Commands Tests And Results",
-        "## Open Questions Or Risks",
-        "## Next Steps",
-    ];
-
-    // Only the ten known headings are structure. Other `## `-prefixed lines
-    // are body content — checkpoints legitimately quote markdown (commands,
-    // error output, README excerpts) and must not fail closed over it.
-    let lines: Vec<&str> = summary.lines().collect();
-    let headings: Vec<(usize, &str)> = lines
-        .iter()
-        .enumerate()
-        .filter_map(|(index, line)| {
-            let trimmed = line.trim();
-            HEADINGS.contains(&trimmed).then_some((index, trimmed))
-        })
-        .collect();
-    let actual: Vec<&str> = headings.iter().map(|(_, heading)| *heading).collect();
-    if actual != HEADINGS {
-        return Err(format!(
-            "checkpoint headings must exactly match the required order; got {}",
-            actual.join(", ")
-        ));
-    }
-
-    for (index, (line_index, heading)) in headings.iter().enumerate() {
-        let body_end = headings
-            .get(index + 1)
-            .map(|(next_index, _)| *next_index)
-            .unwrap_or(lines.len());
-        let body = lines[line_index + 1..body_end].join("\n");
-        let body = body.trim();
-        if body.is_empty() || body == "-" || (body.starts_with("- [") && body.ends_with(']')) {
-            return Err(format!(
-                "checkpoint heading {heading} has placeholder content"
-            ));
-        }
-    }
-    Ok(())
-}
-
-#[must_use]
-pub fn combine_usage(a: Option<TokenUsage>, b: Option<TokenUsage>) -> Option<TokenUsage> {
-    match (a, b) {
-        (None, None) => None,
-        (Some(u), None) | (None, Some(u)) => Some(u),
-        (Some(mut left), Some(right)) => {
-            left.prompt_tokens = left.prompt_tokens.saturating_add(right.prompt_tokens);
-            left.completion_tokens = left
-                .completion_tokens
-                .saturating_add(right.completion_tokens);
-            left.cached_input_tokens = left
-                .cached_input_tokens
-                .saturating_add(right.cached_input_tokens);
-            left.cache_creation_input_tokens = left
-                .cache_creation_input_tokens
-                .saturating_add(right.cache_creation_input_tokens);
-            left.reasoning_output_tokens = left
-                .reasoning_output_tokens
-                .saturating_add(right.reasoning_output_tokens);
-            Some(left)
-        },
-    }
 }
 
 pub fn estimate_messages_tokens(messages: &[ChatMessage]) -> usize {
@@ -816,7 +670,7 @@ fn format_scaled(value: usize, divisor: usize, suffix: &str) -> String {
 }
 
 fn compaction_system_prompt() -> &'static str {
-    "You are performing context checkpoint compaction for Mermaid, a model-agnostic agentic coding CLI. Produce a faithful handoff summary for the next model call. Preserve exact file paths, commands, errors, tool results, user preferences, decisions, current state, and next steps. Do not invent facts. Be concise but complete."
+    "You are checkpointing an agentic coding session in Mermaid. The conversation you are given is about to leave the working context and will be replaced by what you write."
 }
 
 fn compaction_reasoning(current: ReasoningLevel) -> ReasoningLevel {
@@ -832,19 +686,19 @@ fn summary_prompt(prepared: &PreparedCompaction, focus: Option<&str>) -> String 
         .as_deref()
         .map(|summary| {
             format!(
-                "A previous checkpoint exists. Update it with the newer history, preserve still-true details, and remove stale details.\n\n<previous_checkpoint>\n{}\n</previous_checkpoint>",
+                "An earlier checkpoint covers the start of this work; carry forward what is still true.\n\n<previous_checkpoint>\n{}\n</previous_checkpoint>\n\n",
                 summary.trim()
             )
         })
-        .unwrap_or_else(|| "Create a new checkpoint from the conversation history below.".to_string());
+        .unwrap_or_default();
 
     let focus = focus
         .filter(|s| !s.trim().is_empty())
-        .map(|s| format!("\n# User Focus Instructions\n{}\n", s.trim()))
+        .map(|s| format!("# User Focus Instructions\n{}\n\n", s.trim()))
         .unwrap_or_default();
 
     format!(
-        "{anchor}{focus}\n# Required Output\nReturn exactly this Markdown structure and keep section order:\n\n## Goal\n- [single-sentence task summary]\n\n## User Preferences And Constraints\n- [preferences, constraints, mode, or \"(none)\"]\n\n## Project State\n- [repo/product state and important architecture facts]\n\n## Completed Work\n- [what has already been done]\n\n## Current Work\n- [what is actively in progress]\n\n## Key Decisions\n- [decision and rationale]\n\n## Critical Files And Symbols\n- [file path or symbol: why it matters]\n\n## Commands Tests And Results\n- [command/test/result/error]\n\n## Open Questions Or Risks\n- [risk/question/blocker]\n\n## Next Steps\n- [ordered next action]\n\nRules:\n- Preserve exact paths, commands, error strings, identifiers, and numeric facts when known.\n- Mention important omitted or truncated data explicitly.\n- Do not mention that you are an AI or explain the compaction process.\n\n# Conversation History To Compact\n{}",
+        "{anchor}{focus}Write the handoff you'd want if you were resuming this work cold.\n\n# Conversation History To Compact\n{}",
         prepared.history_excerpt
     )
 }
@@ -1158,7 +1012,7 @@ mod tests {
     }
 
     #[test]
-    fn summary_and_verification_requests_copy_resolved_limits() {
+    fn summary_request_copies_resolved_limits() {
         // The summarizer calls the same model — its request must inherit the
         // live-discovered limits or Anthropic AUTO would fall to the 8192
         // floor mid-compaction.
@@ -1176,9 +1030,6 @@ mod tests {
         let summary = build_summary_request(&base, &prepared, None, policy, None);
         assert_eq!(summary.resolved_context_window, Some(1_000_000));
         assert_eq!(summary.resolved_max_output, Some(128_000));
-        let verify = build_verification_request(&base, &prepared, "draft", None, policy, None);
-        assert_eq!(verify.resolved_context_window, Some(1_000_000));
-        assert_eq!(verify.resolved_max_output, Some(128_000));
     }
 
     #[test]
@@ -1547,22 +1398,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn summary_structure_requires_ordered_non_placeholder_sections() {
-        let valid = "## Goal\n- ship the fix\n\n## User Preferences And Constraints\n- none\n\n## Project State\n- ready\n\n## Completed Work\n- audit\n\n## Current Work\n- implementation\n\n## Key Decisions\n- preserve data\n\n## Critical Files And Symbols\n- compaction.rs\n\n## Commands Tests And Results\n- tests pass\n\n## Open Questions Or Risks\n- none\n\n## Next Steps\n- finish";
-        assert!(validate_summary_structure(valid).is_ok());
-        assert!(validate_summary_structure("## Goal\n- [single-sentence task summary]").is_err());
-    }
-
-    #[test]
-    fn summary_structure_tolerates_quoted_markdown_in_bodies() {
-        // Checkpoints legitimately quote markdown — a `## `-prefixed line
-        // inside a section body is content, not structure, and must not fail
-        // the checkpoint closed.
-        let with_quoted_heading = "## Goal\n- ship the fix\n\n## User Preferences And Constraints\n- none\n\n## Project State\n- ready\n\n## Completed Work\n- audit\n\n## Current Work\n- implementation\n\n## Key Decisions\n- preserve data\n\n## Critical Files And Symbols\n- compaction.rs\n\n## Commands Tests And Results\n- README now starts with:\n## Quick Start\ninstall the CLI\n\n## Open Questions Or Risks\n- none\n\n## Next Steps\n- finish";
-        assert!(validate_summary_structure(with_quoted_heading).is_ok());
-    }
-
     fn tool_call(id: &str, name: &str) -> mermaid_model::models::tool_call::ToolCall {
         mermaid_model::models::tool_call::ToolCall {
             id: Some(id.to_string()),
@@ -1846,8 +1681,6 @@ mod tests {
             preserved_turn_count: 1,
             summary_tokens: 10,
             duration_secs: 1.0,
-            review_status: CompactionReviewStatus::Reviewed,
-            review_error: None,
             focus: None,
             archive_path: None,
         };
@@ -1855,43 +1688,5 @@ mod tests {
         assert_eq!(messages[0].kind, ChatMessageKind::ContextCheckpoint);
         assert!(messages[0].content.contains(CHECKPOINT_MARKER));
         assert_eq!(messages[2].content, "new");
-    }
-
-    #[test]
-    fn replacement_metadata_records_review_status() {
-        let prepared = PreparedCompaction {
-            archived_messages: vec![ChatMessage::user("old")],
-            preserved_messages: vec![ChatMessage::user("new")],
-            previous_summary: None,
-            history_excerpt: "old".to_string(),
-            summary_images: Vec::new(),
-        };
-        let record = CompactionEvent {
-            id: "c1".to_string(),
-            trigger: CompactionTrigger::Manual,
-            created_at: Local::now(),
-            before_tokens: 100,
-            after_tokens: 25,
-            archived_message_count: 1,
-            preserved_message_count: 1,
-            preserved_turn_count: 1,
-            summary_tokens: 10,
-            duration_secs: 1.0,
-            review_status: CompactionReviewStatus::DraftValidated,
-            review_error: Some("provider overloaded".to_string()),
-            focus: None,
-            archive_path: None,
-        };
-        let messages = build_replacement_messages("## Goal\n- continue", &prepared, &record);
-        let metadata = messages[0].metadata.as_ref().expect("metadata");
-        assert_eq!(
-            metadata.get("review_status").and_then(|v| v.as_str()),
-            Some("draft_validated")
-        );
-        assert_eq!(
-            metadata.get("review_error").and_then(|v| v.as_str()),
-            Some("provider overloaded")
-        );
-        assert!(messages[1].content.contains("structurally validated draft"));
     }
 }

@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Compaction is one free-form model call.** The checkpoint used to be a fixed
+  ten-heading template that `validate_summary_structure` graded (retrying on a
+  miss), followed by a second "verification" call that re-read the whole excerpt
+  to check the first. Both were scaffolding for weak summarizers: a capable model
+  knows what matters in its own work better than a fixed list does, and the
+  review doubled the cost of every compaction. The summarizer is now asked to
+  "write the handoff you'd want if you were resuming this work cold", and what it
+  writes is the checkpoint. The only check left is a boundary: an empty reply
+  fails rather than replacing history with nothing. `CompactionEvent` loses
+  `review_status` / `review_error` (older logs still load; the fields are
+  ignored), the transcript's `Compact(...)` line and `/context` drop the review
+  note, and the runtime store's `compactions.verification_status` column is
+  written as `NULL`.
+
 ### Fixed
 
 - **The pedantic lint debt is back under its baseline.** Eleven lints had drifted

@@ -3779,8 +3779,6 @@ fn fake_recovery_result(replacement: Vec<ChatMessage>) -> CompactionResult {
                 .count(),
             summary_tokens: 10,
             duration_secs: 0.0,
-            review_status: crate::CompactionReviewStatus::Reviewed,
-            review_error: None,
             focus: None,
             archive_path: None,
         },

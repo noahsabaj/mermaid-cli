@@ -479,8 +479,6 @@ mod tests {
             preserved_turn_count: 1,
             summary_tokens: 90,
             duration_secs: 1.5,
-            review_status: crate::compaction::CompactionReviewStatus::Reviewed,
-            review_error: None,
             focus: None,
             archive_path: None,
         }

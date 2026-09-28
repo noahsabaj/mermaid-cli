@@ -231,9 +231,9 @@ pub struct RuntimeState {
     pub continue_recoveries: u32,
     /// Auto-threshold compaction failed, so it is paused until a compaction
     /// succeeds, the user runs `/compact`, or the conversation is switched.
-    /// Without this, a summarizer that keeps failing (e.g. a model that can't
-    /// produce the required checkpoint structure) silently retries — and pays
-    /// for — a draft + review model call on every subsequent turn. Session-only.
+    /// Without this, a summarizer that keeps failing silently retries — and
+    /// pays for — a summarizer model call on every subsequent turn.
+    /// Session-only.
     #[serde(skip)]
     pub auto_compact_suppressed: bool,
 }

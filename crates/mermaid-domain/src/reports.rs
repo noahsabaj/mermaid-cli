@@ -549,17 +549,6 @@ fn push_last_compaction_lines(lines: &mut Vec<String>, state: &State) {
         "- preserved: {} messages",
         last.preserved_message_count
     ));
-    lines.push(format!(
-        "- review: {}",
-        match last.review_status {
-            crate::CompactionReviewStatus::Reviewed => "reviewed".to_string(),
-            crate::CompactionReviewStatus::DraftValidated => last
-                .review_error
-                .as_ref()
-                .map(|err| format!("validated draft ({err})"))
-                .unwrap_or_else(|| "validated draft".to_string()),
-        }
-    ));
     if let Some(path) = &last.archive_path {
         lines.push(format!("- archive: {path}"));
     }
