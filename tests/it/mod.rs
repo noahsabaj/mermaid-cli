@@ -7,6 +7,7 @@ mod compaction_stubbed;
 mod daemon_integration;
 mod effect_cancel;
 mod engine_handle_stubbed;
+mod evals;
 mod feedback_cli;
 mod lint_policy_drift;
 mod memory_consolidation_stubbed;

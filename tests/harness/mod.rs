@@ -21,6 +21,7 @@
 
 #![allow(dead_code)] // Each test binary uses a different slice of this.
 
+pub mod evals;
 pub mod stub_model;
 
 use std::io::{Read, Write};
