@@ -7,3 +7,10 @@
 [profile.default]
 retries = 1
 slow-timeout = { period = "60s", terminate-after = 3 }
+
+# The managed-SearXNG end-to-end test downloads a ~65-80 MB bundle before it
+# can start the server, so the default three minutes can end it on a slow
+# mirror. It is `#[ignore]`d and runs only in its own CI job.
+[[profile.default.overrides]]
+filter = 'test(managed_searxng_end_to_end)'
+slow-timeout = { period = "60s", terminate-after = 10 }

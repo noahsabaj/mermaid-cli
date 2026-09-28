@@ -4,7 +4,7 @@
 //!
 //! Run with:
 //! ```text
-//! cargo test --release --lib render::bench -- --ignored --nocapture
+//! cargo nextest run --release --lib --run-ignored only --no-capture render::bench
 //! ```
 //!
 //! `--release` is not optional: this crate builds with `lto = true`, and a

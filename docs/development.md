@@ -7,13 +7,18 @@ rule, no back-compat shims, the ratchet baselines). The one-command pre-PR gate 
 just check    # cargo fmt --check + clippy -D warnings + guards + cargo nextest run
 ```
 
-Or run the pieces directly if you don't have [`just`](https://github.com/casey/just)
-/ [`cargo-nextest`](https://nexte.st):
+Tests run under [`cargo-nextest`](https://nexte.st) (`cargo install cargo-nextest --locked`),
+which gives every test its own process and applies the retry policy in
+`.config/nextest.toml`. Plain `cargo test` shares one process across a binary's tests
+and is not a supported way to run the suite. There are no doctests, so nextest
+skipping them loses nothing.
+
+Or run the pieces directly if you don't have [`just`](https://github.com/casey/just):
 
 ```
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo nextest run --workspace   # or: cargo test --workspace
+cargo nextest run --workspace
 ```
 
 That gate runs the same suites on every platform, including the render
@@ -99,5 +104,5 @@ Terminal behavior that a `Line`/`Span` assertion cannot see — a shredded
 background, a glyph past a border, a stale status band — is covered separately
 by `tests/it/pty_frame.rs`, which drives the real binary on a pty and compares
 whole terminal grids against `tests/snapshots/*.txt`. Those DO run on every
-platform. Regenerate with `UPDATE_SNAPSHOTS=1 cargo test --test integration -- it::pty_frame::` and
+platform. Regenerate with `UPDATE_SNAPSHOTS=1 cargo nextest run --test integration it::pty_frame::` and
 read the diff before accepting it.

@@ -192,6 +192,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to date, so each separate merge would have put the other seven behind and
   forced a fresh check cycle for every one.
 
+- **Every test run is nextest now, the opt-in ones too.** The main suite has
+  run under `cargo nextest` for a while, but the CI jobs for the `#[ignore]`d
+  tests (daemon, OS sandbox, managed SearXNG, macOS clipboard) still called
+  `cargo test -- --ignored`, and so did every "run with" hint. They now use
+  `cargo nextest run --run-ignored only` with the same filters, so they get a
+  process per test and the retry and timeout policy in `.config/nextest.toml`.
+  The managed-SearXNG test, which downloads its bundle first, gets ten minutes
+  there instead of three. `docs/development.md` no longer offers
+  `cargo test --workspace` as a fallback. There are no doctests, so nothing
+  still needs `cargo test --doc`.
+
 - **"Unknown command" is gone as a concept.** A slash line the registry does
   not know is a message, so there is no error row to post and nothing the
   composer can eat; `SlashCmd::Unknown` no longer exists and
