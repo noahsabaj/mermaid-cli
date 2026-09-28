@@ -5977,6 +5977,67 @@ fn system_prompt_applies_the_active_style_except_for_subagents() {
 }
 
 #[test]
+fn guidance_pack_defaults_on_for_local_providers_only() {
+    let pack_marker = "# Working Guidance";
+    let mut state = fresh_state();
+    assert!(
+        system_prompt_for_state(&state).contains(pack_marker),
+        "ollama is local: the pack is on by default"
+    );
+    state.session.model_id = "qwen3-coder:30b".to_string();
+    assert!(
+        system_prompt_for_state(&state).contains(pack_marker),
+        "a bare id is ollama by convention"
+    );
+    state.session.model_id = "anthropic/some-model".to_string();
+    assert!(
+        !system_prompt_for_state(&state).contains(pack_marker),
+        "a hosted API gets the core prompt alone"
+    );
+    // A provider pointed at the LAN is local, whatever its name.
+    state.session.model_id = "my-vllm/coder".to_string();
+    state.settings.providers.insert(
+        "my-vllm".to_string(),
+        crate::UserProviderConfig {
+            base_url: Some("http://192.168.1.42:8000/v1".to_string()),
+            ..Default::default()
+        },
+    );
+    assert!(system_prompt_for_state(&state).contains(pack_marker));
+    state.settings.providers.insert(
+        "my-vllm".to_string(),
+        crate::UserProviderConfig {
+            base_url: Some("https://vllm.example.com/v1".to_string()),
+            ..Default::default()
+        },
+    );
+    assert!(!system_prompt_for_state(&state).contains(pack_marker));
+}
+
+#[test]
+fn guidance_pack_is_user_overridable() {
+    let pack_marker = "# Working Guidance";
+    let mut state = fresh_state();
+    state.settings.output =
+        toml::from_str::<crate::OutputConfig>("guidance = \"off\"").expect("guidance parses");
+    assert!(
+        !system_prompt_for_state(&state).contains(pack_marker),
+        "off wins over a local provider"
+    );
+    state.settings.output.guidance = crate::config::GuidanceMode::On;
+    state.session.model_id = "openai/some-model".to_string();
+    assert!(
+        system_prompt_for_state(&state).contains(pack_marker),
+        "on wins over a hosted API"
+    );
+    // A `--system-prompt` replacement is the user's whole prompt.
+    state.settings.prompt.system_prompt = Some("REPLACED".to_string());
+    let prompt = system_prompt_for_state(&state);
+    assert!(prompt.starts_with("REPLACED"), "got {prompt}");
+    assert!(!prompt.contains(pack_marker));
+}
+
+#[test]
 fn ctrl_o_composes_draft_in_editor() {
     let ctrl_o = Msg::Key(Key {
         code: KeyCode::Char('o'),

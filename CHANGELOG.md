@@ -149,6 +149,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The system prompt is split into facts and an optional guidance pack.** The
+  core prompt now states only what the model can't find out for itself (the
+  tools, the OS and shell, what each safety mode gates, where memory and the
+  scratchpad live) and the boundaries it must not cross. It is about a third of
+  its old size. The coaching (the core loop, task-checklist discipline, the
+  codebase-reading procedure, memory upkeep, and the editing, validation and
+  output contracts) moved into a guidance pack layered after it. A new
+  `[output] guidance` key decides when the pack applies: `auto` (the default)
+  turns it on for local providers (Ollama, or any provider whose `base_url` is
+  a loopback or LAN host) and off for hosted APIs; `on` and `off` force it.
+  `/runtime` shows whether it is active. A `--system-prompt` replacement never
+  gets the pack.
+
 - **BREAKING: plan mode is gone; `read_only` stays.** The `plan` safety mode,
   the `enter_plan_mode` / `exit_plan_mode` tools, `/plan`, `/config` (whose
   only section was plan settings), the `[plan]` config table, and

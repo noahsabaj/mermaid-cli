@@ -246,6 +246,28 @@ mermaid --system-prompt "You are a focused code reviewer."
 mermaid --system-prompt-file ./replacement-system-prompt.md
 ```
 
+## Guidance pack
+
+The system prompt has two layers. The core states facts and boundaries: the
+tools, the OS and shell, what each safety mode gates, where memory and the
+scratchpad live. The guidance pack adds coaching on how to work: planning with
+the task checklist, reading a codebase, maintaining memory, and the editing,
+validation and output contracts. Capable hosted models don't need it; smaller
+local models usually do.
+
+```toml
+[output]
+guidance = "auto"  # default: on for local providers, off for hosted APIs
+# guidance = "on"  # always
+# guidance = "off" # never
+```
+
+`auto` decides by provider, not by model name: Ollama is local, and so is any
+provider whose `[providers.<name>] base_url` points at a loopback or LAN host.
+Subagents follow the same setting. A `--system-prompt` replacement is the whole
+prompt, so the pack is never added to it. `/runtime` shows whether the pack is
+on for the current model.
+
 ## Output styles
 
 Output styles (`/output-style`) are named voice/format presets that modify the

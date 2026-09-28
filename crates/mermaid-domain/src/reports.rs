@@ -156,6 +156,18 @@ pub(crate) fn doctor_text(state: &State) -> String {
         }
     ));
     lines.push(format!("Output style: {}", output_style_display(state)));
+    lines.push(format!(
+        "Guidance pack: {} ([output] guidance = {})",
+        if state
+            .settings
+            .guidance_pack_enabled(&state.session.model_id)
+        {
+            "on"
+        } else {
+            "off"
+        },
+        state.settings.output.guidance.as_str()
+    ));
     match &state.instructions {
         Some(instructions) => lines.push(format!(
             "Project instructions: {} bytes from {} source(s){}",
