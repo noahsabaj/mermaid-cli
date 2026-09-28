@@ -171,6 +171,11 @@ fn evals_dir() -> PathBuf {
 }
 
 /// Every task, sorted by id.
+///
+/// # Panics
+///
+/// When `evals/tasks` cannot be read or a `task.toml` does not parse: a
+/// broken task is a broken suite, and should say which file.
 #[must_use]
 pub fn tasks() -> Vec<Task> {
     let root = evals_dir().join("tasks");
@@ -197,6 +202,10 @@ pub fn tasks() -> Vec<Task> {
 
 impl Task {
     /// The task's `reference.toml`.
+    ///
+    /// # Panics
+    ///
+    /// When the file is missing or does not parse.
     #[must_use]
     pub fn reference(&self) -> Reference {
         let path = self.dir.join("reference.toml");
@@ -295,7 +304,7 @@ impl Run {
 pub fn run_timeout(target: &Target<'_>) -> Duration {
     match target {
         Target::Mock(_) => Duration::from_secs(120),
-        Target::Live(_) => Duration::from_secs(15 * 60),
+        Target::Live(_) => Duration::from_mins(15),
     }
 }
 
@@ -711,6 +720,12 @@ fn tail(text: &str, lines: usize) -> String {
 
 // ── The live report ─────────────────────────────────────────────────────
 
+/// A count as a float, for averages. Eval counts are small, so the saturation
+/// at `u32::MAX` never happens; it only keeps the conversion exact.
+fn float(n: impl TryInto<u32>) -> f64 {
+    f64::from(n.try_into().unwrap_or(u32::MAX))
+}
+
 /// Score table for a set of live runs, as Markdown.
 #[must_use]
 pub fn report(runs: &[Run]) -> String {
@@ -736,7 +751,7 @@ pub fn report(runs: &[Run]) -> String {
             if edits == 0 {
                 String::new()
             } else {
-                format!(" ({:.0}%)", 100.0 * fuzzy as f64 / edits as f64)
+                format!(" ({:.0}%)", 100.0 * float(fuzzy) / float(edits))
             }
         );
         out.push_str("| task | passed | turns | tokens | tool calls | fuzzy edits | seconds |\n");
@@ -746,16 +761,16 @@ pub fn report(runs: &[Run]) -> String {
             tasks.entry(run.task.as_str()).or_default().push(run);
         }
         for (task, runs) in tasks {
-            let n = runs.len() as f64;
+            let n = float(runs.len());
             let mean = |f: &dyn Fn(&Run) -> f64| runs.iter().map(|r| f(r)).sum::<f64>() / n;
             let _ = writeln!(
                 out,
                 "| {task} | {}/{} | {:.1} | {:.0} | {:.1} | {}/{} | {:.0} |",
                 runs.iter().filter(|r| r.passed()).count(),
                 runs.len(),
-                mean(&|r| r.turns as f64),
-                mean(&|r| r.tokens as f64),
-                mean(&|r| r.tool_calls as f64),
+                mean(&|r| float(r.turns)),
+                mean(&|r| float(r.tokens)),
+                mean(&|r| float(r.tool_calls)),
                 runs.iter().map(|r| r.fuzzy_edits).sum::<usize>(),
                 runs.iter().map(|r| r.edits).sum::<usize>(),
                 mean(&|r| r.seconds),

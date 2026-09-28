@@ -14,7 +14,7 @@ use tokio::net::{TcpListener, TcpStream};
 
 /// One request the provider received.
 #[derive(Debug, Clone)]
-pub(crate) struct Received {
+pub struct Received {
     pub(crate) path: String,
     /// The JSON body, or `Value::Null` for a bodyless request.
     pub(crate) body: Value,
@@ -22,7 +22,7 @@ pub(crate) struct Received {
 
 /// What the provider answers.
 #[derive(Debug, Clone)]
-pub(crate) struct Reply {
+pub struct Reply {
     status: u16,
     content_type: &'static str,
     body: String,
@@ -60,7 +60,7 @@ impl Reply {
 type Handler = dyn Fn(&Received) -> Reply + Send + Sync;
 
 /// The running provider. Dropping it stops accepting connections.
-pub(crate) struct MockProvider {
+pub struct MockProvider {
     pub(crate) url: String,
     received: Arc<Mutex<Vec<Received>>>,
     task: tokio::task::JoinHandle<()>,
