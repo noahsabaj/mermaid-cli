@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A behavioural eval suite (`evals/`, `just eval <model>`).** Four fixed tasks
+  (fix a failing test, add a CLI flag, answer a question about a repo, and a
+  provider that silently ignores parameters), each run through `mermaid run`
+  in a throwaway copy of a fixture and scored only by outcome: tests pass,
+  files untouched, the answer is right. Pointing it at a new model needs no
+  code change, so it is the yardstick for deleting prompt coaching: if a
+  paragraph goes and the scores hold, it was not doing anything. CI runs every
+  task offline against a scripted OpenAI-compatible endpoint, which proves each
+  task is passable and that doing nothing fails it; it does not score a model.
+- **`tool_finished` events flag fuzzy edits.** An `edit_file` or `apply_patch`
+  that only applied through fuzzy (whitespace or Unicode) matching now carries
+  `"fuzzy": true` on its `mermaid run --format ndjson` line. Additive: the field
+  is omitted when false and the protocol stays version 1. The evals report the
+  rate per model, which says when the fuzzy matcher can be dropped.
+
 ### Fixed
 
 - **The pedantic lint debt is back under its baseline.** Eleven lints had drifted
