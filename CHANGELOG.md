@@ -39,6 +39,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   answers `max_tokens` with "use `max_completion_tokens` instead" gets the
   other spelling from then on.
 
+  The pedantic lint baseline is re-recorded at 77 keys / 2030 occurrences
+  (from 2116): this change adds no new pedantic debt, and the counts that fell
+  since the last recording, mostly with plan mode's removal, had not been
+  lowered yet.
+
 ### Fixed
 
 - **The pedantic lint debt is back under its baseline.** Eleven lints had drifted

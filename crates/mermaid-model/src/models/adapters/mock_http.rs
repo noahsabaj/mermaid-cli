@@ -136,7 +136,7 @@ async fn serve(mut socket: TcpStream, handler: &Handler, log: &Mutex<Vec<Receive
 
 async fn read_request(socket: &mut TcpStream) -> Option<Received> {
     let mut buf = Vec::new();
-    let mut chunk = [0u8; 4096];
+    let mut chunk = vec![0u8; 4096];
     let header_end = loop {
         let n = socket.read(&mut chunk).await.ok()?;
         if n == 0 {

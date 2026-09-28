@@ -212,14 +212,15 @@ fn without_id(text: &str, id: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(at) = rest.find(id) {
-        let before = rest[..at].chars().next_back();
-        let after = rest[at + id.len()..].chars().next();
-        let whole = !before.is_some_and(is_id_char) && !after.is_some_and(is_id_char);
-        out.push_str(&rest[..at]);
+        let (head, tail) = rest.split_at(at);
+        let after = tail.strip_prefix(id).unwrap_or_default();
+        let whole = !head.chars().next_back().is_some_and(is_id_char)
+            && !after.chars().next().is_some_and(is_id_char);
+        out.push_str(head);
         if !whole {
             out.push_str(id);
         }
-        rest = &rest[at + id.len()..];
+        rest = after;
     }
     out.push_str(rest);
     out
