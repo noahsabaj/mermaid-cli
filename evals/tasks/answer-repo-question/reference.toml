@@ -1,0 +1,10 @@
+# A known-good solution, replayed by the offline tier through the mock provider.
+
+[[turn]]
+calls = [
+    { tool = "read_file", args = { path = "README.md" } },
+    { tool = "read_file", args = { path = "src/config.rs" } },
+]
+
+[[turn]]
+say = "It listens on port 7431: `PORT_RANGE_START` (7000) plus this service's `SLOT` (431). The README's 7000 is out of date."

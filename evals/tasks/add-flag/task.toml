@@ -1,0 +1,24 @@
+# Add a small feature to a CLI without breaking its existing behaviour.
+fixture = "greet"
+prompt = """
+Add a `--shout` flag to this CLI. When it is passed, the greeting is printed in upper case. Everything else must keep working exactly as it does now.
+"""
+
+[[check]]
+kind = "command"
+run = ["cargo", "run", "--offline", "--quiet", "--", "--shout", "Ada"]
+stdout_contains = "HELLO, ADA!"
+
+[[check]]
+kind = "command"
+run = ["cargo", "run", "--offline", "--quiet", "--", "Ada"]
+stdout_contains = "Hello, Ada!"
+
+[[check]]
+kind = "command"
+run = ["cargo", "run", "--offline", "--quiet"]
+stdout_contains = "Hello, world!"
+
+[[check]]
+kind = "command"
+run = ["cargo", "test", "--offline", "--quiet"]

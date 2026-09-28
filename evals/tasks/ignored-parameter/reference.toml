@@ -1,0 +1,12 @@
+# The mock accepts `reasoning_effort` and `response_format` and ignores both:
+# the last turn is the formatting turn, answered in prose rather than JSON.
+
+[[turn]]
+tool = "read_file"
+args = { path = "src/config.rs" }
+
+[[turn]]
+say = "Port 7431 (7000 + 431)."
+
+[[turn]]
+say = "The server listens on port 7431."

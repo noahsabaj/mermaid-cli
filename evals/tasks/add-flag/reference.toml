@@ -1,0 +1,38 @@
+# A known-good solution, replayed by the offline tier through the mock
+# provider.
+#
+# The edit's `target_content` deliberately ends a line with three spaces (the
+# `\u0020` escapes) that the file does not have, so it only applies through the
+# fuzzy matcher. That keeps the fuzzy-edit counter covered offline:
+# `fuzzy_edits` is what the offline tier expects the run's event stream to
+# report.
+fuzzy_edits = 1
+
+[[turn]]
+tool = "read_file"
+args = { path = "src/main.rs" }
+
+[[turn]]
+tool = "edit_file"
+args.path = "src/main.rs"
+args.target_content = """
+    let mut name = String::from("world");\u0020\u0020\u0020
+    for arg in std::env::args().skip(1) {
+        name = arg;
+    }
+    println!("{}", greeting(&name));"""
+args.replacement_content = """
+    let mut name = String::from("world");
+    let mut shout = false;
+    for arg in std::env::args().skip(1) {
+        if arg == "--shout" {
+            shout = true;
+        } else {
+            name = arg;
+        }
+    }
+    let text = greeting(&name);
+    println!("{}", if shout { text.to_uppercase() } else { text });"""
+
+[[turn]]
+say = "Added `--shout`, which upper-cases the greeting. Without it the output is unchanged."

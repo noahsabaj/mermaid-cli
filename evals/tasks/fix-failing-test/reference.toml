@@ -1,0 +1,22 @@
+# A known-good solution, replayed by the offline tier through the mock
+# provider. It proves the checks can pass and that the harness path from model
+# output to changed files works. It says nothing about any real model.
+
+[[turn]]
+tool = "read_file"
+args = { path = "src/lib.rs" }
+
+[[turn]]
+tool = "edit_file"
+args.path = "src/lib.rs"
+args.target_content = """
+    if sorted.len() % 2 == 0 {
+        Some(sorted[mid] as f64)
+    } else {"""
+args.replacement_content = """
+    if sorted.len() % 2 == 0 {
+        Some((sorted[mid - 1] + sorted[mid]) as f64 / 2.0)
+    } else {"""
+
+[[turn]]
+say = "The even-length branch returned one middle value instead of averaging the middle pair. Fixed in src/lib.rs."
