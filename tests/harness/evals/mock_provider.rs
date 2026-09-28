@@ -21,7 +21,7 @@ use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use serde_json::{Value, json};
 
@@ -52,6 +52,11 @@ pub struct MockProvider {
 
 impl MockProvider {
     /// Bind a loopback port and serve `script` from a background thread.
+    ///
+    /// # Panics
+    ///
+    /// When no loopback port can be bound.
+    #[must_use]
     pub fn start(script: Vec<MockTurn>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind the mock provider");
         let port = listener.local_addr().expect("mock provider address").port();
@@ -77,27 +82,31 @@ impl MockProvider {
     }
 
     /// The `base_url` a `[providers.*]` entry points at.
+    #[must_use]
     pub fn base_url(&self) -> String {
         format!("http://127.0.0.1:{}/v1", self.port)
     }
 
     /// Every chat request body the endpoint received, oldest first.
+    #[must_use]
     pub fn requests(&self) -> Vec<Value> {
         self.lock().requests.clone()
     }
 
     /// Scripted turns never asked for.
+    #[must_use]
     pub fn remaining(&self) -> usize {
         self.lock().script.len()
     }
 
     /// Calls that arrived after the script ran out.
+    #[must_use]
     pub fn overruns(&self) -> usize {
         self.lock().overruns
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Shared> {
-        self.shared.lock().unwrap_or_else(|e| e.into_inner())
+        self.shared.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -147,13 +156,14 @@ fn serve(stream: TcpStream, shared: &Mutex<Shared>) -> std::io::Result<()> {
     let request: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
     let streaming = request["stream"].as_bool().unwrap_or(false);
     let (turn, call) = {
-        let mut shared = shared.lock().unwrap_or_else(|e| e.into_inner());
+        let mut shared = shared.lock().unwrap_or_else(PoisonError::into_inner);
         shared.requests.push(request);
         let call = shared.requests.len();
         let turn = shared.script.pop_front();
         if turn.is_none() {
             shared.overruns += 1;
         }
+        drop(shared);
         (turn, call)
     };
     let Some(turn) = turn else {

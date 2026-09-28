@@ -1938,8 +1938,9 @@ mod tests {
             async fn fetch(
                 &self,
                 url: &str,
-                _budget: crate::providers::ctx::WebByteBudget,
+                budget: crate::providers::ctx::WebByteBudget,
             ) -> Result<WebFetchResult, WebFetchError> {
+                let _ = budget;
                 let mut result = page("extracted");
                 result.requested_url = url.to_string();
                 Ok(result)
