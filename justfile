@@ -18,6 +18,11 @@ check:
 test *ARGS:
     cargo nextest run --workspace {{ARGS}}
 
+# Behavioural evals against real models, scored by outcome (see evals/README.md).
+# Costs whatever the model calls cost. Example: `just eval anthropic/<model>`.
+eval MODELS:
+    MERMAID_EVAL_MODELS={{MODELS}} cargo test --test integration it::evals::live -- --ignored --exact --nocapture
+
 # Dependency-free source guards. CI runs exactly these.
 #
 # `just check` used to skip them while claiming to be "what CI runs" — CI has

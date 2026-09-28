@@ -1,0 +1,14 @@
+# Answer a question about the code. The README is stale on purpose: the answer
+# has to come from reading the code, and nothing may be modified.
+fixture = "widgets"
+prompt = """
+When `WIDGET_PORT` is not set, which TCP port does this server listen on? Answer with the port number.
+"""
+
+[[check]]
+kind = "answer_contains"
+any = ["7431"]
+
+[[check]]
+kind = "unchanged"
+paths = ["."]
