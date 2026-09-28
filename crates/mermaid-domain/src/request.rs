@@ -156,6 +156,7 @@ pub fn build_chat_request(state: &State) -> ChatRequest {
         // compaction, manual /compact, or a conversation switch). Rides on the
         // request because the effect preflight never sees RuntimeState.
         suppress_auto_compact: state.runtime.auto_compact_suppressed,
+        requested_compaction: state.runtime.requested_compaction.clone(),
     }
 }
 

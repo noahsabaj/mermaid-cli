@@ -603,11 +603,6 @@ pub struct CompactionConfig {
     /// it, older turns are dropped from the tail until it fits.
     pub tail_token_budget: usize,
 
-    /// Per-message character cap applied to tool output inside the summarizer's
-    /// history excerpt (prose gets 4x this). Keeps one enormous tool result
-    /// from crowding out the rest of the conversation.
-    pub tool_output_max_chars: usize,
-
     /// Ceiling on the checkpoint the summarizer may produce. Scaled DOWN
     /// automatically for small context windows (see
     /// `CompactionPolicy::summary_output_tokens`), so this is a cap and not a
@@ -635,7 +630,6 @@ impl Default for CompactionConfig {
             auto_threshold_percent: policy.auto_threshold_percent,
             tail_turns: policy.tail_turns,
             tail_token_budget: policy.tail_token_budget,
-            tool_output_max_chars: policy.tool_output_max_chars,
             summary_max_tokens: policy.summary_max_tokens,
             summarizer_input_token_budget: policy.summarizer_input_token_budget,
             min_response_reserve_tokens: policy.min_response_reserve_tokens,
@@ -665,10 +659,6 @@ impl CompactionConfig {
             // A zero budget would drop the whole tail; fall back to the default
             // rather than produce a checkpoint with nothing after it.
             tail_token_budget: nonzero_or(self.tail_token_budget, defaults.tail_token_budget),
-            tool_output_max_chars: nonzero_or(
-                self.tool_output_max_chars,
-                defaults.tool_output_max_chars,
-            ),
             summary_max_tokens: nonzero_or(self.summary_max_tokens, defaults.summary_max_tokens),
             summarizer_input_token_budget: nonzero_or(
                 self.summarizer_input_token_budget,

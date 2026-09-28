@@ -151,7 +151,6 @@ max_truncation_recoveries = 3
 # auto_threshold_percent = 85        # clamped to 1..=100
 # tail_turns = 2                     # user turns kept verbatim (min 1)
 # tail_token_budget = 8000           # token ceiling on that tail
-# tool_output_max_chars = 2000       # per-message cap in the summarizer excerpt
 # summary_max_tokens = 8000          # ceiling on the checkpoint produced
 # summarizer_input_token_budget = 64000
 # min_response_reserve_tokens = 4000 # window held back for the reply

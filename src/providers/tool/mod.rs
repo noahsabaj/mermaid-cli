@@ -18,6 +18,7 @@
 
 pub mod apply_patch;
 pub mod ask_user_question;
+pub mod context;
 pub mod exec;
 pub mod filesystem;
 pub mod mcp;
@@ -221,6 +222,8 @@ impl ToolRegistry {
         r.register(Arc::new(tasks::TaskCreateTool));
         r.register(Arc::new(tasks::TaskUpdateTool));
         r.register(Arc::new(tasks::TaskListTool));
+        r.register(Arc::new(context::ContextArchiveTool));
+        r.register(Arc::new(context::CompactContextTool));
         r.register(Arc::new(mcp::McpToolProxy));
 
         // `safety.network = "deny"` is a global egress kill-switch, not only

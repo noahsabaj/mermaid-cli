@@ -3779,8 +3779,6 @@ fn fake_recovery_result(replacement: Vec<ChatMessage>) -> CompactionResult {
                 .count(),
             summary_tokens: 10,
             duration_secs: 0.0,
-            review_status: crate::CompactionReviewStatus::Reviewed,
-            review_error: None,
             focus: None,
             archive_path: None,
         },
@@ -6780,6 +6778,55 @@ fn steering_delivers_all_queued_messages_at_the_tool_boundary() {
     assert!(
         cmds.iter()
             .any(|c| matches!(c, Cmd::SaveConversation { .. }))
+    );
+}
+
+/// `compact_context` succeeding asks the very next model call to checkpoint
+/// first, with the model's focus, and only that one call.
+#[test]
+fn a_compact_context_result_rides_the_next_request_once() {
+    let mut state = fresh_state();
+    state
+        .session
+        .append(ChatMessage::assistant("checkpointing"), state.now);
+    let mut call = pending_read_file_call();
+    call.source.function.name = "compact_context".to_string();
+    state.turn = crate::transition::start_executing_tools(
+        TurnId(1),
+        vec![call],
+        std::time::SystemTime::now(),
+    );
+    let outcome =
+        ToolOutcome::success("requested", "requested", 0.0).with_metadata(crate::ToolRunMetadata {
+            detail: crate::ToolMetadata::CompactionRequest {
+                focus: Some("the parser".to_string()),
+            },
+            ..crate::ToolRunMetadata::default()
+        });
+    let (state, cmds) = update(
+        state,
+        Msg::ToolFinished {
+            turn: TurnId(1),
+            call_id: crate::ToolCallId(1),
+            outcome,
+        },
+    );
+    let request = cmds
+        .iter()
+        .find_map(|c| match c {
+            Cmd::CallModel { request, .. } => Some(request),
+            _ => None,
+        })
+        .expect("follow-up CallModel");
+    assert_eq!(
+        request.requested_compaction,
+        Some(crate::RequestedCompaction {
+            focus: Some("the parser".to_string())
+        })
+    );
+    assert_eq!(
+        state.runtime.requested_compaction, None,
+        "the ask is consumed by the dispatch that carries it"
     );
 }
 

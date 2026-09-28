@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Compaction is one free-form model call.** The checkpoint used to be a fixed
+  ten-heading template that `validate_summary_structure` graded (retrying on a
+  miss), followed by a second "verification" call that re-read the whole excerpt
+  to check the first. Both were scaffolding for weak summarizers: a capable model
+  knows what matters in its own work better than a fixed list does, and the
+  review doubled the cost of every compaction. The summarizer is now asked to
+  "write the handoff you'd want if you were resuming this work cold", and what it
+  writes is the checkpoint. The only check left is a boundary: an empty reply
+  fails rather than replacing history with nothing. `CompactionEvent` loses
+  `review_status` / `review_error` (older logs still load; the fields are
+  ignored), the transcript's `Compact(...)` line and `/context` drop the review
+  note, and the runtime store's `compactions.verification_status` column is
+  written as `NULL`.
+
+- **Compaction no longer throws tool output away.** The summarizer's excerpt
+  used to cut every archived tool result to 2,000 characters (8,000 for prose),
+  whatever the window. The excerpt now fits the budget by giving every message
+  one shared cap derived from it, so short messages stay whole, only the longest
+  are trimmed, and a larger window simply shows more. `[compaction]
+  tool_output_max_chars` is gone; a config that still sets it loads and ignores
+  it.
+
+- **A single long run can be compacted.** The verbatim tail was cut only at
+  user messages, so one prompt followed by a long agentic run left nothing
+  before the cut: auto-compaction, context-limit retries and truncation recovery
+  all skipped with "not enough conversation history" however full the window
+  got. The tail now also shrinks at assistant-message boundaries inside the run,
+  which keeps every tool call with its result.
+
 ### Added
 
 - **A behavioural eval suite (`evals/`, `just eval <model>`).** Four fixed tasks
@@ -23,6 +54,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `"fuzzy": true` on its `mermaid run --format ndjson` line. Additive: the field
   is omitted when false and the protocol stays version 1. The evals report the
   rate per model, which says when the fuzzy matcher can be dropped.
+
+- **`context_archive`: search and read the session's full history.** Every
+  message a session commits stays in its `.jsonl` log; compaction only moves
+  messages out of the working context. The new tool searches that log
+  (case-insensitive), reads any message back whole (paged past 32,000
+  characters), or lists it, marking which compaction removed each message. The
+  checkpoint summary stops being the only copy of anything.
+
+- **`compact_context`: the model decides when to checkpoint.** A model that
+  judges its context noisy (a finished subtask, a long dead end) can ask for a
+  checkpoint, optionally with a `focus`, and it runs before the model's next
+  call. The 85% automatic trigger stays as the safety net.
+
+- **`web_fetch` `raw`.** The readability extractor stays the default, but it
+  sometimes guesses wrong about what matters on a page. `raw: true` returns the
+  page source as served, still bounded and pageable through the snapshot. It
+  needs the native fetch backend; the Ollama Cloud backend only returns its own
+  extraction and says so.
 
 ### Fixed
 
