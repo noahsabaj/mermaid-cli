@@ -139,13 +139,27 @@ pub(super) async fn dispatch_call_model(
     // to honor their settings.
     let policy = factory.config().compaction.policy();
     let mut compacted_before_stream = false;
-    if mermaid_domain::should_auto_compact(&context_snapshot, &request, policy).is_ok() {
-        let compaction =
-            CompactionRequest::auto(request.clone(), CompactionTrigger::AutoThreshold, policy);
+    // A checkpoint the model asked for (`compact_context`) runs whatever the
+    // fill; the threshold is the safety net for when it doesn't ask.
+    let pre_stream = match request.requested_compaction.take() {
+        Some(requested) => Some(CompactionRequest::requested(
+            request.clone(),
+            requested,
+            policy,
+        )),
+        None => mermaid_domain::should_auto_compact(&context_snapshot, &request, policy)
+            .is_ok()
+            .then(|| {
+                CompactionRequest::auto(request.clone(), CompactionTrigger::AutoThreshold, policy)
+            }),
+    };
+    if let Some(compaction) = pre_stream {
+        let trigger = compaction.trigger;
         // Best-effort preflight: if there's nothing to compact, proceed
         // un-compacted (the provider's own context limit is the real gate).
-        if let Ok(prepared) = mermaid_domain::prepare_compaction(&compaction, max_context_tokens) {
-            match run_compaction(
+        // Only the model's own request hears about the skip — it asked.
+        match mermaid_domain::prepare_compaction(&compaction, max_context_tokens) {
+            Ok(prepared) => match run_compaction(
                 Arc::clone(&provider),
                 turn,
                 compaction,
@@ -162,31 +176,44 @@ pub(super) async fn dispatch_call_model(
                     let _ = msg_tx.send(Msg::CompactionFinished { turn, result }).await;
                 },
                 Err(err) => {
-                    // Auto-compaction is best-effort. If it can't reduce the
-                    // context — the estimate is roughest exactly at the limit, so
-                    // a large preserved tail can read `after >= before` — don't
-                    // kill the turn. Log it, surface a soft warning, and proceed
-                    // with the original request; the provider's own context limit
-                    // is the real gate. (Manual `/compact` keeps its hard error
-                    // via `run_compaction`'s reduction guard.)
+                    // Pre-stream compaction is best-effort. If it can't reduce
+                    // the context — the estimate is roughest exactly at the
+                    // limit, so a large preserved tail can read `after >=
+                    // before` — don't kill the turn. Log it, surface a soft
+                    // warning, and proceed with the original request; the
+                    // provider's own context limit is the real gate. (Manual
+                    // `/compact` keeps its hard error via `run_compaction`'s
+                    // reduction guard.)
                     if token.is_cancelled() {
                         return;
                     }
                     tracing::warn!(
                         turn = %turn,
                         error = %err,
-                        "auto-compaction failed; proceeding with the un-compacted request",
+                        trigger = trigger.as_str(),
+                        "pre-stream compaction failed; proceeding with the un-compacted request",
                     );
                     let _ = msg_tx
                         .send(Msg::CompactionFailed {
                             turn,
-                            trigger: CompactionTrigger::AutoThreshold,
+                            trigger,
                             message: err.to_string(),
                             kind: mermaid_domain::StatusKind::Warn,
                         })
                         .await;
                 },
-            }
+            },
+            Err(skip) if trigger == CompactionTrigger::ModelRequested => {
+                let _ = msg_tx
+                    .send(Msg::CompactionFailed {
+                        turn,
+                        trigger,
+                        message: skip.to_string(),
+                        kind: mermaid_domain::StatusKind::Info,
+                    })
+                    .await;
+            },
+            Err(_) => {},
         }
     }
 

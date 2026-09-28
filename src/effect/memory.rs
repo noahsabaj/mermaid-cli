@@ -99,6 +99,7 @@ fn consolidation_request(
         resolved_max_output: None,
         output_schema: None,
         suppress_auto_compact: false,
+        requested_compaction: None,
     }
 }
 

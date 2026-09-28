@@ -1821,7 +1821,10 @@ port = 11434
         assert_eq!(policy.summary_max_tokens, 3_000);
         // Unset keys keep their defaults rather than zeroing out.
         let defaults = mermaid_domain::CompactionPolicy::default();
-        assert_eq!(policy.tool_output_max_chars, defaults.tool_output_max_chars);
+        assert_eq!(
+            policy.summarizer_input_token_budget,
+            defaults.summarizer_input_token_budget
+        );
     }
 
     /// A hand-edited config degrades to the nearest workable value rather than
@@ -1835,7 +1838,6 @@ port = 11434
              tail_token_budget = 0\n\
              summary_max_tokens = 0\n\
              summarizer_input_token_budget = 0\n\
-             tool_output_max_chars = 0\n\
              min_response_reserve_tokens = 50000\n\
              max_response_reserve_tokens = 1000\n",
         )
@@ -1855,7 +1857,6 @@ port = 11434
             policy.summarizer_input_token_budget,
             defaults.summarizer_input_token_budget
         );
-        assert_eq!(policy.tool_output_max_chars, defaults.tool_output_max_chars);
 
         // Swapped reserve bounds are ordered, not obeyed: `response_reserve`
         // clamps with `.max(min).min(max)`, so an inverted pair would return

@@ -451,6 +451,7 @@ mod tests {
             resolved_max_output: None,
             output_schema: None,
             suppress_auto_compact: false,
+            requested_compaction: None,
         };
         let app_cfg = mermaid_domain::Config::default();
         let cfg = build_model_config(&req, &app_cfg, None, None);
@@ -488,6 +489,7 @@ mod tests {
             resolved_max_output: None,
             output_schema: None,
             suppress_auto_compact: false,
+            requested_compaction: None,
         };
         let mut app_cfg = mermaid_domain::Config::default();
         app_cfg.ollama.num_gpu = Some(10);
@@ -524,6 +526,7 @@ mod tests {
             resolved_max_output: None,
             output_schema: None,
             suppress_auto_compact: false,
+            requested_compaction: None,
         };
         let cfg = build_model_config(
             &req,
@@ -556,6 +559,7 @@ mod tests {
             resolved_max_output: None,
             output_schema: None,
             suppress_auto_compact: false,
+            requested_compaction: None,
         };
         let app_cfg = mermaid_domain::Config::default();
         // Without a learned cap, AUTO hands over the full window room —

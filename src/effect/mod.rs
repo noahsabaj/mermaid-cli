@@ -102,7 +102,8 @@ fn compaction_row(
         summary_token_count: Some(record.summary_tokens as i64),
         preserved_turns: Some(record.preserved_turn_count as i64),
         archive_path: Some(archive_path.display().to_string()),
-        verification_status: Some(record.review_status.as_str().to_string()),
+        // Nothing verifies a checkpoint any more: one model call writes it.
+        verification_status: None,
     }
 }
 
@@ -2006,7 +2007,7 @@ mod tests {
     /// of `compaction_row` is a decision nothing else records.
     #[test]
     fn compaction_row_maps_every_field_it_claims_to() {
-        use mermaid_domain::{CompactionEvent, CompactionReviewStatus, CompactionTrigger};
+        use mermaid_domain::{CompactionEvent, CompactionTrigger};
         let record = CompactionEvent {
             id: "cmp-1".to_string(),
             trigger: CompactionTrigger::Manual,
@@ -2018,8 +2019,6 @@ mod tests {
             preserved_turn_count: 3,
             summary_tokens: 450,
             duration_secs: 1.5,
-            review_status: CompactionReviewStatus::Reviewed,
-            review_error: None,
             focus: None,
             archive_path: None,
         };
@@ -2036,10 +2035,7 @@ mod tests {
         assert_eq!(row.summary_token_count, Some(450));
         assert_eq!(row.preserved_turns, Some(3));
         assert!(row.archive_path.is_some_and(|p| p.contains("archive.json")));
-        assert_eq!(
-            row.verification_status.as_deref(),
-            Some(CompactionReviewStatus::Reviewed.as_str())
-        );
+        assert_eq!(row.verification_status, None);
     }
 
     use super::*;
@@ -2312,6 +2308,7 @@ mod tests {
             resolved_max_output: None,
             output_schema: None,
             suppress_auto_compact: false,
+            requested_compaction: None,
         };
         r.dispatch(Cmd::CallModel { turn, request });
         assert_eq!(r.scope_count(), 1);
@@ -2340,6 +2337,7 @@ mod tests {
             resolved_max_output: None,
             output_schema: None,
             suppress_auto_compact: false,
+            requested_compaction: None,
         };
         r.dispatch(Cmd::CallModel { turn, request });
         assert_eq!(r.scope_count(), 1);
@@ -2426,6 +2424,7 @@ mod tests {
                 resolved_max_output: None,
                 output_schema: None,
                 suppress_auto_compact: false,
+                requested_compaction: None,
             },
         });
         assert_eq!(r.scope_count(), 1);
@@ -2457,6 +2456,7 @@ mod tests {
             resolved_max_output: None,
             output_schema: None,
             suppress_auto_compact: false,
+            requested_compaction: None,
         };
         let turn = TurnId(123);
 
@@ -2544,8 +2544,6 @@ mod tests {
             preserved_turn_count: 1,
             summary_tokens: 10,
             duration_secs: 0.1,
-            review_status: mermaid_domain::CompactionReviewStatus::Reviewed,
-            review_error: None,
             focus: None,
             archive_path: None,
         };

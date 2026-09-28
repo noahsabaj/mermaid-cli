@@ -641,6 +641,24 @@ pub fn display_info_for_shell(
             )
         },
         "task_list" => ("Tasks".to_string(), "list".to_string()),
+        "context_archive" => {
+            let target = string_arg("query")
+                .map(|q| format!("\"{q}\""))
+                .or_else(|| {
+                    args.get("message")
+                        .and_then(serde_json::Value::as_u64)
+                        .map(|n| format!("message {n}"))
+                })
+                .unwrap_or_else(|| "list".to_string());
+            (
+                "Archive".to_string(),
+                mermaid_model::utils::redact_secrets(&target),
+            )
+        },
+        "compact_context" => (
+            "Compact".to_string(),
+            string_arg("focus").unwrap_or_default(),
+        ),
         n if n.starts_with("mcp__") => {
             let rest = &n[5..];
             let target = rest.replacen("__", ":", 1);

@@ -156,11 +156,22 @@ pub fn build_chat_request(state: &State) -> ChatRequest {
         // compaction, manual /compact, or a conversation switch). Rides on the
         // request because the effect preflight never sees RuntimeState.
         suppress_auto_compact: state.runtime.auto_compact_suppressed,
+        requested_compaction: state.runtime.requested_compaction.clone(),
     }
 }
 
 pub(crate) fn system_prompt_for_state(state: &State) -> String {
-    let default_prompt = get_system_prompt();
+    let mut default_prompt = get_system_prompt();
+    // The guidance pack rides on the stock prompt only: a `--system-prompt`
+    // replacement is the user's whole prompt. Subagents get it too — a child
+    // on a local model needs the coaching as much as its parent.
+    if state
+        .settings
+        .guidance_pack_enabled(&state.session.model_id)
+    {
+        default_prompt.push_str("\n\n");
+        default_prompt.push_str(crate::prompts::GUIDANCE_PACK);
+    }
     let chosen = state.settings.prompt.base_prompt(&default_prompt);
     // Output styles (`/output-style`) shape the main conversation's voice.
     // Subagents keep the stock prompt: a child runs headless with its own
