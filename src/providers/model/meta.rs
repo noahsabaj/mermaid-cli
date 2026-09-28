@@ -19,7 +19,7 @@ use mermaid_model::models::adapters::meta::MetaAdapter;
 use mermaid_model::models::{Model, ModelCapabilities, ModelConfig, ModelError, Result};
 
 use super::super::ctx::{FinalResponse, StreamContext, StreamEvent};
-use super::ModelProvider;
+use super::{ModelProvider, RejectionCache};
 
 pub use mermaid_model::models::adapters::meta::{DEFAULT_API_KEY_ENV, DEFAULT_BASE_URL};
 
@@ -27,6 +27,8 @@ pub use mermaid_model::models::adapters::meta::{DEFAULT_API_KEY_ENV, DEFAULT_BAS
 pub struct MetaProvider {
     adapter: MetaAdapter,
     capabilities: ModelCapabilities,
+    /// Links the adapter's learned rejections to the cross-session cache.
+    rejections: RejectionCache,
 }
 
 impl MetaProvider {
@@ -48,6 +50,7 @@ impl MetaProvider {
         Ok(Self {
             adapter,
             capabilities,
+            rejections: RejectionCache::default(),
         })
     }
 }
@@ -64,6 +67,12 @@ impl ModelProvider for MetaProvider {
             .adapter
             .chat(&request.messages, &config, Some(ctx.sink.clone()));
 
+        // Seed what earlier sessions learned this model rejects, and persist
+        // whatever this turn learns (see `learning`).
+        let learned_model = Model::name(&self.adapter).to_string();
+        let memory = self.adapter.param_memory();
+        self.rejections.seed("meta", &learned_model, memory).await;
+
         // Meta used to select on the token inside its own read loop. The
         // outer race is equivalent and is what the other four do: dropping
         // this future drops the response stream with it.
@@ -72,7 +81,10 @@ impl ModelProvider for MetaProvider {
             _ = ctx.token.cancelled() => {
                 return Err(ModelError::Cancelled);
             },
-            r = chat_fut => r?,
+            r = chat_fut => {
+                self.rejections.persist("meta", &learned_model, memory).await;
+                r?
+            },
         };
 
         let usage = response.usage.clone();

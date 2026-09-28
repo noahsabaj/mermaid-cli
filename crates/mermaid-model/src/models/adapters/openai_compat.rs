@@ -48,6 +48,7 @@ use serde_json::{Value, json};
 use super::accumulator::{
     CappedText, ended_without_terminal, error_body, parse_tool_args, push_tool_arg,
 };
+use super::learning::{Learning, Optional, ParamMemory, Rejections};
 use crate::models::ModelCapabilities;
 use crate::models::adapters::driver::{
     Flow, Framing, StreamProtocol, drive_stream, plain_http_error,
@@ -94,6 +95,8 @@ pub struct OpenAICompatAdapter {
     /// `extra_headers` overrides, then any env-sourced `env_headers`.
     extra_headers: HashMap<String, String>,
     capabilities: ModelCapabilities,
+    /// What this model's provider rejected (see `learning`).
+    memory: ParamMemory,
 }
 
 /// A random 128-bit `Idempotency-Key`, hex-encoded, for safe retry de-duplication
@@ -113,6 +116,88 @@ fn random_idempotency_key() -> String {
         let _ = write!(s, "{b:02x}");
         s
     })
+}
+
+/// The completion-budget spelling to send: the profile's, unless this model
+/// rejected it, then the other one; `None` once both were rejected.
+fn max_tokens_param(preferred: MaxTokensParam, rejected: &Rejections) -> Option<&'static str> {
+    let order = match preferred {
+        MaxTokensParam::MaxTokens => ["max_tokens", "max_completion_tokens"],
+        MaxTokensParam::MaxCompletionTokens => ["max_completion_tokens", "max_tokens"],
+    };
+    order.into_iter().find(|param| !rejected.contains(param))
+}
+
+/// One rendered reasoning field, stepped down past what the model rejected.
+///
+/// `reasoning_effort` values above and below the base tiers have a fallback
+/// (`xhigh` → `high`, `minimal` → `low`, and `none` → omit, since omitting it
+/// is what "no reasoning" meant before `none` existed); a rejected base tier
+/// means the model takes no `reasoning_effort` at all. OpenRouter's nested
+/// `reasoning` object has no tiers to step through: rejected means omitted.
+fn accepted_reasoning(key: &str, value: &Value, rejected: &Rejections) -> Option<Value> {
+    if rejected.contains(key) {
+        return None;
+    }
+    if key != "reasoning_effort" {
+        return Some(value.clone());
+    }
+    let tier = value.as_str().unwrap_or_default();
+    if !rejected.contains(&format!("reasoning_effort:{tier}")) {
+        return Some(value.clone());
+    }
+    match tier {
+        "xhigh" => Some(json!("high")),
+        "minimal" => Some(json!("low")),
+        _ => None,
+    }
+}
+
+/// The optional items a built request carries, for blaming a rejection.
+/// Read back off the body so it can't drift from what was actually sent.
+fn sent_optionals(body: &Value) -> Vec<Optional> {
+    let mut sent = Vec::new();
+    if body.get("temperature").is_some() {
+        sent.push(Optional::new(
+            "temperature",
+            "temperature",
+            &["temperature"],
+        ));
+    }
+    // A spelling is only blamed when the error names the other one: OpenAI's
+    // "use 'max_completion_tokens' instead". An output-cap rejection names
+    // max_tokens too, and belongs to the wrapper's cap learner.
+    if body.get("max_tokens").is_some() {
+        sent.push(
+            Optional::new("max_tokens", "max_tokens", &["max_tokens"])
+                .requiring(&["max_completion_tokens"]),
+        );
+    }
+    if body.get("max_completion_tokens").is_some() {
+        sent.push(
+            Optional::new(
+                "max_completion_tokens",
+                "max_completion_tokens",
+                &["max_completion_tokens"],
+            )
+            .requiring(&["max_tokens"]),
+        );
+    }
+    if let Some(tier) = body.get("reasoning_effort").and_then(Value::as_str) {
+        let remember = match tier {
+            "none" | "minimal" | "xhigh" => format!("reasoning_effort:{tier}"),
+            _ => "reasoning_effort".to_string(),
+        };
+        sent.push(Optional::new(
+            &remember,
+            &format!("reasoning_effort \"{tier}\""),
+            &["reasoning_effort", "reasoning effort"],
+        ));
+    }
+    if body.get("reasoning").is_some() {
+        sent.push(Optional::new("reasoning", "reasoning", &["reasoning"]));
+    }
+    sent
 }
 
 /// One transcript message in OpenAI's `/chat/completions` wire shape.
@@ -239,16 +324,38 @@ impl OpenAICompatAdapter {
             model_name,
             extra_headers,
             capabilities,
+            memory: ParamMemory::default(),
         })
     }
 
-    /// Build the JSON request body for `/chat/completions`. Shared
-    /// between streaming and non-streaming paths.
+    /// What this model's provider has rejected, for the wrapper to persist
+    /// and to seed from the cache.
+    #[must_use]
+    pub const fn param_memory(&self) -> &ParamMemory {
+        &self.memory
+    }
+
+    /// Build the JSON request body for `/chat/completions`, avoiding what the
+    /// provider already rejected for this model.
+    #[cfg(test)]
     fn build_request_body(
         &self,
         messages: &[ChatMessage],
         config: &ModelConfig,
         stream: bool,
+    ) -> Value {
+        self.build_request_body_with(messages, config, stream, &self.memory.snapshot())
+    }
+
+    /// [`Self::build_request_body`] against an explicit rejection set — the
+    /// learning loop's staged one mid-call. Shared between streaming and
+    /// non-streaming paths.
+    fn build_request_body_with(
+        &self,
+        messages: &[ChatMessage],
+        config: &ModelConfig,
+        stream: bool,
+        rejected: &Rejections,
     ) -> Value {
         let mut json_messages = Vec::new();
 
@@ -277,12 +384,15 @@ impl OpenAICompatAdapter {
             "messages": json_messages,
             "stream": stream,
         });
-        // Temperature is sent only for models that accept it (catalog column):
-        // OpenAI o-series / gpt-5 reasoning models reject any non-default
-        // `temperature` with a 400 (#124), and gateway-served claude-opus-4-7+
-        // ids reject sampling params the same way. Clamp to the accepted 0..=2
-        // (a stale config value otherwise 400s).
-        if crate::models::catalog::lookup(&self.model_name).supports_temperature {
+        // Temperature is sent unless the catalog hints the model rejects it or
+        // the provider already did: OpenAI o-series / gpt-5 reasoning models
+        // reject any non-default `temperature` with a 400 (#124), and
+        // gateway-served claude-opus-4-7+ ids reject sampling params the same
+        // way. Clamp to the accepted 0..=2 (a stale config value otherwise
+        // 400s).
+        if crate::models::catalog::lookup(&self.model_name).supports_temperature
+            && !rejected.contains("temperature")
+        {
             body["temperature"] = json!(config.temperature.clamp(0.0, 2.0));
         }
 
@@ -302,14 +412,13 @@ impl OpenAICompatAdapter {
         }
 
         // Completion budget spelling is provider-specific even inside the
-        // OpenAI-compatible family.
-        if config.max_tokens > 0 {
-            match self.profile.max_tokens_param {
-                MaxTokensParam::MaxTokens => body["max_tokens"] = json!(config.max_tokens),
-                MaxTokensParam::MaxCompletionTokens => {
-                    body["max_completion_tokens"] = json!(config.max_tokens);
-                },
-            }
+        // OpenAI-compatible family, and model-specific inside OpenAI (the
+        // reasoning models only take `max_completion_tokens`): the profile's
+        // spelling first, the other once the provider has rejected it.
+        if config.max_tokens > 0
+            && let Some(param) = max_tokens_param(self.profile.max_tokens_param, rejected)
+        {
+            body[param] = json!(config.max_tokens);
         }
 
         // Reasoning depth: snap the requested level onto what the model
@@ -327,10 +436,12 @@ impl OpenAICompatAdapter {
         };
         if let Some(reasoning_value) = self.profile.reasoning_strategy.render(effective_reasoning) {
             // The strategy returns a one-key object; merge its top-level
-            // entries into the request body.
+            // entries into the request body, minus what this model rejected.
             if let Some(obj) = reasoning_value.as_object() {
                 for (k, v) in obj {
-                    body[k] = v.clone();
+                    if let Some(v) = accepted_reasoning(k, v, rejected) {
+                        body[k] = v;
+                    }
                 }
             }
         }
@@ -980,8 +1091,20 @@ impl Model for OpenAICompatAdapter {
         sink: Option<StreamSink>,
     ) -> Result<ModelResponse> {
         let stream = sink.is_some();
-        let body = self.build_request_body(messages, config, stream);
-        let response = self.send_chat(&body).await?;
+        // Optimistic send; a 400/422 naming an optional parameter takes it
+        // back and retries (see `learning`).
+        let mut learning = Learning::start(&self.memory, &self.model_name, sink.as_ref());
+        let response = loop {
+            let body =
+                self.build_request_body_with(messages, config, stream, learning.rejections());
+            let response = self.send_chat(&body).await?;
+            if !learning.is_retryable(&response) {
+                break response;
+            }
+            let err = plain_http_error(response).await;
+            learning.retry_or_fail(err, &sent_optionals(&body)).await?;
+        };
+        learning.settle(&response);
 
         if let Some(sink) = sink {
             self.handle_stream(response, Some(&sink)).await
@@ -1687,6 +1810,82 @@ mod tests {
         .expect("usage-only frame must parse");
         assert!(chunk.choices.is_empty());
         assert!(chunk.usage.is_some());
+    }
+
+    #[test]
+    fn max_tokens_spelling_switches_once_rejected() {
+        let none = Rejections::new();
+        assert_eq!(
+            max_tokens_param(MaxTokensParam::MaxTokens, &none),
+            Some("max_tokens")
+        );
+        assert_eq!(
+            max_tokens_param(MaxTokensParam::MaxTokens, &Rejections::from(["max_tokens"])),
+            Some("max_completion_tokens")
+        );
+        assert_eq!(
+            max_tokens_param(
+                MaxTokensParam::MaxCompletionTokens,
+                &Rejections::from(["max_completion_tokens"])
+            ),
+            Some("max_tokens")
+        );
+        assert_eq!(
+            max_tokens_param(
+                MaxTokensParam::MaxTokens,
+                &Rejections::from(["max_tokens", "max_completion_tokens"])
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn reasoning_effort_steps_down_past_rejected_tiers() {
+        let effort = |tier: &str, rejected: &Rejections| {
+            accepted_reasoning("reasoning_effort", &json!(tier), rejected)
+        };
+        let none = Rejections::new();
+        assert_eq!(effort("xhigh", &none), Some(json!("xhigh")));
+        let no_xhigh = Rejections::from(["reasoning_effort:xhigh"]);
+        assert_eq!(effort("xhigh", &no_xhigh), Some(json!("high")));
+        assert_eq!(effort("medium", &no_xhigh), Some(json!("medium")));
+        let no_minimal = Rejections::from(["reasoning_effort:minimal"]);
+        assert_eq!(effort("minimal", &no_minimal), Some(json!("low")));
+        // A rejected off-tier omits the field: omission is the older "off".
+        let no_none = Rejections::from(["reasoning_effort:none"]);
+        assert_eq!(effort("none", &no_none), None);
+        // A rejected base tier means no reasoning_effort at all.
+        let no_effort = Rejections::from(["reasoning_effort"]);
+        assert_eq!(effort("high", &no_effort), None);
+        // OpenRouter's object: rejected means omitted.
+        let object = json!({"effort": "high"});
+        assert_eq!(
+            accepted_reasoning("reasoning", &object, &Rejections::from(["reasoning"])),
+            None
+        );
+        assert_eq!(
+            accepted_reasoning("reasoning", &object, &none),
+            Some(object)
+        );
+    }
+
+    #[test]
+    fn sent_optionals_reads_the_body_back() {
+        let body = json!({
+            "temperature": 0.7,
+            "max_tokens": 100,
+            "reasoning_effort": "xhigh",
+        });
+        let remembered: Vec<String> = sent_optionals(&body)
+            .into_iter()
+            .map(|o| o.remember)
+            .collect();
+        assert_eq!(
+            remembered,
+            ["temperature", "max_tokens", "reasoning_effort:xhigh"]
+        );
+        let base = sent_optionals(&json!({"reasoning_effort": "medium"}));
+        assert_eq!(base[0].remember, "reasoning_effort");
     }
 
     #[test]

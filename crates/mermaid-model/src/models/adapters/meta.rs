@@ -23,6 +23,7 @@ use reqwest::Client;
 use serde_json::{Value, json};
 
 use super::accumulator::{CappedText, http_error, parse_tool_args, slot_in_bounds};
+use super::learning::{Learning, Optional, ParamMemory, Rejections};
 use crate::models::adapters::driver::{Flow, Framing, StreamProtocol, drive_stream};
 use crate::models::capabilities::ModelCapabilities;
 use crate::models::config::ModelConfig;
@@ -49,6 +50,8 @@ pub struct MetaAdapter {
     model_name: String,
     extra_headers: HashMap<String, String>,
     capabilities: ModelCapabilities,
+    /// What this model's provider rejected (see `learning`).
+    memory: ParamMemory,
 }
 
 impl MetaAdapter {
@@ -103,7 +106,15 @@ impl MetaAdapter {
             model_name,
             extra_headers,
             capabilities,
+            memory: ParamMemory::default(),
         })
+    }
+
+    /// What this model's provider has rejected, for the wrapper to persist
+    /// and to seed from the cache.
+    #[must_use]
+    pub const fn param_memory(&self) -> &ParamMemory {
+        &self.memory
     }
 
     async fn send_chat(&self, body: &Value) -> Result<reqwest::Response> {
@@ -147,8 +158,20 @@ impl Model for MetaAdapter {
         // `stream: true` because that is the only shape the encrypted
         // reasoning items arrive in. A sink-less call still drives the same
         // stream, it just drops the events.
-        let body = build_request_body(messages, config, &self.model_name);
-        let response = self.send_chat(&body).await?;
+        // Optimistic send; a 400 naming an optional parameter takes it back
+        // and retries (see `learning`).
+        let mut learning = Learning::start(&self.memory, &self.model_name, sink.as_ref());
+        let response = loop {
+            let body =
+                build_request_body_with(messages, config, &self.model_name, learning.rejections());
+            let response = self.send_chat(&body).await?;
+            if !learning.is_retryable(&response) {
+                break response;
+            }
+            let err = meta_http_error(response).await;
+            learning.retry_or_fail(err, &sent_optionals(&body)).await?;
+        };
+        learning.settle(&response);
         if !response.status().is_success() {
             return Err(meta_http_error(response).await);
         }
@@ -333,27 +356,42 @@ fn tool_call_from_item(item: &Value) -> Option<ToolCall> {
     })
 }
 
+#[cfg(test)]
 pub(crate) fn build_request_body(
     messages: &[ChatMessage],
     config: &ModelConfig,
     model_name: &str,
 ) -> Value {
+    build_request_body_with(messages, config, model_name, &Rejections::new())
+}
+
+/// The Responses-API request body, avoiding what the provider already
+/// rejected for this model.
+pub(crate) fn build_request_body_with(
+    messages: &[ChatMessage],
+    config: &ModelConfig,
+    model_name: &str,
+    rejected: &Rejections,
+) -> Value {
     let effort = nearest_effort(config.reasoning, &meta_reasoning_levels(model_name))
         .unwrap_or(ReasoningLevel::Minimal);
+    let mut reasoning = json!({"summary": "auto"});
+    if let Some(effort) = accepted_effort(meta_effort(effort), rejected) {
+        reasoning["effort"] = json!(effort);
+    }
     let mut body = json!({
         "model": model_name,
         "input": messages_to_input(messages),
         "stream": true,
         "store": false,
         "include": ["reasoning.encrypted_content"],
-        "reasoning": {
-            "effort": meta_effort(effort),
-            "summary": "auto",
-        },
+        "reasoning": reasoning,
     });
     // Muse is tuned for Meta's 1.0 default. Mermaid's global 0.7 default was
     // chosen for other providers, so omit it here unless the user changed it.
-    if (config.temperature - crate::constants::DEFAULT_TEMPERATURE).abs() > f32::EPSILON {
+    if (config.temperature - crate::constants::DEFAULT_TEMPERATURE).abs() > f32::EPSILON
+        && !rejected.contains("temperature")
+    {
         body["temperature"] = json!(config.temperature);
     }
     let instructions = combined_instructions(config);
@@ -371,6 +409,49 @@ pub(crate) fn build_request_body(
         body["max_output_tokens"] = json!(limit);
     }
     body
+}
+
+/// Step an effort tier down past what this model rejected: `max` → `xhigh`
+/// → `high`, `minimal` → `low`. A rejected base tier (`low`/`medium`/`high`)
+/// is remembered as `effort` itself, which omits the field.
+fn accepted_effort(mut tier: &'static str, rejected: &Rejections) -> Option<&'static str> {
+    if rejected.contains("effort") {
+        return None;
+    }
+    while rejected.contains(&format!("effort:{tier}")) {
+        tier = match tier {
+            "max" => "xhigh",
+            "xhigh" => "high",
+            "minimal" => "low",
+            _ => return None,
+        };
+    }
+    Some(tier)
+}
+
+/// The optional items a built request carries, for blaming a rejection.
+/// Read back off the body so it can't drift from what was actually sent.
+fn sent_optionals(body: &Value) -> Vec<Optional> {
+    let mut sent = Vec::new();
+    if body.get("temperature").is_some() {
+        sent.push(Optional::new(
+            "temperature",
+            "temperature",
+            &["temperature"],
+        ));
+    }
+    if let Some(tier) = body.pointer("/reasoning/effort").and_then(Value::as_str) {
+        let remember = match tier {
+            "max" | "xhigh" | "minimal" => format!("effort:{tier}"),
+            _ => "effort".to_string(),
+        };
+        sent.push(Optional::new(
+            &remember,
+            &format!("reasoning effort \"{tier}\""),
+            &["effort"],
+        ));
+    }
+    sent
 }
 
 /// Unwrap the OpenAI `{"type":"function","function":{...}}` envelope that
@@ -761,6 +842,33 @@ mod tests {
             let body = build_request_body(&messages(), &config(), model);
             assert_eq!(body["reasoning"]["effort"], "xhigh", "model {model}");
         }
+    }
+
+    #[test]
+    fn effort_steps_down_past_rejected_tiers() {
+        let none = Rejections::new();
+        assert_eq!(accepted_effort("max", &none), Some("max"));
+        let no_max = Rejections::from(["effort:max"]);
+        assert_eq!(accepted_effort("max", &no_max), Some("xhigh"));
+        let no_top = Rejections::from(["effort:max", "effort:xhigh"]);
+        assert_eq!(accepted_effort("max", &no_top), Some("high"));
+        assert_eq!(
+            accepted_effort("minimal", &Rejections::from(["effort:minimal"])),
+            Some("low")
+        );
+        assert_eq!(
+            accepted_effort("medium", &Rejections::from(["effort"])),
+            None
+        );
+        // The field goes; the summary request stays.
+        let body = build_request_body_with(
+            &messages(),
+            &config(),
+            "muse-spark-1.1",
+            &Rejections::from(["effort"]),
+        );
+        assert!(body["reasoning"].get("effort").is_none());
+        assert_eq!(body["reasoning"]["summary"], "auto");
     }
 
     #[test]

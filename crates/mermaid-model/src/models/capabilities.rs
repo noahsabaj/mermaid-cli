@@ -5,7 +5,7 @@
 //! calls?" without per-provider string matching scattered through the
 //! codebase.
 //!
-//! This is the WEAKEST of three capability sources, and deliberately so.
+//! This is the WEAKEST of four capability sources, and deliberately so.
 //! Precedence, strongest first:
 //!
 //!   1. **Live probes.** The provider wrapper's `resolve_context_window`
@@ -13,11 +13,16 @@
 //!      runtime store's `provider_probes`), the vision probe surfaced as
 //!      `Msg::ProviderVisionResolved`, and the Ollama placement check.
 //!      Fresh truth from the running provider always wins.
-//!   2. **The catalog** (`super::catalog`). The static per-model table for
-//!      facts no provider API exposes: thinking wire shapes, effort
-//!      ceilings, temperature support, and the vision markers the
-//!      OpenAI-compatible long tail consults here.
-//!   3. **These constructors.** The per-provider statics: the two
+//!   2. **Learned rejections** (`adapters::learning`). What a provider
+//!      refused for this model with a 400 — a parameter, an effort tier, a
+//!      thinking shape — remembered per model and cached in
+//!      `provider_probes`. Requests are sent optimistically; this is how
+//!      they stop being optimistic about what already failed.
+//!   3. **The catalog** (`super::catalog`). Hints only: a known model's
+//!      thinking shape, effort ceiling or temperature rule lets it skip the
+//!      rejection an unknown model pays once. Never required for a request
+//!      to succeed.
+//!   4. **These constructors.** The per-provider statics: the two
 //!      decisions an adapter can make with no model name in hand -- does
 //!      this provider family accept image input, and which reasoning enum
 //!      does it speak.

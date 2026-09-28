@@ -1,8 +1,19 @@
-//! The data-driven model-capability catalog: one FIRST-MATCH-WINS const table
-//! replacing the model-name string gates that were scattered across the
-//! adapters (anthropic thinking/temperature/effort tiers, gemini thinking
-//! dispatch, ollama's gpt-oss think-string, openai-compat reasoning-model and
-//! vision markers) and the domain's static context windows.
+//! The model-capability catalog: HINTS, never requirements.
+//!
+//! Providers don't expose thinking shapes, temperature support or effort
+//! ceilings over an API, so adapters learn them the other way: send the
+//! request optimistically and, when the provider rejects a parameter, take it
+//! back and remember that (`adapters::learning`). This table only lets a
+//! known model skip that one wasted round trip. A model with no row must
+//! work exactly as well, just one rejection later — so every column's
+//! "no row" value means "no opinion", and each adapter's no-opinion default
+//! is the optimistic one (send the parameter, pick the newest shape).
+//!
+//! What the catalog can still do that learning can't: pick a wire shape
+//! where the provider's failure mode is silence. Ollama's gpt-oss, for one,
+//! accepts `think: true` without complaint and ignores it; only the hint
+//! makes it `think: "high"`. A rejection is a signal; an ignored parameter
+//! isn't, so those rows stay.
 //!
 //! Each COLUMN is consulted only by the consumers named on its field doc, so
 //! a cross-provider match can never change behavior an adapter didn't already
@@ -36,16 +47,21 @@ impl MatchRule {
     }
 }
 
-/// Which thinking/reasoning wire shape the model's requests use.
+/// Which thinking/reasoning wire shape to TRY FIRST for the model's requests.
 /// Consumed by the anthropic, gemini, and ollama adapters — each reacts only
-/// to its own variants and treats everything else as `ProviderDefault`.
+/// to its own variants and treats everything else as `ProviderDefault`. A
+/// shape the provider rejects is stepped past (`adapters::learning`), so a
+/// wrong hint costs a round trip, not a broken request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThinkingShape {
-    /// No catalog opinion: the adapter falls back to its provider default
-    /// (anthropic → legacy `budget_tokens`; gemini → omit `thinkingConfig`;
-    /// ollama → `think: bool` gated by the live probe; openai-compat →
-    /// the `ProviderProfile` strategy).
+    /// No catalog opinion: the adapter tries its newest shape first
+    /// (anthropic → adaptive; gemini → `thinkingLevel`; ollama → `think:
+    /// bool` gated by the live probe; openai-compat → the `ProviderProfile`
+    /// strategy).
     ProviderDefault,
+    /// The model takes no thinking controls at all (Gemini 2.0 and older,
+    /// Claude 2): send none rather than learn that from two rejections.
+    Unsupported,
     /// Anthropic 4.6+ adaptive thinking: `thinking: {type: "adaptive"}` +
     /// `output_config.effort` (legacy `budget_tokens` is rejected/deprecated).
     AnthropicAdaptive,
@@ -69,13 +85,13 @@ pub enum ThinkingShape {
 /// by the anthropic adapter only. Every xhigh-capable model also accepts
 /// `max` (verified against the effort doc), so one ordered ceiling encodes
 /// the old `supports_effort` / `supports_max_effort` / `supports_xhigh_effort`
-/// trio: `> None` ⇒ effort accepted, `>= Max` ⇒ "max" accepted,
+/// trio: `> NoEffort` ⇒ effort accepted, `>= Max` ⇒ "max" accepted,
 /// `>= XHigh` ⇒ "xhigh" accepted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum EffortCeiling {
     /// `output_config.effort` is rejected outright (4.5-family Sonnet/Haiku
     /// and older) — the request must carry no effort field.
-    None,
+    NoEffort,
     /// Accepts up to `"high"`.
     High,
     /// Accepts up to `"max"` (Opus 4.6 / Sonnet 4.6).
@@ -91,12 +107,14 @@ pub struct ModelCapEntry {
     pub rule: MatchRule,
     /// Thinking wire shape — consumed by anthropic/gemini/ollama builders.
     pub thinking: ThinkingShape,
-    /// Whether the model accepts a top-level `temperature`. Consumed by the
-    /// anthropic and openai-compat request builders (the 4.6+ adaptive line
-    /// and the o-series/gpt-5 reasoning models 400 on it).
+    /// `false` = known to reject a top-level `temperature`, so don't send
+    /// one; `true` = no known objection. Consumed by the anthropic and
+    /// openai-compat request builders (the 4.6+ adaptive line and the
+    /// o-series/gpt-5 reasoning models 400 on it).
     pub supports_temperature: bool,
     /// Highest accepted effort tier — consumed by the anthropic adapter only.
-    pub effort_ceiling: EffortCeiling,
+    /// `None` = no opinion: send the tier the user asked for.
+    pub effort_ceiling: Option<EffortCeiling>,
     /// Advertised vision capability — consumed by openai-compat
     /// `derive_capabilities` only (anthropic/gemini hardcode true; ollama
     /// probes `/api/show`). Never gates the send.
@@ -129,19 +147,21 @@ const fn claude(
         rule,
         thinking,
         supports_temperature,
-        effort_ceiling,
+        effort_ceiling: Some(effort_ceiling),
         vision: true,
         context_window: None,
     }
 }
 
-/// The default row for models no rule matches: provider-default thinking,
-/// temperature accepted, no effort, no vision, no static window.
+/// The default row for models no rule matches: no opinion on anything, so
+/// every adapter takes its optimistic path and learns from rejections. No
+/// vision is advertised (it never gates the send) and no static window
+/// (limits resolve live).
 pub const UNKNOWN_MODEL: ModelCapEntry = ModelCapEntry {
     rule: MatchRule::Substring(""),
     thinking: ThinkingShape::ProviderDefault,
     supports_temperature: true,
-    effort_ceiling: EffortCeiling::None,
+    effort_ceiling: None,
     vision: false,
     context_window: None,
 };
@@ -198,52 +218,61 @@ pub const CATALOG: &[ModelCapEntry] = &[
         Prefix("claude-sonnet-4-5"),
         T::AnthropicBudget,
         true,
-        E::None,
+        E::NoEffort,
     ),
     claude(
         Prefix("claude-haiku-4-5"),
         T::AnthropicBudget,
         true,
-        E::None,
+        E::NoEffort,
     ),
     // Opus 4.1, and (via the "-2" prefix) date-suffixed Opus 4 ids like
     // claude-opus-4-20250514 — both document a 32k output ceiling.
-    claude(Prefix("claude-opus-4-1"), T::AnthropicBudget, true, E::None),
-    claude(Prefix("claude-opus-4-2"), T::AnthropicBudget, true, E::None),
-    // Claude 3.5 family: 8k output ceiling.
-    claude(Prefix("claude-3-5"), T::AnthropicBudget, true, E::None),
-    // --- Claude via gateways (full-id substrings; the vision-marker set) ---
     claude(
-        Substring("claude-opus-4"),
+        Prefix("claude-opus-4-1"),
         T::AnthropicBudget,
         true,
-        E::None,
+        E::NoEffort,
     ),
     claude(
-        Substring("claude-sonnet-4"),
+        Prefix("claude-opus-4-2"),
         T::AnthropicBudget,
         true,
-        E::None,
+        E::NoEffort,
     ),
+    // Date-suffixed Sonnet 4 ids (claude-sonnet-4-20250514), same trick.
     claude(
-        Substring("claude-haiku-4"),
+        Prefix("claude-sonnet-4-2"),
         T::AnthropicBudget,
         true,
-        E::None,
+        E::NoEffort,
     ),
-    claude(Substring("claude-3"), T::AnthropicBudget, true, E::None),
-    claude(Substring("claude-4"), T::AnthropicBudget, true, E::None),
-    // Bare catch-all for any other anthropic-direct id (claude-2, future
-    // names) — NOT in the gateway vision-marker set (claude-2 was never
-    // advertised as vision-capable).
+    // Claude 3.x family (3.5 has an 8k output ceiling; limits resolve live).
+    claude(Prefix("claude-3"), T::AnthropicBudget, true, E::NoEffort),
+    // Claude 2 / Instant predate thinking and effort entirely.
     ModelCapEntry {
-        rule: Prefix("claude-"),
-        thinking: T::AnthropicBudget,
-        supports_temperature: true,
-        effort_ceiling: E::None,
-        vision: false,
-        context_window: None,
+        rule: Prefix("claude-2"),
+        thinking: T::Unsupported,
+        effort_ceiling: Some(E::NoEffort),
+        ..UNKNOWN_MODEL
     },
+    ModelCapEntry {
+        rule: Prefix("claude-instant"),
+        thinking: T::Unsupported,
+        effort_ceiling: Some(E::NoEffort),
+        ..UNKNOWN_MODEL
+    },
+    // --- Claude via gateways (full-id substrings): vision markers only. An
+    // unlisted claude id reached directly (a model newer than this table)
+    // must NOT fall into a legacy row here — it gets no opinion and the
+    // adapter's optimistic newest shapes, learning down from a rejection.
+    vision_marker("claude-opus"),
+    vision_marker("claude-sonnet"),
+    vision_marker("claude-haiku"),
+    vision_marker("claude-fable"),
+    vision_marker("claude-mythos"),
+    vision_marker("claude-3"),
+    vision_marker("claude-4"),
     // --- OpenAI reasoning models (temperature rejected) ---
     ModelCapEntry {
         rule: Prefix("o1"),
@@ -344,10 +373,26 @@ pub const CATALOG: &[ModelCapEntry] = &[
         vision: true,
         ..UNKNOWN_MODEL
     },
-    // Older/other gemini ids: no thinkingConfig (2.0 and earlier 400 on it),
-    // but the whole family is vision-capable.
+    // Gemini 2.0 and older 400 on any thinkingConfig; saying so up front
+    // saves them two rejections.
+    ModelCapEntry {
+        rule: Prefix("gemini-2.0"),
+        thinking: T::Unsupported,
+        vision: true,
+        ..UNKNOWN_MODEL
+    },
+    ModelCapEntry {
+        rule: Prefix("gemini-1"),
+        thinking: T::Unsupported,
+        vision: true,
+        ..UNKNOWN_MODEL
+    },
+    // Any other gemini id: no thinking opinion (a newer model gets the
+    // newest shape), but the whole family is vision-capable.
     vision_marker("gemini"),
-    // --- Ollama gpt-oss (bare-name prefix; matches tags like gpt-oss:20b) ---
+    // --- Ollama gpt-oss (bare-name prefix; matches tags like gpt-oss:20b).
+    // The one hint learning can't replace: gpt-oss accepts `think: true` and
+    // silently ignores it, so no rejection ever says to use the string. ---
     ModelCapEntry {
         rule: Prefix("gpt-oss"),
         thinking: T::OllamaEffortString,
@@ -389,7 +434,7 @@ const OPENAI_REASONING: ModelCapEntry = ModelCapEntry {
     rule: Substring(""),
     thinking: T::ProviderDefault,
     supports_temperature: false,
-    effort_ceiling: E::None,
+    effort_ceiling: None,
     vision: false,
     context_window: None,
 };
@@ -411,13 +456,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn unknown_model_gets_default_row() {
+    fn unknown_model_gets_no_opinions() {
+        // Every column says "no opinion", so each adapter takes its
+        // optimistic path: send what the user asked for, learn from a 400.
         let entry = lookup("totally-unknown-model");
         assert_eq!(entry.thinking, T::ProviderDefault);
         assert!(entry.supports_temperature);
-        assert_eq!(entry.effort_ceiling, E::None);
+        assert_eq!(entry.effort_ceiling, None);
         assert!(!entry.vision);
         assert_eq!(entry.context_window, None);
+    }
+
+    #[test]
+    fn a_claude_newer_than_the_table_is_not_pinned_to_legacy_rows() {
+        // The rows this replaced sent any unlisted claude id down the legacy
+        // path (budget thinking, no effort): a model released after the
+        // table was written got the worst behavior. Now it gets none.
+        for id in [
+            "claude-opus-5-5",
+            "claude-sonnet-5-5",
+            "claude-opus-4-9",
+            "claude-next",
+        ] {
+            let entry = lookup(id);
+            assert_eq!(entry.thinking, T::ProviderDefault, "{id}");
+            assert_eq!(entry.effort_ceiling, None, "{id}");
+            assert!(entry.supports_temperature, "{id}");
+        }
+        // Gateway ids keep their vision marker, newer families included.
+        assert!(lookup("openrouter/anthropic/claude-opus-4.9").vision);
+        assert!(lookup("openrouter/anthropic/claude-opus-5.5").vision);
     }
 
     #[test]
@@ -458,20 +526,34 @@ mod tests {
     }
 
     #[test]
-    fn ordering_specific_claude_before_catch_all() {
-        // Specific family rows win over the bare catch-all…
-        assert_eq!(lookup("claude-opus-4-7").effort_ceiling, E::XHigh);
+    fn ordering_specific_claude_rows() {
+        assert_eq!(lookup("claude-opus-4-7").effort_ceiling, Some(E::XHigh));
         assert_eq!(
             lookup("claude-3-5-sonnet-20241022").thinking,
             T::AnthropicBudget
         );
-        // …the date-suffix trick still lands Opus 4 on its own row (vision)…
-        assert!(lookup("claude-opus-4-20250514").vision);
-        // …and the catch-all covers the rest with NO vision marker and no
-        // static window (limits resolve live).
-        let catch_all = lookup("claude-2.1");
-        assert!(!catch_all.vision);
-        assert_eq!(catch_all.context_window, None);
+        // The date-suffix trick lands Opus 4 and Sonnet 4 on their own rows.
+        let opus4 = lookup("claude-opus-4-20250514");
+        assert!(opus4.vision);
+        assert_eq!(opus4.effort_ceiling, Some(E::NoEffort));
+        assert_eq!(
+            lookup("claude-sonnet-4-20250514").thinking,
+            T::AnthropicBudget
+        );
+        // Claude 2 takes no thinking controls, no vision, no static window.
+        let claude2 = lookup("claude-2.1");
+        assert_eq!(claude2.thinking, T::Unsupported);
+        assert!(!claude2.vision);
+        assert_eq!(claude2.context_window, None);
+    }
+
+    #[test]
+    fn old_gemini_takes_no_thinking_config() {
+        assert_eq!(lookup("gemini-2.0-flash").thinking, T::Unsupported);
+        assert_eq!(lookup("gemini-1.5-pro").thinking, T::Unsupported);
+        // A gemini newer than the table has no opinion (newest shape first).
+        assert_eq!(lookup("gemini-4-pro").thinking, T::ProviderDefault);
+        assert!(lookup("gemini-4-pro").vision);
     }
 
     #[test]
@@ -544,11 +626,13 @@ mod tests {
 
     #[test]
     fn effort_ceiling_ordering_encodes_the_old_trio() {
-        assert!(E::XHigh > E::Max && E::Max > E::High && E::High > E::None);
+        assert!(E::XHigh > E::Max && E::Max > E::High && E::High > E::NoEffort);
         // xhigh-capable ⊂ max-capable: every XHigh row would also accept max.
         for entry in CATALOG {
-            if entry.effort_ceiling == E::XHigh {
-                assert!(entry.effort_ceiling >= E::Max);
+            if let Some(ceiling) = entry.effort_ceiling
+                && ceiling == E::XHigh
+            {
+                assert!(ceiling >= E::Max);
             }
         }
     }

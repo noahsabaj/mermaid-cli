@@ -18,9 +18,10 @@ use async_trait::async_trait;
 
 use mermaid_domain::{ChatRequest, TurnId};
 use mermaid_model::models::adapters::ModelLimits;
+use mermaid_model::models::adapters::learning::{ParamMemory, Rejections};
 use mermaid_model::models::adapters::ollama_sizing::NumCtxSource;
 use mermaid_model::models::{FinishReason, ModelError, Result, TokenUsage};
-use mermaid_runtime::NewProviderProbe;
+use mermaid_runtime::{NewProviderProbe, RuntimeStore};
 
 use super::ctx::{FinalResponse, StreamContext, StreamEvent};
 use mermaid_model::models::ModelCapabilities;
@@ -294,6 +295,103 @@ where
     }
 }
 
+/// `provider_probes` key for the request items a provider rejected for one
+/// model (`mermaid_model::models::adapters::learning`): a JSON array such as
+/// `["effort:xhigh","temperature"]`. TTL-bounded like every probe, so a
+/// provider that later adds support is re-asked after the TTL.
+pub(crate) const REJECTIONS_PROBE_KEY: &str = "rejected_params";
+
+/// The fresh cached rejections for one model, if any.
+fn read_rejections(store: &RuntimeStore, provider: &str, model: &str) -> Option<Rejections> {
+    let rec = store
+        .provider_probes()
+        .get(provider, model, REJECTIONS_PROBE_KEY)
+        .ok()??;
+    if probe_is_stale(&rec.probed_at) {
+        return None;
+    }
+    serde_json::from_str(&rec.capability_value).ok()
+}
+
+/// Store `learned` for one model, merged with whatever a concurrent session
+/// cached meanwhile.
+fn write_rejections(
+    store: &RuntimeStore,
+    provider: &str,
+    model: &str,
+    learned: &Rejections,
+) -> anyhow::Result<()> {
+    let mut merged = read_rejections(store, provider, model).unwrap_or_default();
+    merged.extend(learned);
+    store.provider_probes().upsert(NewProviderProbe {
+        provider: provider.to_string(),
+        model_id: model.to_string(),
+        capability_key: REJECTIONS_PROBE_KEY.into(),
+        capability_value: serde_json::to_string(&merged)?,
+        confidence: "learned".into(),
+        error: None,
+    })?;
+    Ok(())
+}
+
+/// A provider wrapper's link between its adapter's in-memory rejections and
+/// the cross-session cache: seed once before the first turn, persist
+/// whenever a turn learned something new. Best-effort both ways — a store
+/// that can't be opened costs a relearned rejection, never a failed turn.
+#[derive(Default)]
+pub(crate) struct RejectionCache {
+    seeded: tokio::sync::OnceCell<()>,
+    /// What the store holds as far as this instance knows.
+    persisted: std::sync::Mutex<Rejections>,
+}
+
+impl RejectionCache {
+    /// Seed `memory` from the store, once per provider instance.
+    pub(crate) async fn seed(&self, provider: &str, model: &str, memory: &ParamMemory) {
+        self.seeded
+            .get_or_init(|| async {
+                let (provider, model) = (provider.to_string(), model.to_string());
+                let cached = tokio::task::spawn_blocking(move || {
+                    mermaid_runtime::with_shared_store(|store| {
+                        Ok(read_rejections(store, &provider, &model))
+                    })
+                    .ok()
+                    .flatten()
+                })
+                .await
+                .ok()
+                .flatten();
+                if let Some(cached) = cached {
+                    memory.seed(&cached);
+                    *self.lock() = cached;
+                }
+            })
+            .await;
+    }
+
+    /// Persist `memory` if it learned anything the store doesn't have.
+    pub(crate) async fn persist(&self, provider: &str, model: &str, memory: &ParamMemory) {
+        let learned = memory.snapshot();
+        if *self.lock() == learned {
+            return;
+        }
+        *self.lock() = learned.clone();
+        let (provider, model) = (provider.to_string(), model.to_string());
+        let _ = tokio::task::spawn_blocking(move || {
+            mermaid_runtime::with_shared_store(|store| {
+                write_rejections(store, &provider, &model, &learned)
+            })
+        })
+        .await;
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Rejections> {
+        self.persisted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
 /// Extract a model's real per-response output ceiling from a provider's 400
 /// rejection body. Fires ONLY on unambiguous output-cap wordings:
 ///
@@ -396,6 +494,46 @@ pub(crate) async fn learn_output_cap(provider: String, model: String, cap: usize
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn temp_store(name: &str) -> RuntimeStore {
+        let dir =
+            std::env::temp_dir().join(format!("mermaid_rejections_{name}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        RuntimeStore::open(dir.join("runtime.sqlite3")).expect("store")
+    }
+
+    #[test]
+    fn rejections_round_trip_through_provider_probes() {
+        let store = temp_store("round_trip");
+        assert_eq!(read_rejections(&store, "anthropic", "claude-nova-7"), None);
+        let learned = Rejections::from(["temperature"]);
+        write_rejections(&store, "anthropic", "claude-nova-7", &learned).expect("write");
+        assert_eq!(
+            read_rejections(&store, "anthropic", "claude-nova-7"),
+            Some(learned)
+        );
+        // Keyed per (provider, model): another model learned nothing.
+        assert_eq!(read_rejections(&store, "anthropic", "claude-other"), None);
+        let rec = store
+            .provider_probes()
+            .get("anthropic", "claude-nova-7", REJECTIONS_PROBE_KEY)
+            .expect("get")
+            .expect("row");
+        assert_eq!(rec.confidence, "learned");
+        assert_eq!(rec.capability_value, r#"["temperature"]"#);
+    }
+
+    #[test]
+    fn writing_rejections_merges_with_a_concurrent_sessions() {
+        let store = temp_store("merge");
+        write_rejections(&store, "openai", "m", &Rejections::from(["temperature"])).expect("a");
+        write_rejections(&store, "openai", "m", &Rejections::from(["max_tokens"])).expect("b");
+        assert_eq!(
+            read_rejections(&store, "openai", "m"),
+            Some(Rejections::from(["max_tokens", "temperature"]))
+        );
+    }
 
     // The incident wording (Ollama Cloud, minimax-m3), raw and JSON-wrapped.
     const MINIMAX_RAW: &str =
