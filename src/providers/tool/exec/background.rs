@@ -29,8 +29,7 @@ pub(crate) async fn run_background_command(
         // The SAME invocation the foreground paths spawn: under a sandbox
         // policy that is `mermaid __sandbox-exec [...] -- sh -c <command>`,
         // so a backgrounded command is confined exactly like a foreground one.
-        let invocation =
-            shell_invocation(command, sandbox.network, sandbox.confine_writes.as_deref());
+        let invocation = shell_invocation(command, sandbox);
         let pid = match launch_background_process(
             &invocation,
             workdir,

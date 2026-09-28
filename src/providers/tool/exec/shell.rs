@@ -58,24 +58,23 @@ fn launcher_exe() -> PathBuf {
     })
 }
 
-pub(crate) fn shell_invocation(
-    command: &str,
-    sandbox_network: bool,
-    confine_writes: Option<&[PathBuf]>,
-) -> ShellInvocation {
-    if sandbox_network || confine_writes.is_some() {
-        // `mermaid __sandbox-exec [--no-network] [--confine-fs]
-        // [--confine-writes <dir>]… -- sh -c <command>`: the launcher installs
-        // the requested confinement on itself, then execs the shell. Both
-        // PowerShell and `sh` come through here — `SandboxPlan::resolve` sets
-        // these flags on Windows too, where the launcher runs the child in an
-        // AppContainer.
+pub(crate) fn shell_invocation(command: &str, sandbox: &SandboxPlan) -> ShellInvocation {
+    if sandbox.read_only || sandbox.network || sandbox.confine_writes.is_some() {
+        // `mermaid __sandbox-exec [--read-only | [--no-network] [--confine-fs]
+        // [--confine-writes <dir>]…] -- sh -c <command>`: the launcher
+        // installs the requested confinement on itself, then execs the shell.
+        // Both PowerShell and `sh` come through here — `SandboxPlan::resolve`
+        // sets these flags on Windows too, where the launcher runs the child
+        // in an AppContainer.
         let exe = launcher_exe();
         let mut args: Vec<std::ffi::OsString> = vec!["__sandbox-exec".into()];
-        if sandbox_network {
+        if sandbox.read_only {
+            args.push("--read-only".into());
+        }
+        if sandbox.network {
             args.push("--no-network".into());
         }
-        if let Some(dirs) = confine_writes {
+        if let Some(dirs) = &sandbox.confine_writes {
             // The marker, not the dir count, is what tells the launcher that
             // write-confinement was requested. An empty root list is a
             // deny-all-writes policy and must not be indistinguishable from
@@ -120,12 +119,8 @@ pub(crate) fn shell_invocation(
     }
 }
 
-pub(crate) fn build_sandboxed_shell(
-    command: &str,
-    sandbox_network: bool,
-    confine_writes: Option<&[PathBuf]>,
-) -> Command {
-    let invocation = shell_invocation(command, sandbox_network, confine_writes);
+pub(crate) fn build_sandboxed_shell(command: &str, sandbox: &SandboxPlan) -> Command {
+    let invocation = shell_invocation(command, sandbox);
     let mut cmd = Command::new(&invocation.program);
     cmd.args(&invocation.args);
     cmd

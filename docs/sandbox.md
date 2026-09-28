@@ -35,3 +35,32 @@ requested confinement cannot be applied, the command exits 126 instead of runnin
 unconfined. On platforms without a backend the exec tool does not request confinement at
 all — it logs a once-per-process warning, and `mermaid self-test` reports the real
 per-platform availability.
+
+## Read-only mode
+
+On Linux kernels with Landlock ABI 6 (6.12 and later), `read_only` mode is enforced by the
+kernel rather than predicted by a parser. Every shell command runs inside a fixed read-only
+sandbox, applied by `mermaid __sandbox-exec --read-only`:
+
+- no filesystem writes anywhere, except the discard devices (`/dev/null`, `/dev/zero`,
+  `/dev/full`) and the command's terminal (Landlock);
+- no file metadata changes (mode, owner, extended attributes, timestamps, `chattr` flags),
+  no sockets of any family (so no network and no local daemons such as Docker, D-Bus or a
+  database socket), no System V or POSIX IPC, no kernel keyring, and no `io_uring`
+  (seccomp, `EPERM`; internet sockets still die with `SIGSYS`);
+- no signals to processes outside the sandbox (Landlock scoping), and no capabilities, even
+  when Mermaid runs as root.
+
+Because the kernel holds that line, the policy lets any command run in `read_only` mode, not
+just the ones the shell allowlists recognise as reads: `cargo metadata`, a project script, an
+unfamiliar binary. A command that tries to change something fails with a permission error,
+and the model is told the read-only sandbox refused it. The destructive-pattern hard-deny and
+your own `deny` overrides still apply first. Every restriction is a hard requirement: there
+is no best-effort degrade, and a launcher that cannot apply all of it exits 126.
+
+Elsewhere (macOS, Windows, and older Linux kernels) `read_only` mode keeps deciding with the
+shell allowlists, exactly as before. `mermaid self-test` reports which one this machine uses.
+The rollout is deliberately one platform at a time: Seatbelt needs a read-only profile that
+also covers Mach IPC (preference and launchd services can change state without a file write),
+and the Windows AppContainer backend needs the same audit before either replaces its
+allowlists.

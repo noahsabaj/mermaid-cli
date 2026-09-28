@@ -140,6 +140,16 @@ impl PolicyEngine {
                         risk,
                         checkpoint: false,
                     }
+                } else if request.read_only_contained && request.category == ToolCategory::Shell {
+                    // The command runs inside the read-only OS sandbox, so the
+                    // kernel keeps it read-only whatever the classifier guessed.
+                    // Returned here, ahead of the floors below: they exist
+                    // because a mutation escapes checkpoints, and a contained
+                    // command cannot mutate.
+                    return PolicyDecision::Allow {
+                        risk,
+                        checkpoint: false,
+                    };
                 } else if request.category == ToolCategory::Web {
                     PolicyDecision::Ask {
                         risk,
@@ -495,6 +505,86 @@ mod tests {
         let mut req = ActionRequest::new("mcp_proxy", ToolCategory::Mcp, "mcp srv__tool");
         req.mcp_read_only_hint = read_only_hint;
         req
+    }
+
+    fn contained_shell(command: &str) -> ActionRequest {
+        let mut req = shell(command);
+        req.read_only_contained = true;
+        req
+    }
+
+    /// Commands the allowlists would deny in `read_only` run when the OS
+    /// sandbox contains them: the kernel, not the classifier, keeps them
+    /// read-only. Without containment the old verdicts stand.
+    #[test]
+    fn read_only_allows_any_contained_shell_command() {
+        let engine = PolicyEngine::new(SafetyMode::ReadOnly);
+        for cmd in [
+            "touch notes.txt",
+            "curl https://example.com",
+            "npm install",
+            "sudo apt-get install ripgrep",
+            "cargo build",
+            "docker ps",
+        ] {
+            assert!(
+                matches!(
+                    engine.decide(&contained_shell(cmd)),
+                    PolicyDecision::Allow {
+                        checkpoint: false,
+                        ..
+                    }
+                ),
+                "contained {cmd:?} should run in read_only"
+            );
+            assert!(
+                matches!(engine.decide(&shell(cmd)), PolicyDecision::Deny { .. }),
+                "uncontained {cmd:?} keeps the allowlist verdict"
+            );
+        }
+    }
+
+    /// Containment never outranks the floor that is not the classifier's:
+    /// the destructive hard-deny and the user's own deny overrides.
+    #[test]
+    fn contained_read_only_keeps_hard_deny_and_user_denies() {
+        let engine = PolicyEngine::new(SafetyMode::ReadOnly);
+        assert!(matches!(
+            engine.decide(&contained_shell("rm -rf /")),
+            PolicyDecision::Deny {
+                risk: RiskClass::Destructive,
+                ..
+            }
+        ));
+        let engine = engine.with_overrides(vec![PolicyOverride {
+            pattern: Some("docker".to_string()),
+            decision: PolicyOverrideDecision::Deny,
+            ..PolicyOverride::default()
+        }]);
+        assert!(matches!(
+            engine.decide(&contained_shell("docker ps")),
+            PolicyDecision::Deny { .. }
+        ));
+    }
+
+    /// The flag only speaks for shell commands in `read_only`: other modes
+    /// gate as before, and other categories cannot borrow it.
+    #[test]
+    fn containment_flag_changes_nothing_outside_read_only_shell() {
+        assert!(matches!(
+            PolicyEngine::new(SafetyMode::Ask).decide(&contained_shell("touch notes.txt")),
+            PolicyDecision::Ask { .. }
+        ));
+        assert!(matches!(
+            PolicyEngine::new(SafetyMode::Auto).decide(&contained_shell("curl https://x.dev")),
+            PolicyDecision::Classify { .. }
+        ));
+        let mut edit = ActionRequest::new("write_file", ToolCategory::Edit, "write src/lib.rs");
+        edit.read_only_contained = true;
+        assert!(matches!(
+            PolicyEngine::new(SafetyMode::ReadOnly).decide(&edit),
+            PolicyDecision::Deny { .. }
+        ));
     }
 
     #[test]
