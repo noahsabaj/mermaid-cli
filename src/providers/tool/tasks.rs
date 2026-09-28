@@ -381,7 +381,8 @@ impl ToolExecutor for TaskListTool {
         }
     }
 
-    async fn execute(&self, _args: serde_json::Value, ctx: ExecContext) -> ToolOutcome {
+    async fn execute(&self, args: serde_json::Value, ctx: ExecContext) -> ToolOutcome {
+        let _ = args;
         let started = Instant::now();
         let secs = || started.elapsed().as_secs_f64();
         let Some(broker) = ctx.tasks.clone() else {

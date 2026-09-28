@@ -422,7 +422,8 @@ impl ToolExecutor for CompactContextTool {
         }
     }
 
-    async fn execute(&self, args: serde_json::Value, _ctx: ExecContext) -> ToolOutcome {
+    async fn execute(&self, args: serde_json::Value, ctx: ExecContext) -> ToolOutcome {
+        let _ = ctx;
         let focus = str_arg(&args, "focus").map(str::to_string);
         ToolOutcome::success(
             "Checkpoint requested; it runs before your next step.",
@@ -509,7 +510,7 @@ mod tests {
         let events = vec![
             SessionEvent::Reset {
                 at: chrono::Local::now(),
-                messages: vec![first.clone(), second.clone()],
+                messages: vec![first.clone(), second],
             },
             SessionEvent::Message {
                 message: ChatMessage::user("appended later"),
