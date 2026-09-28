@@ -91,6 +91,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Anthropic compacts the conversation itself.** Where a provider offers
+  server-side context management, Mermaid now prefers it. On Anthropic, an
+  agent turn asks the API to compact once the prompt passes the automatic
+  threshold (`[compaction] auto_threshold_percent`, 85% of the window by
+  default), and Mermaid's own summary call is skipped for that trigger. The
+  `compaction` block the API returns is stored on the assistant turn and sent
+  back verbatim on later requests, so history is never rewritten on the client
+  (which also keeps thinking blocks valid). The context estimate counts only
+  what follows the latest compaction. A model that refuses the edit is retried
+  without it, and that is remembered with the other learned rejections, so
+  Mermaid compacts client-side for that model from then on.
+  `[compaction] provider_native = false` turns this off. `compact_context`,
+  `/compact` and the context-limit retry still run Mermaid's own compaction.
+
 - **A behavioural eval suite (`evals/`, `just eval <model>`).** Four fixed tasks
   (fix a failing test, add a CLI flag, answer a question about a repo, and a
   provider that silently ignores parameters), each run through `mermaid run`

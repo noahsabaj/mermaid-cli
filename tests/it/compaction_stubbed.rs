@@ -266,3 +266,91 @@ async fn a_model_requested_checkpoint_runs_before_the_call_whatever_the_fill() {
     runner.shutdown().await;
     assert_eq!(model.calls(), 2, "the checkpoint, then the turn itself");
 }
+
+/// Dispatch one agent turn on `history()` to `model` and collect everything
+/// the runner reports until the model call finishes.
+async fn call_with(model: Arc<ScriptedModel>, config: mermaid_domain::Config) -> Vec<Msg> {
+    let providers = Arc::new(ProviderFactory::with_seeded_providers(
+        config,
+        [(STUB.to_string(), model as Arc<dyn ModelProvider>)],
+    ));
+    let (mut runner, mut rx) =
+        EffectRunner::pair_from(PathBuf::from("."), providers, Arc::new(ToolRegistry::new()));
+    runner.dispatch(Cmd::CallModel {
+        turn: TurnId(1),
+        request: compaction_request().chat,
+    });
+    let seen = tokio::time::timeout(Duration::from_secs(20), async {
+        let mut seen = Vec::new();
+        while let Some(msg) = rx.recv().await {
+            let done = matches!(msg, Msg::StreamDone { .. } | Msg::UpstreamError { .. });
+            seen.push(msg);
+            if done {
+                break;
+            }
+        }
+        seen
+    })
+    .await
+    .expect("the turn never finished");
+    runner.shutdown().await;
+    seen
+}
+
+/// `history()` is ~13k tokens, so a 12k window is past the auto threshold.
+const SMALL_WINDOW: usize = 12_000;
+
+#[tokio::test]
+async fn a_provider_that_compacts_itself_takes_the_automatic_threshold_over() {
+    // Past the threshold, but the provider compacts server-side: no summary
+    // call of ours, and the turn asks the provider to do it at the same fill.
+    let model = ScriptedModel::natively_compacting([Turn::say("continuing")], SMALL_WINDOW);
+    let seen = call_with(model.clone(), mermaid_domain::Config::default()).await;
+
+    assert!(
+        !seen.iter().any(|m| matches!(
+            m,
+            Msg::CompactionFinished { .. } | Msg::CompactionFailed { .. }
+        )),
+        "the harness must not compact what the provider will"
+    );
+    let requests = model.requests();
+    assert_eq!(requests.len(), 1, "the turn alone, no summary call");
+    assert_eq!(
+        requests[0].native_compaction,
+        Some(mermaid_model::models::NativeCompaction {
+            trigger_tokens: SMALL_WINDOW * 85 / 100
+        })
+    );
+    assert_eq!(
+        requests[0].messages.len(),
+        history().len(),
+        "history untouched"
+    );
+}
+
+#[tokio::test]
+async fn provider_native_off_keeps_the_harness_compacting() {
+    let model = ScriptedModel::natively_compacting(
+        [
+            Turn::say("Handoff: parser rewrite, lexer done."),
+            Turn::say("continuing"),
+        ],
+        SMALL_WINDOW,
+    );
+    let mut config = mermaid_domain::Config::default();
+    config.compaction.provider_native = false;
+    let seen = call_with(model.clone(), config).await;
+
+    assert!(
+        seen.iter().any(|m| matches!(
+            m,
+            Msg::CompactionFinished { result, .. }
+                if result.record.trigger == mermaid_domain::CompactionTrigger::AutoThreshold
+        )),
+        "with provider_native off the automatic threshold is ours again"
+    );
+    let requests = model.requests();
+    assert_eq!(requests.len(), 2, "the summary, then the turn");
+    assert!(requests.iter().all(|r| r.native_compaction.is_none()));
+}

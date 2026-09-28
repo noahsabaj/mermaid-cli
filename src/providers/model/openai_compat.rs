@@ -89,6 +89,7 @@ impl ModelProvider for OpenAICompatProvider {
             effective: window,
             source: None,
             max_output: limits.as_ref().and_then(|l| l.max_output_tokens),
+            compacts_natively: false,
         }
     }
 

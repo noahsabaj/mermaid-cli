@@ -306,9 +306,7 @@ mod tests {
             "hello".to_string(),
             "reasoning".to_string(),
             vec![],
-            Some(ProviderContinuation::Anthropic {
-                signature: "sig_abc".to_string(),
-            }),
+            Some(ProviderContinuation::anthropic("sig_abc".to_string())),
             chrono::Local::now(),
             false,
         );

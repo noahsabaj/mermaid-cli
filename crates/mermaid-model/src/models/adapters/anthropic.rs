@@ -33,7 +33,7 @@ use super::accumulator::{
 use crate::constants::MAX_RESPONSE_CHARS;
 use crate::models::ModelCapabilities;
 use crate::models::adapters::driver::{Flow, Framing, StreamProtocol, drive_stream};
-use crate::models::config::ModelConfig;
+use crate::models::config::{ModelConfig, NativeCompaction};
 use crate::models::error::{BackendError, ModelError, Result};
 use crate::models::reasoning::{
     ReasoningCapability, ReasoningChunk, ReasoningLevel, nearest_effort,
@@ -53,6 +53,12 @@ use crate::models::types::{
 /// API version pin per Anthropic stability guarantee. Bump when a feature
 /// we use moves to a newer version line.
 const ANTHROPIC_VERSION: &str = "2023-06-01";
+
+/// Server-side compaction: the beta that enables it, the edit that asks for
+/// it, and the key a model's refusal of it is remembered under.
+const COMPACTION_BETA: &str = "compact-2026-01-12";
+const COMPACTION_EDIT: &str = "compact_20260112";
+const COMPACTION_PARAM: &str = "context_management";
 
 /// Map Anthropic's `stop_reason` onto the normalized [`FinishReason`].
 fn map_anthropic_stop_reason(s: &str) -> FinishReason {
@@ -78,6 +84,7 @@ fn finalize_block(
     text_acc: &mut String,
     thinking_acc: &mut String,
     signature_acc: &mut Option<String>,
+    compaction_acc: &mut Option<Value>,
     tool_calls_done: &mut Vec<ToolCall>,
     out: &mut Vec<StreamEvent>,
 ) {
@@ -106,8 +113,43 @@ fn finalize_block(
             out.push(StreamEvent::ToolCall(tc.clone()));
             tool_calls_done.push(tc);
         },
+        BlockAccumulator::Compaction(block) => {
+            out.push(StreamEvent::Status(COMPACTED_NOTICE.to_string()));
+            *compaction_acc = Some(block);
+        },
         BlockAccumulator::Other => {},
     }
+}
+
+/// The `context_management` value asking for server-side compaction, unless
+/// the turn didn't ask or this model refused it.
+fn context_management(native: Option<NativeCompaction>, rejected: &Rejections) -> Option<Value> {
+    let native = native.filter(|_| !rejected.contains(COMPACTION_PARAM))?;
+    Some(json!({
+        "edits": [{
+            "type": COMPACTION_EDIT,
+            "trigger": {"type": "input_tokens", "value": native.trigger_tokens},
+        }],
+    }))
+}
+
+/// What the user sees when the provider compacted the conversation itself.
+const COMPACTED_NOTICE: &str =
+    "The provider compacted the earlier conversation to fit the context window";
+
+/// The continuation a finished response carries: the thinking signature and
+/// the server-side compaction block, when either arrived.
+fn continuation(
+    signature: Option<String>,
+    compaction: Option<Value>,
+) -> Option<ProviderContinuation> {
+    if signature.is_none() && compaction.is_none() {
+        return None;
+    }
+    Some(ProviderContinuation::Anthropic {
+        signature: signature.unwrap_or_default(),
+        compaction,
+    })
 }
 
 /// Adaptive (Claude 4.6+) vs legacy (`budget_tokens`) thinking-config shape.
@@ -285,6 +327,13 @@ fn sent_optionals(body: &Value) -> Vec<Optional> {
             .unless(&["signature"]),
         );
     }
+    if body.get(COMPACTION_PARAM).is_some() {
+        sent.push(Optional::new(
+            COMPACTION_PARAM,
+            "server-side compaction",
+            &[COMPACTION_PARAM, "compact"],
+        ));
+    }
     sent
 }
 
@@ -382,17 +431,20 @@ fn coalesce_consecutive_roles(msgs: Vec<Value>) -> Vec<Value> {
         }
         let mut blocks = content_blocks(&prev["content"]);
         blocks.extend(incoming);
-        // Stable partition: the role's must-lead block kind first, the rest
-        // in their original relative order behind it.
-        let lead = if msg["role"] == "user" {
-            "tool_result"
+        // Stable sort: the role's must-lead block kinds first, the rest in
+        // their original relative order behind them. A compaction block
+        // stands in for everything before it, so it leads even `thinking`.
+        let lead: &[&str] = if msg["role"] == "user" {
+            &["tool_result"]
         } else {
-            "thinking"
+            &["compaction", "thinking"]
         };
-        let (mut leading, rest): (Vec<Value>, Vec<Value>) =
-            blocks.into_iter().partition(|b| b["type"] == lead);
-        leading.extend(rest);
-        prev["content"] = Value::Array(leading);
+        blocks.sort_by_key(|b| {
+            lead.iter()
+                .position(|kind| b["type"] == *kind)
+                .unwrap_or(lead.len())
+        });
+        prev["content"] = Value::Array(blocks);
     }
     out
 }
@@ -525,10 +577,20 @@ fn user_content(msg: &ChatMessage) -> Value {
 }
 
 /// The content blocks of an assistant turn, in Anthropic's required order:
-/// a signed `thinking` block (when the signature survived), then `text`,
-/// then one `tool_use` per call. Empty for a message with nothing to say.
+/// the server-side `compaction` block (when this turn carried one), a signed
+/// `thinking` block (when the signature survived), then `text`, then one
+/// `tool_use` per call. Empty for a message with nothing to say.
 fn assistant_content_blocks(msg: &ChatMessage) -> Vec<Value> {
     let mut content_blocks: Vec<Value> = Vec::new();
+    // A server-side compaction block goes back exactly as it came, ahead of
+    // the turn's own output: the API reads it in place of the history before.
+    if let Some(block) = msg
+        .provider_continuation
+        .as_ref()
+        .and_then(ProviderContinuation::anthropic_compaction)
+    {
+        content_blocks.push(block.clone());
+    }
     // Thinking block FIRST per Anthropic ordering rules — but ONLY
     // when we also have its signature. The API rejects a
     // signature-less thinking block in history with a 400
@@ -644,6 +706,13 @@ impl AnthropicAdapter {
         &self.memory
     }
 
+    /// Whether this model can take server-side compaction: yes until the
+    /// provider refuses it. Only meaningful once the memory is seeded.
+    #[must_use]
+    pub fn compacts_natively(&self) -> bool {
+        !self.memory.snapshot().contains(COMPACTION_PARAM)
+    }
+
     /// Build the JSON request body for `POST /v1/messages`, avoiding what the
     /// provider already rejected for this model.
     #[cfg(test)]
@@ -677,7 +746,11 @@ impl AnthropicAdapter {
             &OutputBudgetInputs {
                 requested_cap: config.max_tokens,
                 window: config.resolved_context_window,
-                prompt_estimate: estimate_prompt_tokens(messages, system.as_deref()),
+                // Only what follows a server-side compaction reaches the model.
+                prompt_estimate: estimate_prompt_tokens(
+                    ChatMessage::since_provider_compaction(messages),
+                    system.as_deref(),
+                ),
                 provider_max_output: Some(
                     config
                         .resolved_max_output
@@ -795,6 +868,15 @@ impl AnthropicAdapter {
             });
         }
 
+        // Server-side compaction, when the turn asked for it and this model has
+        // not refused it: the API summarizes the earlier conversation once
+        // the prompt passes the trigger, and returns a `compaction` block to
+        // replay (see `assistant_content_blocks`). A refusal is learned like
+        // any other, and the harness compacts on its own from then on.
+        if let Some(edits) = context_management(config.native_compaction, rejected) {
+            body[COMPACTION_PARAM] = edits;
+        }
+
         // Thinking format: newest accepted shape (see `thinking_format_for`).
         match thinking_format_for(&self.model_name, rejected) {
             Some(ThinkingFormat::Adaptive) => {
@@ -830,22 +912,24 @@ impl AnthropicAdapter {
     /// via `crate::models::retry::retry_transient_http`.
     async fn send_chat(&self, body: &Value) -> Result<reqwest::Response> {
         let url = format!("{}/messages", self.base_url.trim_end_matches('/'));
+        let beta = body.get(COMPACTION_PARAM).map(|_| COMPACTION_BETA);
         crate::models::retry::retry_transient_http(|| async {
-            self.client
+            let mut request = self
+                .client
                 .post(&url)
                 .header("x-api-key", &self.api_key)
                 .header("anthropic-version", ANTHROPIC_VERSION)
-                .header("content-type", "application/json")
-                .json(body)
-                .send()
-                .await
-                .map_err(|e| {
-                    ModelError::Backend(BackendError::ConnectionFailed {
-                        backend: "anthropic".to_string(),
-                        url: url.clone(),
-                        reason: e.to_string(),
-                    })
+                .header("content-type", "application/json");
+            if let Some(beta) = beta {
+                request = request.header("anthropic-beta", beta);
+            }
+            request.json(body).send().await.map_err(|e| {
+                ModelError::Backend(BackendError::ConnectionFailed {
+                    backend: "anthropic".to_string(),
+                    url: url.clone(),
+                    reason: e.to_string(),
                 })
+            })
         })
         .await
     }
@@ -915,9 +999,15 @@ impl AnthropicAdapter {
         let mut text_acc = String::new();
         let mut thinking_acc = String::new();
         let mut signature: Option<String> = None;
+        let mut compaction: Option<Value> = None;
         let mut tool_calls: Vec<ToolCall> = Vec::new();
 
-        for block in json.content {
+        for raw in json.content {
+            if raw.get("type").and_then(Value::as_str) == Some("compaction") {
+                compaction = Some(raw);
+                continue;
+            }
+            let block = serde_json::from_value(raw).unwrap_or(ContentBlockOut::Other);
             match block {
                 ContentBlockOut::Text { text } => text_acc.push_str(&text),
                 ContentBlockOut::Thinking {
@@ -981,8 +1071,7 @@ impl AnthropicAdapter {
             } else {
                 Some(tool_calls)
             },
-            provider_continuation: signature
-                .map(|signature| ProviderContinuation::Anthropic { signature }),
+            provider_continuation: continuation(signature, compaction),
         })
     }
 
@@ -1015,6 +1104,7 @@ pub(crate) struct AnthropicStream {
     text_acc: String,
     thinking_acc: String,
     signature_acc: Option<String>,
+    compaction_acc: Option<Value>,
     tool_calls_done: Vec<ToolCall>,
     /// Per-buffer caps (see `accumulator::push_capped`): a thinking trace
     /// that trips its cap must not stop the answer's text from accumulating.
@@ -1044,6 +1134,7 @@ impl AnthropicStream {
             text_acc: String::new(),
             thinking_acc: String::new(),
             signature_acc: None,
+            compaction_acc: None,
             tool_calls_done: Vec::new(),
             text_truncated: false,
             thinking_truncated: false,
@@ -1141,6 +1232,12 @@ impl AnthropicStream {
                     *signature = Some(sig.to_string());
                 }
             },
+            (BlockAccumulator::Compaction(block), kind) if kind.ends_with("_delta") => {
+                // Whatever the block streams (its summary, opaque state) is
+                // appended to the field of the same name, so the block is
+                // replayed whole however the API splits it.
+                append_string_fields(block, delta);
+            },
             (BlockAccumulator::ToolUse { input_buf, .. }, "input_json_delta") => {
                 let frag = delta
                     .and_then(|d| d.get("partial_json"))
@@ -1203,9 +1300,31 @@ fn block_accumulator_for(block: Option<&Value>) -> BlockAccumulator {
                 input_buf: String::new(),
             }
         },
+        // Kept verbatim for replay; its deltas fill it in.
+        "compaction" => BlockAccumulator::Compaction(block.cloned().unwrap_or_default()),
         // Unknown block types (e.g., server-tool
         // results we don't request) — track as inert.
         _ => BlockAccumulator::Other,
+    }
+}
+
+/// Append each string field of a delta (other than its `type`) to the block's
+/// field of the same name.
+fn append_string_fields(block: &mut Value, delta: Option<&Value>) {
+    let (Some(block), Some(delta)) = (block.as_object_mut(), delta.and_then(Value::as_object))
+    else {
+        return;
+    };
+    for (key, value) in delta {
+        let Some(part) = value.as_str().filter(|_| key != "type") else {
+            continue;
+        };
+        match block.get_mut(key) {
+            Some(Value::String(existing)) => existing.push_str(part),
+            _ => {
+                block.insert(key.clone(), Value::String(part.to_string()));
+            },
+        }
     }
 }
 
@@ -1252,6 +1371,7 @@ impl StreamProtocol for AnthropicStream {
                         &mut self.text_acc,
                         &mut self.thinking_acc,
                         &mut self.signature_acc,
+                        &mut self.compaction_acc,
                         &mut self.tool_calls_done,
                         out,
                     );
@@ -1335,6 +1455,7 @@ impl StreamProtocol for AnthropicStream {
                     &mut self.text_acc,
                     &mut self.thinking_acc,
                     &mut self.signature_acc,
+                    &mut self.compaction_acc,
                     &mut self.tool_calls_done,
                     out,
                 );
@@ -1379,9 +1500,7 @@ impl StreamProtocol for AnthropicStream {
             } else {
                 Some(self.tool_calls_done)
             },
-            provider_continuation: self
-                .signature_acc
-                .map(|signature| ProviderContinuation::Anthropic { signature }),
+            provider_continuation: continuation(self.signature_acc, self.compaction_acc),
         })
     }
 }
@@ -1462,7 +1581,9 @@ impl From<AnthropicModelInfo> for ModelLimits {
 /// Non-streaming response shape (`POST /v1/messages` without `stream`).
 #[derive(Debug, Deserialize)]
 struct AnthropicResponse {
-    content: Vec<ContentBlockOut>,
+    /// Raw, so a `compaction` block can be kept verbatim; the rest decode
+    /// as [`ContentBlockOut`].
+    content: Vec<Value>,
     #[serde(default)]
     usage: UsageOut,
     #[serde(default)]
@@ -1521,6 +1642,8 @@ enum BlockAccumulator {
         name: String,
         input_buf: String,
     },
+    /// A server-side `compaction` block, as opened, with its deltas applied.
+    Compaction(Value),
     /// Catch-all for unknown content block types — e.g., server-tool
     /// results we never requested. Ignored on the way in and out.
     Other,
@@ -1656,6 +1779,7 @@ mod tests {
         let mut text = String::new();
         let mut thinking = String::new();
         let mut sig = None;
+        let mut compaction = None;
         let mut tools = Vec::new();
         let mut events = Vec::new();
         finalize_block(
@@ -1667,6 +1791,7 @@ mod tests {
             &mut text,
             &mut thinking,
             &mut sig,
+            &mut compaction,
             &mut tools,
             &mut events,
         );
@@ -1687,11 +1812,8 @@ mod tests {
             "unsigned thinking must be dropped"
         );
 
-        let mut signed = ChatMessage::assistant("answer").with_provider_continuation(
-            ProviderContinuation::Anthropic {
-                signature: "sig123".to_string(),
-            },
-        );
+        let mut signed = ChatMessage::assistant("answer")
+            .with_provider_continuation(ProviderContinuation::anthropic("sig123".to_string()));
         signed.thinking = Some("private reasoning".to_string());
         let (_sys, msgs) = convert_messages(&[signed]);
         assert!(has_thinking_block(&msgs), "signed thinking must be present");
@@ -2059,9 +2181,7 @@ mod tests {
     fn convert_messages_emits_thinking_block_with_signature() {
         let mut msg = ChatMessage::assistant("Final answer.");
         msg.thinking = Some("reasoning content".to_string());
-        msg.provider_continuation = Some(ProviderContinuation::Anthropic {
-            signature: "sig_xyz".to_string(),
-        });
+        msg.provider_continuation = Some(ProviderContinuation::anthropic("sig_xyz".to_string()));
         let messages = vec![ChatMessage::user("Q?"), msg];
         let (_, msgs) = convert_messages(&messages);
         let assistant_content = msgs[1]["content"].as_array().expect("array");
@@ -2323,9 +2443,7 @@ mod tests {
     fn merged_assistant_turn_keeps_thinking_first() {
         let mut second = ChatMessage::assistant("part two");
         second.thinking = Some("more reasoning".to_string());
-        second.provider_continuation = Some(ProviderContinuation::Anthropic {
-            signature: "sig_xyz".to_string(),
-        });
+        second.provider_continuation = Some(ProviderContinuation::anthropic("sig_xyz".to_string()));
         let messages = vec![
             ChatMessage::user("go"),
             ChatMessage::assistant("part one"),
@@ -2337,6 +2455,34 @@ mod tests {
         assert_eq!(blocks[0]["type"], "thinking", "{blocks:#?}");
         assert_eq!(blocks[1]["text"], "part one");
         assert_eq!(blocks[2]["text"], "part two");
+    }
+
+    #[test]
+    fn merged_assistant_turn_puts_a_compaction_block_before_thinking() {
+        // The block stands in for everything before it, so even when a merge
+        // brings it in behind other output it has to lead.
+        let block = json!({"type": "compaction", "content": "summary"});
+        let mut second = ChatMessage::assistant("part two");
+        second.thinking = Some("more reasoning".to_string());
+        second.provider_continuation = Some(ProviderContinuation::Anthropic {
+            signature: "sig_xyz".to_string(),
+            compaction: Some(block.clone()),
+        });
+        let messages = vec![
+            ChatMessage::user("go"),
+            ChatMessage::assistant("part one"),
+            second,
+        ];
+        let (_system, out) = convert_messages(&messages);
+        let blocks = out[1]["content"].as_array().expect("content array");
+        let kinds: Vec<&str> = blocks.iter().filter_map(|b| b["type"].as_str()).collect();
+        assert_eq!(
+            kinds,
+            ["compaction", "thinking", "text", "text"],
+            "{blocks:#?}"
+        );
+        assert_eq!(blocks[0], block);
+        assert_eq!(blocks[2]["text"], "part one");
     }
 
     #[test]

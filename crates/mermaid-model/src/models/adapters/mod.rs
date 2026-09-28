@@ -27,6 +27,10 @@ pub mod ollama;
 pub mod ollama_sizing;
 pub mod openai_compat;
 pub mod output_budget;
+/// Anthropic's server-side compaction, end to end: asked for, replayed,
+/// and learned when refused.
+#[cfg(test)]
+mod server_compaction;
 /// Every adapter, end to end, against a model the catalog has never seen.
 #[cfg(test)]
 mod unknown_model;

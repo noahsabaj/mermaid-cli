@@ -32,7 +32,9 @@ the only copy of anything.
 
 `compact_context` lets the model checkpoint when it judges its context noisy, with an optional
 `focus` for the handoff; it runs before the model's next call. The automatic trigger
-(`[compaction] auto_threshold_percent`, 85% by default) stays as the safety net.
+(`[compaction] auto_threshold_percent`, 85% by default) stays as the safety net. On a provider
+that compacts server-side (Anthropic), the provider handles that automatic trigger instead
+(`[compaction] provider_native`); `compact_context` and `/compact` still run Mermaid's own.
 
 ## MCP tools
 

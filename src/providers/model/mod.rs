@@ -43,6 +43,9 @@ pub struct ContextSizing {
     /// resolve→reducer pipeline as the window so `provider_capabilities` can be
     /// refreshed live.
     pub max_output: Option<usize>,
+    /// Whether the provider compacts the conversation itself when a turn asks
+    /// (`ChatRequest::native_compaction`): Anthropic, until the model refuses.
+    pub compacts_natively: bool,
 }
 
 /// Where a loaded model actually sits in memory, from a post-turn probe (Ollama
@@ -85,6 +88,7 @@ pub trait ModelProvider: Send + Sync {
             effective: max,
             source: None,
             max_output: self.capabilities().max_output_tokens,
+            compacts_natively: false,
         }
     }
 

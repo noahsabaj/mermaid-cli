@@ -100,6 +100,7 @@ fn consolidation_request(
         output_schema: None,
         suppress_auto_compact: false,
         requested_compaction: None,
+        native_compaction: None,
     }
 }
 

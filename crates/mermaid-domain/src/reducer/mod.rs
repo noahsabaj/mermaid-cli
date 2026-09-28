@@ -215,8 +215,7 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
                 partial_reasoning.push_str(&chunk.text);
                 *phase = GenPhase::Thinking;
                 if let Some(sig) = chunk.signature {
-                    *provider_continuation =
-                        Some(ProviderContinuation::Anthropic { signature: sig });
+                    *provider_continuation = Some(ProviderContinuation::anthropic(sig));
                 }
                 // Count thinking tokens too, so the live counter climbs during a
                 // long reasoning phase instead of sitting at 0 until answer text.

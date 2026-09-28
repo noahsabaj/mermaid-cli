@@ -186,6 +186,7 @@ impl ModelProvider for OllamaProvider {
                 effective: Some(r.value),
                 source: Some(r.source),
                 max_output,
+                compacts_natively: false,
             },
             // No model_max and nothing configured → omit num_ctx (Ollama default).
             None => ContextSizing {
@@ -193,6 +194,7 @@ impl ModelProvider for OllamaProvider {
                 effective: None,
                 source: None,
                 max_output,
+                compacts_natively: false,
             },
         }
     }
@@ -452,6 +454,7 @@ mod tests {
             output_schema: None,
             suppress_auto_compact: false,
             requested_compaction: None,
+            native_compaction: None,
         };
         let app_cfg = mermaid_domain::Config::default();
         let cfg = build_model_config(&req, &app_cfg, None, None);
@@ -490,6 +493,7 @@ mod tests {
             output_schema: None,
             suppress_auto_compact: false,
             requested_compaction: None,
+            native_compaction: None,
         };
         let mut app_cfg = mermaid_domain::Config::default();
         app_cfg.ollama.num_gpu = Some(10);
@@ -527,6 +531,7 @@ mod tests {
             output_schema: None,
             suppress_auto_compact: false,
             requested_compaction: None,
+            native_compaction: None,
         };
         let cfg = build_model_config(
             &req,
@@ -560,6 +565,7 @@ mod tests {
             output_schema: None,
             suppress_auto_compact: false,
             requested_compaction: None,
+            native_compaction: None,
         };
         let app_cfg = mermaid_domain::Config::default();
         // Without a learned cap, AUTO hands over the full window room —

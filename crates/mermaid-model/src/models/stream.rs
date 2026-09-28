@@ -142,9 +142,7 @@ mod tests {
         // authoritative `Done` around the mapping to compensate.
         let ev = StreamEvent::Done {
             usage: Some(TokenUsage::provider(10, 20)),
-            provider_continuation: Some(ProviderContinuation::Anthropic {
-                signature: "sig".to_string(),
-            }),
+            provider_continuation: Some(ProviderContinuation::anthropic("sig".to_string())),
             stop_reason: Some(FinishReason::ToolUse),
         };
         match ev {
