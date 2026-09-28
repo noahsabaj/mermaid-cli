@@ -11,7 +11,7 @@
 //! runs on every push:
 //!
 //! ```text
-//! MODEL_API_KEY=... cargo test --test integration -- --ignored it::subagent_worktree:: --test-threads=1
+//! MODEL_API_KEY=... cargo nextest run --test integration --run-ignored only -j 1 it::subagent_worktree::
 //! ```
 //!
 //! `#[ignore]`d so the default suite skips it. The default suite still
@@ -19,7 +19,7 @@
 //! which is the only thing a CI step for them would have added, since no key
 //! means every case skips while printing `ok. 3 passed` in 0.00s.
 //!
-//! Skips cleanly without `MODEL_API_KEY` so `cargo test -- --ignored` locally
+//! Skips cleanly without `MODEL_API_KEY` so `cargo nextest run --run-ignored only` locally
 //! does not fail spuriously.
 
 use std::path::{Path, PathBuf};

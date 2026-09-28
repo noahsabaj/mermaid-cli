@@ -1040,7 +1040,7 @@ mod tests {
     /// spawn Granian, serve the JSON API, then reap. Ignored by default — it
     /// downloads a ~65-80 MB bundle, writes the data dir, and spawns a real
     /// server. Run with:
-    ///   `cargo test --lib managed_searxng_end_to_end -- --ignored --nocapture`
+    ///   `cargo nextest run --lib --run-ignored only --no-capture managed_searxng_end_to_end`
     #[tokio::test]
     #[ignore]
     async fn managed_searxng_end_to_end() {
