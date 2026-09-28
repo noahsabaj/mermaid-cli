@@ -17,11 +17,19 @@ pub mod anthropic;
 mod conformance;
 pub mod driver;
 pub mod gemini;
+/// Capability discovery by rejection: send optimistically, learn from a 400.
+pub mod learning;
 pub mod meta;
+/// A scripted loopback HTTP provider for adapter tests.
+#[cfg(test)]
+mod mock_http;
 pub mod ollama;
 pub mod ollama_sizing;
 pub mod openai_compat;
 pub mod output_budget;
+/// Every adapter, end to end, against a model the catalog has never seen.
+#[cfg(test)]
+mod unknown_model;
 
 /// A model's token limits as reported by its provider's models endpoint.
 /// `None` means the provider didn't expose that limit — never a guess.

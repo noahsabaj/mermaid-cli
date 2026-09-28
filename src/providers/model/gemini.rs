@@ -12,7 +12,7 @@ use mermaid_model::models::adapters::gemini::GeminiAdapter;
 use mermaid_model::models::{Model, ModelConfig, ModelError, Result};
 
 use super::super::ctx::{FinalResponse, StreamContext, StreamEvent};
-use super::{ContextSizing, ModelProvider, resolve_limits_cached};
+use super::{ContextSizing, ModelProvider, RejectionCache, resolve_limits_cached};
 use mermaid_model::models::ModelCapabilities;
 
 /// Gemini's AI Studio root, and the env vars its key lives in. `LEGACY_API_KEY_ENV`
@@ -25,6 +25,8 @@ pub const LEGACY_API_KEY_ENV: &str = "GEMINI_API_KEY";
 pub struct GeminiProvider {
     adapter: GeminiAdapter,
     capabilities: ModelCapabilities,
+    /// Links the adapter's learned rejections to the cross-session cache.
+    rejections: RejectionCache,
 }
 
 impl GeminiProvider {
@@ -41,6 +43,7 @@ impl GeminiProvider {
         Ok(Self {
             adapter,
             capabilities,
+            rejections: RejectionCache::default(),
         })
     }
 }
@@ -75,12 +78,21 @@ impl ModelProvider for GeminiProvider {
             .adapter
             .chat(&request.messages, &config, Some(ctx.sink.clone()));
 
+        // Seed what earlier sessions learned this model rejects, and persist
+        // whatever this turn learns (see `learning`).
+        let learned_model = Model::name(&self.adapter).to_string();
+        let memory = self.adapter.param_memory();
+        self.rejections.seed("gemini", &learned_model, memory).await;
+
         let response = tokio::select! {
             biased;
             _ = ctx.token.cancelled() => {
                 return Err(ModelError::Cancelled);
             },
-            r = chat_fut => r?,
+            r = chat_fut => {
+                self.rejections.persist("gemini", &learned_model, memory).await;
+                r?
+            },
         };
 
         let usage = response.usage.clone();

@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::accumulator::{CappedText, error_body};
+use super::learning::{Learning, Optional, ParamMemory, Rejections};
 use crate::models::ModelCapabilities;
 use crate::models::adapters::driver::{
     Flow, Framing, StreamProtocol, drive_stream, plain_http_error,
@@ -100,6 +101,8 @@ pub struct OllamaAdapter {
     base_url: String,
     model_name: String,
     capabilities: ModelCapabilities,
+    /// What this model's server rejected (see `learning`).
+    memory: ParamMemory,
     /// Whether the model advertises the `thinking` capability via `/api/show`.
     /// Probed lazily on the first chat and cached, so `new` stays network-free.
     /// `None` until resolved; recent Ollama 400s a `think` field sent to a
@@ -142,19 +145,20 @@ fn uses_effort_string_think(model_name: &str) -> bool {
 /// - Most models (qwen3, deepseek-r1, kimi-k2-thinking, ...) take `think: bool`.
 /// - **gpt-oss** models take `think: "low"|"medium"|"high"` (string enum).
 ///
-/// Sending a bool to gpt-oss silently uses the default effort; sending a
-/// string to non-gpt-oss models 400s. This dispatch picks the right shape
-/// by inspecting the model name.
-/// `supports_thinking` is the model's advertised `thinking` capability (probed
-/// lazily); `None` from the call site means "send as before" (unknown). Returns
-/// `None` when no `think` field should be sent at all — a non-thinking model
-/// 400s on a stray `think` (#122).
+/// Sending a bool to gpt-oss silently uses the default effort — no error to
+/// learn from, which is why the catalog hint picks the string there. Every
+/// other model gets the bool, gated by `supports_thinking` (the model's
+/// probed `thinking` capability): a non-thinking model 400s on a stray
+/// `think` (#122). A shape this model's server rejected anyway is stepped
+/// past (see `learning`). Returns `None` when no `think` field should be
+/// sent at all.
 fn think_for_ollama(
     model_name: &str,
     level: ReasoningLevel,
     supports_thinking: bool,
+    rejected: &Rejections,
 ) -> Option<serde_json::Value> {
-    if uses_effort_string_think(model_name) {
+    if uses_effort_string_think(model_name) && !rejected.contains("think:effort") {
         let effort = match level {
             // gpt-oss can't truly disable thinking. `None` collapses to
             // `"low"` (the closest-to-off tier) rather than silently
@@ -165,11 +169,24 @@ fn think_for_ollama(
         };
         return Some(serde_json::Value::String(effort.to_string()));
     }
-    if !supports_thinking {
+    if !supports_thinking || rejected.contains("think:bool") {
         // Model advertised no `thinking` capability — omit the field entirely.
         return None;
     }
     Some(serde_json::Value::Bool(level != ReasoningLevel::None))
+}
+
+/// The optional items a built request carries, for blaming a rejection.
+/// Read back off the body so it can't drift from what was actually sent.
+/// (`options` are not among them: Ollama ignores options it doesn't know.)
+fn sent_optionals(body: &serde_json::Value) -> Vec<Optional> {
+    match body.get("think") {
+        Some(serde_json::Value::String(_)) => {
+            vec![Optional::new("think:effort", "a think level", &["think"])]
+        },
+        Some(serde_json::Value::Bool(_)) => vec![Optional::new("think:bool", "think", &["think"])],
+        _ => Vec::new(),
+    }
 }
 
 impl OllamaAdapter {
@@ -229,7 +246,15 @@ impl OllamaAdapter {
             vision_cap: tokio::sync::OnceCell::new(),
             recovery: None,
             status_notify: None,
+            memory: ParamMemory::default(),
         })
+    }
+
+    /// What this model's server has rejected, for the wrapper to persist and
+    /// to seed from the cache.
+    #[must_use]
+    pub const fn param_memory(&self) -> &ParamMemory {
+        &self.memory
     }
 
     /// Attach the hook that revives a dead local server. Callers pass one only
@@ -500,12 +525,27 @@ impl OllamaAdapter {
     /// callback) and `chat_typed` (new typed events). Centralizing here
     /// avoids two copies of the message-formatting + tool-filtering +
     /// option-assembly logic.
+    #[cfg(test)]
     fn build_request_body(
         &self,
         messages: &[ChatMessage],
         config: &ModelConfig,
         stream: bool,
         supports_thinking: bool,
+    ) -> serde_json::Value {
+        let rejected = self.memory.snapshot();
+        self.build_request_body_with(messages, config, stream, supports_thinking, &rejected)
+    }
+
+    /// [`Self::build_request_body`] against an explicit rejection set — the
+    /// learning loop's staged one mid-call.
+    fn build_request_body_with(
+        &self,
+        messages: &[ChatMessage],
+        config: &ModelConfig,
+        stream: bool,
+        supports_thinking: bool,
+        rejected: &Rejections,
     ) -> serde_json::Value {
         let ollama_opts = config.ollama_options();
 
@@ -572,8 +612,12 @@ impl OllamaAdapter {
         // requires a string enum, and a model that doesn't advertise `thinking`
         // must not receive the field at all (it 400s). `think_for_ollama`
         // returns `None` in that last case so the key is omitted (#122).
-        if let Some(think) = think_for_ollama(&self.model_name, config.reasoning, supports_thinking)
-        {
+        if let Some(think) = think_for_ollama(
+            &self.model_name,
+            config.reasoning,
+            supports_thinking,
+            rejected,
+        ) {
             request_body["think"] = think;
         }
         tracing::debug!(
@@ -818,11 +862,30 @@ impl Model for OllamaAdapter {
     ) -> Result<ModelResponse> {
         let stream = sink.is_some();
         let supports_thinking = self.thinking_supported().await;
-        let request_body = self.build_request_body(messages, config, stream, supports_thinking);
-        // The sink doubles as the autostart notice channel: if the local
-        // server has to be started, the user sees a status line instead of
-        // ~15s of bare spinner.
-        let response = self.send_chat(&request_body, sink.as_ref()).await?;
+        // Optimistic send; a 400 naming `think` takes it back and retries
+        // (see `learning`).
+        let mut learning = Learning::start(&self.memory, &self.model_name, sink.as_ref());
+        let response = loop {
+            let request_body = self.build_request_body_with(
+                messages,
+                config,
+                stream,
+                supports_thinking,
+                learning.rejections(),
+            );
+            // The sink doubles as the autostart notice channel: if the local
+            // server has to be started, the user sees a status line instead
+            // of ~15s of bare spinner.
+            let response = self.send_chat(&request_body, sink.as_ref()).await?;
+            if !learning.is_retryable(&response) {
+                break response;
+            }
+            let err = plain_http_error(response).await;
+            learning
+                .retry_or_fail(err, &sent_optionals(&request_body))
+                .await?;
+        };
+        learning.settle(&response);
 
         if let Some(sink) = sink {
             self.handle_stream(response, Some(&sink)).await

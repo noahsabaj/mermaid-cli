@@ -19,14 +19,16 @@ use mermaid_model::models::{Model, ModelConfig, ModelError, ProviderProfile, Res
 
 use super::super::ctx::{FinalResponse, StreamContext, StreamEvent};
 use super::{
-    ContextSizing, ModelProvider, learn_output_cap, output_cap_from_error, resolve_limits_cached,
-    retry_cap,
+    ContextSizing, ModelProvider, RejectionCache, learn_output_cap, output_cap_from_error,
+    resolve_limits_cached, retry_cap,
 };
 use mermaid_model::models::ModelCapabilities;
 
 pub struct OpenAICompatProvider {
     adapter: OpenAICompatAdapter,
     capabilities: ModelCapabilities,
+    /// Links the adapter's learned rejections to the cross-session cache.
+    rejections: RejectionCache,
 }
 
 impl OpenAICompatProvider {
@@ -50,6 +52,7 @@ impl OpenAICompatProvider {
         Ok(Self {
             adapter,
             capabilities,
+            rejections: RejectionCache::default(),
         })
     }
 }
@@ -135,12 +138,23 @@ impl ModelProvider for OpenAICompatProvider {
             }
         };
 
+        // Seed what earlier sessions learned this model rejects, and persist
+        // whatever this turn learns (see `learning`).
+        let learned_model = Model::name(&self.adapter).to_string();
+        let memory = self.adapter.param_memory();
+        self.rejections
+            .seed(self.adapter.provider_name(), &learned_model, memory)
+            .await;
+
         let response = tokio::select! {
             biased;
             _ = ctx.token.cancelled() => {
                 return Err(ModelError::Cancelled);
             },
-            r = chat_fut => r?,
+            r = chat_fut => {
+                self.rejections.persist(self.adapter.provider_name(), &learned_model, memory).await;
+                r?
+            },
         };
 
         let usage = response.usage.clone();

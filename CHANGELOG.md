@@ -9,6 +9,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A model the catalog has never heard of now works on its first call.**
+  Mermaid used to predict which request parameters each model accepts from a
+  table of model names, and a model missing from it got the most conservative
+  guess. A Claude released after the table was written was sent the deprecated
+  `budget_tokens` thinking shape and no effort setting; a new Gemini got no
+  thinking controls at all. Now every adapter sends what the user asked for
+  (temperature, the requested effort tier, the newest thinking shape) and, when
+  the provider rejects one of those with a 400 or 422, takes that one parameter
+  back or steps it down a tier and retries. A short status line says which
+  parameter the model refused. What was rejected is remembered for the model
+  and cached in the runtime store's `provider_probes` table under
+  `rejected_params`, so the next session skips the wasted round trip; like the
+  other probes it expires after 30 days, so a provider that adds support is
+  asked again.
+
+  The model catalog is now hints only. Its rows still save a known model that
+  one round trip, and it still decides the wire shape where a provider fails
+  silently instead of with an error: Ollama's `gpt-oss` accepts `think: true`
+  and ignores it, so no rejection ever says to send `think: "high"`. A success
+  never records a parameter as supported, and a lesson is only kept once a
+  retry without the parameter was accepted, so a misread error is not
+  remembered. The bare `claude-` catch-all row and the gateway rows that
+  pinned any unlisted Claude id to legacy thinking are gone; old Gemini (2.0
+  and earlier) and Claude 2 rows now say outright that they take no thinking
+  controls.
+
+  OpenAI-compatible providers also learn the budget spelling: a model that
+  answers `max_tokens` with "use `max_completion_tokens` instead" gets the
+  other spelling from then on.
+
+  The pedantic lint baseline is lowered to 77 keys / 2039 occurrences (from
+  2116): this change adds no new pedantic debt, and the counts that fell since
+  the last recording, mostly with plan mode's removal, had not been lowered
+  yet. Each key only moves down, so lints already above the baseline stay
+  above it.
+
 - **Compaction is one free-form model call.** The checkpoint used to be a fixed
   ten-heading template that `validate_summary_structure` graded (retrying on a
   miss), followed by a second "verification" call that re-read the whole excerpt

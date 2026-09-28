@@ -22,8 +22,8 @@ use mermaid_runtime::NewProviderProbe;
 
 use super::super::ctx::{FinalResponse, StreamContext, StreamEvent};
 use super::{
-    ContextSizing, ModelPlacement, ModelProvider, learn_output_cap, load_limits_from_db,
-    output_cap_from_error, probe_is_stale, retry_cap,
+    ContextSizing, ModelPlacement, ModelProvider, RejectionCache, learn_output_cap,
+    load_limits_from_db, output_cap_from_error, probe_is_stale, retry_cap,
 };
 use mermaid_model::models::ModelCapabilities;
 
@@ -31,6 +31,8 @@ use mermaid_model::models::ModelCapabilities;
 pub struct OllamaProvider {
     adapter: OllamaAdapter,
     capabilities: ModelCapabilities,
+    /// Links the adapter's learned rejections to the cross-session cache.
+    rejections: RejectionCache,
     /// Shared app `Config` so `build_model_config` can read Ollama
     /// hardware options (`num_ctx`, `num_gpu`, `num_thread`, `numa`) at
     /// call time. Before F11 these were silently dropped because the
@@ -92,6 +94,7 @@ impl OllamaProvider {
         Ok(Self {
             adapter,
             capabilities,
+            rejections: RejectionCache::default(),
             config,
             ctx_cell: tokio::sync::OnceCell::new(),
         })
@@ -274,6 +277,12 @@ impl ModelProvider for OllamaProvider {
             }
         };
 
+        // Seed what earlier sessions learned this model rejects, and persist
+        // whatever this turn learns (see `learning`).
+        let learned_model = Model::name(&self.adapter).to_string();
+        let memory = self.adapter.param_memory();
+        self.rejections.seed("ollama", &learned_model, memory).await;
+
         let response = tokio::select! {
             biased;
             _ = ctx.token.cancelled() => {
@@ -284,7 +293,10 @@ impl ModelProvider for OllamaProvider {
                 // sentinel the runner swallows.
                 return Err(ModelError::Cancelled);
             },
-            r = chat_fut => r?,
+            r = chat_fut => {
+                self.rejections.persist("ollama", &learned_model, memory).await;
+                r?
+            },
         };
 
         // F3: the wrapper's `Done` is the sole terminal event — the adapter
