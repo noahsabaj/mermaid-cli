@@ -159,11 +159,15 @@ max_truncation_recoveries = 3
 # tail_turns = 2                     # user turns kept verbatim (min 1)
 # tail_token_budget = 8000           # token ceiling on that tail
 # summary_max_tokens = 8000          # ceiling on the checkpoint produced
+# The summarizer reads this share of a known context window (a 1M model
+# summarizes from 750k tokens of history), with summarizer_input_token_budget
+# as the floor and as the whole budget when the window is unknown.
+# summarizer_input_window_percent = 75  # clamped to 1..=100
 # summarizer_input_token_budget = 64000
 # min_response_reserve_tokens = 4000 # window held back for the reply
 # max_response_reserve_tokens = 20000
 # Both token budgets scale DOWN automatically on a small context window, so
-# these are caps rather than demands. Nonsense values are clamped, not
+# they never ask for more than fits. Nonsense values are clamped, not
 # rejected: 0 falls back to the default and swapped reserve bounds are ordered.
 
 # Subagents (the `agent` tool). Built-in types: `general` (full tool access

@@ -41,8 +41,13 @@ pub const COMPACTION_TAIL_TURNS: usize = 2;
 pub const COMPACTION_TAIL_TOKEN_BUDGET: usize = 8_000;
 /// Maximum tokens requested from the compaction summarizer.
 pub const COMPACTION_SUMMARY_MAX_TOKENS: usize = 8_000;
-/// Maximum estimated input tokens sent to the summarizer.
+/// Summarizer input budget when the model's window is unknown, and the floor
+/// under the window-scaled budget when it is known.
 pub const COMPACTION_SUMMARIZER_INPUT_TOKEN_BUDGET: usize = 64_000;
+/// Share of a known context window the summarizer's input may use, so the
+/// handoff sees more of the history as windows grow. The rest covers the
+/// summary's own output and the error in the chars/4 token estimate.
+pub const COMPACTION_SUMMARIZER_INPUT_WINDOW_PERCENT: u8 = 75;
 /// Minimum response reserve when deciding whether the next request fits.
 pub const COMPACTION_MIN_RESPONSE_RESERVE_TOKENS: usize = 4_000;
 /// Maximum response reserve when deciding whether the next request fits.
