@@ -585,7 +585,10 @@ fn web_capabilities_notice(
             .map(mermaid_model::utils::redact_secrets)
             .unwrap_or_else(|| "backend initialization failed".to_string());
         let reason = reason.split_whitespace().collect::<Vec<_>>().join(" ");
-        let reason = mermaid_model::utils::truncate_middle_bytes(&reason, 240)
+        // The cap bounds third-party error text (TLS, I/O); it must stay above
+        // Mermaid's own remediation messages, or the fix the user needs is the
+        // part that gets cut.
+        let reason = mermaid_model::utils::truncate_middle_bytes(&reason, 512)
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ");
@@ -826,6 +829,27 @@ mod tests {
             detail,
             "- search: no sovereign SearXNG bundle is available for this platform (windows/x86_64). Configure `[web] search_backend = \"ollama\"`."
         );
+    }
+
+    /// The real unsupported-platform remedy must reach the user whole: a
+    /// truncation marker landing inside it hid the first fix on Windows.
+    #[test]
+    fn web_capability_notice_keeps_the_unsupported_platform_remedy_whole() {
+        let config = Config::default();
+        let reason = crate::searxng::bundle::unsupported_platform_message("windows", "x86_64");
+        let capabilities = capabilities(
+            local_fetch(),
+            unavailable(
+                "managed_searxng",
+                "local managed process",
+                crate::providers::tool::web::Egress::OnMachine,
+                &reason,
+            ),
+        );
+        let notice = web_capabilities_notice(&config, &capabilities).expect("degraded search");
+        let (_, detail) = notice.split_once('\n').expect("detail line");
+        assert!(!detail.contains("[content truncated]"), "{detail}");
+        assert_eq!(detail, format!("- search: {reason}"));
     }
 
     #[test]

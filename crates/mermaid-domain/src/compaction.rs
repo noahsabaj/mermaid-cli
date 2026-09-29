@@ -14,7 +14,8 @@ use serde::{Deserialize, Serialize};
 use mermaid_model::constants::{
     COMPACTION_AUTO_THRESHOLD_PERCENT, COMPACTION_MAX_RESPONSE_RESERVE_TOKENS,
     COMPACTION_MIN_RESPONSE_RESERVE_TOKENS, COMPACTION_SUMMARIZER_INPUT_TOKEN_BUDGET,
-    COMPACTION_SUMMARY_MAX_TOKENS, COMPACTION_TAIL_TOKEN_BUDGET, COMPACTION_TAIL_TURNS,
+    COMPACTION_SUMMARIZER_INPUT_WINDOW_PERCENT, COMPACTION_SUMMARY_MAX_TOKENS,
+    COMPACTION_TAIL_TOKEN_BUDGET, COMPACTION_TAIL_TURNS,
 };
 use mermaid_model::models::{
     ChatMessage, ChatMessageKind, MessageRole, ProviderContinuation, ReasoningLevel, TokenUsage,
@@ -79,6 +80,7 @@ pub struct CompactionPolicy {
     pub tail_token_budget: usize,
     pub summary_max_tokens: usize,
     pub summarizer_input_token_budget: usize,
+    pub summarizer_input_window_percent: u8,
     pub min_response_reserve_tokens: usize,
     pub max_response_reserve_tokens: usize,
 }
@@ -92,6 +94,7 @@ impl Default for CompactionPolicy {
             tail_token_budget: COMPACTION_TAIL_TOKEN_BUDGET,
             summary_max_tokens: COMPACTION_SUMMARY_MAX_TOKENS,
             summarizer_input_token_budget: COMPACTION_SUMMARIZER_INPUT_TOKEN_BUDGET,
+            summarizer_input_window_percent: COMPACTION_SUMMARIZER_INPUT_WINDOW_PERCENT,
             min_response_reserve_tokens: COMPACTION_MIN_RESPONSE_RESERVE_TOKENS,
             max_response_reserve_tokens: COMPACTION_MAX_RESPONSE_RESERVE_TOKENS,
         }
@@ -133,7 +136,13 @@ impl CompactionPolicy {
     /// Total input budget (fixed scaffold + history excerpt) for the
     /// summarizer, given the model's window.
     ///
-    /// Monotonic in the window, which the previous computation was NOT: it
+    /// A known window grants `summarizer_input_window_percent` of it, floored
+    /// at `summarizer_input_token_budget` and never more than the window minus
+    /// the summary's output. A flat 64k ceiling meant a 1M-context model
+    /// summarized ~850k tokens of history from a 64k excerpt, so the handoff
+    /// never improved as windows grew. An unknown window keeps the flat budget.
+    ///
+    /// Monotonic in the window, which an earlier computation was NOT: it
     /// subtracted a flat output cap and then treated a non-positive result as
     /// "window unknown", falling back to the *most permissive* budget. An 8k
     /// model therefore got a 64k input budget while a 9k model got 1k —
@@ -143,9 +152,12 @@ impl CompactionPolicy {
     pub fn summary_input_budget(self, window: Option<usize>) -> usize {
         match window {
             None => self.summarizer_input_token_budget,
-            Some(size) => size
-                .saturating_sub(self.summary_output_tokens(window))
-                .min(self.summarizer_input_token_budget),
+            Some(size) => {
+                let room = size.saturating_sub(self.summary_output_tokens(window));
+                let scaled =
+                    size.saturating_mul(usize::from(self.summarizer_input_window_percent)) / 100;
+                scaled.max(self.summarizer_input_token_budget).min(room)
+            },
         }
     }
 
@@ -1408,16 +1420,71 @@ mod tests {
             policy.summary_input_budget(None),
             policy.summarizer_input_token_budget
         );
-        // A large known window is likewise unchanged: the flat cap is the
-        // ceiling, and the input budget is still the summarizer's own cap.
+        // A large known window keeps the flat output cap as its ceiling.
         assert_eq!(
             policy.summary_output_tokens(Some(1_000_000)),
             policy.summary_max_tokens
         );
+    }
+
+    /// The summarizer's input grows with the window instead of stopping at the
+    /// flat 64k: a 1M-context model summarizes from 750k of history, not 64k.
+    #[test]
+    fn summary_input_budget_scales_with_a_known_window() {
+        let policy = CompactionPolicy::default();
+        assert_eq!(policy.summary_input_budget(Some(1_000_000)), 750_000);
+        assert_eq!(policy.summary_input_budget(Some(200_000)), 150_000);
+        assert_eq!(policy.summary_input_budget(Some(128_000)), 96_000);
+        // Between the floor and the share, the floor holds: no window gets a
+        // smaller budget than the flat one it had before scaling.
         assert_eq!(
-            policy.summary_input_budget(Some(1_000_000)),
+            policy.summary_input_budget(Some(80_000)),
             policy.summarizer_input_token_budget
         );
+        // Small windows are bounded by what the summary's output leaves.
+        for window in [32_000usize, 16_000, 8_000, 4_000] {
+            assert_eq!(
+                policy.summary_input_budget(Some(window)),
+                window - policy.summary_output_tokens(Some(window)),
+                "window {window}",
+            );
+        }
+        // The budget plus the summary's output never exceeds the window.
+        for window in [
+            2_048usize, 9_000, 64_000, 72_000, 85_000, 128_000, 1_048_576,
+        ] {
+            assert!(
+                policy.summary_input_budget(Some(window))
+                    + policy.summary_output_tokens(Some(window))
+                    <= window,
+                "window {window}",
+            );
+        }
+    }
+
+    /// A 1M-window compaction's history excerpt carries far more than the old
+    /// flat 64k budget allowed, so the handoff sees most of the conversation.
+    #[test]
+    fn a_large_window_summarizes_from_a_large_excerpt() {
+        // ~800k chars (~200k tokens) of archived history: past the old 64k
+        // budget and a 128k window, well inside a 1M one.
+        let request = CompactionRequest::manual(
+            request_with(vec![
+                ChatMessage::user("old ".repeat(100_000)),
+                ChatMessage::assistant("old answer ".repeat(36_000)),
+                ChatMessage::user("second".to_string()),
+                ChatMessage::assistant("second answer".to_string()),
+                ChatMessage::user("third".to_string()),
+            ]),
+            None,
+            CompactionPolicy::default(),
+        );
+        let truncated = "truncated for the checkpoint";
+        let small = prepare_compaction(&request, Some(128_000)).expect("prepared");
+        let large = prepare_compaction(&request, Some(1_000_000)).expect("prepared");
+        assert!(small.history_excerpt.contains(truncated));
+        assert!(!large.history_excerpt.contains(truncated));
+        assert!(large.history_excerpt.len() > 790_000);
     }
 
     #[test]

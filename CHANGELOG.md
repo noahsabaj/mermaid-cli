@@ -22,6 +22,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   remembered and gets Mermaid's schemas; `[tools] provider_native = false`
   turns the whole thing off. Along the way `read_file` lists a directory
   instead of failing on it.
+- **The evals can compare the guidance pack on and off, and keep a history.**
+  `just eval-guidance <model>` runs every task with the coaching pack pinned
+  on and then off (3 runs each by default) and reports the difference per
+  task, with a verdict on whether the pack helps that model and whether the
+  `auto` default, which decides by local versus hosted provider rather than by
+  capability, picked right for it. Every live run now appends its scores to
+  `evals/results/history.jsonl` with the date, version and commit, and the
+  report compares each model with its earlier runs and with every model
+  recorded, on the same tasks. `MERMAID_EVAL_JOBS` runs tasks in parallel.
+- **Three longer eval tasks, scored on inputs the model never sees.**
+  `ledger-refunds` carries a feature through parsing, totals and the report;
+  `ledger-exact-money` moves money from `f64` to integer cents across a crate;
+  `stock-wrong-totals` is a bug reported only by its symptom, whose cause sits
+  in a different module. Each is scored by running the program on a hidden
+  input copied in after the run (the new `overlay` on a `command` check), so
+  a fix tuned to the visible samples does not pass.
+
+### Changed
+
+- **Hosted models no longer get coaching through tool descriptions and
+  checklist reminders.** The guidance pack was already off for hosted APIs,
+  but the same advice still reached every model another way: the `memory`,
+  `task_create`, `task_update`, `task_list` and `ask_user_question` tool
+  descriptions told the model how to use them well, and the checklist sent a
+  reminder every 5 model calls without an update and a note whenever more
+  than one task was in progress. Tool descriptions now say only what the tool
+  does, the advice lives in the guidance pack, and both checklist reminders
+  follow `[output] guidance`.
+
+### Fixed
+
+- The stale-task reminder no longer sends the model two runs of about 22
+  spaces in the middle of its sentence.
+
+### Changed
+
+- **Compaction summaries now read more of the conversation on large-context
+  models.** The summarizer's input was capped at 64k tokens whatever the model's
+  window, so a 1M-context model compacting ~850k tokens of history wrote its
+  handoff from a 64k excerpt trimmed from the middle. The budget now scales with
+  the window Mermaid resolves for the model: 75% of it (750k on a 1M model, 150k
+  on 200k), never less than the old 64k and never more than the window minus the
+  summary's output, so small local models behave exactly as before. An unknown
+  window keeps 64k. The share is configurable as
+  `[compaction] summarizer_input_window_percent`.
 
 ## [0.28.0] - 2026-09-29
 

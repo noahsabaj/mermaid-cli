@@ -1,0 +1,5 @@
+2026-03-01 deposit 200 salary
+2026-03-04 withdrawal 80.00 boots
+2026-03-06 refund 80.00 boots did not fit
+2026-03-09 withdrawal 15.5 lunch
+2026-03-12 refund 5.25 overcharged

@@ -166,11 +166,15 @@ max_truncation_recoveries = 3
 # tail_turns = 2                     # user turns kept verbatim (min 1)
 # tail_token_budget = 8000           # token ceiling on that tail
 # summary_max_tokens = 8000          # ceiling on the checkpoint produced
+# The summarizer reads this share of a known context window (a 1M model
+# summarizes from 750k tokens of history), with summarizer_input_token_budget
+# as the floor and as the whole budget when the window is unknown.
+# summarizer_input_window_percent = 75  # clamped to 1..=100
 # summarizer_input_token_budget = 64000
 # min_response_reserve_tokens = 4000 # window held back for the reply
 # max_response_reserve_tokens = 20000
 # Both token budgets scale DOWN automatically on a small context window, so
-# these are caps rather than demands. Nonsense values are clamped, not
+# they never ask for more than fits. Nonsense values are clamped, not
 # rejected: 0 falls back to the default and swapped reserve bounds are ordered.
 
 # Subagents (the `agent` tool). Built-in types: `general` (full tool access
@@ -277,9 +281,19 @@ guidance = "auto"  # default: on for local providers, off for hosted APIs
 
 `auto` decides by provider, not by model name: Ollama is local, and so is any
 provider whose `[providers.<name>] base_url` points at a loopback or LAN host.
-Subagents follow the same setting. A `--system-prompt` replacement is the whole
+Subagents follow the same setting. The same switch covers the checklist
+reminders outside the prompt: the note when more than one task is in progress
+and the reminder when a task has gone several model calls without an update.
+Tool descriptions carry only what each tool does, whatever the setting. A `--system-prompt` replacement is the whole
 prompt, so the pack is never added to it. `/runtime` shows whether the pack is
 on for the current model.
+
+Locality is a stand-in for what actually matters, which is how capable the
+model is. A strong model served from your own machine gets coached anyway, and
+a weak hosted one does not. To see whether the pack helps a particular model,
+run the evals with it pinned on and then off (`just eval-guidance <model>`, see
+[`evals/README.md`](../evals/README.md#guidance-pack-on-versus-off)); the report
+says whether `auto` picked right for it, and `on` or `off` overrides it if not.
 
 ## Output styles
 

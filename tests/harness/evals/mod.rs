@@ -27,6 +27,7 @@
 //! for current models, the matcher is safe to drop.
 
 pub mod mock_provider;
+pub mod report;
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -81,10 +82,16 @@ pub struct TaskSpec {
 pub enum Check {
     /// Run a command in the project afterwards. It must exit 0 and, when
     /// `stdout_contains` is set, print that text.
+    ///
+    /// `overlay` names a directory under the task whose files are copied
+    /// into the project first: hidden inputs or tests the model never saw,
+    /// so a solution tuned to the visible samples does not pass.
     Command {
         run: Vec<String>,
         #[serde(default)]
         stdout_contains: Option<String>,
+        #[serde(default)]
+        overlay: Option<String>,
     },
     /// These paths (files or directories, `.` for the whole project) must be
     /// byte-identical to the fixture.
@@ -238,6 +245,60 @@ impl Target<'_> {
     }
 }
 
+/// Which guidance pack setting a run is pinned to. The pack is the coaching
+/// layered onto the core prompt (`[output] guidance`); running the same model
+/// with it on and then off is how the suite says whether the coaching still
+/// earns its tokens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Guidance {
+    /// Whatever the config in effect decides. For the live tier that is the
+    /// user's own config, which is `auto` unless they pinned it.
+    Default,
+    On,
+    Off,
+}
+
+impl Guidance {
+    /// Parse one entry of `MERMAID_EVAL_GUIDANCE`.
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "default" => Some(Self::Default),
+            "on" => Some(Self::On),
+            "off" => Some(Self::Off),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::On => "on",
+            Self::Off => "off",
+        }
+    }
+
+    /// The `-c` override that pins it, if any.
+    fn override_arg(self) -> Option<&'static str> {
+        match self {
+            Self::Default => None,
+            Self::On => Some("output.guidance=on"),
+            Self::Off => Some("output.guidance=off"),
+        }
+    }
+}
+
+/// Whether the config in effect turns the guidance pack on for a live
+/// `model`: the user's own config, as the binary under test reads it. `None`
+/// when it cannot be read.
+#[must_use]
+pub fn default_guidance(model: &str) -> Option<bool> {
+    mermaid_cli::app::load_config()
+        .ok()
+        .map(|config| config.guidance_pack_enabled(model))
+}
+
 /// One check's verdict.
 #[derive(Debug, Clone)]
 pub struct CheckResult {
@@ -250,6 +311,13 @@ pub struct CheckResult {
 pub struct Run {
     pub task: String,
     pub model: String,
+    pub guidance: Guidance,
+    /// Whether the guidance pack was on, when known: always for a pinned
+    /// setting, and for `Default` when the config could be read.
+    pub pack: Option<bool>,
+    /// Whether the config in effect would turn the pack on for this model,
+    /// whatever this run pinned. Live runs only.
+    pub default_pack: Option<bool>,
     pub checks: Vec<CheckResult>,
     /// The run never produced a `result` line (crash, timeout).
     pub harness_error: Option<String>,
@@ -277,6 +345,9 @@ impl Run {
     #[must_use]
     pub fn explain(&self) -> String {
         let mut out = format!("{} on {}", self.task, self.model);
+        if self.guidance != Guidance::Default {
+            let _ = write!(out, " (guidance pack {})", self.guidance.as_str());
+        }
         if let Some(error) = &self.harness_error {
             let _ = write!(out, "\n  run failed: {error}");
         }
@@ -311,45 +382,48 @@ pub fn run_timeout(target: &Target<'_>) -> Duration {
 /// How long a check command may take.
 const CHECK_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// Run `task` once against `target` and score it.
+/// Run `task` once against `target` and score it, with the guidance pack as
+/// the config decides.
 #[must_use]
 pub fn run_task(task: &Task, target: &Target<'_>) -> Run {
-    let sandbox = crate::harness::test_sandbox(&format!("mermaid-eval-{}", task.id));
+    run_task_with(task, target, Guidance::Default)
+}
+
+/// Run `task` once against `target` with the guidance pack pinned as
+/// `guidance` says, and score it.
+#[must_use]
+pub fn run_task_with(task: &Task, target: &Target<'_>, guidance: Guidance) -> Run {
+    // The setting is in the name so concurrent runs of one task never share
+    // a sandbox.
+    let sandbox =
+        crate::harness::test_sandbox(&format!("mermaid-eval-{}-{}", task.id, guidance.as_str()));
     let project = sandbox.join("project");
     copy_dir(&task.fixture(), &project);
     init_git(&project);
     let before = snapshot(&project);
 
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_mermaid"));
-    cmd.args(["--model", target.model()])
-        .args(&task.spec.args)
-        // Autonomous, like any unattended run: nobody is there to approve a
-        // write. The working copy is a throwaway.
-        .args(["-c", "safety.mode=full_access"])
-        .args(["-c", "safety.checkpoint_on_mutation=false"])
-        .args(["run", "--format", "ndjson"]);
-    if let Some(schema) = &task.spec.output_schema {
-        cmd.arg("--output-schema").arg(task.dir.join(schema));
-    }
-    cmd.arg(&task.spec.prompt)
-        .current_dir(&project)
-        // Inside the project, where `--confine-fs` would allow it, and out of
-        // the snapshot. The model's own `cargo` runs and the checks share it.
-        .env("CARGO_TARGET_DIR", project.join("target"))
-        .env_remove("CARGO_BUILD_TARGET_DIR");
-    if let Target::Mock(mock) = target {
-        isolate(&mut cmd, &sandbox, mock);
-    }
-
+    let cmd = mermaid_command(task, target, guidance, &sandbox, &project);
     let started = Instant::now();
     let output = run_with_timeout(cmd, run_timeout(target));
     let seconds = started.elapsed().as_secs_f64();
     let _ = std::fs::write(sandbox.join("events.ndjson"), &output.stdout);
     let _ = std::fs::write(sandbox.join("stderr.txt"), &output.stderr);
 
+    let default_pack = match target {
+        Target::Live(model) => default_guidance(model),
+        Target::Mock(_) => None,
+    };
+    let pack = match guidance {
+        Guidance::On => Some(true),
+        Guidance::Off => Some(false),
+        Guidance::Default => default_pack,
+    };
     let mut run = Run {
         task: task.id.clone(),
         model: target.model().to_string(),
+        guidance,
+        pack,
+        default_pack,
         checks: Vec::new(),
         harness_error: output.timed_out.then(|| "timed out".to_string()),
         response: String::new(),
@@ -396,6 +470,13 @@ pub fn run_task(task: &Task, target: &Target<'_>) -> Run {
     save_diff(&project, &sandbox);
     let after = snapshot(&project);
     for check in &task.spec.checks {
+        if let Check::Command {
+            overlay: Some(overlay),
+            ..
+        } = check
+        {
+            copy_dir(&task.dir.join(overlay), &project);
+        }
         let (label, failure) = score(
             check,
             &project,
@@ -411,6 +492,40 @@ pub fn run_task(task: &Task, target: &Target<'_>) -> Run {
         });
     }
     run
+}
+
+/// The `mermaid run` invocation for one run of `task`.
+fn mermaid_command(
+    task: &Task,
+    target: &Target<'_>,
+    guidance: Guidance,
+    sandbox: &Path,
+    project: &Path,
+) -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_mermaid"));
+    cmd.args(["--model", target.model()])
+        .args(&task.spec.args)
+        // Autonomous, like any unattended run: nobody is there to approve a
+        // write. The working copy is a throwaway.
+        .args(["-c", "safety.mode=full_access"])
+        .args(["-c", "safety.checkpoint_on_mutation=false"]);
+    if let Some(pin) = guidance.override_arg() {
+        cmd.args(["-c", pin]);
+    }
+    cmd.args(["run", "--format", "ndjson"]);
+    if let Some(schema) = &task.spec.output_schema {
+        cmd.arg("--output-schema").arg(task.dir.join(schema));
+    }
+    cmd.arg(&task.spec.prompt)
+        .current_dir(project)
+        // Inside the project, where `--confine-fs` would allow it, and out of
+        // the snapshot. The model's own `cargo` runs and the checks share it.
+        .env("CARGO_TARGET_DIR", project.join("target"))
+        .env_remove("CARGO_BUILD_TARGET_DIR");
+    if let Target::Mock(mock) = target {
+        isolate(&mut cmd, sandbox, mock);
+    }
+    cmd
 }
 
 /// Tally the event stream into `run`, and return its `result` line.
@@ -452,6 +567,7 @@ fn score(
         Check::Command {
             run: argv,
             stdout_contains,
+            overlay: _,
         } => score_command(argv, stdout_contains.as_deref(), project),
         Check::Unchanged { paths } => {
             let label = format!("{} unchanged", paths.join(", "));
@@ -716,73 +832,4 @@ fn snapshot(project: &Path) -> BTreeMap<String, Vec<u8>> {
 fn tail(text: &str, lines: usize) -> String {
     let all: Vec<&str> = text.lines().collect();
     all[all.len().saturating_sub(lines)..].join("\n")
-}
-
-// ── The live report ─────────────────────────────────────────────────────
-
-/// A count as a float, for averages. Eval counts are small, so the saturation
-/// at `u32::MAX` never happens; it only keeps the conversion exact.
-fn float(n: impl TryInto<u32>) -> f64 {
-    f64::from(n.try_into().unwrap_or(u32::MAX))
-}
-
-/// Score table for a set of live runs, as Markdown.
-#[must_use]
-pub fn report(runs: &[Run]) -> String {
-    let mut models: BTreeMap<&str, Vec<&Run>> = BTreeMap::new();
-    for run in runs {
-        models.entry(run.model.as_str()).or_default().push(run);
-    }
-    let mut out = String::from("# Mermaid behavioural evals\n");
-    for (model, runs) in models {
-        let passed = runs.iter().filter(|r| r.passed()).count();
-        let unscored = runs.iter().filter(|r| r.harness_error.is_some()).count();
-        let edits: usize = runs.iter().map(|r| r.edits).sum();
-        let fuzzy: usize = runs.iter().map(|r| r.fuzzy_edits).sum();
-        let _ = write!(
-            out,
-            "\n## {model}\n\n{passed}/{} runs passed{}. Fuzzy edits: {fuzzy} of {edits}{}.\n\n",
-            runs.len(),
-            if unscored == 0 {
-                String::new()
-            } else {
-                format!(" ({unscored} never finished; see Failures)")
-            },
-            if edits == 0 {
-                String::new()
-            } else {
-                format!(" ({:.0}%)", 100.0 * float(fuzzy) / float(edits))
-            }
-        );
-        out.push_str("| task | passed | turns | tokens | tool calls | fuzzy edits | seconds |\n");
-        out.push_str("|---|---|---|---|---|---|---|\n");
-        let mut tasks: BTreeMap<&str, Vec<&Run>> = BTreeMap::new();
-        for run in &runs {
-            tasks.entry(run.task.as_str()).or_default().push(run);
-        }
-        for (task, runs) in tasks {
-            let n = float(runs.len());
-            let mean = |f: &dyn Fn(&Run) -> f64| runs.iter().map(|r| f(r)).sum::<f64>() / n;
-            let _ = writeln!(
-                out,
-                "| {task} | {}/{} | {:.1} | {:.0} | {:.1} | {}/{} | {:.0} |",
-                runs.iter().filter(|r| r.passed()).count(),
-                runs.len(),
-                mean(&|r| float(r.turns)),
-                mean(&|r| float(r.tokens)),
-                mean(&|r| float(r.tool_calls)),
-                runs.iter().map(|r| r.fuzzy_edits).sum::<usize>(),
-                runs.iter().map(|r| r.edits).sum::<usize>(),
-                mean(&|r| r.seconds),
-            );
-        }
-        let failures: Vec<&&Run> = runs.iter().filter(|r| !r.passed()).collect();
-        if !failures.is_empty() {
-            out.push_str("\nFailures:\n\n");
-            for run in failures {
-                let _ = writeln!(out, "```\n{}\n```", run.explain());
-            }
-        }
-    }
-    out
 }

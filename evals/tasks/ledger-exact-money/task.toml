@@ -1,0 +1,28 @@
+# A refactor across every module: money moves from f64 to integer cents. The
+# visible symptom is small (`-0.00`); the hidden sample has amounts where f64
+# loses a cent, so rounding the output or special-casing the sign does not
+# pass.
+fixture = "ledger"
+prompt = """
+This ledger stores money as `f64`, and it shows: `cargo run -- samples/petty-cash.txt` prints `Balance: -0.00` for a tin that should be exactly empty, and large ledgers come out a cent off. Change it to store money as an exact integer number of cents everywhere, parsing amounts like `12`, `12.5` and `12.34` exactly. The summary's format stays the same. Keep the existing tests passing.
+"""
+
+[[check]]
+kind = "command"
+run = ["cargo", "run", "--offline", "--quiet", "--", "samples/petty-cash.txt"]
+stdout_contains = "Entries: 3\nDeposits: 0.30\nWithdrawals: 0.30\nBalance: 0.00\n"
+
+[[check]]
+kind = "command"
+overlay = "hidden"
+run = ["cargo", "run", "--offline", "--quiet", "--", "samples/eval-exact.txt"]
+stdout_contains = "Entries: 5\nDeposits: 70368744177674.85\nWithdrawals: 0.30\nBalance: 70368744177674.55\n"
+
+[[check]]
+kind = "command"
+run = ["cargo", "run", "--offline", "--quiet", "--", "samples/january.txt"]
+stdout_contains = "Entries: 5\nDeposits: 1240.25\nWithdrawals: 532.49\nBalance: 707.76\n"
+
+[[check]]
+kind = "command"
+run = ["cargo", "test", "--offline", "--quiet"]

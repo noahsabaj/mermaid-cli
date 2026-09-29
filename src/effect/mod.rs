@@ -1277,10 +1277,7 @@ impl EffectRunner {
                     // has edited is the worst of both).
                     let _ = tx
                         .send(Msg::TaskNotice {
-                            text: format!(
-                                "The user edited the task checklist: {line}. Acknowledge and \
-                                 incorporate this into your plan."
-                            ),
+                            text: format!("The user edited the task checklist: {line}."),
                         })
                         .await;
                     let _ = tx.send(Msg::TransientStatus { text: line }).await;
