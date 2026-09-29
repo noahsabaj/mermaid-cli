@@ -96,10 +96,16 @@ fn default_safety() -> String {
 pub enum Check {
     /// Run a command in the project afterwards. It must exit 0 and, when
     /// `stdout_contains` is set, print that text.
+    ///
+    /// `overlay` names a directory under the task whose files are copied
+    /// into the project first: hidden inputs or tests the model never saw,
+    /// so a solution tuned to the visible samples does not pass.
     Command {
         run: Vec<String>,
         #[serde(default)]
         stdout_contains: Option<String>,
+        #[serde(default)]
+        overlay: Option<String>,
     },
     /// These paths (files or directories, `.` for the whole project) must be
     /// byte-identical to the fixture.
@@ -477,6 +483,13 @@ pub fn run_task_with(task: &Task, target: &Target<'_>, guidance: Guidance) -> Ru
     save_diff(&project, &sandbox);
     let after = snapshot(&project);
     for check in &task.spec.checks {
+        if let Check::Command {
+            overlay: Some(overlay),
+            ..
+        } = check
+        {
+            copy_dir(&task.dir.join(overlay), &project);
+        }
         let (label, failure) = score(
             check,
             &project,
@@ -610,6 +623,7 @@ fn score(
         Check::Command {
             run: argv,
             stdout_contains,
+            overlay: _,
         } => score_command(argv, stdout_contains.as_deref(), project),
         Check::Unchanged { paths } => {
             let label = format!("{} unchanged", paths.join(", "));

@@ -1,0 +1,5 @@
+sku,quantity,unit_price,name,category
+P-1,4,12.00,Primer,"Paint, outdoor"
+P-2,2,30.00,"Stain, dark oak","Paint, outdoor"
+W-7,50,0.20,"Pipe, 12"" long",Plumbing
+T-4,1,9.99,Saw,Tools

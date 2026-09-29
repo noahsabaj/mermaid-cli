@@ -272,11 +272,10 @@ impl ToolExecutor for AskUserQuestionTool {
     fn schema(&self) -> ToolDefinition {
         ToolDefinition {
             name: "ask_user_question".to_string(),
-            description: "Ask the user one or more multiple-choice questions when you are genuinely blocked on a decision that is theirs to make — one you cannot resolve from their request, the code, or a sensible default. The terminal renders an interactive selectable prompt and the user's answer comes back as this tool's result. \
-                Use it only when the answer changes what you do next; do NOT use it for choices with an obvious default (just pick, say so, and proceed) or for facts you can verify yourself. The user can always type a custom \"Other\" answer, so your options need not be exhaustive. \
-                Batch up to 4 independent questions in one call rather than asking one at a time. Set each question's `kind`: `select` (pick one), `multiSelect` (pick any), `rank` (reorder options), or an input kind that collects a typed value — `text` (optional `validate`), `number` (`min`/`max`/`step`/`slider`), `date`, or `path`. Choice kinds need `options`; list a recommended option first and mark it by ending its label with \"(Recommended)\". \
-                Attach an optional preview to an option (a `content` string plus an optional `diff` flag) to show an ASCII mockup, code, config, or a unified diff side-by-side when that option is focused — a diff of the change an option would make is often clearer than a text description. \
-                Set `memoryKey` on a question to let the user remember the answer across sessions, so settled preferences (package manager, code style) aren't re-asked."
+            description: "Ask the user one or more questions. The terminal renders an interactive selectable prompt and the user's answer comes back as this tool's result. The user can always type a custom \"Other\" answer. \
+                Up to 4 questions per call. Each question's `kind`: `select` (pick one), `multiSelect` (pick any), `rank` (reorder options), or an input kind that collects a typed value — `text` (optional `validate`), `number` (`min`/`max`/`step`/`slider`), `date`, or `path`. Choice kinds need `options`; an option whose label ends with \"(Recommended)\" is shown as the recommendation. \
+                An option can carry a preview (a `content` string plus an optional `diff` flag), shown side-by-side when that option is focused: an ASCII mockup, code, config, or a unified diff. \
+                `memoryKey` on a question lets the user remember the answer across sessions, so it is not asked again."
                 .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",

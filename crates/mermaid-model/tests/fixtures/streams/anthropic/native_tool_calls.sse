@@ -1,0 +1,26 @@
+data: {"type":"message_start","message":{"id":"msg_07","usage":{"input_tokens":40}}}
+
+data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_edit","name":"str_replace_based_edit_tool"}}
+
+data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"command\":\"str_replace\",\"path\":\"src/lib.rs\","}}
+
+data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"\"old_str\":\"old\",\"new_str\":\"new\"}"}}
+
+data: {"type":"content_block_stop","index":0}
+
+data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_bash","name":"bash"}}
+
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"command\":\"cargo test\"}"}}
+
+data: {"type":"content_block_stop","index":1}
+
+data: {"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"toolu_read","name":"read_file"}}
+
+data: {"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"a.txt\"}"}}
+
+data: {"type":"content_block_stop","index":2}
+
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":30}}
+
+data: {"type":"message_stop"}
+

@@ -1,0 +1,91 @@
+# A known-good solution, replayed by the offline tier through the mock
+# provider.
+
+[[turn]]
+calls = [
+    { tool = "read_file", args = { path = "src/entry.rs" } },
+    { tool = "read_file", args = { path = "src/parse.rs" } },
+    { tool = "read_file", args = { path = "src/balance.rs" } },
+    { tool = "read_file", args = { path = "src/report.rs" } },
+]
+
+[[turn]]
+tool = "edit_file"
+args.path = "src/entry.rs"
+args.target_content = """
+    Deposit,
+    Withdrawal,
+}"""
+args.replacement_content = """
+    Deposit,
+    Withdrawal,
+    /// Money coming back, such as a returned purchase. Adds to the balance
+    /// like a deposit but is totalled on its own.
+    Refund,
+}"""
+
+[[turn]]
+tool = "edit_file"
+args.path = "src/parse.rs"
+args.target_content = """
+        "withdrawal" => Kind::Withdrawal,"""
+args.replacement_content = """
+        "withdrawal" => Kind::Withdrawal,
+        "refund" => Kind::Refund,"""
+
+[[turn]]
+tool = "write_file"
+args.path = "src/balance.rs"
+args.content = """
+use crate::entry::{Entry, Kind};
+
+/// Sums per kind.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Totals {
+    pub deposits: f64,
+    pub withdrawals: f64,
+    pub refunds: f64,
+}
+
+pub fn totals(entries: &[Entry]) -> Totals {
+    let mut totals = Totals::default();
+    for entry in entries {
+        match entry.kind {
+            Kind::Deposit => totals.deposits += entry.amount,
+            Kind::Withdrawal => totals.withdrawals += entry.amount,
+            Kind::Refund => totals.refunds += entry.amount,
+        }
+    }
+    totals
+}
+
+/// What is left: every deposit and refund minus every withdrawal.
+pub fn balance(entries: &[Entry]) -> f64 {
+    let mut balance = 0.0;
+    for entry in entries {
+        match entry.kind {
+            Kind::Deposit | Kind::Refund => balance += entry.amount,
+            Kind::Withdrawal => balance -= entry.amount,
+        }
+    }
+    balance
+}
+"""
+
+[[turn]]
+tool = "edit_file"
+args.path = "src/report.rs"
+args.target_content = """
+    out.push_str(&format!("Withdrawals: {}\\n", money(totals.withdrawals)));"""
+args.replacement_content = """
+    out.push_str(&format!("Withdrawals: {}\\n", money(totals.withdrawals)));
+    if entries.iter().any(|e| e.kind == crate::entry::Kind::Refund) {
+        out.push_str(&format!("Refunds: {}\\n", money(totals.refunds)));
+    }"""
+
+[[turn]]
+tool = "execute_command"
+args = { command = "cargo test --offline --quiet" }
+
+[[turn]]
+say = "Added a `refund` entry kind. Refunds add to the balance, are totalled separately, and get a `Refunds:` line in the summary only when the ledger has one."

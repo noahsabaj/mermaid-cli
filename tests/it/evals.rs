@@ -69,6 +69,19 @@ fn every_task_is_well_formed() {
         if let Some(schema) = &task.spec.output_schema {
             assert!(task.dir.join(schema).is_file(), "{}: no {schema}", task.id);
         }
+        for check in &task.spec.checks {
+            if let Check::Command {
+                overlay: Some(overlay),
+                ..
+            } = check
+            {
+                assert!(
+                    task.dir.join(overlay).is_dir(),
+                    "{}: no overlay directory {overlay}",
+                    task.id
+                );
+            }
+        }
         // A request check can only be scored against the mock, so the live
         // tier must never see it.
         if task

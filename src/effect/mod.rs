@@ -1281,10 +1281,7 @@ impl EffectRunner {
                     // has edited is the worst of both).
                     let _ = tx
                         .send(Msg::TaskNotice {
-                            text: format!(
-                                "The user edited the task checklist: {line}. Acknowledge and \
-                                 incorporate this into your plan."
-                            ),
+                            text: format!("The user edited the task checklist: {line}."),
                         })
                         .await;
                     let _ = tx.send(Msg::TransientStatus { text: line }).await;
@@ -2312,6 +2309,7 @@ mod tests {
             suppress_auto_compact: false,
             requested_compaction: None,
             native_compaction: None,
+            native_tools: mermaid_model::models::NativeTools::default(),
         };
         r.dispatch(Cmd::CallModel { turn, request });
         assert_eq!(r.scope_count(), 1);
@@ -2342,6 +2340,7 @@ mod tests {
             suppress_auto_compact: false,
             requested_compaction: None,
             native_compaction: None,
+            native_tools: mermaid_model::models::NativeTools::default(),
         };
         r.dispatch(Cmd::CallModel { turn, request });
         assert_eq!(r.scope_count(), 1);
@@ -2431,6 +2430,7 @@ mod tests {
                 suppress_auto_compact: false,
                 requested_compaction: None,
                 native_compaction: None,
+                native_tools: mermaid_model::models::NativeTools::default(),
             },
         });
         assert_eq!(r.scope_count(), 1);
@@ -2464,6 +2464,7 @@ mod tests {
             suppress_auto_compact: false,
             requested_compaction: None,
             native_compaction: None,
+            native_tools: mermaid_model::models::NativeTools::default(),
         };
         let turn = TurnId(123);
 

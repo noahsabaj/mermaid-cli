@@ -177,6 +177,7 @@ fn only_what_follows_the_last_compaction_counts_as_context() {
         ChatMessage::assistant(text).with_provider_continuation(ProviderContinuation::Anthropic {
             signature: String::new(),
             compaction: Some(json!({"type": "compaction", "content": text})),
+            native_tool_calls: Vec::new(),
         })
     };
     let history = vec![

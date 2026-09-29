@@ -1,0 +1,52 @@
+# A known-good solution, replayed by the offline tier through the mock
+# provider.
+
+[[turn]]
+calls = [
+    { tool = "read_file", args = { path = "data/stock.csv" } },
+    { tool = "read_file", args = { path = "src/summary.rs" } },
+    { tool = "read_file", args = { path = "src/load.rs" } },
+]
+
+[[turn]]
+tool = "read_file"
+args = { path = "src/csv.rs" }
+
+[[turn]]
+tool = "edit_file"
+args.path = "src/csv.rs"
+args.target_content = """
+/// Split one record into its fields, trimming surrounding whitespace.
+pub fn split_record(line: &str) -> Vec<String> {
+    line.split(',').map(|field| field.trim().to_string()).collect()
+}"""
+args.replacement_content = """
+/// Split one record into its fields, trimming surrounding whitespace.
+///
+/// A field in double quotes may hold commas, and `""` inside it is one quote.
+pub fn split_record(line: &str) -> Vec<String> {
+    let mut fields = Vec::new();
+    let mut field = String::new();
+    let mut quoted = false;
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' if quoted && chars.peek() == Some(&'"') => {
+                field.push('"');
+                chars.next();
+            }
+            '"' => quoted = !quoted,
+            ',' if !quoted => fields.push(std::mem::take(&mut field).trim().to_string()),
+            c => field.push(c),
+        }
+    }
+    fields.push(field.trim().to_string());
+    fields
+}"""
+
+[[turn]]
+tool = "execute_command"
+args = { command = "cargo run --offline --quiet -- data/stock.csv" }
+
+[[turn]]
+say = "The CSV splitter split on every comma, including the ones inside quoted names like \"Bolts, M4\", which shifted the category column. It now honours quotes, so the totals are right."

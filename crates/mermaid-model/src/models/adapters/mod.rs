@@ -23,6 +23,11 @@ pub mod meta;
 /// A scripted loopback HTTP provider for adapter tests.
 #[cfg(test)]
 mod mock_http;
+/// The native tools end to end: declared, translated, replayed, refused.
+#[cfg(test)]
+mod native_tool_calls;
+/// Anthropic's own text-editor and bash tools, mapped onto Mermaid's.
+pub mod native_tools;
 pub mod ollama;
 pub mod ollama_sizing;
 pub mod openai_compat;

@@ -159,6 +159,7 @@ pub fn build_chat_request(state: &State) -> ChatRequest {
         requested_compaction: state.runtime.requested_compaction.clone(),
         // The effect layer decides, once it knows the provider.
         native_compaction: None,
+        native_tools: mermaid_model::models::NativeTools::default(),
     }
 }
 

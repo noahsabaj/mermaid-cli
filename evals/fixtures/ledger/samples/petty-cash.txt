@@ -1,0 +1,4 @@
+# The petty cash tin, which should come out exactly empty.
+2026-02-01 deposit 0.30 float
+2026-02-02 withdrawal 0.10 stamp
+2026-02-03 withdrawal 0.20 envelope

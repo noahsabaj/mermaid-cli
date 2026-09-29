@@ -1,0 +1,27 @@
+# A bug reported by its symptom, not by a failing test. The report is about
+# totals (`summary.rs`); the cause is the CSV splitter (`csv.rs`), which
+# ignores quoting. Scored on the visible export and on one the model never
+# sees, with quoted commas in another column and an escaped quote.
+fixture = "stock"
+prompt = """
+`cargo run -- data/stock.csv` gives the wrong stock values. There is a category called `M4"` that does not exist in our catalogue, and Fasteners and Tools come out too low. The file is an ordinary CSV export from our spreadsheet. Find the cause and fix it. Keep the existing tests passing.
+"""
+
+[[check]]
+kind = "command"
+run = ["cargo", "run", "--offline", "--quiet", "--", "data/stock.csv"]
+stdout_contains = "Fasteners: 20.00\nPaint: 129.00\nTools: 79.50\nTotal: 228.50\n"
+
+[[check]]
+kind = "command"
+overlay = "hidden"
+run = ["cargo", "run", "--offline", "--quiet", "--", "data/eval-export.csv"]
+stdout_contains = "Paint, outdoor: 108.00\nPlumbing: 10.00\nTools: 9.99\nTotal: 127.99\n"
+
+[[check]]
+kind = "command"
+run = ["cargo", "test", "--offline", "--quiet"]
+
+[[check]]
+kind = "unchanged"
+paths = ["tests", "data"]

@@ -302,16 +302,33 @@ fn replay_write_file(args: &serde_json::Value, workdir: &Path) -> Result<String>
 
 fn replay_edit_file(args: &serde_json::Value, workdir: &Path) -> Result<String> {
     let path = string_arg(args, "path")?;
-    let target = string_arg(args, "target_content")?;
     let replacement = string_arg(args, "replacement_content")?;
+    // An `insert_line` edit puts the text after that line (the text editor's
+    // `insert`); anything else is a search-and-replace.
+    let insert_line = args
+        .get("insert_line")
+        .map(|line| {
+            line.as_u64()
+                .and_then(|l| usize::try_from(l).ok())
+                .ok_or_else(|| anyhow::anyhow!("edit_file replay: bad insert_line {line}"))
+        })
+        .transpose()?;
+    let target = match insert_line {
+        Some(_) => "",
+        None => string_arg(args, "target_content")?,
+    };
     let allow_multiple = args
         .get("allow_multiple")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
+    let apply = |original: &str| match insert_line {
+        Some(line) => crate::edit::insert_content(original, line, replacement),
+        None => crate::edit::replace_content(original, target, replacement, allow_multiple),
+    };
     let p = Path::new(path);
     if p.is_absolute() {
         let original = std::fs::read_to_string(p)?;
-        let applied = crate::edit::replace_content(&original, target, replacement, allow_multiple)
+        let applied = apply(&original)
             .map_err(|e| anyhow::anyhow!("edit_file replay for {}: {e}", p.display()))?;
         crate::write_atomic(p, applied.new_contents.as_bytes())?;
         Ok(format!("replayed edit_file {}", p.display()))
@@ -324,7 +341,7 @@ fn replay_edit_file(args: &serde_json::Value, workdir: &Path) -> Result<String> 
             std::io::Read::read_to_string(&mut file, &mut buf)?;
             buf
         };
-        let applied = crate::edit::replace_content(&original, target, replacement, allow_multiple)
+        let applied = apply(&original)
             .map_err(|e| anyhow::anyhow!("edit_file replay for {}: {e}", rel.display()))?;
         crate::pathguard::write_atomic_beneath(workdir, &rel, applied.new_contents.as_bytes())?;
         Ok(format!(
@@ -567,6 +584,28 @@ mod tests {
             replay_pending_action(&action).is_err(),
             "an escaping working_dir must be rejected before exec"
         );
+    }
+
+    /// An approved text-editor `insert` (an `edit_file` with `insert_line`)
+    /// replays as an insert, not as a search for an empty target.
+    #[test]
+    fn replay_edit_file_inserts_after_a_line() {
+        let root =
+            std::env::temp_dir().join(format!("mermaid_replay_insert_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.txt"), "one\ntwo\n").unwrap();
+        let action = serde_json::json!({
+            "tool": "edit_file",
+            "workdir": root,
+            "args": {"path": "a.txt", "insert_line": 1, "replacement_content": "mid"}
+        });
+        replay_pending_action(&action).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.txt")).unwrap(),
+            "one\nmid\ntwo\n"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
