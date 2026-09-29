@@ -17,6 +17,8 @@ pub enum ReplaceError {
     AmbiguousMatch { count: usize },
     /// Target content was empty.
     EmptyTarget,
+    /// An insert named a line past the end of the file.
+    LineOutOfRange { line: usize, total: usize },
 }
 
 impl std::fmt::Display for ReplaceError {
@@ -28,6 +30,10 @@ impl std::fmt::Display for ReplaceError {
                 "target_content found {count} times; provide more surrounding context to disambiguate, or set allow_multiple=true"
             ),
             Self::EmptyTarget => write!(f, "target_content cannot be empty"),
+            Self::LineOutOfRange { line, total } => write!(
+                f,
+                "cannot insert after line {line}: the file has {total} lines (0 inserts at the top)"
+            ),
         }
     }
 }
@@ -200,9 +206,80 @@ pub fn replace_content(
     })
 }
 
+/// Insert `text` after line `after_line` of `original` (1-based; `0` puts it
+/// first). Line endings follow the file's, and the result ends with one, as a
+/// replacement's does.
+///
+/// # Errors
+///
+/// Returns [`ReplaceError::LineOutOfRange`] if `after_line` is past the last
+/// line.
+pub fn insert_content(
+    original: &str,
+    after_line: usize,
+    text: &str,
+) -> Result<AppliedFile, ReplaceError> {
+    let line_sep = if original.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let split = |s: &str| {
+        let mut lines: Vec<String> = s
+            .split('\n')
+            .map(|l| l.strip_suffix('\r').unwrap_or(l).to_string())
+            .collect();
+        if lines.last().is_some_and(String::is_empty) {
+            lines.pop();
+        }
+        lines
+    };
+    let mut lines = split(original);
+    if after_line > lines.len() {
+        return Err(ReplaceError::LineOutOfRange {
+            line: after_line,
+            total: lines.len(),
+        });
+    }
+    let tail = lines.split_off(after_line);
+    lines.extend(split(text));
+    lines.extend(tail);
+    lines.push(String::new());
+    Ok(AppliedFile {
+        new_contents: lines.join(line_sep),
+        fuzzy: false,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn insert_lands_after_the_named_line() {
+        let original = "one\ntwo\n";
+        assert_eq!(
+            insert_content(original, 0, "zero").unwrap().new_contents,
+            "zero\none\ntwo\n"
+        );
+        assert_eq!(
+            insert_content(original, 1, "a\nb\n").unwrap().new_contents,
+            "one\na\nb\ntwo\n"
+        );
+        assert_eq!(
+            insert_content(original, 2, "three").unwrap().new_contents,
+            "one\ntwo\nthree\n"
+        );
+        assert_eq!(
+            insert_content("x\r\ny\r\n", 1, "m").unwrap().new_contents,
+            "x\r\nm\r\ny\r\n"
+        );
+        assert_eq!(insert_content("", 0, "new").unwrap().new_contents, "new\n");
+        assert_eq!(
+            insert_content(original, 3, "x"),
+            Err(ReplaceError::LineOutOfRange { line: 3, total: 2 })
+        );
+    }
 
     #[test]
     fn exact_single_replacement() {

@@ -17,6 +17,19 @@ full-trim and Unicode normalisation before refusing. `apply_patch` is for multi-
 new-file work and takes a unified diff, range headers included. Both write atomically beneath
 the resolved root, snapshot a checkpoint for `/undo`, and replay through the approval queue.
 
+On Anthropic, the model gets Anthropic's own text editor and bash tools, the definitions Claude
+is trained on, in place of Mermaid's schemas for the same work: the text editor stands in for
+`read_file`, `write_file` and `edit_file`, and `bash` sits beside `execute_command`, which keeps
+its timeout and background mode. Each native call is rewritten onto the Mermaid tool it stands
+for before anything runs (`view` is a line-numbered `read_file`, `str_replace` and `insert` are
+`edit_file`, `bash` is `execute_command` with the longest foreground timeout), so the policy
+gate, the read-only sandbox, checkpoints and approvals see the same tool they always do, and
+history sends the call back to the model as it wrote it. `bash` is not offered on Windows,
+where commands run under PowerShell. A model that refuses these tools gets Mermaid's schemas
+from then on; `[tools] provider_native = false` always sends Mermaid's. OpenAI's `apply_patch`
+and `shell` tools exist only in the Responses API, which Mermaid does not use for OpenAI;
+Mermaid's own `apply_patch` already takes the same patch format.
+
 Paths outside the project (absolute, or traversing out of it) resolve to where they point and
 are gated as external access: `read_only` denies, `ask` prompts with a per-directory
 "don't ask again", `auto` classifies, `full_access` allows. See the README's [Safety](../README.md#safety) section.

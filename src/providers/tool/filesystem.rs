@@ -169,6 +169,10 @@ impl ToolExecutor for ReadFileTool {
         if paths.is_empty() {
             return ToolOutcome::error("read_file requires at least one path", None);
         }
+        let view = match View::from_args(&args) {
+            Ok(view) => view,
+            Err(e) => return ToolOutcome::error(e, None),
+        };
 
         let start = std::time::Instant::now();
         let roots = AllowedRoots::new(&ctx.workdir, ctx.scratchpad.as_deref());
@@ -200,7 +204,15 @@ impl ToolExecutor for ReadFileTool {
                 _ = ctx.token.cancelled() => {
                     return ToolOutcome::cancelled();
                 },
-                read = read_one(target.root, target.rel) => {
+                read = read_target(target.root, target.rel) => {
+                    let read = read.and_then(|(content, was_truncated, is_dir)| {
+                        if is_dir {
+                            return Ok((content, was_truncated));
+                        }
+                        view.apply(&content)
+                            .map(|content| (content, was_truncated))
+                            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
+                    });
                     match read {
                         Ok((content, was_truncated)) => {
                             // A byte-identical repeat of a read this same turn
@@ -678,16 +690,10 @@ impl ToolExecutor for EditFileTool {
         let Some(path) = args.get("path").and_then(|v| v.as_str()) else {
             return ToolOutcome::error("edit_file requires 'path' (string)", None);
         };
-        let Some(target) = args.get("target_content").and_then(|v| v.as_str()) else {
-            return ToolOutcome::error("edit_file requires 'target_content' (string)", None);
+        let edit = match Edit::from_args(&args) {
+            Ok(edit) => edit,
+            Err(e) => return ToolOutcome::error(e, None),
         };
-        let Some(replacement) = args.get("replacement_content").and_then(|v| v.as_str()) else {
-            return ToolOutcome::error("edit_file requires 'replacement_content' (string)", None);
-        };
-        let allow_multiple = args
-            .get("allow_multiple")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
 
         let roots = AllowedRoots::new(&ctx.workdir, ctx.scratchpad.as_deref());
         let ResolvedInRoot {
@@ -700,14 +706,11 @@ impl ToolExecutor for EditFileTool {
             Err(e) => return ToolOutcome::error(format!("edit_file: {e}"), None),
         };
 
+        let mut pending_args = edit.args();
+        pending_args["path"] = serde_json::json!(path);
         let pending_action = serde_json::json!({
             "tool": "edit_file",
-            "args": {
-                "path": path,
-                "target_content": target,
-                "replacement_content": replacement,
-                "allow_multiple": allow_multiple,
-            },
+            "args": pending_args,
             "workdir": ctx.workdir.display().to_string(),
             "turn_id": ctx.turn.0,
             "call_id": ctx.call_id.0,
@@ -748,13 +751,10 @@ impl ToolExecutor for EditFileTool {
         }
 
         let display_path = path.to_string();
-        let target = target.to_string();
-        let replacement = replacement.to_string();
-
         tokio::select! {
             biased;
             _ = ctx.token.cancelled() => ToolOutcome::cancelled(),
-            result = tokio::task::spawn_blocking(move || edit_file_blocking(&root, &rel, &target, &replacement, allow_multiple)) => {
+            result = tokio::task::spawn_blocking(move || edit_file_blocking(&root, &rel, &edit)) => {
                 match result {
                     Ok(Ok(edit)) => {
                         let duration_secs = start.elapsed().as_secs_f64();
@@ -958,6 +958,125 @@ async fn external_read_gate(ctx: &ExecContext, raw: &str, abs: &Path) -> Option<
     }
 }
 
+/// How `read_file` presents a file: whole and as-is by default, or
+/// line-numbered and optionally cut to a line range. The numbered form is the
+/// text editor's `view` (see the Anthropic adapter's native tools), which the
+/// model reads line numbers from to aim an `insert`. Neither field is in the
+/// advertised schema: only that translation sends them.
+#[derive(Debug, Default)]
+struct View {
+    line_numbers: bool,
+    /// 1-based inclusive first and last line; `None` last means to the end.
+    range: Option<(usize, Option<usize>)>,
+}
+
+impl View {
+    fn from_args(args: &serde_json::Value) -> Result<Self, String> {
+        let line_numbers = args
+            .get("line_numbers")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let range = match args.get("view_range") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(range) => {
+                let bad = || {
+                    format!(
+                        "view_range must be [start, end] with 1 <= start and end >= start or \
+                         end = -1, got {range}"
+                    )
+                };
+                let [start, end] = range.as_array().map(Vec::as_slice).ok_or_else(bad)? else {
+                    return Err(bad());
+                };
+                let start = start
+                    .as_u64()
+                    .filter(|s| *s >= 1)
+                    .and_then(|s| usize::try_from(s).ok())
+                    .ok_or_else(bad)?;
+                let end = match end.as_i64() {
+                    Some(-1) => None,
+                    Some(e) => Some(
+                        usize::try_from(e)
+                            .ok()
+                            .filter(|e| *e >= start)
+                            .ok_or_else(bad)?,
+                    ),
+                    None => return Err(bad()),
+                };
+                Some((start, end))
+            },
+        };
+        Ok(Self {
+            line_numbers: line_numbers || range.is_some(),
+            range,
+        })
+    }
+
+    fn apply(&self, content: &str) -> Result<String, String> {
+        if !self.line_numbers {
+            return Ok(content.to_string());
+        }
+        let total = content.lines().count();
+        let (start, end) = self.range.unwrap_or((1, None));
+        if start > total.max(1) {
+            return Err(format!(
+                "view_range starts at line {start}, but the file has {total} lines"
+            ));
+        }
+        let end = end.unwrap_or(total).min(total);
+        let mut out = String::new();
+        for (idx, line) in content.lines().enumerate().take(end).skip(start - 1) {
+            out.push_str(&format!("{:>6}\t{line}\n", idx + 1));
+        }
+        Ok(out)
+    }
+}
+
+/// Entries a directory listing shows before it stops.
+const DIRECTORY_LISTING_CAP: usize = 1_000;
+
+/// Read `rel` beneath `root`: a file's (bounded) text, or for a directory a
+/// listing two levels deep, skipping hidden and ignored entries. The flag says
+/// which it was, so a listing is never line-numbered as if it were a file.
+async fn read_target(root: PathBuf, rel: PathBuf) -> std::io::Result<(String, bool, bool)> {
+    let abs = root.join(&rel);
+    if tokio::fs::metadata(&abs).await.is_ok_and(|m| m.is_dir()) {
+        let listing = tokio::task::spawn_blocking(move || list_directory(&abs))
+            .await
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        return Ok((listing.0, listing.1, true));
+    }
+    let (content, truncated) = read_one(root, rel).await?;
+    Ok((content, truncated, false))
+}
+
+/// `dir`'s entries two levels deep, one relative path per line (directories
+/// end in `/`), and whether the listing hit [`DIRECTORY_LISTING_CAP`].
+fn list_directory(dir: &Path) -> (String, bool) {
+    let mut entries: Vec<String> = ignore::WalkBuilder::new(dir)
+        .max_depth(Some(2))
+        .hidden(true)
+        .build()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.depth() > 0)
+        .filter_map(|entry| {
+            let rel = entry.path().strip_prefix(dir).ok()?.display().to_string();
+            let is_dir = entry.file_type().is_some_and(|t| t.is_dir());
+            Some(if is_dir { format!("{rel}/") } else { rel })
+        })
+        .collect();
+    entries.sort();
+    let truncated = entries.len() > DIRECTORY_LISTING_CAP;
+    entries.truncate(DIRECTORY_LISTING_CAP);
+    let mut out = entries.join("\n");
+    if truncated {
+        out.push_str(&format!(
+            "\n[TRUNCATED: listing stops at {DIRECTORY_LISTING_CAP} entries]"
+        ));
+    }
+    (out, truncated)
+}
+
 /// Read one file (bounded) from `rel` beneath `root`. Returns the (possibly
 /// marker-footed) text and the REAL truncation flag from the bounded read, so
 /// the caller propagates that rather than sniffing the output for the marker
@@ -1059,13 +1178,72 @@ struct EditResult {
     fuzzy: bool,
 }
 
-fn edit_file_blocking(
-    root: &Path,
-    rel: &Path,
-    target: &str,
-    replacement: &str,
-    allow_multiple: bool,
-) -> Result<EditResult, String> {
+/// One `edit_file` change: a search-and-replace, or an insert after a line.
+enum Edit {
+    Replace {
+        target: String,
+        replacement: String,
+        allow_multiple: bool,
+    },
+    Insert {
+        after_line: usize,
+        text: String,
+    },
+}
+
+impl Edit {
+    /// The change `args` asks for. `insert_line` is the text editor's
+    /// `insert` (see the Anthropic adapter's native tools): the text goes
+    /// after that line instead of over a match. It is not in the advertised
+    /// schema; only that translation sends it.
+    fn from_args(args: &serde_json::Value) -> Result<Self, String> {
+        let text = |key: &str| args.get(key).and_then(serde_json::Value::as_str);
+        let replacement = text("replacement_content")
+            .ok_or("edit_file requires 'replacement_content' (string)")?
+            .to_string();
+        if let Some(line) = args.get("insert_line") {
+            let after_line = line
+                .as_u64()
+                .and_then(|l| usize::try_from(l).ok())
+                .ok_or("edit_file 'insert_line' must be a non-negative line number")?;
+            return Ok(Self::Insert {
+                after_line,
+                text: replacement,
+            });
+        }
+        Ok(Self::Replace {
+            target: text("target_content")
+                .ok_or("edit_file requires 'target_content' (string)")?
+                .to_string(),
+            replacement,
+            allow_multiple: args
+                .get("allow_multiple")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+        })
+    }
+
+    /// The arguments that replay this change (without the path).
+    fn args(&self) -> serde_json::Value {
+        match self {
+            Self::Replace {
+                target,
+                replacement,
+                allow_multiple,
+            } => serde_json::json!({
+                "target_content": target,
+                "replacement_content": replacement,
+                "allow_multiple": allow_multiple,
+            }),
+            Self::Insert { after_line, text } => serde_json::json!({
+                "insert_line": after_line,
+                "replacement_content": text,
+            }),
+        }
+    }
+}
+
+fn edit_file_blocking(root: &Path, rel: &Path, edit: &Edit) -> Result<EditResult, String> {
     let file = mermaid_runtime::open_beneath(root, rel, mermaid_runtime::OpenIntent::Read)
         .map_err(|e| format!("cannot open file: {e}"))?;
     let (data, truncated) = mermaid_model::utils::read_capped(file, MAX_FILE_READ_BYTES)
@@ -1076,8 +1254,17 @@ fn edit_file_blocking(
         ));
     }
     let original = String::from_utf8_lossy(&data).into_owned();
-    let applied = mermaid_runtime::replace_content(&original, target, replacement, allow_multiple)
-        .map_err(|e| e.to_string())?;
+    let applied = match edit {
+        Edit::Replace {
+            target,
+            replacement,
+            allow_multiple,
+        } => mermaid_runtime::replace_content(&original, target, replacement, *allow_multiple),
+        Edit::Insert { after_line, text } => {
+            mermaid_runtime::insert_content(&original, *after_line, text)
+        },
+    }
+    .map_err(|e| e.to_string())?;
 
     write_one_blocking(root, rel, &applied.new_contents)
         .map_err(|e| format!("cannot write file: {e}"))?;
@@ -1284,6 +1471,112 @@ mod tests {
             .await;
         assert!(outcome.is_success(), "expected success: {outcome:?}");
         assert_eq!(outcome.output(), "hello");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The text editor's `view` arrives as a numbered, optionally ranged
+    /// `read_file`; the numbers are what the model aims an `insert` with.
+    #[tokio::test]
+    async fn read_file_numbers_lines_and_cuts_ranges_for_the_text_editor() {
+        let dir = temp_root("read_view");
+        fs::write(dir.join("a.txt"), "one\ntwo\nthree\n").expect("write");
+        let read = |args: serde_json::Value, call: u64| {
+            let (ctx, _rx) = test_exec_context(TurnId(call), ToolCallId(call), dir.clone());
+            async move { ReadFileTool.execute(args, ctx).await }
+        };
+        let all = read(
+            serde_json::json!({"path": "a.txt", "line_numbers": true}),
+            1,
+        )
+        .await;
+        assert_eq!(all.output(), "     1\tone\n     2\ttwo\n     3\tthree\n");
+        let ranged = read(
+            serde_json::json!({"path": "a.txt", "view_range": [2, -1]}),
+            2,
+        )
+        .await;
+        assert_eq!(ranged.output(), "     2\ttwo\n     3\tthree\n");
+        let one = read(
+            serde_json::json!({"path": "a.txt", "view_range": [2, 2]}),
+            3,
+        )
+        .await;
+        assert_eq!(one.output(), "     2\ttwo\n");
+        for bad in [
+            serde_json::json!([0, 2]),
+            serde_json::json!([3, 1]),
+            serde_json::json!([9, -1]),
+            serde_json::json!("1-2"),
+        ] {
+            let outcome = read(serde_json::json!({"path": "a.txt", "view_range": bad}), 4).await;
+            assert_eq!(outcome.status, mermaid_domain::ToolStatus::Error, "{bad}");
+        }
+        let plain = read(serde_json::json!({"path": "a.txt"}), 5).await;
+        assert_eq!(plain.output(), "one\ntwo\nthree\n", "unchanged by default");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn read_file_lists_a_directory_two_levels_deep() {
+        let dir = temp_root("read_dir");
+        fs::create_dir_all(dir.join("src/deep/deeper")).expect("mkdir");
+        fs::write(dir.join("src/lib.rs"), "").expect("write");
+        fs::write(dir.join("src/deep/deeper/x.rs"), "").expect("write");
+        fs::write(dir.join(".hidden"), "").expect("write");
+        fs::write(dir.join("README.md"), "").expect("write");
+        for (turn, args) in [
+            serde_json::json!({"path": "."}),
+            serde_json::json!({"path": ".", "line_numbers": true}),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let turn = TurnId(turn as u64 + 1);
+            let (ctx, _rx) = test_exec_context(turn, ToolCallId(1), dir.clone());
+            let outcome = ReadFileTool.execute(args, ctx).await;
+            assert!(outcome.is_success(), "{outcome:?}");
+            assert_eq!(
+                outcome.output(),
+                format!(
+                    "README.md\nsrc/\nsrc{0}deep/\nsrc{0}lib.rs",
+                    std::path::MAIN_SEPARATOR
+                )
+            );
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The text editor's `insert` arrives as an `edit_file` with
+    /// `insert_line`: the text lands after that line, with no match needed.
+    #[tokio::test]
+    async fn edit_file_inserts_after_a_line() {
+        let dir = temp_root("edit_insert");
+        fs::write(dir.join("a.txt"), "one\ntwo\n").expect("write");
+        let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), dir.clone());
+        let outcome = EditFileTool
+            .execute(
+                serde_json::json!({"path": "a.txt", "insert_line": 1, "replacement_content": "mid"}),
+                ctx,
+            )
+            .await;
+        assert!(outcome.is_success(), "{outcome:?}");
+        assert_eq!(
+            fs::read_to_string(dir.join("a.txt")).unwrap(),
+            "one\nmid\ntwo\n"
+        );
+
+        let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(2), dir.clone());
+        let past_end = EditFileTool
+            .execute(
+                serde_json::json!({"path": "a.txt", "insert_line": 9, "replacement_content": "x"}),
+                ctx,
+            )
+            .await;
+        assert_eq!(past_end.status, mermaid_domain::ToolStatus::Error);
+        assert_eq!(
+            fs::read_to_string(dir.join("a.txt")).unwrap(),
+            "one\nmid\ntwo\n"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

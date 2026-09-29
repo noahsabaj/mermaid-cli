@@ -126,6 +126,7 @@ async fn effect_runner_cancels_scope_on_command() {
         suppress_auto_compact: false,
         requested_compaction: None,
         native_compaction: None,
+        native_tools: mermaid_model::models::NativeTools::default(),
     };
     runner.dispatch(Cmd::CallModel {
         turn: TurnId(1),

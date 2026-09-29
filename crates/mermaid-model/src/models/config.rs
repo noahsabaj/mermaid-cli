@@ -81,6 +81,22 @@ pub struct ModelConfig {
     /// provider has not refused it. Adapters without a native shape ignore it.
     #[serde(skip)]
     pub native_compaction: Option<NativeCompaction>,
+
+    /// Which of the provider's own tool definitions this turn may send in
+    /// place of Mermaid's schemas. Runtime-only; set by the effect layer.
+    /// Adapters without native tools ignore it.
+    #[serde(skip)]
+    pub native_tools: NativeTools,
+}
+
+/// The provider-defined tools a turn may advertise: a file editor standing in
+/// for `read_file`/`write_file`/`edit_file`, and a shell beside
+/// `execute_command`. Their calls are translated back onto those tools, so
+/// every gate still sees the tool it knows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NativeTools {
+    pub text_editor: bool,
+    pub shell: bool,
 }
 
 /// Provider-side compaction for one turn: once the prompt passes
@@ -114,6 +130,7 @@ impl Default for ModelConfig {
             resolved_max_output: None,
             output_schema: None,
             native_compaction: None,
+            native_tools: NativeTools::default(),
         }
     }
 }

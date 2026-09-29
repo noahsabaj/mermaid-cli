@@ -135,6 +135,10 @@ pub struct Config {
     #[serde(default)]
     pub exec: ExecConfig,
 
+    /// How the built-in tools are offered to the model (`[tools]` table).
+    #[serde(default)]
+    pub tools: ToolsConfig,
+
     /// Subagent (`agent` tool) settings: drive timeout and user-defined
     /// agent types.
     #[serde(default)]
@@ -192,6 +196,26 @@ impl ExecConfig {
     #[must_use]
     pub fn pty_enabled(&self) -> bool {
         self.pty.unwrap_or(true)
+    }
+}
+
+/// How the built-in tools reach the model (`[tools]` table).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ToolsConfig {
+    /// Send a provider's own tool definitions where it has them (Anthropic's
+    /// text editor and bash today) instead of Mermaid's schemas for the same
+    /// tools. The calls still run through Mermaid's file and shell tools, so
+    /// every safety gate applies. A model that refuses them gets Mermaid's.
+    /// `false` always sends Mermaid's.
+    pub provider_native: bool,
+}
+
+impl Default for ToolsConfig {
+    fn default() -> Self {
+        Self {
+            provider_native: true,
+        }
     }
 }
 

@@ -229,6 +229,7 @@ pub(super) async fn dispatch_call_model(
     // Set after any client-side compaction above, whose summary call must not
     // inherit it.
     request.native_compaction = native_compaction;
+    request.native_tools = native_tools_for(factory.config());
 
     // Build a StreamContext — provider writes typed events into the
     // internal sink; we relay each to the reducer as a Msg.
@@ -517,6 +518,19 @@ pub(super) async fn run_provider_error_hook(
         }),
     )
     .await;
+}
+
+/// The provider-defined tools a turn may send (`[tools] provider_native`).
+/// The native shell is a bash tool, so it is offered only where commands run
+/// under `sh`: on Windows they run under PowerShell, and a model writing bash
+/// for it would be wrong every time.
+fn native_tools_for(config: &Config) -> mermaid_model::models::NativeTools {
+    let on = config.tools.provider_native;
+    mermaid_model::models::NativeTools {
+        text_editor: on,
+        shell: on
+            && mermaid_runtime::HostShell::current() != mermaid_runtime::HostShell::PowerShell,
+    }
 }
 
 /// Server-side compaction for this turn: when automatic compaction is on, the

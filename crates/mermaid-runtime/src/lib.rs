@@ -45,7 +45,7 @@ pub use daemon::{
     DEFAULT_PAIRING_TTL_DAYS, clamp_pairing_ttl_days, generate_pairing_token, hash_pairing_token,
     pairing_expiry_from_now, request_daemon_json, request_daemon_text, subscribe_daemon_lines,
 };
-pub use edit::{ReplaceError, replace_content};
+pub use edit::{ReplaceError, insert_content, replace_content};
 
 pub use pathguard::{
     OpenIntent, create_dir_all_beneath, normalize_lexical, open_beneath, remove_file_beneath,

@@ -608,6 +608,7 @@ pub fn build_summary_request(
         suppress_auto_compact: false,
         requested_compaction: None,
         native_compaction: None,
+        native_tools: mermaid_model::models::NativeTools::default(),
     }
 }
 
@@ -1093,6 +1094,7 @@ mod tests {
             suppress_auto_compact: false,
             requested_compaction: None,
             native_compaction: None,
+            native_tools: mermaid_model::models::NativeTools::default(),
         }
     }
 
@@ -1951,6 +1953,7 @@ mod tests {
                 ProviderContinuation::Anthropic {
                     signature: signature.to_string(),
                     compaction: Some(serde_json::json!({"type": "compaction", "content": "s"})),
+                    native_tool_calls: Vec::new(),
                 },
             )
         };

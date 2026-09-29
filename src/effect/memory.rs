@@ -101,6 +101,7 @@ fn consolidation_request(
         suppress_auto_compact: false,
         requested_compaction: None,
         native_compaction: None,
+        native_tools: mermaid_model::models::NativeTools::default(),
     }
 }
 
