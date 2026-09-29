@@ -197,26 +197,6 @@ pub(crate) fn doctor_text(state: &State) -> String {
     lines.join("\n")
 }
 
-/// The most recent user message, trimmed and length-capped — used as the
-/// Auto-mode classifier's "what is the user trying to do" context. `None`
-/// when the session has no user message yet.
-pub(crate) fn latest_user_intent(session: &super::state::Session) -> Option<String> {
-    const MAX: usize = 2000;
-    session
-        .messages()
-        .iter()
-        .rev()
-        .find(|m| matches!(m.role, mermaid_model::models::MessageRole::User))
-        .map(|m| {
-            let c = m.content.trim();
-            if c.len() > MAX {
-                format!("{}…", &c[..c.floor_char_boundary(MAX)])
-            } else {
-                c.to_string()
-            }
-        })
-}
-
 pub(crate) fn usage_text(state: &State) -> String {
     let mut lines = Vec::new();
     lines.push("Usage".to_string());

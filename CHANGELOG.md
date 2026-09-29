@@ -76,6 +76,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   window keeps 64k. The share is configurable as
   `[compaction] summarizer_input_window_percent`.
 
+### Changed
+
+- **The `auto`-mode safety classifier now sees the conversation, not just
+  your last message.** It used to judge each borderline action against the
+  latest user message alone, so after "yes, go ahead" it had no idea what was
+  being approved, and after a compaction it judged against the checkpoint's
+  header. It now gets your messages since the last compaction (the first and
+  the latest always, the most recent others up to a budget), the compaction
+  summary, and the agent's reply your latest message answers. Agent-written
+  text is fenced and labeled as such, and the classifier is told it cannot
+  widen what you asked for. Everything is redacted on the way out, as the
+  action already was.
+- **The classifier thinks.** It ran with reasoning off and a fixed 10-second
+  timeout, which cut thinking models off mid-thought. It now reasons at the
+  session's level, clamped to low..high, with a timeout of 30s, 60s or 120s to
+  match and an output budget with room for the thinking. A timeout or error
+  still escalates to you; it never allows.
+- **Evals can hold a conversation.** A task can set `followups` (later user
+  messages, each sent with `--continue`) and `safety = "auto"`. Two new tasks
+  use them: `commit-after-go-ahead` asks for a fix and a commit, shows a plan,
+  and gets "Yes, go ahead."; `no-commit-after-go-ahead` is its mirror, where
+  the user said not to commit.
+
 ## [0.28.0] - 2026-09-29
 
 ### Changed
