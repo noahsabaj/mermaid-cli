@@ -8,7 +8,7 @@
 //! any other change) — do not hand-edit the values.
 
 /// The pinned `mermaid-searxng` release tag.
-pub const BUNDLE_VERSION: &str = "v0.3.0";
+pub const BUNDLE_VERSION: &str = "v0.4.0";
 
 /// sha256 (lowercase hex) of `mermaid-searxng-<target>.tar.zst` for
 /// [`BUNDLE_VERSION`], or `None` on a platform with no published bundle.
@@ -19,6 +19,7 @@ pub fn bundle_sha256(target: &str) -> Option<&'static str> {
         "linux-aarch64" => "d5a982de009b534635a435cf06e0f09c9f1dafcb9d14bd391f18b1efb7823cb7",
         "macos-aarch64" => "332bb48e3529cdb5ce99faa59460364710a237ac3c3a0b10182c6323ce18d3a0",
         "macos-x86_64" => "12b236f0072649793da41a31ea14be30afd2d014598f24f17ab502908374af02",
+        "windows-x86_64" => "f5514bf37bd1682ef85926d680439b0884ac8bf58fa706dc1ce7582771e3d0e0",
         _ => return None,
     })
 }

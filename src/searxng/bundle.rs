@@ -559,14 +559,31 @@ fn write_synced_file(path: &Path, contents: &[u8]) -> Result<()> {
 }
 
 fn sync_runtime_tree(path: &Path) -> Result<()> {
-    sync_runtime_tree_with(
-        path,
-        &mut |file| {
-            std::fs::File::open(file)?.sync_all()?;
-            Ok(())
-        },
-        &mut sync_directory,
-    )
+    sync_runtime_tree_with(path, &mut sync_extracted_file, &mut sync_directory)
+}
+
+#[cfg(unix)]
+fn sync_extracted_file(path: &Path) -> Result<()> {
+    std::fs::File::open(path)?.sync_all()?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn sync_extracted_file(path: &Path) -> Result<()> {
+    // FlushFileBuffers needs a handle with write access; a read-only handle
+    // fails with ERROR_ACCESS_DENIED. Opening for write never truncates here.
+    match std::fs::OpenOptions::new().write(true).open(path) {
+        Ok(file) => file.sync_all()?,
+        // A file the archive marked read-only cannot take a write handle.
+        // Its bytes are already in the OS cache and reach disk on their own;
+        // skip the explicit flush rather than failing the whole publication.
+        Err(error)
+            if error.kind() == ErrorKind::PermissionDenied
+                && std::fs::symlink_metadata(path)
+                    .is_ok_and(|metadata| metadata.permissions().readonly()) => {},
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
 }
 
 fn sync_runtime_tree_with(
