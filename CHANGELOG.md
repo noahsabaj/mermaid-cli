@@ -26,6 +26,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   input copied in after the run (the new `overlay` on a `command` check), so
   a fix tuned to the visible samples does not pass.
 
+### Changed
+
+- **Hosted models no longer get coaching through tool descriptions and
+  checklist reminders.** The guidance pack was already off for hosted APIs,
+  but the same advice still reached every model another way: the `memory`,
+  `task_create`, `task_update`, `task_list` and `ask_user_question` tool
+  descriptions told the model how to use them well, and the checklist sent a
+  reminder every 5 model calls without an update and a note whenever more
+  than one task was in progress. Tool descriptions now say only what the tool
+  does, the advice lives in the guidance pack, and both checklist reminders
+  follow `[output] guidance`.
+
+### Fixed
+
+- The stale-task reminder no longer sends the model two runs of about 22
+  spaces in the middle of its sentence.
+
 ## [0.28.0] - 2026-09-29
 
 ### Changed

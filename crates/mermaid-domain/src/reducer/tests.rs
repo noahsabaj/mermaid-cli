@@ -7622,6 +7622,11 @@ fn stale_in_progress_task_triggers_a_nudge_every_n_calls() {
         instructions.contains("Task #1 'task 0' has been in_progress"),
         "nudge fires at the threshold: {instructions}"
     );
+    let nudge = instructions
+        .lines()
+        .find(|l| l.contains("in_progress for"))
+        .unwrap_or_default();
+    assert!(!nudge.contains("  "), "no stray whitespace: {nudge:?}");
     assert_eq!(state.runtime.calls_since_task_update, 0, "re-armed");
 
     // A checklist update resets the counter.
@@ -7632,6 +7637,34 @@ fn stale_in_progress_task_triggers_a_nudge_every_n_calls() {
         },
     );
     assert_eq!(state.runtime.calls_since_task_update, 0);
+}
+
+#[test]
+fn stale_task_nudge_follows_the_guidance_switch() {
+    use crate::ChecklistStatus::InProgress;
+    let mut state = fresh_state();
+    state.session.model_id = "anthropic/some-model".to_string();
+    let (mut state, _) = update(
+        state,
+        Msg::TasksUpdated {
+            store: sample_task_store(&[InProgress]),
+        },
+    );
+    for i in 1..=2 * TASK_STALENESS_CALLS {
+        let mut cmds = Vec::new();
+        super::push_call_model(&mut state, &mut cmds, TurnId(u64::from(i)));
+        let Some(Cmd::CallModel { request, .. }) = cmds.first() else {
+            panic!("expected CallModel");
+        };
+        assert!(
+            !request
+                .instructions
+                .clone()
+                .unwrap_or_default()
+                .contains("in_progress for"),
+            "a hosted API gets no staleness nudge (call {i})"
+        );
+    }
 }
 
 /// Ctrl+L is meta-level (like Ctrl+C/Ctrl+B): it must work — and only
