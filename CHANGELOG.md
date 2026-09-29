@@ -86,8 +86,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fails with a message naming the read-only sandbox. The destructive hard-deny
   and user `deny` overrides still come first. Every restriction is a hard
   requirement, so there is no best-effort degrade: where the kernel cannot
-  enforce all of it (macOS, Windows, older Linux), `read_only` keeps the
-  allowlists exactly as before, and `mermaid self-test` says which applies.
+  enforce all of it (Windows, older Linux), `read_only` keeps the allowlists
+  exactly as before, and `mermaid self-test` says which applies.
+- **`read_only` mode is enforced by the OS on macOS too.** Commands run under a
+  deny-default Seatbelt profile: every read is allowed, and writes (data and
+  metadata), networking including unix sockets, Mach services other than user
+  lookups and the preferences daemon (which refuses sandboxed writes), Apple
+  Events, and signals outside the sandbox are refused. Denying writes alone
+  would not be read-only on macOS, because `launchctl`, `defaults` and Apple
+  Events change state through a daemon without the command writing a file.
 
 ### Added
 

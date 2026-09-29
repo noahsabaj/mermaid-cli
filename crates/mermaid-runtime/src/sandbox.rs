@@ -151,9 +151,11 @@ pub fn enforce(policy: &SandboxPolicy, argv: &[OsString]) -> anyhow::Result<Enfo
 /// there is no best-effort degrade, because `read_only` mode lets any command
 /// through on the strength of this containment.
 ///
-/// Linux only for now (Landlock ABI 6, kernel 6.12+, plus seccomp). macOS and
-/// Windows keep the shell allowlists until their backends are verified to meet
-/// the same contract; [`read_only_containment_available`] is `false` there.
+/// Linux applies it to the launcher itself (Landlock ABI 6, kernel 6.12+,
+/// plus seccomp); macOS rewrites the argv onto `sandbox-exec` with a
+/// deny-default Seatbelt profile. Windows keeps the shell allowlists until
+/// its backend is verified to meet the same contract, so
+/// [`read_only_containment_available`] is `false` there.
 ///
 /// # Errors
 ///
@@ -167,7 +169,16 @@ pub fn enforce_read_only(argv: &[OsString]) -> anyhow::Result<Enforcement> {
         linux::apply_read_only()?;
         Ok(Enforcement::SelfApplied { fs_enforced: true })
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        anyhow::ensure!(
+            macos::sandbox_exec_present(),
+            "{} not found; refusing to run the command unconfined",
+            macos::SANDBOX_EXEC
+        );
+        Ok(Enforcement::ExecArgv(macos::wrap_read_only_argv(argv)))
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = argv;
         anyhow::bail!("read-only containment is not available on this platform")
@@ -177,17 +188,23 @@ pub fn enforce_read_only(argv: &[OsString]) -> anyhow::Result<Enforcement> {
 /// Whether [`enforce_read_only`] can succeed here.
 ///
 /// On Linux, the kernel must support Landlock ABI 6 (write rights plus
-/// signal scoping) and both seccomp filters must assemble; `false`
-/// everywhere else. `read_only` mode lets arbitrary
-/// shell commands run only when this is `true`, and falls back to the shell
-/// allowlists otherwise. Creates a ruleset fd and drops it; restricts nothing.
+/// signal scoping) and both seccomp filters must assemble; that probe creates
+/// a ruleset fd and drops it, restricting nothing. On macOS, `sandbox-exec`
+/// must accept the read-only profile and run a shell under it; that probe
+/// spawns one short-lived process, so callers cache the answer. `false`
+/// everywhere else. `read_only` mode lets arbitrary shell commands run only
+/// when this is `true`, and falls back to the shell allowlists otherwise.
 #[must_use]
 pub fn read_only_containment_available() -> bool {
     #[cfg(target_os = "linux")]
     {
         linux::read_only_supported()
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        macos::read_only_supported()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         false
     }
@@ -329,6 +346,78 @@ mod macos {
             }
         }
         (sbpl, params)
+    }
+
+    /// The Seatbelt profile behind `read_only` mode. Deny-default, the shape
+    /// of Chromium's and Apple's own App Sandbox, rather than the
+    /// allow-default profile above: on macOS a file-write deny alone is not
+    /// read-only, because Mach IPC lets a command change state through a
+    /// daemon without writing a file itself (`launchctl`, Apple Events to
+    /// another app). So everything is refused unless listed:
+    ///
+    /// - running programs, and signals only to processes in this sandbox;
+    /// - every read, including sysctls and the command's own process info;
+    /// - the Mach services reads need: user and group lookups, and the
+    ///   preferences daemon, which itself refuses writes from a sandbox that
+    ///   lacks `user-preference-write` (the integration suite checks that a
+    ///   `defaults write` fails);
+    /// - writing to the discard devices and the command's terminal, and the
+    ///   terminal `ioctl`s a shell uses to see that it has one.
+    ///
+    /// Not listed, so denied: every other write (data, metadata, xattrs,
+    /// times), all networking including unix sockets, other Mach services,
+    /// Apple Events, IPC, and IOKit. Constant: no path or other input is ever
+    /// spliced in.
+    pub(super) const READ_ONLY_PROFILE: &str = r#"(version 1)
+(deny default)
+(allow process-exec)
+(allow process-fork)
+(allow process-info* (target same-sandbox))
+(allow signal (target same-sandbox))
+(allow file-read*)
+(allow sysctl-read)
+(allow mach-lookup
+  (global-name "com.apple.system.opendirectoryd.libinfo")
+  (global-name "com.apple.cfprefsd.daemon")
+  (global-name "com.apple.cfprefsd.agent"))
+(allow user-preference-read)
+(allow file-write-data
+  (literal "/dev/null")
+  (literal "/dev/zero")
+  (literal "/dev/tty")
+  (regex #"^/dev/ttys[0-9]+$"))
+(allow file-ioctl
+  (literal "/dev/tty")
+  (regex #"^/dev/ttys[0-9]+$"))
+"#;
+
+    /// Rewrite `argv` to run under `sandbox-exec` with the read-only profile:
+    /// `/usr/bin/sandbox-exec -p <profile> -- <argv...>`.
+    pub(super) fn wrap_read_only_argv(argv: &[OsString]) -> Vec<OsString> {
+        let mut wrapped: Vec<OsString> = vec![
+            SANDBOX_EXEC.into(),
+            "-p".into(),
+            READ_ONLY_PROFILE.into(),
+            "--".into(),
+        ];
+        wrapped.extend(argv.iter().cloned());
+        wrapped
+    }
+
+    /// Whether `sandbox-exec` takes the read-only profile and a shell runs
+    /// under it. Checked by running `/bin/sh -c :` confined, because a
+    /// profile this macOS rejects, or one a shell cannot start under, would
+    /// otherwise fail every command in `read_only` mode instead of falling
+    /// back to the allowlists.
+    pub(super) fn read_only_supported() -> bool {
+        sandbox_exec_present()
+            && std::process::Command::new(SANDBOX_EXEC)
+                .args(["-p", READ_ONLY_PROFILE, "--", "/bin/sh", "-c", ":"])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success())
     }
 
     /// Rewrite `argv` to run under `sandbox-exec` with the policy's profile:
@@ -476,6 +565,32 @@ mod macos {
                 "the path must ride a param instead"
             );
             let _ = std::fs::remove_dir_all(evil.parent().unwrap());
+        }
+
+        #[test]
+        fn read_only_profile_denies_by_default_and_never_allows_writes_broadly() {
+            let profile = READ_ONLY_PROFILE;
+            assert!(profile.starts_with("(version 1)\n(deny default)\n"));
+            // No network rule at all: deny-default covers every socket.
+            assert!(!profile.contains("network"));
+            // Writes are granted only as data to named devices, never as the
+            // `file-write*` family, which would include metadata and create.
+            assert!(!profile.contains("file-write*"));
+            assert!(!profile.contains("(allow default)"));
+            // Signals and process control stay inside the sandbox.
+            assert!(profile.contains("(allow signal (target same-sandbox))"));
+            assert!(!profile.contains("appleevent"));
+        }
+
+        #[test]
+        fn read_only_argv_puts_the_profile_before_the_command() {
+            let argv: Vec<OsString> = vec!["sh".into(), "-c".into(), "ls".into()];
+            let wrapped = wrap_read_only_argv(&argv);
+            assert_eq!(wrapped[0], OsString::from(SANDBOX_EXEC));
+            assert_eq!(wrapped[1], OsString::from("-p"));
+            assert_eq!(wrapped[2], OsString::from(READ_ONLY_PROFILE));
+            assert_eq!(wrapped[3], OsString::from("--"));
+            assert_eq!(&wrapped[4..], argv.as_slice());
         }
 
         #[test]

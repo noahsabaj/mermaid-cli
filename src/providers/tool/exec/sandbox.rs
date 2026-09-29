@@ -91,8 +91,9 @@ pub(crate) enum DenialKind {
 ///   [`DenialKind::Ambiguous`].
 pub(crate) fn detect_denial(run: &CommandRunOutput, sandbox: &SandboxPlan) -> Option<DenialKind> {
     if sandbox.read_only {
-        // Linux-only for now, where the network half is the precise SIGSYS.
-        if is_sigsys_denial(run) {
+        // Linux's network half is the precise SIGSYS; Seatbelt (macOS)
+        // refuses everything, sockets included, with plain EPERM.
+        if cfg!(target_os = "linux") && is_sigsys_denial(run) {
             return Some(DenialKind::ReadOnlyNetwork);
         }
         return is_permission_denial(run).then_some(DenialKind::ReadOnly);
