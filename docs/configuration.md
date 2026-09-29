@@ -270,7 +270,10 @@ guidance = "auto"  # default: on for local providers, off for hosted APIs
 
 `auto` decides by provider, not by model name: Ollama is local, and so is any
 provider whose `[providers.<name>] base_url` points at a loopback or LAN host.
-Subagents follow the same setting. A `--system-prompt` replacement is the whole
+Subagents follow the same setting. The same switch covers the checklist
+reminders outside the prompt: the note when more than one task is in progress
+and the reminder when a task has gone several model calls without an update.
+Tool descriptions carry only what each tool does, whatever the setting. A `--system-prompt` replacement is the whole
 prompt, so the pack is never added to it. `/runtime` shows whether the pack is
 on for the current model.
 

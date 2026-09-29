@@ -72,12 +72,10 @@ impl ToolExecutor for MemoryTool {
     fn schema(&self) -> ToolDefinition {
         ToolDefinition {
             name: "memory".to_string(),
-            description: "Manage your durable, cross-session memory of semantic facts: preferences, project conventions, decisions and their rationale, and hard-won gotchas. The memory index is always in your context; use this tool to change or search it. \
-                Before saving, apply the signal gate: will a future agent act better because this fact exists? If not, write nothing. The highest-signal facts are user-stated preferences and decisions, project conventions, and gotchas that cost real time — weight what the user explicitly said over what you inferred. \
+            description: "Durable, cross-session memory of facts, one fact per file. The memory index is always in your context; this tool changes or searches it. \
                 `action=remember` saves a new fact; `action=update` replaces one fact's body (pass its `id`); `action=forget` deletes a fact (pass its `id`); `action=search` finds facts by keyword (pass `query`) across names, descriptions, and bodies. \
-                Keep each fact atomic — one idea per memory — and never merge or re-summarize the whole corpus. \
-                Default scope is project-private (machine-local, not committed); set `shared=true` for team facts committed to the repo's .mermaid/memory, or `global=true` for facts that apply across all projects. \
-                Save durable knowledge, not transient task state, and never store secrets, tokens, or PII."
+                Default scope is project-private (machine-local, not committed); `shared=true` writes to the repo's .mermaid/memory, and `global=true` applies across all projects. \
+                Never store secrets, tokens, or PII."
                 .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",

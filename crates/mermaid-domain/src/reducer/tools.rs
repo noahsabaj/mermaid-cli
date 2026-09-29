@@ -279,24 +279,29 @@ pub fn push_call_model(state: &mut State, cmds: &mut Vec<Cmd>, turn: TurnId) {
     // Mode changes become history events BEFORE anything else rides this
     // request.
     advertise_context_changes(state, cmds);
-    // Structural plan-rot guard: count model-call cycles while a task sits
+    // Checklist staleness nudge: count model-call cycles while a task sits
     // in_progress with no checklist update (`handle_tasks_updated` resets the
-    // counter). At the threshold, inject a targeted nudge into THIS request
-    // and re-arm — prompt discipline alone demonstrably decays mid-run.
+    // counter), and at the threshold inject a reminder into THIS request and
+    // re-arm. It is coaching, so it rides on the guidance pack's switch.
+    let coached = state
+        .settings
+        .guidance_pack_enabled(&state.session.model_id);
     match state.session.conversation.tasks.active() {
-        Some(active) => {
+        Some(active) if coached => {
             state.runtime.calls_since_task_update += 1;
             if state.runtime.calls_since_task_update >= TASK_STALENESS_CALLS {
                 state.runtime.calls_since_task_update = 0;
                 let notice = format!(
-                    "Task #{} '{}' has been in_progress for {} model calls without a                      checklist update. Update, split, or complete it (task_update) so                      the checklist reflects reality.",
+                    "Task #{} '{}' has been in_progress for {} model calls without a \
+                     checklist update. Update, split, or complete it (task_update) so \
+                     the checklist reflects reality.",
                     active.id, active.subject, TASK_STALENESS_CALLS
                 );
                 push_task_notice(state, notice);
             }
         },
-        // No active task: hold the counter at zero.
-        None => state.runtime.calls_since_task_update = 0,
+        // No active task, or no coaching: hold the counter at zero.
+        _ => state.runtime.calls_since_task_update = 0,
     }
     let request = build_chat_request(state);
     state.pending_hook_context.clear();

@@ -74,6 +74,12 @@ fn no_broker(secs: f64) -> ToolOutcome {
     )
 }
 
+/// Checklist advisory notes ("keep one task in_progress") are coaching, so
+/// they ride on the same switch as the guidance pack.
+fn coaching_enabled(ctx: &ExecContext) -> bool {
+    ctx.config.guidance_pack_enabled(&ctx.model_id)
+}
+
 fn metadata(action: &str, store: &ChecklistStore) -> ToolRunMetadata {
     let (completed, total) = store.counts();
     ToolRunMetadata {
@@ -184,26 +190,23 @@ impl ToolExecutor for TaskCreateTool {
         ToolDefinition {
             name: "task_create".to_string(),
             description: "Create tasks on your session checklist, which the user sees live in \
-                the terminal. Use it at the START of multi-step work (3+ distinct steps): plan \
-                the whole job and create ALL initial tasks in ONE call, in execution order. \
-                Skip it entirely for trivial or single-step requests — a one-item checklist is \
-                noise. Each task needs a short imperative `subject` (\"Wire the broker\") and a \
-                present-tense `active_form` (\"Wiring the broker\") shown on the spinner while \
-                it runs. Mark at most one task `in_progress`. Add tasks later as you discover \
-                work; give an `explanation` when a mid-run addition reshapes the plan."
+                the terminal. Each task has a short imperative `subject` (\"Wire the broker\") \
+                and a present-tense `active_form` (\"Wiring the broker\") shown on the spinner \
+                while it runs. An optional `explanation` is shown to the user alongside the \
+                change."
                 .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "tasks": {
                         "type": "array",
-                        "description": "Tasks to add, in execution order. Create the full initial plan in one call.",
+                        "description": "Tasks to add, in execution order.",
                         "items": {
                             "type": "object",
                             "properties": {
                                 "subject": {
                                     "type": "string",
-                                    "description": "Short imperative step, e.g. \"Add the config flag\". Meaningful and verifiable, not vague."
+                                    "description": "Short imperative step, e.g. \"Add the config flag\"."
                                 },
                                 "active_form": {
                                     "type": "string",
@@ -216,7 +219,7 @@ impl ToolExecutor for TaskCreateTool {
                                 "status": {
                                     "type": "string",
                                     "enum": ["pending", "in_progress"],
-                                    "description": "Initial status (default pending). At most one task in_progress across the whole list."
+                                    "description": "Initial status (default pending)."
                                 }
                             },
                             "required": ["subject", "active_form"]
@@ -252,9 +255,11 @@ impl ToolExecutor for TaskCreateTool {
         out.push_str(&store.progress_string());
         // Creation can violate single-in_progress too (e.g. adding an
         // in_progress task while another is active) — same advisory path.
-        for note in mermaid_domain::advisory_notes(&store, &[], &store) {
-            out.push('\n');
-            out.push_str(&note);
+        if coaching_enabled(&ctx) {
+            for note in mermaid_domain::advisory_notes(&store, &[], &store) {
+                out.push('\n');
+                out.push_str(&note);
+            }
         }
         ToolOutcome::success(out, format!("created {count} task(s)"), secs())
             .with_metadata(metadata("create", &store))
@@ -270,17 +275,10 @@ impl ToolExecutor for TaskUpdateTool {
     fn schema(&self) -> ToolDefinition {
         ToolDefinition {
             name: "task_update".to_string(),
-            description: "Update checklist tasks by id (from task_create). Batch related \
-                transitions in one call — completing one task and starting the next is ONE \
-                call with two updates. Keep at most one task in_progress: set it \
-                in_progress BEFORE you start the work and completed IMMEDIATELY after it is \
-                done and verified — never batch-complete at the end, and never jump a task \
-                from pending straight to completed. Only mark completed when the work truly \
-                succeeded; if you hit a blocker, mark the stuck task blocked with an \
-                `explanation`, create a task for the blocker, and mark that one \
-                in_progress. When the plan changes shape (splitting, merging, dropping \
-                work), update or delete tasks and say why in `explanation` — do not let the \
-                checklist go stale while you work."
+            description: "Update checklist tasks by id (from task_create). One call can apply \
+                several updates, in order. Statuses are pending, in_progress, blocked, \
+                completed, and deleted; an optional `explanation` is shown to the user \
+                alongside the change."
                 .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
@@ -298,7 +296,7 @@ impl ToolExecutor for TaskUpdateTool {
                                 "status": {
                                     "type": "string",
                                     "enum": ["pending", "in_progress", "blocked", "completed", "deleted"],
-                                    "description": "New status. \"blocked\" marks a task stalled on something outside it (pair it with a new task for the blocker); \"deleted\" permanently removes the task from the list."
+                                    "description": "New status. \"blocked\" marks a task stalled on something outside it; \"deleted\" permanently removes the task from the list."
                                 },
                                 "subject": { "type": "string", "description": "Replacement subject." },
                                 "active_form": { "type": "string", "description": "Replacement active form." },
@@ -350,9 +348,11 @@ impl ToolExecutor for TaskUpdateTool {
             out.push_str(&format!("error: {err}\n"));
         }
         out.push_str(&store.progress_string());
-        for note in &report.notes {
-            out.push('\n');
-            out.push_str(note);
+        if coaching_enabled(&ctx) {
+            for note in &report.notes {
+                out.push('\n');
+                out.push_str(note);
+            }
         }
         ToolOutcome::success(out, store.progress_string(), secs())
             .with_metadata(metadata("update", &store))
@@ -370,9 +370,7 @@ impl ToolExecutor for TaskListTool {
             name: "task_list".to_string(),
             description: "Read back the current session checklist: every task with its id, \
                 status, description, and recent evidence (the work recorded while it was in \
-                progress). Call it to re-anchor after a context compaction, or when unsure of \
-                a task id or the plan's current state. The user also sees this list live in \
-                the terminal, so you never need to repeat its contents in prose."
+                progress). The user sees the same list live in the terminal."
                 .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
@@ -467,6 +465,30 @@ mod tests {
                 .contains("at most one task in_progress")
         );
         assert_eq!(outcome.summary, "Tasks 1/3");
+    }
+
+    #[tokio::test]
+    async fn advisory_notes_follow_the_guidance_switch() {
+        let (mut ctx, broker, _rx) = ctx_with_broker();
+        ctx.model_id = "anthropic/some-model".to_string();
+        let outcome = TaskCreateTool.execute(create_args(2), ctx).await;
+        assert!(outcome.error.is_none());
+
+        let (mut ctx2, _p) = test_exec_context(TurnId(1), ToolCallId(2), PathBuf::from("/tmp"));
+        ctx2.tasks = Some(broker);
+        ctx2.model_id = "anthropic/some-model".to_string();
+        let outcome = TaskUpdateTool
+            .execute(
+                serde_json::json!({ "updates": [{ "id": 2, "status": "in_progress" }]}),
+                ctx2,
+            )
+            .await;
+        assert!(outcome.error.is_none());
+        assert!(
+            !outcome.model_content.contains("Note:"),
+            "a hosted API gets no coaching notes: {}",
+            outcome.model_content
+        );
     }
 
     #[tokio::test]
