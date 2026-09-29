@@ -221,3 +221,39 @@ fn live() {
     .expect("write runs.json");
     println!("{markdown}\nReport written to {}", out.display());
 }
+
+#[test]
+fn a_go_ahead_reaches_the_classifier_with_the_goal_before_it() {
+    // `commit-after-go-ahead` through the real binary: the goal is stated in
+    // one run and the commit happens in the next, after a bare "Yes, go
+    // ahead." The classifier's request must still carry the original ask and
+    // the plan the user approved, or the task only passes by luck.
+    let task = tasks()
+        .into_iter()
+        .find(|t| t.id == "commit-after-go-ahead")
+        .expect("the commit-after-go-ahead task");
+    let mock = MockProvider::start(task.reference().script());
+    let run = run_task(&task, &Target::Mock(&mock));
+    assert!(run.passed(), "{}", run.explain());
+
+    // The classifier's call is the one that offers no tools.
+    let vets: Vec<String> = mock
+        .requests()
+        .iter()
+        .filter(|r| r["tools"].as_array().is_none_or(Vec::is_empty))
+        .map(|r| r["messages"].to_string())
+        .collect();
+    assert_eq!(vets.len(), 1, "one borderline action, one vet");
+    let vet = &vets[0];
+    for expected in [
+        "commit the fix with git",
+        "Yes, go ahead.",
+        "Shall I go ahead?",
+    ] {
+        assert!(
+            vet.contains(expected),
+            "the classifier never saw {expected:?}:\n{vet}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&run.sandbox);
+}

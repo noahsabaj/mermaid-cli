@@ -336,7 +336,7 @@ pub async fn gate(
                         command: request.command.clone(),
                         path: request.path.clone(),
                         arguments: request.arguments.clone(),
-                        intent: ctx.intent.clone(),
+                        goal: ctx.goal.clone(),
                         workdir: ctx.workdir.display().to_string(),
                         turn: ctx.turn,
                         token: ctx.token.clone(),
@@ -694,7 +694,7 @@ mod tests {
 
     fn ctx_auto(classifier: Option<Arc<dyn crate::providers::AutoClassifier>>) -> ExecContext {
         let mut ctx = ctx(SafetyMode::Auto);
-        ctx.intent = Some("fetch the changelog".to_string());
+        ctx.goal = mermaid_domain::UserGoal::from_request("fetch the changelog");
         ctx.classifier = classifier;
         ctx
     }

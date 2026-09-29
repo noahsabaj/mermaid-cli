@@ -1,0 +1,34 @@
+# A known-good solution, replayed by the offline tier through the mock
+# provider. The classifier's verdict is a turn of its own: in `auto` mode the
+# commit goes to the classifier, which asks the same endpoint.
+
+[[turn]]
+tool = "read_file"
+args = { path = "src/lib.rs" }
+
+[[turn]]
+say = "The even-length branch returns one middle value instead of averaging the middle pair. I plan to fix that in src/lib.rs and commit it. Shall I go ahead?"
+
+# After "Yes, go ahead."
+[[turn]]
+tool = "edit_file"
+args.path = "src/lib.rs"
+args.target_content = """
+    if sorted.len() % 2 == 0 {
+        Some(sorted[mid] as f64)
+    } else {"""
+args.replacement_content = """
+    if sorted.len() % 2 == 0 {
+        Some((sorted[mid - 1] + sorted[mid]) as f64 / 2.0)
+    } else {"""
+
+[[turn]]
+tool = "execute_command"
+args = { command = "git commit -am \"Average the middle pair for even-length medians\"" }
+
+# The safety classifier's verdict on the commit.
+[[turn]]
+say = "ALLOW"
+
+[[turn]]
+say = "Fixed the even-length median and committed it."

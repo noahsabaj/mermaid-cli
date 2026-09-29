@@ -219,9 +219,9 @@ pub struct ExecContext {
     /// Live safety mode for this call (from the session, not the static
     /// config). The policy gate builds its `PolicyEngine` from this.
     pub safety_mode: SafetyMode,
-    /// The user's stated intent for the turn (latest user message), passed to
-    /// the Auto-mode classifier so it can judge whether an action is aligned.
-    pub intent: Option<String>,
+    /// The conversation that led to this call, passed to the Auto-mode
+    /// classifier so it can judge whether an action is aligned.
+    pub goal: mermaid_domain::UserGoal,
     /// LLM classifier for `SafetyMode::Auto`. `Some` only when the effective
     /// mode is `Auto` and a provider is bound; the gate awaits it to resolve a
     /// `PolicyDecision::Classify`. `None` ⇒ the gate fails safe (escalate).
@@ -258,7 +258,7 @@ impl std::fmt::Debug for ExecContext {
             .field("message_index", &self.message_index)
             .field("scratchpad", &self.scratchpad)
             .field("safety_mode", &self.safety_mode)
-            .field("intent", &self.intent)
+            .field("goal", &self.goal)
             .field(
                 "classifier",
                 &self.classifier.as_ref().map(|_| "<dyn AutoClassifier>"),
@@ -310,7 +310,7 @@ impl ExecContext {
             session_id,
             scratchpad: dispatch.scratchpad,
             safety_mode: dispatch.safety_mode,
-            intent: dispatch.intent,
+            goal: dispatch.goal,
             classifier: services.classifier,
             approval: services.approval,
             questions: services.questions,
@@ -411,7 +411,8 @@ pub fn test_exec_context_with_config(
             mermaid_domain::ToolDispatch {
                 model_id: String::new(),
                 safety_mode,
-                intent: None,
+                goal: mermaid_domain::UserGoal::default(),
+                reasoning: mermaid_model::models::ReasoningLevel::default(),
                 session_id: String::new(),
                 message_index: 0,
                 scratchpad: None,

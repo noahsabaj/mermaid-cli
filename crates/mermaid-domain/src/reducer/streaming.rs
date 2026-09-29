@@ -2,7 +2,6 @@ use crate::cmd::Cmd;
 use crate::compaction::{CompactionRequest, CompactionResult, CompactionTrigger};
 use crate::msg::Msg;
 use crate::reducer::*;
-use crate::reports::*;
 use crate::request::*;
 use crate::state::{State, StatusKind, TokenUsageTotals, ToolOutcome, TurnState};
 use crate::transition::commit_assistant_message;
@@ -728,8 +727,8 @@ pub fn handle_stream_done(
             })
             .collect();
         // Captured once for the whole batch: the live safety mode + the
-        // turn's intent (for the Auto-mode classifier).
-        let intent = latest_user_intent(&state.session);
+        // user's goal (for the Auto-mode classifier).
+        let goal = crate::user_goal::user_goal(&state.session);
         let safety_mode = state.session.safety_mode;
         for call in &pending {
             if call.source.function.name == crate::tool_search::TOOL_SEARCH_NAME {
@@ -742,7 +741,8 @@ pub fn handle_stream_done(
                 dispatch: crate::cmd::ToolDispatch {
                     model_id: state.session.model_id.clone(),
                     safety_mode,
-                    intent: intent.clone(),
+                    goal: goal.clone(),
+                    reasoning: state.session.reasoning,
                     // Checkpoint anchoring: conversation id + length at
                     // DISPATCH. History here is [..., user@k,
                     // assistant(tool_use)], so any checkpoint this run takes

@@ -52,6 +52,7 @@ pub mod slash_commands;
 pub mod state;
 pub mod tool_search;
 pub mod transition;
+pub mod user_goal;
 
 pub use action_display::{action_display_for, display_info_for, display_info_for_shell};
 pub use checklist::{
@@ -117,3 +118,4 @@ pub use transition::{
     commit_assistant_message, fill_outcome, start_executing_tools, start_generating,
     tool_result_messages, try_complete_outcomes,
 };
+pub use user_goal::UserGoal;

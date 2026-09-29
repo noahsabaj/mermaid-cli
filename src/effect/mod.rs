@@ -1146,7 +1146,11 @@ impl EffectRunner {
                                 .auto_classifier_model
                                 .clone()
                                 .unwrap_or_else(|| dispatch.model_id.clone());
-                            Arc::new(crate::providers::ModelAutoClassifier::new(p.clone(), model))
+                            Arc::new(crate::providers::ModelAutoClassifier::new(
+                                p.clone(),
+                                model,
+                                dispatch.reasoning,
+                            ))
                                 as Arc<dyn crate::providers::AutoClassifier>
                         })
                     } else {
@@ -2383,7 +2387,8 @@ mod tests {
             dispatch: mermaid_domain::ToolDispatch {
                 model_id: "ollama/test".to_string(),
                 safety_mode: mermaid_runtime::SafetyMode::Ask,
-                intent: None,
+                goal: mermaid_domain::UserGoal::default(),
+                reasoning: mermaid_model::models::ReasoningLevel::default(),
                 session_id: "sess-test".to_string(),
                 message_index: 0,
                 scratchpad: None,

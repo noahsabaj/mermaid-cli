@@ -71,8 +71,22 @@ pub struct TaskSpec {
     /// `--output-schema`.
     #[serde(default)]
     pub output_schema: Option<String>,
+    /// Later user messages in the same conversation, each sent as its own
+    /// `mermaid --continue run` after the previous run ends. How a task
+    /// expresses "yes, go ahead".
+    #[serde(default)]
+    pub followups: Vec<String>,
+    /// The safety mode the runs use. Defaults to `full_access`: nobody is
+    /// there to approve a write. `auto` puts borderline actions in front of
+    /// the safety classifier, which then decides the outcome.
+    #[serde(default = "default_safety")]
+    pub safety: String,
     #[serde(rename = "check")]
     pub checks: Vec<Check>,
+}
+
+fn default_safety() -> String {
+    "full_access".to_string()
 }
 
 /// One outcome a run must produce.
@@ -320,29 +334,8 @@ pub fn run_task(task: &Task, target: &Target<'_>) -> Run {
     init_git(&project);
     let before = snapshot(&project);
 
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_mermaid"));
-    cmd.args(["--model", target.model()])
-        .args(&task.spec.args)
-        // Autonomous, like any unattended run: nobody is there to approve a
-        // write. The working copy is a throwaway.
-        .args(["-c", "safety.mode=full_access"])
-        .args(["-c", "safety.checkpoint_on_mutation=false"])
-        .args(["run", "--format", "ndjson"]);
-    if let Some(schema) = &task.spec.output_schema {
-        cmd.arg("--output-schema").arg(task.dir.join(schema));
-    }
-    cmd.arg(&task.spec.prompt)
-        .current_dir(&project)
-        // Inside the project, where `--confine-fs` would allow it, and out of
-        // the snapshot. The model's own `cargo` runs and the checks share it.
-        .env("CARGO_TARGET_DIR", project.join("target"))
-        .env_remove("CARGO_BUILD_TARGET_DIR");
-    if let Target::Mock(mock) = target {
-        isolate(&mut cmd, &sandbox, mock);
-    }
-
     let started = Instant::now();
-    let output = run_with_timeout(cmd, run_timeout(target));
+    let output = run_conversation(task, target, &project, &sandbox);
     let seconds = started.elapsed().as_secs_f64();
     let _ = std::fs::write(sandbox.join("events.ndjson"), &output.stdout);
     let _ = std::fs::write(sandbox.join("stderr.txt"), &output.stderr);
@@ -413,6 +406,58 @@ pub fn run_task(task: &Task, target: &Target<'_>) -> Run {
     run
 }
 
+/// Run the task's prompt, then each follow-up as a continuation of the same
+/// conversation, sharing one time limit. The runs' output is concatenated and
+/// scored as one.
+fn run_conversation(task: &Task, target: &Target<'_>, project: &Path, sandbox: &Path) -> Output {
+    let prompts: Vec<&String> = std::iter::once(&task.spec.prompt)
+        .chain(&task.spec.followups)
+        .collect();
+    let started = Instant::now();
+    let mut output = Output {
+        status: None,
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+        timed_out: false,
+    };
+    for (i, prompt) in prompts.iter().enumerate() {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_mermaid"));
+        cmd.args(["--model", target.model()]).args(&task.spec.args);
+        if i > 0 {
+            cmd.arg("--continue");
+        }
+        // Autonomous by default, like any unattended run: nobody is there to
+        // approve a write. The working copy is a throwaway.
+        cmd.args(["-c", &format!("safety.mode={}", task.spec.safety)])
+            .args(["-c", "safety.checkpoint_on_mutation=false"])
+            .args(["run", "--format", "ndjson"]);
+        if let Some(schema) = &task.spec.output_schema {
+            cmd.arg("--output-schema").arg(task.dir.join(schema));
+        }
+        cmd.arg(prompt.as_str())
+            .current_dir(project)
+            // Inside the project, where `--confine-fs` would allow it, and out
+            // of the snapshot. The model's own `cargo` runs and the checks
+            // share it.
+            .env("CARGO_TARGET_DIR", project.join("target"))
+            .env_remove("CARGO_BUILD_TARGET_DIR");
+        git_identity(&mut cmd);
+        if let Target::Mock(mock) = target {
+            isolate(&mut cmd, sandbox, mock);
+        }
+        let remaining = run_timeout(target).saturating_sub(started.elapsed());
+        let step = run_with_timeout(cmd, remaining);
+        output.stdout.extend_from_slice(&step.stdout);
+        output.stderr.extend_from_slice(&step.stderr);
+        output.status = step.status;
+        output.timed_out = step.timed_out;
+        if step.timed_out {
+            break;
+        }
+    }
+    output
+}
+
 /// Tally the event stream into `run`, and return its `result` line.
 fn read_events(stdout: &[u8], run: &mut Run) -> Option<Value> {
     let mut result = None;
@@ -432,6 +477,8 @@ fn read_events(stdout: &[u8], run: &mut Run) -> Option<Value> {
                     }
                 }
             },
+            // With follow-ups there is one per run; the last one is the
+            // conversation's outcome.
             "result" => result = Some(event),
             _ => {},
         }
@@ -651,6 +698,19 @@ fn copy_dir(from: &Path, to: &Path) {
 
 /// Commit the fixture, so the model sees an ordinary repository and the run
 /// leaves a `git diff` behind. Best-effort: without git the run still works.
+/// A git identity for commits the model makes, and no signing: the machine
+/// running the evals may have neither set up, and a task that asks for a
+/// commit should not fail on that.
+fn git_identity(cmd: &mut Command) {
+    cmd.env("GIT_AUTHOR_NAME", "mermaid-eval")
+        .env("GIT_AUTHOR_EMAIL", "eval@example.invalid")
+        .env("GIT_COMMITTER_NAME", "mermaid-eval")
+        .env("GIT_COMMITTER_EMAIL", "eval@example.invalid")
+        .env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", "commit.gpgsign")
+        .env("GIT_CONFIG_VALUE_0", "false");
+}
+
 fn init_git(project: &Path) {
     let git = |args: &[&str]| {
         Command::new("git")
