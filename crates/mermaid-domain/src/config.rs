@@ -302,7 +302,9 @@ impl Default for OutputConfig {
 
 /// When the guidance pack applies. `Auto` decides per provider, not per
 /// model: on for a local provider (Ollama, or any provider whose `base_url`
-/// is a loopback or LAN host), off for hosted APIs.
+/// is a loopback or LAN host), off for hosted APIs. Locality only stands in
+/// for model capability; the evals' on/off comparison (`just eval-guidance`)
+/// measures whether it picks right for a given model.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum GuidanceMode {

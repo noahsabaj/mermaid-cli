@@ -175,6 +175,8 @@ tokio = { version = "1.44", features = ["test-util"] }
 ruzstd = "0.8.3"
 tar = "0.4.46"
 vt100 = "0.16.2"
+# The eval history stamps each run with its UTC date.
+chrono = "0.4"
 
 [profile.release]
 lto = true

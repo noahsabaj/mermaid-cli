@@ -23,6 +23,11 @@ test *ARGS:
 eval MODELS:
     MERMAID_EVAL_MODELS={{MODELS}} cargo test --test integration it::evals::live -- --ignored --exact --nocapture
 
+# The same, once with the guidance pack pinned on and once off, REPEAT runs
+# per task each, to see whether the coaching still earns its tokens.
+eval-guidance MODELS REPEAT="3":
+    MERMAID_EVAL_GUIDANCE=on,off MERMAID_EVAL_REPEAT={{REPEAT}} MERMAID_EVAL_MODELS={{MODELS}} cargo test --test integration it::evals::live -- --ignored --exact --nocapture
+
 # Dependency-free source guards. CI runs exactly these.
 #
 # `just check` used to skip them while claiming to be "what CI runs" — CI has
