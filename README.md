@@ -146,7 +146,7 @@ Approval policy and OS confinement are independent. The policy (`read_only`, `as
 - `--confine-fs` — write-class filesystem access only beneath the project root, cwd, and temp
 - `--sandbox` — both at once
 
-Enforcement is seccomp-BPF plus Landlock on Linux, Seatbelt on macOS, AppContainer plus Job Objects on Windows. It fails closed: unappliable confinement exits 126 rather than running unconfined. On Linux 6.12 and later, `read_only` mode runs every shell command inside a kernel-enforced read-only sandbox (no writes, sockets, IPC, outward signals or privileges), so any command that only reads works; other platforms keep the read-only allowlists. See [docs/sandbox.md](docs/sandbox.md).
+Enforcement is seccomp-BPF plus Landlock on Linux, Seatbelt on macOS, AppContainer plus Job Objects on Windows. It fails closed: unappliable confinement exits 126 rather than running unconfined. On macOS and on Linux 6.12 and later, `read_only` mode runs every shell command inside a kernel-enforced read-only sandbox (no writes, sockets, IPC, outward signals or privileges), so any command that only reads works; Windows and older Linux kernels keep the read-only allowlists. See [docs/sandbox.md](docs/sandbox.md).
 
 ## Project instructions
 

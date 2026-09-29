@@ -38,9 +38,9 @@ per-platform availability.
 
 ## Read-only mode
 
-On Linux kernels with Landlock ABI 6 (6.12 and later), `read_only` mode is enforced by the
-kernel rather than predicted by a parser. Every shell command runs inside a fixed read-only
-sandbox, applied by `mermaid __sandbox-exec --read-only`:
+On macOS, and on Linux kernels with Landlock ABI 6 (6.12 and later), `read_only` mode is
+enforced by the kernel rather than predicted by a parser. Every shell command runs inside a
+fixed read-only sandbox, applied by `mermaid __sandbox-exec --read-only`. On Linux:
 
 - no filesystem writes anywhere, except the discard devices (`/dev/null`, `/dev/zero`,
   `/dev/full`) and the command's terminal (Landlock);
@@ -51,6 +51,18 @@ sandbox, applied by `mermaid __sandbox-exec --read-only`:
 - no signals to processes outside the sandbox (Landlock scoping), and no capabilities, even
   when Mermaid runs as root.
 
+On macOS the launcher runs the command under a fixed, deny-default Seatbelt profile. A
+write-only deny would not be read-only there, because Mach IPC lets a command change state
+through a daemon without writing a file itself (`launchctl`, `defaults`, Apple Events to
+another app). So everything is refused unless the profile lists it:
+
+- allowed: running programs, every file read, sysctl reads, process information and signals
+  inside the sandbox, writes to `/dev/null`, `/dev/zero` and the command's terminal, and two
+  Mach services: user and group lookups, and the preferences daemon for reads (it refuses
+  writes from a sandbox without `user-preference-write`);
+- refused: every other write, including metadata and extended attributes, all networking
+  including unix sockets, every other Mach service, Apple Events, IPC and IOKit.
+
 Because the kernel holds that line, the policy lets any command run in `read_only` mode, not
 just the ones the shell allowlists recognise as reads: `cargo metadata`, a project script, an
 unfamiliar binary. A command that tries to change something fails with a permission error,
@@ -58,9 +70,10 @@ and the model is told the read-only sandbox refused it. The destructive-pattern 
 your own `deny` overrides still apply first. Every restriction is a hard requirement: there
 is no best-effort degrade, and a launcher that cannot apply all of it exits 126.
 
-Elsewhere (macOS, Windows, and older Linux kernels) `read_only` mode keeps deciding with the
+Elsewhere (Windows, and Linux kernels before 6.12) `read_only` mode keeps deciding with the
 shell allowlists, exactly as before. `mermaid self-test` reports which one this machine uses.
-The rollout is deliberately one platform at a time: Seatbelt needs a read-only profile that
-also covers Mach IPC (preference and launchd services can change state without a file write),
-and the Windows AppContainer backend needs the same audit before either replaces its
-allowlists.
+Windows stays on the allowlists because its only unprivileged network cut-off, an
+AppContainer, also refuses reads: a container can open only what grants it access, which
+leaves out the user's profile. Toolchains there (`~/.cargo`, `~/.rustup`, a per-user Python)
+would fail to start at all, so containment would refuse reads as well as changes, which is
+not the contract above.

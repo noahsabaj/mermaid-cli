@@ -501,5 +501,8 @@ jobs:
         run: "cargo nextest run --test integration --run-ignored only it::sandbox_network::"
       - name: Sandbox filesystem confinement (ignored)
         run: "cargo nextest run --test integration --run-ignored only it::sandbox_fs::"
+      - name: Sandbox read-only containment (ignored, macOS)
+        if: runner.os == 'macOS'
+        run: "cargo nextest run --test integration --run-ignored only it::sandbox_read_only::"
       - name: Self-test (real sandbox availability probes)
         run: cargo run --bin mermaid -- self-test --format json

@@ -716,10 +716,12 @@ mod tests {
             stdout_lines: 0,
             stderr_lines: 0,
         };
-        assert_eq!(
-            detect_denial(&out(None, Some(31), ""), &READ_ONLY_PLAN),
-            Some(DenialKind::ReadOnlyNetwork)
-        );
+        let sigsys = detect_denial(&out(None, Some(31), ""), &READ_ONLY_PLAN);
+        if cfg!(target_os = "linux") {
+            assert_eq!(sigsys, Some(DenialKind::ReadOnlyNetwork));
+        } else {
+            assert_eq!(sigsys, None, "SIGSYS is the Linux kill-switch only");
+        }
         assert_eq!(
             detect_denial(
                 &out(Some(1), None, "touch: Permission denied"),

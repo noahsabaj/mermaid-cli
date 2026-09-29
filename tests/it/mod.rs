@@ -24,7 +24,7 @@ mod run_event_stream;
 mod sandbox_fs;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 mod sandbox_network;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod sandbox_read_only;
 mod subagent_lifecycle_stubbed;
 mod subagent_worktree;
