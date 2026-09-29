@@ -366,7 +366,7 @@ mod macos {
     ///
     /// Not listed, so denied: every other write (data, metadata, xattrs,
     /// times), all networking including unix sockets, other Mach services,
-    /// Apple Events, IPC, and IOKit. Constant: no path or other input is ever
+    /// Apple Events, IPC, and `IOKit`. Constant: no path or other input is ever
     /// spliced in.
     pub(super) const READ_ONLY_PROFILE: &str = r#"(version 1)
 (deny default)
