@@ -44,6 +44,7 @@ use crate::models::traits::Model;
 
 use super::ModelLimits;
 use super::learning::{Learning, Optional, ParamMemory, Rejections};
+use super::native_tools::{self, Advertised};
 use super::output_budget::{OutputBudgetInputs, OutputCapMode, resolve_output_budget};
 use crate::models::types::{
     ChatMessage, FinishReason, MessageAudience, MessageRole, ModelResponse, ProviderContinuation,
@@ -85,7 +86,7 @@ fn finalize_block(
     thinking_acc: &mut String,
     signature_acc: &mut Option<String>,
     compaction_acc: &mut Option<Value>,
-    tool_calls_done: &mut Vec<ToolCall>,
+    tool_calls: &mut ToolCalls,
     out: &mut Vec<StreamEvent>,
 ) {
     match acc {
@@ -106,12 +107,11 @@ fn finalize_block(
             } else {
                 parse_tool_args(&name, input_buf)
             };
-            let tc = ToolCall {
-                id: if id.is_empty() { None } else { Some(id) },
-                function: FunctionCall { name, arguments },
-            };
-            out.push(StreamEvent::ToolCall(tc.clone()));
-            tool_calls_done.push(tc);
+            let tc = tool_calls.push(
+                if id.is_empty() { None } else { Some(id) },
+                FunctionCall { name, arguments },
+            );
+            out.push(StreamEvent::ToolCall(tc));
         },
         BlockAccumulator::Compaction(block) => {
             out.push(StreamEvent::Status(COMPACTED_NOTICE.to_string()));
@@ -142,14 +142,50 @@ const COMPACTED_NOTICE: &str =
 fn continuation(
     signature: Option<String>,
     compaction: Option<Value>,
+    native_tool_calls: Vec<String>,
 ) -> Option<ProviderContinuation> {
-    if signature.is_none() && compaction.is_none() {
+    if signature.is_none() && compaction.is_none() && native_tool_calls.is_empty() {
         return None;
     }
     Some(ProviderContinuation::Anthropic {
         signature: signature.unwrap_or_default(),
         compaction,
+        native_tool_calls,
     })
+}
+
+/// A response's finished tool calls, and the ids of those the model made
+/// through one of Anthropic's own tools.
+#[derive(Debug, Default)]
+struct ToolCalls {
+    calls: Vec<ToolCall>,
+    native: Vec<String>,
+}
+
+impl ToolCalls {
+    /// Record a finished `tool_use` as the reducer should see it: a call to
+    /// one of Anthropic's own tools is rewritten onto the Mermaid tool it
+    /// stands for, and its id noted so history can send it back as written.
+    fn push(&mut self, id: Option<String>, mut function: FunctionCall) -> ToolCall {
+        if native_tools::canonicalize(&mut function)
+            && let Some(id) = &id
+        {
+            self.native.push(id.clone());
+        }
+        let call = ToolCall { id, function };
+        self.calls.push(call.clone());
+        call
+    }
+
+    fn is_empty(&self) -> bool {
+        self.calls.is_empty()
+    }
+
+    /// The calls for the response, and the native ids for its continuation.
+    fn into_parts(self) -> (Option<Vec<ToolCall>>, Vec<String>) {
+        let calls = (!self.calls.is_empty()).then_some(self.calls);
+        (calls, self.native)
+    }
 }
 
 /// Adaptive (Claude 4.6+) vs legacy (`budget_tokens`) thinking-config shape.
@@ -334,6 +370,17 @@ fn sent_optionals(body: &Value) -> Vec<Optional> {
             &[COMPACTION_PARAM, "compact"],
         ));
     }
+    let native_declared = body
+        .get("tools")
+        .and_then(Value::as_array)
+        .is_some_and(|tools| tools.iter().any(|t| t["type"] != "custom"));
+    if native_declared {
+        sent.push(Optional::new(
+            native_tools::REJECTION,
+            "Anthropic's text editor and bash tools",
+            native_tools::REJECTION_NAMES,
+        ));
+    }
     sent
 }
 
@@ -344,12 +391,15 @@ fn sent_optionals(body: &Value) -> Vec<Optional> {
 /// tool types (`web_search`, `code_interpreter`, `computer_use`). The
 /// `type: "custom"` field is documented in the official SDK examples;
 /// the API also accepts omission, but explicit is forward-compatible.
-fn to_anthropic_tools(openai_tools: &[&Value]) -> Vec<Value> {
+fn to_anthropic_tools(openai_tools: &[&Value], native: Advertised) -> Vec<Value> {
     openai_tools
         .iter()
         .filter_map(|tool| {
             let function = tool.get("function")?;
             let name = function.get("name")?.as_str()?;
+            if native.replaces(name) {
+                return None;
+            }
             let description = function
                 .get("description")
                 .and_then(|d| d.as_str())
@@ -366,6 +416,42 @@ fn to_anthropic_tools(openai_tools: &[&Value]) -> Vec<Value> {
             }))
         })
         .collect()
+}
+
+/// Anthropic's own tools this request offers: what the turn allows, unless
+/// this model has refused them.
+fn advertised_native_tools(config: &ModelConfig, rejected: &Rejections) -> Advertised {
+    if rejected.contains(native_tools::REJECTION) {
+        return Advertised::default();
+    }
+    let names: Vec<&str> = config
+        .tools
+        .iter()
+        .filter_map(|t| t.pointer("/function/name").and_then(Value::as_str))
+        .collect();
+    Advertised::resolve(config.native_tools, &names)
+}
+
+/// The request's `tools`: every registered tool in Anthropic's shape, the
+/// ones a native tool stands in for swapped for it.
+///
+/// Tool registration is the single capability boundary. Translate every
+/// registered tool; native fetch and SearXNG do not need an Ollama key.
+fn request_tools(config: &ModelConfig, native: Advertised) -> Vec<Value> {
+    let registered: Vec<&Value> = config.tools.iter().collect();
+    let mut tools = to_anthropic_tools(&registered, native);
+    tools.extend(native.declarations());
+    // Mark the LAST tool with `cache_control: ephemeral` (Step 5b).
+    // Anthropic caches everything BEFORE the marker too, so a single marker
+    // on the last tool covers all tools + the system prompt above (one big
+    // cache breakpoint instead of multiple — there's a hard limit of 4 per
+    // request).
+    if let Some(last) = tools.last_mut()
+        && let Some(obj) = last.as_object_mut()
+    {
+        obj.insert("cache_control".to_string(), json!({"type": "ephemeral"}));
+    }
+    tools
 }
 
 /// Wrap harness steering in a `<system-reminder>` tag and emit it as a user
@@ -464,8 +550,10 @@ fn coalesce_consecutive_roles(msgs: Vec<Value>) -> Vec<Value> {
 ///
 /// Assistant messages with `thinking + provider_continuation` emit a
 /// `thinking` content block paired with the `text/tool_use` blocks; the
-/// signature round-trips so subsequent turns don't 400.
-fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<Value>) {
+/// signature round-trips so subsequent turns don't 400. Tool calls the model
+/// made through one of Anthropic's own tools go back in that form while this
+/// request still offers the tool (`native`).
+fn convert_messages(messages: &[ChatMessage], native: Advertised) -> (Option<String>, Vec<Value>) {
     let mut system: Option<String> = None;
     let mut out: Vec<Value> = Vec::new();
 
@@ -501,7 +589,7 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<Value>) {
                 i += 1;
             },
             MessageRole::Assistant => {
-                let content_blocks = assistant_content_blocks(msg);
+                let content_blocks = assistant_content_blocks(msg, native);
                 if content_blocks.is_empty() {
                     // Skip empty assistant messages — an artifact of
                     // tool-only responses where content is "" and there
@@ -580,7 +668,7 @@ fn user_content(msg: &ChatMessage) -> Value {
 /// the server-side `compaction` block (when this turn carried one), a signed
 /// `thinking` block (when the signature survived), then `text`, then one
 /// `tool_use` per call. Empty for a message with nothing to say.
-fn assistant_content_blocks(msg: &ChatMessage) -> Vec<Value> {
+fn assistant_content_blocks(msg: &ChatMessage, native: Advertised) -> Vec<Value> {
     let mut content_blocks: Vec<Value> = Vec::new();
     // A server-side compaction block goes back exactly as it came, ahead of
     // the turn's own output: the API reads it in place of the history before.
@@ -622,11 +710,23 @@ fn assistant_content_blocks(msg: &ChatMessage) -> Vec<Value> {
     }
     if let Some(ref tool_calls) = msg.tool_calls {
         for tc in tool_calls {
+            let id = tc.id.clone().unwrap_or_default();
+            let made_natively = msg
+                .provider_continuation
+                .as_ref()
+                .is_some_and(|c| c.is_anthropic_native_call(&id));
+            let (name, input) = made_natively
+                .then(|| native.to_native(&tc.function))
+                .flatten()
+                .map_or_else(
+                    || (tc.function.name.clone(), tc.function.arguments.clone()),
+                    |(name, input)| (name.to_string(), input),
+                );
             content_blocks.push(json!({
                 "type": "tool_use",
-                "id": tc.id.clone().unwrap_or_default(),
-                "name": tc.function.name,
-                "input": tc.function.arguments,
+                "id": id,
+                "name": name,
+                "input": input,
             }));
         }
     }
@@ -728,7 +828,8 @@ impl AnthropicAdapter {
         config: &ModelConfig,
         rejected: &Rejections,
     ) -> Value {
-        let (system_from_msgs, anthropic_messages) = convert_messages(messages);
+        let native = advertised_native_tools(config, rejected);
+        let (system_from_msgs, anthropic_messages) = convert_messages(messages, native);
         // ModelConfig.system_prompt wins over any system message in the
         // history (matches the OpenAICompatAdapter pattern). Falls back
         // to whatever convert_messages found.
@@ -817,22 +918,9 @@ impl AnthropicAdapter {
             body["temperature"] = json!(temp);
         }
 
-        // Tool registration is the single capability boundary. Translate every
-        // registered tool; native fetch and SearXNG do not need an Ollama key.
-        let registered: Vec<&Value> = config.tools.iter().collect();
-        let mut anthropic_tools = to_anthropic_tools(&registered);
-        if !anthropic_tools.is_empty() {
-            // Mark the LAST tool with `cache_control: ephemeral` (Step
-            // 5b). Anthropic caches everything BEFORE the marker too, so
-            // a single marker on the last tool covers all tools + the
-            // system prompt above (one big cache breakpoint instead of
-            // multiple — there's a hard limit of 4 per request).
-            if let Some(last) = anthropic_tools.last_mut()
-                && let Some(obj) = last.as_object_mut()
-            {
-                obj.insert("cache_control".to_string(), json!({"type": "ephemeral"}));
-            }
-            body["tools"] = json!(anthropic_tools);
+        let tools = request_tools(config, native);
+        if !tools.is_empty() {
+            body["tools"] = json!(tools);
         }
 
         // Reasoning depth: snap onto supported levels first (defensive —
@@ -1000,7 +1088,7 @@ impl AnthropicAdapter {
         let mut thinking_acc = String::new();
         let mut signature: Option<String> = None;
         let mut compaction: Option<Value> = None;
-        let mut tool_calls: Vec<ToolCall> = Vec::new();
+        let mut tool_calls = ToolCalls::default();
 
         for raw in json.content {
             if raw.get("type").and_then(Value::as_str) == Some("compaction") {
@@ -1020,13 +1108,13 @@ impl AnthropicAdapter {
                     }
                 },
                 ContentBlockOut::ToolUse { id, name, input } => {
-                    tool_calls.push(ToolCall {
-                        id: Some(id),
-                        function: FunctionCall {
+                    tool_calls.push(
+                        Some(id),
+                        FunctionCall {
                             name,
                             arguments: input,
                         },
-                    });
+                    );
                 },
                 ContentBlockOut::Other => {},
             }
@@ -1056,6 +1144,7 @@ impl AnthropicAdapter {
             }));
         }
 
+        let (tool_calls, native_calls) = tool_calls.into_parts();
         Ok(ModelResponse {
             content: text_acc,
             usage: Some(usage),
@@ -1066,12 +1155,8 @@ impl AnthropicAdapter {
             } else {
                 Some(thinking_acc)
             },
-            tool_calls: if tool_calls.is_empty() {
-                None
-            } else {
-                Some(tool_calls)
-            },
-            provider_continuation: continuation(signature, compaction),
+            tool_calls,
+            provider_continuation: continuation(signature, compaction, native_calls),
         })
     }
 
@@ -1105,7 +1190,7 @@ pub(crate) struct AnthropicStream {
     thinking_acc: String,
     signature_acc: Option<String>,
     compaction_acc: Option<Value>,
-    tool_calls_done: Vec<ToolCall>,
+    tool_calls_done: ToolCalls,
     /// Per-buffer caps (see `accumulator::push_capped`): a thinking trace
     /// that trips its cap must not stop the answer's text from accumulating.
     text_truncated: bool,
@@ -1135,7 +1220,7 @@ impl AnthropicStream {
             thinking_acc: String::new(),
             signature_acc: None,
             compaction_acc: None,
-            tool_calls_done: Vec::new(),
+            tool_calls_done: ToolCalls::default(),
             text_truncated: false,
             thinking_truncated: false,
             saw_usage: false,
@@ -1481,6 +1566,7 @@ impl StreamProtocol for AnthropicStream {
             }));
         }
 
+        let (tool_calls, native_calls) = self.tool_calls_done.into_parts();
         Ok(ModelResponse {
             content: self.text_acc,
             usage: self.saw_usage.then(|| {
@@ -1495,12 +1581,12 @@ impl StreamProtocol for AnthropicStream {
             } else {
                 Some(self.thinking_acc)
             },
-            tool_calls: if self.tool_calls_done.is_empty() {
-                None
-            } else {
-                Some(self.tool_calls_done)
-            },
-            provider_continuation: continuation(self.signature_acc, self.compaction_acc),
+            tool_calls,
+            provider_continuation: continuation(
+                self.signature_acc,
+                self.compaction_acc,
+                native_calls,
+            ),
         })
     }
 }
@@ -1780,7 +1866,7 @@ mod tests {
         let mut thinking = String::new();
         let mut sig = None;
         let mut compaction = None;
-        let mut tools = Vec::new();
+        let mut tools = ToolCalls::default();
         let mut events = Vec::new();
         finalize_block(
             BlockAccumulator::ToolUse {
@@ -1795,8 +1881,8 @@ mod tests {
             &mut tools,
             &mut events,
         );
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].function.name, "read_file");
+        assert_eq!(tools.calls.len(), 1);
+        assert_eq!(tools.calls[0].function.name, "read_file");
         assert!(matches!(events.as_slice(), [StreamEvent::ToolCall(_)]));
     }
 
@@ -1806,7 +1892,7 @@ mod tests {
         // it must be dropped; with a signature it must be emitted.
         let mut unsigned = ChatMessage::assistant("answer");
         unsigned.thinking = Some("private reasoning".to_string());
-        let (_sys, msgs) = convert_messages(&[unsigned]);
+        let (_sys, msgs) = convert_messages(&[unsigned], Advertised::default());
         assert!(
             !has_thinking_block(&msgs),
             "unsigned thinking must be dropped"
@@ -1815,7 +1901,7 @@ mod tests {
         let mut signed = ChatMessage::assistant("answer")
             .with_provider_continuation(ProviderContinuation::anthropic("sig123".to_string()));
         signed.thinking = Some("private reasoning".to_string());
-        let (_sys, msgs) = convert_messages(&[signed]);
+        let (_sys, msgs) = convert_messages(&[signed], Advertised::default());
         assert!(has_thinking_block(&msgs), "signed thinking must be present");
     }
 
@@ -2074,7 +2160,7 @@ mod tests {
                 }
             }
         });
-        let translated = to_anthropic_tools(&[&openai_tool]);
+        let translated = to_anthropic_tools(&[&openai_tool], Advertised::default());
         assert_eq!(translated.len(), 1);
         assert_eq!(translated[0]["name"], "read_file");
         assert_eq!(translated[0]["description"], "Read a file");
@@ -2100,7 +2186,7 @@ mod tests {
                 "parameters": {"type": "object", "properties": {}}
             }
         });
-        let translated = to_anthropic_tools(&[&openai_tool]);
+        let translated = to_anthropic_tools(&[&openai_tool], Advertised::default());
         assert_eq!(translated[0]["description"], "");
     }
 
@@ -2113,7 +2199,7 @@ mod tests {
             ChatMessage::user("Hello"),
             ChatMessage::system("This second system message is dropped."),
         ];
-        let (system, msgs) = convert_messages(&messages);
+        let (system, msgs) = convert_messages(&messages, Advertised::default());
         assert_eq!(system.as_deref(), Some("You are helpful."));
         // Only the user message ends up in the messages array.
         assert_eq!(msgs.len(), 1);
@@ -2160,7 +2246,7 @@ mod tests {
             ChatMessage::tool("c3", "read_file", "contents of c"),
             ChatMessage::assistant("Done."),
         ];
-        let (_, msgs) = convert_messages(&messages);
+        let (_, msgs) = convert_messages(&messages, Advertised::default());
         // Sequence after merge: user → assistant(text+tool_use*3) →
         // user(tool_result*3) → assistant(text). 4 messages.
         assert_eq!(msgs.len(), 4);
@@ -2183,7 +2269,7 @@ mod tests {
         msg.thinking = Some("reasoning content".to_string());
         msg.provider_continuation = Some(ProviderContinuation::anthropic("sig_xyz".to_string()));
         let messages = vec![ChatMessage::user("Q?"), msg];
-        let (_, msgs) = convert_messages(&messages);
+        let (_, msgs) = convert_messages(&messages, Advertised::default());
         let assistant_content = msgs[1]["content"].as_array().expect("array");
         // Thinking block first, text block second.
         assert_eq!(assistant_content[0]["type"], "thinking");
@@ -2197,7 +2283,7 @@ mod tests {
     fn convert_messages_image_block_for_user_with_images() {
         let msg = ChatMessage::user("What is this?").with_images(vec!["BASE64DATA".to_string()]);
         let messages = vec![msg];
-        let (_, msgs) = convert_messages(&messages);
+        let (_, msgs) = convert_messages(&messages, Advertised::default());
         let content = msgs[0]["content"].as_array().expect("array");
         assert_eq!(content[0]["type"], "text");
         assert_eq!(content[0]["text"], "What is this?");
@@ -2280,7 +2366,7 @@ mod tests {
         nudge.kind = ChatMessageKind::RecoveryNudge;
         let messages = vec![ChatMessage::user("ok"), nudge];
 
-        let (_system, out) = convert_messages(&messages);
+        let (_system, out) = convert_messages(&messages, Advertised::default());
         assert_eq!(out.len(), 1, "merged into the adjacent user turn");
         assert_eq!(out[0]["role"], "user");
         let blocks = out[0]["content"].as_array().expect("content array");
@@ -2303,7 +2389,7 @@ mod tests {
         nudge.kind = ChatMessageKind::ContextMarker;
         let messages = vec![ChatMessage::assistant("partial reply"), nudge];
 
-        let (_system, out) = convert_messages(&messages);
+        let (_system, out) = convert_messages(&messages, Advertised::default());
         assert_eq!(out.len(), 2);
         assert_eq!(out[0]["role"], "assistant");
         assert_eq!(out[1]["role"], "user", "alternation stays valid");
@@ -2384,7 +2470,7 @@ mod tests {
         ];
 
         for (name, messages) in shapes {
-            let (_system, out) = convert_messages(&messages);
+            let (_system, out) = convert_messages(&messages, Advertised::default());
             assert!(!out.is_empty(), "{name}: the history must not vanish");
             for pair in out.windows(2) {
                 assert_ne!(
@@ -2402,7 +2488,7 @@ mod tests {
     #[test]
     fn coalescing_two_user_turns_keeps_both_texts() {
         let messages = vec![ChatMessage::user("first"), ChatMessage::user("second")];
-        let (_system, out) = convert_messages(&messages);
+        let (_system, out) = convert_messages(&messages, Advertised::default());
         assert_eq!(out.len(), 1);
         let blocks = out[0]["content"].as_array().expect("content array");
         assert_eq!(blocks.len(), 2, "both texts survive: {blocks:#?}");
@@ -2429,7 +2515,7 @@ mod tests {
             ChatMessage::tool("c1", "read_file", "contents"),
             ChatMessage::user("actually, stop"),
         ];
-        let (_system, out) = convert_messages(&messages);
+        let (_system, out) = convert_messages(&messages, Advertised::default());
         let blocks = out[2]["content"].as_array().expect("content array");
         assert_eq!(out[2]["role"], "user");
         assert_eq!(blocks[0]["type"], "tool_result", "{blocks:#?}");
@@ -2449,7 +2535,7 @@ mod tests {
             ChatMessage::assistant("part one"),
             second,
         ];
-        let (_system, out) = convert_messages(&messages);
+        let (_system, out) = convert_messages(&messages, Advertised::default());
         assert_eq!(out.len(), 2);
         let blocks = out[1]["content"].as_array().expect("content array");
         assert_eq!(blocks[0]["type"], "thinking", "{blocks:#?}");
@@ -2467,13 +2553,14 @@ mod tests {
         second.provider_continuation = Some(ProviderContinuation::Anthropic {
             signature: "sig_xyz".to_string(),
             compaction: Some(block.clone()),
+            native_tool_calls: Vec::new(),
         });
         let messages = vec![
             ChatMessage::user("go"),
             ChatMessage::assistant("part one"),
             second,
         ];
-        let (_system, out) = convert_messages(&messages);
+        let (_system, out) = convert_messages(&messages, Advertised::default());
         let blocks = out[1]["content"].as_array().expect("content array");
         let kinds: Vec<&str> = blocks.iter().filter_map(|b| b["type"].as_str()).collect();
         assert_eq!(
@@ -2885,10 +2972,10 @@ mod tests {
     #[test]
     fn build_request_body_handles_empty_tools_without_panicking() {
         // The translation helper is the right unit-of-test here:
-        // if `to_anthropic_tools(&[])` returned a non-empty vec, the
+        // if `to_anthropic_tools(&[], ..)` returned a non-empty vec, the
         // adapter's `if !anthropic_tools.is_empty()` guard would let us
         // reach the cache_control insertion with no last element.
-        let result = to_anthropic_tools(&[]);
+        let result = to_anthropic_tools(&[], Advertised::default());
         assert!(result.is_empty(), "empty input must produce empty output");
     }
 

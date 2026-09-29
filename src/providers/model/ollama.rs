@@ -455,6 +455,7 @@ mod tests {
             suppress_auto_compact: false,
             requested_compaction: None,
             native_compaction: None,
+            native_tools: mermaid_model::models::NativeTools::default(),
         };
         let app_cfg = mermaid_domain::Config::default();
         let cfg = build_model_config(&req, &app_cfg, None, None);
@@ -494,6 +495,7 @@ mod tests {
             suppress_auto_compact: false,
             requested_compaction: None,
             native_compaction: None,
+            native_tools: mermaid_model::models::NativeTools::default(),
         };
         let mut app_cfg = mermaid_domain::Config::default();
         app_cfg.ollama.num_gpu = Some(10);
@@ -532,6 +534,7 @@ mod tests {
             suppress_auto_compact: false,
             requested_compaction: None,
             native_compaction: None,
+            native_tools: mermaid_model::models::NativeTools::default(),
         };
         let cfg = build_model_config(
             &req,
@@ -566,6 +569,7 @@ mod tests {
             suppress_auto_compact: false,
             requested_compaction: None,
             native_compaction: None,
+            native_tools: mermaid_model::models::NativeTools::default(),
         };
         let app_cfg = mermaid_domain::Config::default();
         // Without a learned cap, AUTO hands over the full window room —

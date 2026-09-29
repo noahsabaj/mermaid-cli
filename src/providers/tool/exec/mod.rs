@@ -213,6 +213,16 @@ impl ToolExecutor for ExecuteCommandTool {
          drift, which is easiest to see with both in one place"
     )]
     async fn execute(&self, args: serde_json::Value, ctx: ExecContext) -> ToolOutcome {
+        // The native `bash` tool's `restart` (see the Anthropic adapter's
+        // native tools). There is no session to restart: every command
+        // already starts a fresh shell. Not in the advertised schema.
+        if args.get("restart").and_then(serde_json::Value::as_bool) == Some(true) {
+            return ToolOutcome::success(
+                "Nothing to restart: every command already runs in a fresh shell.",
+                "shell restarted",
+                0.0,
+            );
+        }
         let Some(command) = args.get("command").and_then(|v| v.as_str()) else {
             return ToolOutcome::error("execute_command requires 'command' (string)", None);
         };
@@ -1029,6 +1039,18 @@ mod tests {
             "output: {}",
             outcome.output()
         );
+    }
+
+    /// The native `bash` tool's `restart` runs nothing: every command already
+    /// starts a fresh shell.
+    #[tokio::test]
+    async fn restart_is_a_no_op_that_runs_nothing() {
+        let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), std::env::temp_dir());
+        let outcome = ExecuteCommandTool
+            .execute(serde_json::json!({"restart": true}), ctx)
+            .await;
+        assert!(outcome.is_success(), "outcome: {outcome:?}");
+        assert!(outcome.output().contains("fresh shell"));
     }
 
     #[tokio::test]

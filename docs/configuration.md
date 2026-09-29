@@ -124,6 +124,13 @@ checkpoint_on_mutation = true
 # interactive daemons). Set false to use pipes.
 # pty = true
 
+[tools]
+# Send a provider's own tool definitions where it has them (Anthropic's text
+# editor and bash) instead of Mermaid's schemas for the same tools. The calls
+# still run through Mermaid's file and shell tools, so every safety gate
+# applies. false always sends Mermaid's.
+# provider_native = true
+
 [ui]
 # TUI color theme: "dark" (default) or "light". Switch live with
 # `/theme dark|light` (persists here). Setting the NO_COLOR environment

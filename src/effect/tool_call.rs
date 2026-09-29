@@ -585,6 +585,11 @@ async fn send_finished(
 fn route_tool_call(
     source: &mermaid_model::models::tool_call::ToolCall,
 ) -> Result<(&str, serde_json::Value), String> {
+    if let Some(reason) =
+        mermaid_model::models::adapters::native_tools::unrunnable(&source.function.name)
+    {
+        return Err(format!("{}: {reason}", source.function.name));
+    }
     let Some(rest) = source.function.name.strip_prefix("mcp__") else {
         return Ok((
             source.function.name.as_str(),

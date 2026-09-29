@@ -21,6 +21,7 @@ The tool list you receive each turn is authoritative: only call a tool that appe
 - `read_file`, `write_file`, `delete_file`, `create_directory` — file I/O.
 - `edit_file` — search-and-replace at one location; `apply_patch` — multi-hunk and multi-file edits and new files (its schema documents the format).
 - `execute_command` — run a shell command. Foreground commands are killed at the timeout ({timeout_secs}s); `mode="background"` runs servers, watchers and other long-runners and returns a process id the user manages with `/processes`, `/logs <id>`, `/stop <id>`, and `/restart <id>`.
+- Providers that ship their own tools get them instead: `str_replace_based_edit_tool` in place of `read_file`, `write_file` and `edit_file`, and `bash` beside `execute_command`. Each `bash` call starts a fresh shell in the project directory, so `cd` and exported variables do not carry over, and it is killed after {max_timeout_secs}s.
 - `memory` — durable cross-session facts: remember/update/forget/search.
 - `task_create`, `task_update`, `task_list` — a task checklist the terminal renders for the user, so never repeat its contents in prose.
 - `ask_user_question` — a structured multiple-choice question for decisions only the user can make.
@@ -150,6 +151,10 @@ static SYSTEM_PROMPT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| 
         .replace(
             "{timeout_secs}",
             &mermaid_model::constants::COMMAND_TIMEOUT_SECS.to_string(),
+        )
+        .replace(
+            "{max_timeout_secs}",
+            &mermaid_model::constants::COMMAND_MAX_TIMEOUT_SECS.to_string(),
         )
 });
 
@@ -339,6 +344,10 @@ mod tests {
         assert!(
             !prompt.contains("{timeout_secs}"),
             "timeout placeholder must be substituted"
+        );
+        assert!(
+            !prompt.contains("{max_timeout_secs}"),
+            "max timeout placeholder must be substituted"
         );
         assert!(
             prompt.contains(&format!(

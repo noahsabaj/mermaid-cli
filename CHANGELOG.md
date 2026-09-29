@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Claude now gets the tools it was trained on.** On Anthropic, Mermaid sends
+  Anthropic's own text editor (`text_editor_20250728`) and bash
+  (`bash_20250124`) tool definitions instead of its hand-written schemas for
+  the same work. The text editor stands in for `read_file`, `write_file` and
+  `edit_file`; `bash` sits beside `execute_command`, which keeps its timeout
+  and background mode. Every native call is rewritten onto the Mermaid tool it
+  stands for before it runs, so the policy gate, the read-only sandbox,
+  checkpoints and approvals apply exactly as before, and history replays the
+  call in the form the model wrote. `bash` is not offered on Windows, where
+  commands run under PowerShell. A model that rejects these tools is
+  remembered and gets Mermaid's schemas; `[tools] provider_native = false`
+  turns the whole thing off. Along the way `read_file` lists a directory
+  instead of failing on it.
+
 ## [0.28.0] - 2026-09-29
 
 ### Changed

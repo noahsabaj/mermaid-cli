@@ -391,6 +391,10 @@ pub struct ChatRequest {
     /// never the reducer, when `[compaction] provider_native` is on and the
     /// provider has not refused it; the automatic threshold is then skipped.
     pub native_compaction: Option<mermaid_model::models::NativeCompaction>,
+    /// The provider-defined tools this turn may send in place of Mermaid's
+    /// schemas. Set by the effect layer, never the reducer, from
+    /// `[tools] provider_native`; providers without native tools ignore it.
+    pub native_tools: mermaid_model::models::NativeTools,
 }
 
 /// Provider-agnostic tool definition sent in the request. Concrete
@@ -444,6 +448,7 @@ impl From<&ChatRequest> for mermaid_model::models::ModelConfig {
             resolved_max_output: request.resolved_max_output,
             output_schema: request.output_schema.clone(),
             native_compaction: request.native_compaction,
+            native_tools: request.native_tools,
             ..Self::default()
         }
     }
@@ -775,6 +780,7 @@ mod tests {
             suppress_auto_compact: false,
             requested_compaction: None,
             native_compaction: None,
+            native_tools: mermaid_model::models::NativeTools::default(),
         };
         assert!(
             Cmd::CallModel {
@@ -842,6 +848,7 @@ mod model_config_tests {
             suppress_auto_compact: false,
             requested_compaction: None,
             native_compaction: None,
+            native_tools: mermaid_model::models::NativeTools::default(),
         };
         let cfg = ModelConfig::from(&req);
         assert_eq!(cfg.model, "anthropic/claude-test");

@@ -18,6 +18,13 @@ pub enum ProviderContinuation {
         /// replayed verbatim, never rebuilt.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         compaction: Option<serde_json::Value>,
+        /// Ids of this turn's tool calls the model made through one of
+        /// Anthropic's own tools (text editor, bash). The calls themselves are
+        /// stored under Mermaid's tool names so every gate and display sees
+        /// the tool it knows; these ids say which to send back in the native
+        /// form the model actually wrote.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        native_tool_calls: Vec<String>,
     },
     /// Meta Responses output items, including encrypted reasoning state.
     MetaResponses { output: Vec<MetaResponseItem> },
@@ -30,6 +37,7 @@ impl ProviderContinuation {
         Self::Anthropic {
             signature,
             compaction: None,
+            native_tool_calls: Vec::new(),
         }
     }
 
@@ -46,8 +54,20 @@ impl ProviderContinuation {
     #[must_use]
     pub fn without_compaction(self) -> Option<Self> {
         match self {
-            Self::Anthropic { signature, .. } if signature.is_empty() => None,
-            Self::Anthropic { signature, .. } => Some(Self::anthropic(signature)),
+            Self::Anthropic {
+                signature,
+                native_tool_calls,
+                ..
+            } if signature.is_empty() && native_tool_calls.is_empty() => None,
+            Self::Anthropic {
+                signature,
+                native_tool_calls,
+                ..
+            } => Some(Self::Anthropic {
+                signature,
+                compaction: None,
+                native_tool_calls,
+            }),
             meta @ Self::MetaResponses { .. } => Some(meta),
         }
     }
@@ -58,6 +78,18 @@ impl ProviderContinuation {
         match self {
             Self::Anthropic { compaction, .. } => compaction.as_ref(),
             Self::MetaResponses { .. } => None,
+        }
+    }
+
+    /// Whether the tool call `id` was made through one of Anthropic's own
+    /// tools and must be replayed in that form.
+    #[must_use]
+    pub fn is_anthropic_native_call(&self, id: &str) -> bool {
+        match self {
+            Self::Anthropic {
+                native_tool_calls, ..
+            } => native_tool_calls.iter().any(|call| call == id),
+            Self::MetaResponses { .. } => false,
         }
     }
 
