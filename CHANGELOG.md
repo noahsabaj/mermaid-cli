@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The evals can compare the guidance pack on and off, and keep a history.**
+  `just eval-guidance <model>` runs every task with the coaching pack pinned
+  on and then off (3 runs each by default) and reports the difference per
+  task, with a verdict on whether the pack helps that model and whether the
+  `auto` default, which decides by local versus hosted provider rather than by
+  capability, picked right for it. Every live run now appends its scores to
+  `evals/results/history.jsonl` with the date, version and commit, and the
+  report compares each model with its earlier runs and with every model
+  recorded, on the same tasks. `MERMAID_EVAL_JOBS` runs tasks in parallel.
+
 ### Changed
 
 - **The `auto`-mode safety classifier now sees the conversation, not just

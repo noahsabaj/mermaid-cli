@@ -29,12 +29,63 @@ post-mortem.
 | `MERMAID_EVAL_MODELS` | comma-separated model ids (what `just eval` sets) |
 | `MERMAID_EVAL_TASKS` | comma-separated task ids to run; default all |
 | `MERMAID_EVAL_REPEAT` | runs per task; default 1. Models are stochastic, so use 3 or more before drawing conclusions |
+| `MERMAID_EVAL_GUIDANCE` | comma-separated `default`, `on`, `off`: run every task once per setting of the guidance pack. Default `default`, which is whatever your config says |
+| `MERMAID_EVAL_JOBS` | runs in flight at once; default 1. Mind the provider's rate limits |
+| `MERMAID_EVAL_LABEL` | a tag for this run's history entries, such as the change being measured |
+| `MERMAID_EVAL_HISTORY` | history file to append to; `off` to append nothing. Default `evals/results/history.jsonl` |
 | `MERMAID_EVAL_OUT` | report directory |
 
 Scores are reported, not asserted: a model failing a task is a result, not a
 test failure. A run where the model never answered at all (a bad key, an
 unknown id) is flagged separately, so a misconfiguration does not read as a
 score of zero.
+
+## Guidance pack on versus off
+
+The guidance pack is the coaching layered onto the core system prompt: how to
+plan, how to read a codebase, checklist discipline. The question the suite
+exists to answer is whether that coaching still helps the models people use,
+and the only way to answer it is to run the same model with the pack on and
+then off:
+
+```
+just eval-guidance anthropic/<model>           # 3 runs per task per setting
+just eval-guidance ollama/qwen3-coder:30b 5
+```
+
+The report then has a section per setting and an on-versus-off table: pass
+rates, mean tokens, a per-task difference, and a verdict (the pack helps,
+hurts, or makes no measured difference). With fewer than 3 runs per task on
+either side, it says the difference is only a hint.
+
+**The default is a stand-in.** `[output] guidance = "auto"`, the shipped
+default, turns the pack on for local providers (Ollama, or a `base_url` on a
+loopback or LAN host) and off for hosted APIs. Where a model is served says
+little about how capable it is: a strong local model gets coached anyway, and
+a weak hosted one does not. The table's `default` column is what your config
+picks for each model, and the verdict says whether that pick matches the
+measurement ("the default is right" or "the default is wrong for this model").
+Once enough models have been measured, the default should come from these
+results rather than from locality.
+
+## History
+
+Every live run appends one line per model and guidance setting to
+`evals/results/history.jsonl`: the date, the Mermaid version and commit (with
+`dirty` when the checkout had uncommitted changes), the `MERMAID_EVAL_LABEL`
+tag, and each task's passes, runs, turns, tokens and seconds. Commit it. The
+report ends with a history section scored on the tasks the current run
+covered, so rows stay comparable as tasks are added:
+
+- every model ever recorded, latest run first by pass rate, which is the
+  "does the harness scale with the model" view across releases;
+- each current model's own trend over its earlier runs, which is the "did this
+  harness change help" view.
+
+For a throwaway run (debugging a task, a half-configured model) set
+`MERMAID_EVAL_HISTORY=off`. A setting where no run was scored at all (a bad
+key, an unknown id) records nothing, so a misconfiguration never enters the
+history as a zero.
 
 ## What CI runs
 
