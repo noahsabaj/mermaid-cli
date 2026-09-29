@@ -113,6 +113,10 @@ checkpoint_on_mutation = true
 # system_installs = "auto"
 # Model the "auto" classifier uses to vet actions. Omit to vet with the
 # session's active model; set a smaller/faster model to cut latency and cost.
+# The classifier sees your messages in this conversation, the reply you last
+# answered and any compaction summary (secrets redacted), and reasons at the
+# session's level clamped to low..high. It waits 30s at low, 60s at medium and
+# 120s at high; a timeout or error escalates to you, never allows.
 # auto_classifier_model = "<provider>/<small-fast-model>"
 
 [exec]

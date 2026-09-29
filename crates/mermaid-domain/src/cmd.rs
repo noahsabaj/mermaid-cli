@@ -54,9 +54,13 @@ pub struct ToolDispatch {
     /// (`state.session.safety_mode`). The runner builds the policy gate /
     /// Auto classifier from this rather than the static config.
     pub safety_mode: SafetyMode,
-    /// The user's stated intent for the turn (latest user message),
-    /// passed to the Auto-mode classifier as alignment context.
-    pub intent: Option<String>,
+    /// The conversation that led to this call (the user's requests, the
+    /// compaction summary, the reply a short "go ahead" answers), passed to
+    /// the Auto-mode classifier as alignment context.
+    pub goal: crate::UserGoal,
+    /// The session's reasoning level at dispatch. The Auto-mode classifier
+    /// thinks at this level, clamped to a range that fits a verdict.
+    pub reasoning: ReasoningLevel,
     /// Conversation id at dispatch — checkpoint-anchoring provenance
     /// (rides onto any checkpoint this call takes).
     pub session_id: String,
