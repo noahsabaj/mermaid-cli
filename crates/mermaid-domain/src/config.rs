@@ -1127,7 +1127,7 @@ pub struct WebConfig {
     /// Cloud; `searxng` selects a self-hosted instance at `searxng_url`.
     pub search_backend: SearchBackend,
     /// Fall back to Ollama Cloud search when `search_backend = "auto"` has no
-    /// viable managed bundle on this platform (Windows today). Explicit
+    /// viable managed bundle on this platform. Explicit
     /// opt-in because it changes where search queries egress — off by
     /// default, disclosed in the startup notice when it engages, and it
     /// still needs `OLLAMA_API_KEY`. A viable managed bundle always wins;

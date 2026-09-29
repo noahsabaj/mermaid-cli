@@ -30,11 +30,8 @@ const MAX_BUNDLE_BYTES: u64 = 128 * 1024 * 1024;
 /// The published runtime is substantially smaller than this after unpacking.
 /// Keep enough headroom for CPython and wheels while bounding decompression
 /// bombs and accidental oversized releases.
-#[cfg(any(unix, test))]
 const MAX_UNPACKED_BYTES: u64 = 1024 * 1024 * 1024;
-#[cfg(any(unix, test))]
 const MAX_ARCHIVE_ENTRIES: u64 = 200_000;
-#[cfg(any(unix, test))]
 const MAX_ARCHIVE_PATH_BYTES: usize = 4096;
 const MAX_POINTER_BYTES: u64 = 256;
 /// Without cross-process leases there is no safe way to identify which old
@@ -47,9 +44,7 @@ const MAX_GENERATION_DIRECTORIES: usize = 4;
 /// retention bound so repeated crashes cannot grow the private temp volume
 /// without limit.
 const MAX_DOWNLOAD_STAGING_DIRECTORIES: usize = MAX_GENERATION_DIRECTORIES;
-#[cfg(any(unix, test))]
 const EXTRACTION_HEARTBEAT_BYTES: u64 = 4 * 1024 * 1024;
-#[cfg(any(unix, test))]
 const EXTRACTION_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 // A crashed owner becomes reapable before a waiter gives up. Live owners renew
@@ -271,14 +266,14 @@ pub(super) fn invalidate_runtime(runtime: &Path) -> Result<()> {
 }
 
 /// Pure OS/arch → asset-triple mapping, unit-testable off-host. Covers exactly
-/// the targets the `mermaid-searxng` release publishes; Windows (SearXNG needs
-/// Unix-only modules) is unsupported.
+/// the targets the `mermaid-searxng` release publishes.
 fn triple_for(os: &str, arch: &str) -> Option<&'static str> {
     Some(match (os, arch) {
         ("linux", "x86_64") => "linux-x86_64",
         ("linux", "aarch64") => "linux-aarch64",
         ("macos", "aarch64") => "macos-aarch64",
         ("macos", "x86_64") => "macos-x86_64",
+        ("windows", "x86_64") => "windows-x86_64",
         _ => return None,
     })
 }
@@ -620,7 +615,7 @@ fn finalize_generation(incoming: &Path, root: &Path, expected_sha: &str) -> Resu
         if generation.exists() {
             continue;
         }
-        std::fs::rename(incoming, &generation).with_context(|| {
+        rename_retrying(incoming, &generation).with_context(|| {
             format!(
                 "publishing immutable SearXNG generation {}",
                 generation.display()
@@ -640,9 +635,9 @@ fn sync_directory(path: &Path) -> Result<()> {
 
 #[cfg(windows)]
 fn sync_directory(_path: &Path) -> Result<()> {
-    // Windows directory handles require platform-specific flags. Managed
-    // provisioning is unavailable there; keep lock tests portable while the
-    // production pointer operation continues to fail closed.
+    // NTFS journals directory metadata (renames, creates) itself, and flushing
+    // a directory handle needs write access plus FILE_FLAG_BACKUP_SEMANTICS.
+    // The files inside are still synced individually before publication.
     Ok(())
 }
 
@@ -689,13 +684,12 @@ fn atomic_replace_pointer(from: &Path, to: &Path) -> Result<()> {
 }
 
 #[cfg(windows)]
-fn atomic_replace_pointer(_from: &Path, _to: &Path) -> Result<()> {
-    // Managed provisioning is rejected before reaching this function on
-    // Windows. `std::fs::rename` cannot atomically replace an existing file on
-    // Windows, so fail closed instead of introducing a remove/rename gap.
-    Err(anyhow!(
-        "atomic managed-SearXNG pointer replacement is unavailable on Windows"
-    ))
+fn atomic_replace_pointer(from: &Path, to: &Path) -> Result<()> {
+    // `std::fs::rename` replaces an existing file on Windows in one step
+    // (POSIX-semantics rename where the OS supports it, else MoveFileExW with
+    // MOVEFILE_REPLACE_EXISTING), so readers see the old or the new pointer.
+    rename_retrying(from, to)
+        .with_context(|| format!("atomically switching SearXNG pointer {}", to.display()))
 }
 
 /// Cross-process installation ownership. A permanent advisory-lock file
@@ -839,7 +833,6 @@ impl ProvisionLock {
         }
     }
 
-    #[cfg(any(unix, test))]
     fn heartbeat(&self) -> Result<()> {
         let claim = self.claim_ownership()?;
         self.write_heartbeat_claimed()?;
@@ -950,10 +943,38 @@ fn replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
 
 #[cfg(windows)]
 fn replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
-    // Managed provisioning is unavailable on Windows. Keep lock protocol tests
-    // portable; the transition claim prevents another compliant actor from
-    // observing the short remove/rename interval on this unsupported target.
-    std::fs::remove_file(to)?;
+    // Replaces in one step on Windows too; see `atomic_replace_pointer`.
+    rename_retrying(from, to)
+}
+
+/// `std::fs::rename`, retried briefly on the transient failures Windows
+/// reports while another process holds a handle without delete sharing:
+/// typically an antivirus scanner inspecting freshly extracted files.
+#[cfg(windows)]
+fn rename_retrying(from: &Path, to: &Path) -> std::io::Result<()> {
+    const ERROR_ACCESS_DENIED: i32 = 5;
+    const ERROR_SHARING_VIOLATION: i32 = 32;
+    const ERROR_LOCK_VIOLATION: i32 = 33;
+    let mut attempt = 0;
+    loop {
+        match std::fs::rename(from, to) {
+            Err(error)
+                if attempt < 20
+                    && matches!(
+                        error.raw_os_error(),
+                        Some(ERROR_ACCESS_DENIED | ERROR_SHARING_VIOLATION | ERROR_LOCK_VIOLATION)
+                    ) =>
+            {
+                attempt += 1;
+                std::thread::sleep(Duration::from_millis(50));
+            },
+            result => return result,
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn rename_retrying(from: &Path, to: &Path) -> std::io::Result<()> {
     std::fs::rename(from, to)
 }
 
@@ -1131,7 +1152,7 @@ fn quarantine_claimed_lock(path: &Path, prefix: &str) -> Result<PathBuf> {
         .parent()
         .context("the provisioning lock has no parent")?;
     let quarantine = unique_candidate(parent, prefix);
-    std::fs::rename(path, &quarantine)?;
+    rename_retrying(path, &quarantine)?;
     sync_directory(parent)?;
     Ok(quarantine)
 }
@@ -1201,7 +1222,6 @@ fn unique_candidate(parent: &Path, prefix: &str) -> PathBuf {
     ))
 }
 
-#[cfg(unix)]
 fn extract(
     archive: &Path,
     dest: &Path,
@@ -1223,20 +1243,6 @@ fn extract(
     extract_tar(progressing, dest)
 }
 
-#[cfg(windows)]
-fn extract(
-    _archive: &Path,
-    _dest: &Path,
-    _lock: &ProvisionLock,
-    _cancellation: Arc<AtomicBool>,
-) -> Result<()> {
-    // No Windows bundle is published (SearXNG imports Unix-only modules like
-    // `pwd`); ensure_bundle returns the unsupported-platform error long before
-    // this is reachable. Present only so the crate compiles on Windows.
-    Err(anyhow!("SearXNG bundles are not published for Windows"))
-}
-
-#[cfg(any(unix, test))]
 #[derive(Debug, Default)]
 struct ExtractionBudget {
     entries: u64,
@@ -1247,13 +1253,11 @@ struct ExtractionBudget {
 /// `tar` iterator consumes internally before yielding an entry. Per-entry
 /// accounting alone cannot see those extension records and therefore cannot
 /// defend against a compressed metadata bomb.
-#[cfg(any(unix, test))]
 struct DecodedLimitReader<R> {
     inner: R,
     remaining: u64,
 }
 
-#[cfg(any(unix, test))]
 impl<R> DecodedLimitReader<R> {
     fn new(inner: R, limit: u64) -> Self {
         Self {
@@ -1263,7 +1267,6 @@ impl<R> DecodedLimitReader<R> {
     }
 }
 
-#[cfg(any(unix, test))]
 impl<R: std::io::Read> std::io::Read for DecodedLimitReader<R> {
     fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
         if output.is_empty() {
@@ -1296,7 +1299,6 @@ impl<R: std::io::Read> std::io::Read for DecodedLimitReader<R> {
 /// renews provisioning ownership by decoded-byte progress or elapsed time.
 /// Because `tar::Entry::unpack_in` ultimately reads through the archive's
 /// source, this also heartbeats throughout one very large file entry.
-#[cfg(any(unix, test))]
 struct ExtractionProgressReader<R, H> {
     inner: R,
     cancellation: Arc<AtomicBool>,
@@ -1307,7 +1309,6 @@ struct ExtractionProgressReader<R, H> {
     heartbeat_interval: Duration,
 }
 
-#[cfg(any(unix, test))]
 impl<R, H> ExtractionProgressReader<R, H> {
     fn new(
         inner: R,
@@ -1335,7 +1336,6 @@ impl<R, H> ExtractionProgressReader<R, H> {
     }
 }
 
-#[cfg(any(unix, test))]
 impl<R, H> std::io::Read for ExtractionProgressReader<R, H>
 where
     R: std::io::Read,
@@ -1363,7 +1363,6 @@ where
     }
 }
 
-#[cfg(any(unix, test))]
 impl ExtractionBudget {
     fn account(&mut self, path: &Path, path_bytes: usize, size: u64) -> Result<()> {
         validate_archive_path(path, path_bytes)?;
@@ -1388,7 +1387,6 @@ impl ExtractionBudget {
     }
 }
 
-#[cfg(any(unix, test))]
 fn validate_archive_path(path: &Path, path_bytes: usize) -> Result<()> {
     use std::path::Component;
 
@@ -1410,7 +1408,6 @@ fn validate_archive_path(path: &Path, path_bytes: usize) -> Result<()> {
     Ok(())
 }
 
-#[cfg(any(unix, test))]
 fn extract_tar(reader: impl std::io::Read, dest: &Path) -> Result<()> {
     let mut archive = tar::Archive::new(reader);
     let mut budget = ExtractionBudget::default();
@@ -1449,7 +1446,6 @@ fn extract_tar(reader: impl std::io::Read, dest: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(any(unix, test))]
 fn validate_archive_link(
     entry_path: &Path,
     target: &Path,
@@ -1534,18 +1530,19 @@ mod tests {
         assert_eq!(triple_for("linux", "aarch64"), Some("linux-aarch64"));
         assert_eq!(triple_for("macos", "aarch64"), Some("macos-aarch64"));
         assert_eq!(triple_for("macos", "x86_64"), Some("macos-x86_64"));
+        assert_eq!(triple_for("windows", "x86_64"), Some("windows-x86_64"));
     }
 
     #[test]
     fn triple_is_none_for_unpublished_platforms() {
-        assert_eq!(triple_for("windows", "x86_64"), None); // SearXNG needs `pwd`
+        assert_eq!(triple_for("windows", "aarch64"), None);
         assert_eq!(triple_for("freebsd", "x86_64"), None);
     }
 
     #[test]
-    fn viability_explains_unsupported_windows() {
-        let error = viability_for("windows", "x86_64").unwrap_err();
-        assert!(error.contains("windows/x86_64"), "{error}");
+    fn viability_explains_unsupported_platforms() {
+        let error = viability_for("freebsd", "x86_64").unwrap_err();
+        assert!(error.contains("freebsd/x86_64"), "{error}");
         assert!(error.contains("searxng_url"), "{error}");
     }
 
@@ -1557,6 +1554,7 @@ mod tests {
             "linux-aarch64",
             "macos-aarch64",
             "macos-x86_64",
+            "windows-x86_64",
         ] {
             let sha = bundle_manifest::bundle_sha256(t).unwrap_or_else(|| panic!("no sha for {t}"));
             assert_eq!(sha.len(), 64, "{t} sha is not 64 hex chars");
@@ -2158,7 +2156,6 @@ mod tests {
         assert!(active_runtime(&root, TEST_SHA).is_none());
     }
 
-    #[cfg(unix)]
     #[test]
     fn pointer_switch_retains_every_published_generation() {
         let (root, _cleanup) =
@@ -2181,7 +2178,6 @@ mod tests {
         assert!(old_contents.contains("first"));
     }
 
-    #[cfg(unix)]
     #[test]
     fn publication_claim_spans_markers_generation_and_pointer() {
         let (root, _cleanup) = create_unique_dir(
@@ -2231,10 +2227,8 @@ mod tests {
         lock.heartbeat().unwrap();
     }
 
-    #[cfg(unix)]
     const MULTIPROCESS_ROOT_ENV: &str = "MERMAID_SEARXNG_MULTIPROCESS_TEST_ROOT";
 
-    #[cfg(unix)]
     #[test]
     fn multiprocess_provision_helper() {
         let Some(root) = std::env::var_os(MULTIPROCESS_ROOT_ENV).map(PathBuf::from) else {
@@ -2264,7 +2258,6 @@ mod tests {
         });
     }
 
-    #[cfg(unix)]
     #[test]
     fn two_processes_publish_exactly_one_generation() {
         use std::process::{Command, Stdio};

@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Local web search now works on Windows.** `web_search` defaulted to a
+  bundled local SearXNG that had no Windows build, so on Windows the tool
+  simply was not there unless you pointed Mermaid at Ollama Cloud or your own
+  instance. mermaid-searxng v0.4.0 publishes a `windows-x86_64` bundle, and
+  Mermaid now downloads, verifies and runs it like on Linux and macOS: no
+  Docker, no WSL, nothing leaving the machine. SearXNG's one Unix-only import
+  (`pwd`, used only to log a Valkey connection failure, and Valkey is off)
+  is made optional in that build.
 - **Claude now gets the tools it was trained on.** On Anthropic, Mermaid sends
   Anthropic's own text editor (`text_editor_20250728`) and bash
   (`bash_20250124`) tool definitions instead of its hand-written schemas for
