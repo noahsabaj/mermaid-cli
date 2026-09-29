@@ -1,0 +1,23 @@
+# A feature that has to be carried through every layer of a small crate:
+# parsing, the entry model, the totals and the report. Scored on a sample
+# file the model never sees (`hidden/`), so matching the visible samples is
+# not enough.
+fixture = "ledger"
+prompt = """
+Add refunds to this ledger. A line like `2026-02-03 refund 15.00 returned kettle` puts money back, like a deposit, but refunds are not deposits: the summary shows them on their own `Refunds:` line, between `Withdrawals:` and `Balance:`. Only show that line when the ledger has at least one refund, so the output for existing ledgers stays exactly as it is. Keep the existing tests passing.
+"""
+
+[[check]]
+kind = "command"
+overlay = "hidden"
+run = ["cargo", "run", "--offline", "--quiet", "--", "samples/eval-refunds.txt"]
+stdout_contains = "Entries: 5\nDeposits: 200.00\nWithdrawals: 95.50\nRefunds: 85.25\nBalance: 189.75\n"
+
+[[check]]
+kind = "command"
+run = ["cargo", "run", "--offline", "--quiet", "--", "samples/january.txt"]
+stdout_contains = "Entries: 5\nDeposits: 1240.25\nWithdrawals: 532.49\nBalance: 707.76\n"
+
+[[check]]
+kind = "command"
+run = ["cargo", "test", "--offline", "--quiet"]

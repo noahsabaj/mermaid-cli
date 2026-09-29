@@ -1,0 +1,118 @@
+# A known-good solution, replayed by the offline tier through the mock
+# provider: every module rewritten around `u64` cents.
+
+[[turn]]
+calls = [
+    { tool = "read_file", args = { path = "src/entry.rs" } },
+    { tool = "read_file", args = { path = "src/parse.rs" } },
+    { tool = "read_file", args = { path = "src/balance.rs" } },
+    { tool = "read_file", args = { path = "src/report.rs" } },
+    { tool = "read_file", args = { path = "tests/ledger.rs" } },
+]
+
+[[turn]]
+tool = "edit_file"
+args.path = "src/entry.rs"
+args.target_content = """
+    /// Always positive; `kind` says which way it moves the balance.
+    pub amount: f64,"""
+args.replacement_content = """
+    /// In cents, never negative; `kind` says which way it moves the balance.
+    pub amount: u64,"""
+
+[[turn]]
+tool = "edit_file"
+args.path = "src/parse.rs"
+args.target_content = """
+/// A non-negative amount such as `12`, `12.5` or `12.34`.
+pub fn parse_amount(text: &str) -> Result<f64, String> {
+    let amount: f64 = text
+        .parse()
+        .map_err(|_| format!("bad amount `{text}`"))?;
+    if amount < 0.0 {
+        return Err(format!("negative amount `{text}`"));
+    }
+    Ok(amount)
+}"""
+args.replacement_content = """
+/// A non-negative amount such as `12`, `12.5` or `12.34`, in cents.
+pub fn parse_amount(text: &str) -> Result<u64, String> {
+    if text.starts_with('-') {
+        return Err(format!("negative amount `{text}`"));
+    }
+    let bad = || format!("bad amount `{text}`");
+    let (whole, frac) = text.split_once('.').unwrap_or((text, ""));
+    if whole.is_empty() || frac.len() > 2 || !frac.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(bad());
+    }
+    let whole: u64 = whole.parse().map_err(|_| bad())?;
+    let frac: u64 = format!("{frac:0<2}").parse().map_err(|_| bad())?;
+    whole
+        .checked_mul(100)
+        .and_then(|cents| cents.checked_add(frac))
+        .ok_or_else(bad)
+}"""
+
+[[turn]]
+tool = "write_file"
+args.path = "src/balance.rs"
+args.content = """
+use crate::entry::{Entry, Kind};
+
+/// Sums per kind, in cents.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Totals {
+    pub deposits: u64,
+    pub withdrawals: u64,
+}
+
+pub fn totals(entries: &[Entry]) -> Totals {
+    let mut totals = Totals::default();
+    for entry in entries {
+        match entry.kind {
+            Kind::Deposit => totals.deposits += entry.amount,
+            Kind::Withdrawal => totals.withdrawals += entry.amount,
+        }
+    }
+    totals
+}
+
+/// What is left, in cents: every deposit minus every withdrawal.
+pub fn balance(entries: &[Entry]) -> i128 {
+    let totals = totals(entries);
+    i128::from(totals.deposits) - i128::from(totals.withdrawals)
+}
+"""
+
+[[turn]]
+tool = "write_file"
+args.path = "src/report.rs"
+args.content = """
+use crate::balance::{balance, totals};
+use crate::entry::Entry;
+
+/// A money amount in cents as it appears in the summary.
+pub fn money(cents: i128) -> String {
+    let sign = if cents < 0 { "-" } else { "" };
+    let cents = cents.unsigned_abs();
+    format!("{sign}{}.{:02}", cents / 100, cents % 100)
+}
+
+/// The summary `ledger <file>` prints.
+pub fn render(entries: &[Entry]) -> String {
+    let totals = totals(entries);
+    let mut out = String::new();
+    out.push_str(&format!("Entries: {}\\n", entries.len()));
+    out.push_str(&format!("Deposits: {}\\n", money(totals.deposits.into())));
+    out.push_str(&format!("Withdrawals: {}\\n", money(totals.withdrawals.into())));
+    out.push_str(&format!("Balance: {}\\n", money(balance(entries))));
+    out
+}
+"""
+
+[[turn]]
+tool = "execute_command"
+args = { command = "cargo test --offline --quiet && cargo run --offline --quiet -- samples/petty-cash.txt" }
+
+[[turn]]
+say = "Money is now `u64` cents from parsing to the report, and the balance is signed cents. The petty cash tin prints `Balance: 0.00`."
