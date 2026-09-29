@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-09-29
+
 ### Changed
 
 - **A model the catalog has never heard of now works on its first call.**
@@ -95,6 +97,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Events, and signals outside the sandbox are refused. Denying writes alone
   would not be read-only on macOS, because `launchctl`, `defaults` and Apple
   Events change state through a daemon without the command writing a file.
+
+- **The system prompt is split into facts and an optional guidance pack.** The
+  core prompt now states only what the model can't find out for itself (the
+  tools, the OS and shell, what each safety mode gates, where memory and the
+  scratchpad live) and the boundaries it must not cross. It is about a third of
+  its old size. The coaching (the core loop, task-checklist discipline, the
+  codebase-reading procedure, memory upkeep, and the editing, validation and
+  output contracts) moved into a guidance pack layered after it. A new
+  `[output] guidance` key decides when the pack applies: `auto` (the default)
+  turns it on for local providers (Ollama, or any provider whose `base_url` is
+  a loopback or LAN host) and off for hosted APIs; `on` and `off` force it.
+  `/runtime` shows whether it is active. A `--system-prompt` replacement never
+  gets the pack.
+
+  The 38 tests that asserted the prompt's exact wording are deleted. They froze
+  the coaching in place; the behavioural eval suite under `evals/` now measures
+  whether a prompt change makes the agent better or worse. Two structural guards
+  remain: the core stays within 40 non-blank lines, and every safety boundary
+  lives in the core rather than the pack.
+
+- **BREAKING: plan mode is gone; `read_only` stays.** The `plan` safety mode,
+  the `enter_plan_mode` / `exit_plan_mode` tools, `/plan`, `/config` (whose
+  only section was plan settings), the `[plan]` config table, and
+  `mermaid run --plan` / `--plan-autoaccept` are removed, along with the
+  machinery that existed only for them: the plan-mode system prompt and the
+  surgery it did on the base prompt, the plan-file and safe-build carve-outs,
+  the scratchpad-only shell carve-out and its dedicated confinement, the
+  per-dispatch plan reminder and its stall breaker, checklist seeding from an
+  approved plan, and the `plan` payload on `tool_finished` events. Shift+Tab
+  now cycles `read_only → ask → auto → full_access`. For "look but don't
+  touch", use `read_only` (Shift+Tab, `/safety read_only`, or
+  `[safety] mode = "read_only"`); the model plans in the conversation like it
+  does in any other mode.
+
+  Old state still loads: a conversation saved while planning resumes in the
+  configured safety mode, and an approved plan in an old transcript renders as
+  an ordinary tool row. A leftover `[plan]` table is reported as an unknown
+  key and ignored. `[safety] mode = "plan"` is now an invalid value (it was
+  already reset to the default at load), and a `--replay` log that contains
+  `/plan` no longer parses.
+
+- **Dependency and action roll-up.** `base64` 0.22 -> 0.23 (a major bump, but the
+  API this codebase uses is unchanged), `reqwest` 0.13.4 -> 0.13.5, `rusqlite`
+  0.40.1 -> 0.40.2, `which` 8.0.4 -> 8.0.6, `async-trait` 0.1.89 -> 0.1.92, and
+  the pinned SHAs for `actions/deploy-pages` (v5.0.1),
+  `dtolnay/rust-toolchain` and `taiki-e/install-action` (v2.87.14). Rolled up
+  into one change rather than eight: branch protection requires branches be up
+  to date, so each separate merge would have put the other seven behind and
+  forced a fresh check cycle for every one.
+
+- **Every test run is nextest now, the opt-in ones too.** The main suite has
+  run under `cargo nextest` for a while, but the CI jobs for the `#[ignore]`d
+  tests (daemon, OS sandbox, managed SearXNG, macOS clipboard) still called
+  `cargo test -- --ignored`, and so did every "run with" hint. They now use
+  `cargo nextest run --run-ignored only` with the same filters, so they get a
+  process per test and the retry and timeout policy in `.config/nextest.toml`.
+  The managed-SearXNG test, which downloads its bundle first, gets ten minutes
+  there instead of three. `docs/development.md` no longer offers
+  `cargo test --workspace` as a fallback. There are no doctests, so nothing
+  still needs `cargo test --doc`.
+
+- **"Unknown command" is gone as a concept.** A slash line the registry does
+  not know is a message, so there is no error row to post and nothing the
+  composer can eat; `SlashCmd::Unknown` no longer exists and
+  `parse_slash_command` returns `Option`. Two side effects of the single
+  classifier: a buffer with leading whitespace (`  /help`) is now prose,
+  where before it drew no palette but still ran the command on Enter, and
+  `/help<newline>more` now runs `/help`, where before the palette offered it
+  and the parser refused it.
+
+- **BREAKING: default safety mode is now `Auto` (was `Ask`).** A fresh
+  session — with no `mode` in any config file — starts classifier-vetted:
+  aligned actions run without prompting, risky or off-task ones still
+  escalate to an approval prompt. Set `[safety] mode = "ask"` in config to restore
+  prompt-before-everything; existing configs that already pin a mode
+  (including `mode = "ask"` frozen by an earlier `mermaid init`) keep
+  their value.
 
 ### Added
 
@@ -236,6 +315,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   confinement can name `/dev/null` individually instead of granting `/dev` as
   a hierarchy — the latter also hands out `/dev/sda` and `/dev/mem`.
 
+- **A message that opens with a path is no longer swallowed by the command
+  parser.** Typing `/home/you/Downloads/pkg.deb can you make this run on
+  fedora` used to turn the composer yellow, retitle it " Enter Command ",
+  replace the status band with an empty palette, hijack Up/Down/Tab/Esc (Esc
+  wiped the whole line), suppress the `@`-mention picker, and on Enter
+  discard the message for a transcript row reading `Unknown command:
+  /home/you/downloads/pkg.deb` — lowercased, with everything after the first
+  space dropped. Six places decided independently whether a buffer was a
+  command, each with a bare `starts_with('/')`, and two of them stripped a
+  different number of slashes than the submit path did. They are now one
+  function, and the test is whether the first word names a real command
+  rather than whether the line starts with a slash. A `/` that matches
+  nothing leaves every key alone and sends verbatim on Enter; while it is
+  still a bare word, a dim `No commands match "/tmp"` sits above the
+  composer, and it goes away as soon as a space makes the line a sentence. `//foo` is likewise ordinary
+  text, where before it dispatched as `/foo` while the palette offered to
+  complete it to `/forget`.
 
 ### Security
 
@@ -276,105 +372,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the command in `__sandbox-exec` because it had asked for confinement. The
   field is now `confine_writes: Option<Vec<PathBuf>>` and the launcher protocol
   carries an explicit `--confine-fs` marker independent of the root list.
-
-### Fixed
-
-- **A message that opens with a path is no longer swallowed by the command
-  parser.** Typing `/home/you/Downloads/pkg.deb can you make this run on
-  fedora` used to turn the composer yellow, retitle it " Enter Command ",
-  replace the status band with an empty palette, hijack Up/Down/Tab/Esc (Esc
-  wiped the whole line), suppress the `@`-mention picker, and on Enter
-  discard the message for a transcript row reading `Unknown command:
-  /home/you/downloads/pkg.deb` — lowercased, with everything after the first
-  space dropped. Six places decided independently whether a buffer was a
-  command, each with a bare `starts_with('/')`, and two of them stripped a
-  different number of slashes than the submit path did. They are now one
-  function, and the test is whether the first word names a real command
-  rather than whether the line starts with a slash. A `/` that matches
-  nothing leaves every key alone and sends verbatim on Enter; while it is
-  still a bare word, a dim `No commands match "/tmp"` sits above the
-  composer, and it goes away as soon as a space makes the line a sentence. `//foo` is likewise ordinary
-  text, where before it dispatched as `/foo` while the palette offered to
-  complete it to `/forget`.
-
-### Changed
-
-- **The system prompt is split into facts and an optional guidance pack.** The
-  core prompt now states only what the model can't find out for itself (the
-  tools, the OS and shell, what each safety mode gates, where memory and the
-  scratchpad live) and the boundaries it must not cross. It is about a third of
-  its old size. The coaching (the core loop, task-checklist discipline, the
-  codebase-reading procedure, memory upkeep, and the editing, validation and
-  output contracts) moved into a guidance pack layered after it. A new
-  `[output] guidance` key decides when the pack applies: `auto` (the default)
-  turns it on for local providers (Ollama, or any provider whose `base_url` is
-  a loopback or LAN host) and off for hosted APIs; `on` and `off` force it.
-  `/runtime` shows whether it is active. A `--system-prompt` replacement never
-  gets the pack.
-
-  The 38 tests that asserted the prompt's exact wording are deleted. They froze
-  the coaching in place; the behavioural eval suite under `evals/` now measures
-  whether a prompt change makes the agent better or worse. Two structural guards
-  remain: the core stays within 40 non-blank lines, and every safety boundary
-  lives in the core rather than the pack.
-
-- **BREAKING: plan mode is gone; `read_only` stays.** The `plan` safety mode,
-  the `enter_plan_mode` / `exit_plan_mode` tools, `/plan`, `/config` (whose
-  only section was plan settings), the `[plan]` config table, and
-  `mermaid run --plan` / `--plan-autoaccept` are removed, along with the
-  machinery that existed only for them: the plan-mode system prompt and the
-  surgery it did on the base prompt, the plan-file and safe-build carve-outs,
-  the scratchpad-only shell carve-out and its dedicated confinement, the
-  per-dispatch plan reminder and its stall breaker, checklist seeding from an
-  approved plan, and the `plan` payload on `tool_finished` events. Shift+Tab
-  now cycles `read_only → ask → auto → full_access`. For "look but don't
-  touch", use `read_only` (Shift+Tab, `/safety read_only`, or
-  `[safety] mode = "read_only"`); the model plans in the conversation like it
-  does in any other mode.
-
-  Old state still loads: a conversation saved while planning resumes in the
-  configured safety mode, and an approved plan in an old transcript renders as
-  an ordinary tool row. A leftover `[plan]` table is reported as an unknown
-  key and ignored. `[safety] mode = "plan"` is now an invalid value (it was
-  already reset to the default at load), and a `--replay` log that contains
-  `/plan` no longer parses.
-
-- **Dependency and action roll-up.** `base64` 0.22 -> 0.23 (a major bump, but the
-  API this codebase uses is unchanged), `reqwest` 0.13.4 -> 0.13.5, `rusqlite`
-  0.40.1 -> 0.40.2, `which` 8.0.4 -> 8.0.6, `async-trait` 0.1.89 -> 0.1.92, and
-  the pinned SHAs for `actions/deploy-pages` (v5.0.1),
-  `dtolnay/rust-toolchain` and `taiki-e/install-action` (v2.87.14). Rolled up
-  into one change rather than eight: branch protection requires branches be up
-  to date, so each separate merge would have put the other seven behind and
-  forced a fresh check cycle for every one.
-
-- **Every test run is nextest now, the opt-in ones too.** The main suite has
-  run under `cargo nextest` for a while, but the CI jobs for the `#[ignore]`d
-  tests (daemon, OS sandbox, managed SearXNG, macOS clipboard) still called
-  `cargo test -- --ignored`, and so did every "run with" hint. They now use
-  `cargo nextest run --run-ignored only` with the same filters, so they get a
-  process per test and the retry and timeout policy in `.config/nextest.toml`.
-  The managed-SearXNG test, which downloads its bundle first, gets ten minutes
-  there instead of three. `docs/development.md` no longer offers
-  `cargo test --workspace` as a fallback. There are no doctests, so nothing
-  still needs `cargo test --doc`.
-
-- **"Unknown command" is gone as a concept.** A slash line the registry does
-  not know is a message, so there is no error row to post and nothing the
-  composer can eat; `SlashCmd::Unknown` no longer exists and
-  `parse_slash_command` returns `Option`. Two side effects of the single
-  classifier: a buffer with leading whitespace (`  /help`) is now prose,
-  where before it drew no palette but still ran the command on Enter, and
-  `/help<newline>more` now runs `/help`, where before the palette offered it
-  and the parser refused it.
-
-- **BREAKING: default safety mode is now `Auto` (was `Ask`).** A fresh
-  session — with no `mode` in any config file — starts classifier-vetted:
-  aligned actions run without prompting, risky or off-task ones still
-  escalate to an approval prompt. Set `[safety] mode = "ask"` in config to restore
-  prompt-before-everything; existing configs that already pin a mode
-  (including `mode = "ask"` frozen by an earlier `mermaid init`) keep
-  their value.
 
 ## [0.27.0] - 2026-09-07
 
@@ -5461,7 +5458,8 @@ MERMAID.md project instructions, MCP spec bump, and a security update.
 - rustfmt and clippy configuration
 - Docker compose setup for LiteLLM proxy
 
-[Unreleased]: https://github.com/noahsabaj/mermaid-cli/compare/v0.27.0...HEAD
+[Unreleased]: https://github.com/noahsabaj/mermaid-cli/compare/v0.28.0...HEAD
+[0.28.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.27.0...v0.28.0
 [0.27.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.26.0...v0.27.0
 [0.26.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.25.0...v0.26.0
 [0.25.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.24.0...v0.25.0
