@@ -1,0 +1,5 @@
+2026-04-01 deposit 70368744177664.35 treasury
+2026-04-02 withdrawal 0.10 fee
+2026-04-03 withdrawal 0.20 fee
+2026-04-04 deposit 7 interest
+2026-04-05 deposit 3.5 interest

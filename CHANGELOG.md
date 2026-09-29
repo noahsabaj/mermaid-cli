@@ -18,6 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `evals/results/history.jsonl` with the date, version and commit, and the
   report compares each model with its earlier runs and with every model
   recorded, on the same tasks. `MERMAID_EVAL_JOBS` runs tasks in parallel.
+- **Three longer eval tasks, scored on inputs the model never sees.**
+  `ledger-refunds` carries a feature through parsing, totals and the report;
+  `ledger-exact-money` moves money from `f64` to integer cents across a crate;
+  `stock-wrong-totals` is a bug reported only by its symptom, whose cause sits
+  in a different module. Each is scored by running the program on a hidden
+  input copied in after the run (the new `overlay` on a `command` check), so
+  a fix tuned to the visible samples does not pass.
 
 ## [0.28.0] - 2026-09-29
 
