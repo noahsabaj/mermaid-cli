@@ -615,9 +615,15 @@ pub struct CompactionConfig {
     /// demand.
     pub summary_max_tokens: usize,
 
-    /// Ceiling on the summarizer's input (prompt scaffold plus history
-    /// excerpt). Also scaled down to fit a small window.
+    /// The summarizer's input (prompt scaffold plus history excerpt) when the
+    /// model's window is unknown, and the floor under the window-scaled budget
+    /// when it is known. Scaled down to fit a small window.
     pub summarizer_input_token_budget: usize,
+
+    /// Share (percent) of a known context window the summarizer's input may
+    /// use, so a larger window gets a fuller handoff. Clamped to `1..=100`,
+    /// and never past what the summary's own output leaves of the window.
+    pub summarizer_input_window_percent: u8,
 
     /// Floor and ceiling on the window room held back for the model's reply
     /// when deciding whether the context counts as "full". Swapped values are
@@ -639,6 +645,7 @@ impl Default for CompactionConfig {
             tail_token_budget: policy.tail_token_budget,
             summary_max_tokens: policy.summary_max_tokens,
             summarizer_input_token_budget: policy.summarizer_input_token_budget,
+            summarizer_input_window_percent: policy.summarizer_input_window_percent,
             min_response_reserve_tokens: policy.min_response_reserve_tokens,
             max_response_reserve_tokens: policy.max_response_reserve_tokens,
         }
@@ -671,6 +678,7 @@ impl CompactionConfig {
                 self.summarizer_input_token_budget,
                 defaults.summarizer_input_token_budget,
             ),
+            summarizer_input_window_percent: self.summarizer_input_window_percent.clamp(1, 100),
             // Order the pair rather than trusting it: swapped bounds are the
             // easy hand-edit mistake, and silently inverting the reserve is
             // worse than ignoring the user's intent about which is which.

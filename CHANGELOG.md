@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Compaction summaries now read more of the conversation on large-context
+  models.** The summarizer's input was capped at 64k tokens whatever the model's
+  window, so a 1M-context model compacting ~850k tokens of history wrote its
+  handoff from a 64k excerpt trimmed from the middle. The budget now scales with
+  the window Mermaid resolves for the model: 75% of it (750k on a 1M model, 150k
+  on 200k), never less than the old 64k and never more than the window minus the
+  summary's output, so small local models behave exactly as before. An unknown
+  window keeps 64k. The share is configurable as
+  `[compaction] summarizer_input_window_percent`.
+
 ## [0.28.0] - 2026-09-29
 
 ### Changed
