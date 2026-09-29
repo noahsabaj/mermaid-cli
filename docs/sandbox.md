@@ -72,5 +72,8 @@ is no best-effort degrade, and a launcher that cannot apply all of it exits 126.
 
 Elsewhere (Windows, and Linux kernels before 6.12) `read_only` mode keeps deciding with the
 shell allowlists, exactly as before. `mermaid self-test` reports which one this machine uses.
-The rollout is deliberately one platform at a time: the Windows AppContainer backend needs
-the same audit before it replaces its allowlists.
+Windows stays on the allowlists because its only unprivileged network cut-off, an
+AppContainer, also refuses reads: a container can open only what grants it access, which
+leaves out the user's profile. Toolchains there (`~/.cargo`, `~/.rustup`, a per-user Python)
+would fail to start at all, so containment would refuse reads as well as changes, which is
+not the contract above.
