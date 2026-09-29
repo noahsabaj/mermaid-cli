@@ -277,6 +277,13 @@ Tool descriptions carry only what each tool does, whatever the setting. A `--sys
 prompt, so the pack is never added to it. `/runtime` shows whether the pack is
 on for the current model.
 
+Locality is a stand-in for what actually matters, which is how capable the
+model is. A strong model served from your own machine gets coached anyway, and
+a weak hosted one does not. To see whether the pack helps a particular model,
+run the evals with it pinned on and then off (`just eval-guidance <model>`, see
+[`evals/README.md`](../evals/README.md#guidance-pack-on-versus-off)); the report
+says whether `auto` picked right for it, and `on` or `off` overrides it if not.
+
 ## Output styles
 
 Output styles (`/output-style`) are named voice/format presets that modify the
