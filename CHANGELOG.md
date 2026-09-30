@@ -63,6 +63,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The stale-task reminder no longer sends the model two runs of about 22
   spaces in the middle of its sentence.
+- **`stock-wrong-totals` no longer fails a model for adding tests.** Its
+  check that `tests/` was untouched failed every run on DeepSeek V4.1 Flash,
+  though each one fixed the bug and only added regression tests. The task now
+  puts the original tests back and runs them (a new `restore` field on a
+  `command` check), so a weakened or deleted test still fails it.
+- Eval history no longer marks every run after a session's first as `dirty`:
+  that first run's own append to `evals/results/history.jsonl` counted as an
+  uncommitted change.
 
 ### Changed
 
