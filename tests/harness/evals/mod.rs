@@ -100,12 +100,20 @@ pub enum Check {
     /// `overlay` names a directory under the task whose files are copied
     /// into the project first: hidden inputs or tests the model never saw,
     /// so a solution tuned to the visible samples does not pass.
+    ///
+    /// `restore` names paths (as in `unchanged`) put back to the fixture's
+    /// version first, dropping any file the run added under them. Running the
+    /// original tests this way lets a model add regression tests without
+    /// failing the task, where `unchanged` would fail it for the addition,
+    /// while a weakened or deleted test still does not pass.
     Command {
         run: Vec<String>,
         #[serde(default)]
         stdout_contains: Option<String>,
         #[serde(default)]
         overlay: Option<String>,
+        #[serde(default)]
+        restore: Vec<String>,
     },
     /// These paths (files or directories, `.` for the whole project) must be
     /// byte-identical to the fixture.
@@ -484,11 +492,13 @@ pub fn run_task_with(task: &Task, target: &Target<'_>, guidance: Guidance) -> Ru
     let after = snapshot(&project);
     for check in &task.spec.checks {
         if let Check::Command {
-            overlay: Some(overlay),
-            ..
+            overlay, restore, ..
         } = check
         {
-            copy_dir(&task.dir.join(overlay), &project);
+            restore_paths(&project, &before, restore);
+            if let Some(overlay) = overlay {
+                copy_dir(&task.dir.join(overlay), &project);
+            }
         }
         let (label, failure) = score(
             check,
@@ -624,19 +634,20 @@ fn score(
             run: argv,
             stdout_contains,
             overlay: _,
-        } => score_command(argv, stdout_contains.as_deref(), project),
+            restore,
+        } => {
+            let (mut label, failure) = score_command(argv, stdout_contains.as_deref(), project);
+            if !restore.is_empty() {
+                let _ = write!(label, " with the original {} restored", restore.join(", "));
+            }
+            (label, failure)
+        },
         Check::Unchanged { paths } => {
             let label = format!("{} unchanged", paths.join(", "));
-            let covered = |file: &str| {
-                paths.iter().any(|p| {
-                    let p = p.trim_end_matches('/');
-                    p == "." || file == p || file.starts_with(&format!("{p}/"))
-                })
-            };
             let changed: Vec<&String> = before
                 .keys()
                 .chain(after.keys().filter(|k| !before.contains_key(*k)))
-                .filter(|file| covered(file) && before.get(*file) != after.get(*file))
+                .filter(|file| covers(paths, file) && before.get(*file) != after.get(*file))
                 .collect();
             let failure = (!changed.is_empty()).then(|| format!("changed: {changed:?}"));
             (label, failure)
@@ -805,6 +816,34 @@ fn run_with_timeout(mut cmd: Command, limit: Duration) -> Output {
         stdout: stdout.join().unwrap_or_default(),
         stderr: stderr.join().unwrap_or_default(),
         timed_out,
+    }
+}
+
+/// Whether `file`, a project-relative path, falls under one of `paths`.
+fn covers(paths: &[String], file: &str) -> bool {
+    paths.iter().any(|p| {
+        let p = p.trim_end_matches('/');
+        p == "." || file == p || file.starts_with(&format!("{p}/"))
+    })
+}
+
+/// Put `paths` back to the fixture's version: files the run added under them
+/// are removed, and the fixture's own are rewritten.
+fn restore_paths(project: &Path, fixture: &BTreeMap<String, Vec<u8>>, paths: &[String]) {
+    if paths.is_empty() {
+        return;
+    }
+    for (file, _) in snapshot(project) {
+        if covers(paths, &file) && !fixture.contains_key(&file) {
+            std::fs::remove_file(project.join(&file)).expect("remove an added file");
+        }
+    }
+    for (file, bytes) in fixture.iter().filter(|(file, _)| covers(paths, file)) {
+        let target = project.join(file);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).expect("recreate a restored directory");
+        }
+        std::fs::write(target, bytes).expect("restore a fixture file");
     }
 }
 

@@ -71,15 +71,24 @@ fn every_task_is_well_formed() {
         }
         for check in &task.spec.checks {
             if let Check::Command {
-                overlay: Some(overlay),
-                ..
+                overlay, restore, ..
             } = check
             {
-                assert!(
-                    task.dir.join(overlay).is_dir(),
-                    "{}: no overlay directory {overlay}",
-                    task.id
-                );
+                if let Some(overlay) = overlay {
+                    assert!(
+                        task.dir.join(overlay).is_dir(),
+                        "{}: no overlay directory {overlay}",
+                        task.id
+                    );
+                }
+                // A misspelt path would restore nothing and pass silently.
+                for path in restore {
+                    assert!(
+                        task.fixture().join(path).exists(),
+                        "{}: restore names {path}, which the fixture lacks",
+                        task.id
+                    );
+                }
             }
         }
         // A request check can only be scored against the mock, so the live

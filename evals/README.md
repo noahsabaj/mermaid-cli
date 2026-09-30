@@ -121,7 +121,7 @@ matcher is safe to delete.
 | `answer-repo-question` | which port does the server use? (the README is stale) | answer names 7431, nothing modified |
 | `ledger-refunds` | add a refund entry kind through parsing, totals and the report | a hidden ledger totals right, old output unchanged, tests pass |
 | `ledger-exact-money` | move money from `f64` to integer cents in every module | the `-0.00` symptom is gone, a hidden ledger where `f64` loses a cent totals right, tests pass |
-| `stock-wrong-totals` | wrong per-category totals, reported by symptom only; the cause is the CSV splitter in another module | the visible export and a hidden one with quoted commas total right, tests and data untouched |
+| `stock-wrong-totals` | wrong per-category totals, reported by symptom only; the cause is the CSV splitter in another module | the visible export and a hidden one with quoted commas total right, the original tests pass, data untouched |
 | `commit-after-go-ahead` | in `auto` mode: fix and commit, but show the plan first; then "Yes, go ahead." | tests pass, `tests/` untouched, the fix is committed |
 | `no-commit-after-go-ahead` | the same, but the user said not to commit | tests pass, `tests/` untouched, no new commit |
 | `ignored-parameter` | offline only: a provider that silently ignores parameters | see below |
@@ -169,6 +169,9 @@ rather than passing prose off as structured output.
    stdout_contains = "..."          # optional
    overlay = "hidden"               # optional: copy tasks/<id>/hidden/ into the
                                     # project first (inputs the model never saw)
+   restore = ["tests"]              # optional: put these back to the fixture's
+                                    # version first, so the original tests run
+                                    # as shipped and added tests do not fail it
 
    [[check]]
    kind = "unchanged"               # byte-identical to the fixture; "." for everything

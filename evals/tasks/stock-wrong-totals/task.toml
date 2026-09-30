@@ -18,10 +18,14 @@ overlay = "hidden"
 run = ["cargo", "run", "--offline", "--quiet", "--", "data/eval-export.csv"]
 stdout_contains = "Paint, outdoor: 108.00\nPlumbing: 10.00\nTools: 9.99\nTotal: 127.99\n"
 
+# The original tests, run as shipped. A model that adds regression tests
+# (a reasonable response to a bug report) still passes; one that weakens or
+# deletes a test does not.
 [[check]]
 kind = "command"
 run = ["cargo", "test", "--offline", "--quiet"]
+restore = ["tests"]
 
 [[check]]
 kind = "unchanged"
-paths = ["tests", "data"]
+paths = ["data"]

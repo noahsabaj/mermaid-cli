@@ -407,8 +407,18 @@ impl Provenance {
             date: chrono::Utc::now().format("%Y-%m-%d").to_string(),
             mermaid: env!("CARGO_PKG_VERSION").to_string(),
             commit: git(&["rev-parse", "--short=12", "HEAD"]),
-            dirty: git(&["status", "--porcelain", "--untracked-files=no"])
-                .is_some_and(|status| !status.is_empty()),
+            // The history file is left out: the first run of a session appends
+            // to it, and every run after that would be stamped dirty by the
+            // suite's own output rather than by a change to the code.
+            dirty: git(&[
+                "status",
+                "--porcelain",
+                "--untracked-files=no",
+                "--",
+                ".",
+                ":(exclude)evals/results",
+            ])
+            .is_some_and(|status| !status.is_empty()),
             label: label.filter(|l| !l.trim().is_empty()),
         }
     }
