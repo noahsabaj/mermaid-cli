@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-09-30
+
 ### Added
 
 - **Local web search now works on Windows.** `web_search` defaulted to a
@@ -59,26 +61,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   does, the advice lives in the guidance pack, and both checklist reminders
   follow `[output] guidance`.
 
-### Fixed
-
-- The stale-task reminder no longer sends the model two runs of about 22
-  spaces in the middle of its sentence.
-- **`stock-wrong-totals` no longer fails a model for adding tests.** Its
-  check that `tests/` was untouched failed every run on DeepSeek V4.1 Flash,
-  though each one fixed the bug and only added regression tests. The task now
-  puts the original tests back and runs them (a new `restore` field on a
-  `command` check), so a weakened or deleted test still fails it.
-- Eval history no longer marks every run after a session's first as `dirty`:
-  that first run's own append to `evals/results/history.jsonl` counted as an
-  uncommitted change.
-- The offline evals no longer fail most runs on Windows with "error decoding
-  response body". The mock provider read each request through a cloned
-  socket, and on Windows a clone is inheritable, so every binary the suite
-  spawned in parallel could hold another task's connection open after the
-  mock closed it. It now reads through a borrow, and nothing leaks.
-
-### Changed
-
 - **Compaction summaries now read more of the conversation on large-context
   models.** The summarizer's input was capped at 64k tokens whatever the model's
   window, so a 1M-context model compacting ~850k tokens of history wrote its
@@ -88,8 +70,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   summary's output, so small local models behave exactly as before. An unknown
   window keeps 64k. The share is configurable as
   `[compaction] summarizer_input_window_percent`.
-
-### Changed
 
 - **The `auto`-mode safety classifier now sees the conversation, not just
   your last message.** It used to judge each borderline action against the
@@ -111,6 +91,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   use them: `commit-after-go-ahead` asks for a fix and a commit, shows a plan,
   and gets "Yes, go ahead."; `no-commit-after-go-ahead` is its mirror, where
   the user said not to commit.
+
+### Fixed
+
+- The stale-task reminder no longer sends the model two runs of about 22
+  spaces in the middle of its sentence.
+- **`stock-wrong-totals` no longer fails a model for adding tests.** Its
+  check that `tests/` was untouched failed every run on DeepSeek V4.1 Flash,
+  though each one fixed the bug and only added regression tests. The task now
+  puts the original tests back and runs them (a new `restore` field on a
+  `command` check), so a weakened or deleted test still fails it.
+- Eval history no longer marks every run after a session's first as `dirty`:
+  that first run's own append to `evals/results/history.jsonl` counted as an
+  uncommitted change.
+- The offline evals no longer fail most runs on Windows with "error decoding
+  response body". The mock provider read each request through a cloned
+  socket, and on Windows a clone is inheritable, so every binary the suite
+  spawned in parallel could hold another task's connection open after the
+  mock closed it. It now reads through a borrow, and nothing leaks.
+- The startup notice for a platform with no local search bundle no longer
+  cuts its own advice off mid-word. Each degraded capability's reason was
+  capped at 240 bytes and Mermaid's no-bundle message runs to about 300, so
+  the truncation marker landed inside the first remedy
+  (`allow_ollama_searc ...[content truncated]... arch_backend`). The cap is
+  now 512, which fits Mermaid's own remedies and still bounds error text from
+  elsewhere.
 
 ## [0.28.0] - 2026-09-29
 
@@ -5563,7 +5568,8 @@ MERMAID.md project instructions, MCP spec bump, and a security update.
 - rustfmt and clippy configuration
 - Docker compose setup for LiteLLM proxy
 
-[Unreleased]: https://github.com/noahsabaj/mermaid-cli/compare/v0.28.0...HEAD
+[Unreleased]: https://github.com/noahsabaj/mermaid-cli/compare/v0.29.0...HEAD
+[0.29.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.28.0...v0.29.0
 [0.28.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.27.0...v0.28.0
 [0.27.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.26.0...v0.27.0
 [0.26.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.25.0...v0.26.0
