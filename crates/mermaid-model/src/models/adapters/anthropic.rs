@@ -967,19 +967,17 @@ impl AnthropicAdapter {
 
         // Thinking format: newest accepted shape (see `thinking_format_for`).
         match thinking_format_for(&self.model_name, rejected) {
-            Some(ThinkingFormat::Adaptive) => {
-                // For adaptive, only emit `thinking` when the user
-                // actually wants thinking — adaptive models accept
-                // omission as disabled. Bundle the `display` field so
-                // Opus 4.7 surfaces reasoning chunks (it defaults to
-                // `"omitted"` — would otherwise hide the trace).
-                if effective_reasoning != ReasoningLevel::None {
-                    body["thinking"] = json!({
-                        "type": "adaptive",
-                        "display": "summarized",
-                    });
-                }
+            // For adaptive, only emit `thinking` when the user actually wants
+            // thinking — adaptive models accept omission as disabled. Bundle
+            // the `display` field so Opus 4.7 surfaces reasoning chunks (it
+            // defaults to `"omitted"` — would otherwise hide the trace).
+            Some(ThinkingFormat::Adaptive) if effective_reasoning != ReasoningLevel::None => {
+                body["thinking"] = json!({
+                    "type": "adaptive",
+                    "display": "summarized",
+                });
             },
+            Some(ThinkingFormat::Adaptive) => {},
             Some(ThinkingFormat::Legacy) => {
                 if let Some(budget) = legacy_budget_for(effective_reasoning, max_tokens) {
                     body["thinking"] = json!({
