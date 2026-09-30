@@ -119,8 +119,14 @@ impl Drop for MockProvider {
 }
 
 /// Answer one HTTP/1.1 request, then close the connection.
+///
+/// Reads through a borrow rather than `try_clone`: on Windows a cloned socket
+/// comes back inheritable, so any child process spawned meanwhile (the suite
+/// runs every task's binary in parallel) holds the connection open after this
+/// side closes it, and the client's close-delimited SSE body ends in a reset
+/// instead of EOF ("error decoding response body").
 fn serve(stream: TcpStream, shared: &Mutex<Shared>) -> std::io::Result<()> {
-    let mut reader = BufReader::new(stream.try_clone()?);
+    let mut reader = BufReader::new(&stream);
     let mut request_line = String::new();
     reader.read_line(&mut request_line)?;
     let mut content_length = 0usize;

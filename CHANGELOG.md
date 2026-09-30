@@ -71,6 +71,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Eval history no longer marks every run after a session's first as `dirty`:
   that first run's own append to `evals/results/history.jsonl` counted as an
   uncommitted change.
+- The offline evals no longer fail most runs on Windows with "error decoding
+  response body". The mock provider read each request through a cloned
+  socket, and on Windows a clone is inheritable, so every binary the suite
+  spawned in parallel could hold another task's connection open after the
+  mock closed it. It now reads through a borrow, and nothing leaks.
 
 ### Changed
 
