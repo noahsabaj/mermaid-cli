@@ -12,6 +12,7 @@ pub mod output_styles;
 pub mod plugin_assets;
 mod project_config;
 pub mod recorder;
+mod removed_keys;
 pub mod replay;
 pub mod run;
 pub mod run_non_interactive;
@@ -33,6 +34,7 @@ pub(crate) use project_config::persist_project_output_style;
 pub use recorder::{
     RECORDING_FORMAT_VERSION, RecordLine, Recorder, Replay, ReplayEntry, SessionHeader,
 };
+pub use removed_keys::{clean_removed_config_keys, cleanup_report, offer_removed_key_cleanup};
 pub use replay::{ReplayReport, replay_recording, run_replay};
 pub use run::{InteractiveOptions, run_interactive_with};
 pub use run_non_interactive::{RunOptions, RunResult, format_result, run_non_interactive_with};

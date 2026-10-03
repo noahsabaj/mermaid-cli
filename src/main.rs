@@ -68,6 +68,19 @@ async fn async_main(hardening: mermaid_runtime::hardening::Hardening) -> Result<
     // memory and conversations key off the same root) < session flags
     // (`-c` + the dedicated sandbox/run flags, collected by `session_flags`).
     let cwd = cli.path.clone().unwrap_or(std::env::current_dir()?);
+    // `clean-config` edits the user file, so it runs before the load would
+    // warn about the very keys it is about to delete.
+    if matches!(cli.command, Some(Commands::CleanConfig)) {
+        let cleanup = mermaid_cli::app::clean_removed_config_keys()?;
+        println!("{}", mermaid_cli::app::cleanup_report(&cleanup));
+        return Ok(());
+    }
+    // Starting the TUI at a terminal: offer to delete config keys this
+    // version no longer reads, before the load warns about them. Every other
+    // path (headless `run`, subcommands, pipes) only warns.
+    if cli.command.is_none() {
+        mermaid_cli::app::offer_removed_key_cleanup();
+    }
     let mut config = load_layered_config_or_warn(Some(&cwd), &cli.session_flags());
     apply_prompt_flags(&cli, &mut config)?;
     for warning in

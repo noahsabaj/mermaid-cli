@@ -24,7 +24,16 @@ one recursive TOML deep-merge (tables merge; scalars and arrays replace):
    `--confine-fs`, `--sandbox`, `run --max-tokens`, `run --allow-untrusted-tools`), with a
    dedicated flag beating a contradictory `-c`
 
-Unknown-key warnings name the layer they came from, and in-app settings changes (`/model`,
+Unknown-key warnings name the layer they came from. A key that an older Mermaid read
+(for example `[plan]`, removed in 0.28.0, or `[computer_use]`, removed in 0.26.0) is not
+a spelling error, so its warning names the release that removed it instead.
+`mermaid clean-config` deletes those keys from the user file, including inside
+`[profiles.*]`: it copies the old file to `config.toml.bak` first (or `.bak.2`, … when a
+backup exists), keeps comments, key order and every other key, and never touches a key
+it does not know. When bare `mermaid` starts at a terminal and finds such keys, it lists
+them and asks `[y/N]` before doing the same; headless runs and scripts only warn.
+
+In-app settings changes (`/model`,
 Alt+T, `/context`, `mermaid add`) rewrite only their own keys in the user file — unrecognized
 keys in the file survive, and defaults are never frozen in.
 
