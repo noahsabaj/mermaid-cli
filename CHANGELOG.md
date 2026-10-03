@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The highlighted row in `/load` and the rewind picker can be read.** Its
+  meta, `(14 msg · 2026-01-01 12:34)` or `(#1 back)`, was drawn in
+  `text_disabled` on a `text_disabled` band, the same colour, so it vanished
+  on exactly the row being chosen. The highlight now lies on the
+  `user_message_background` band, bold, with the meta in the title's
+  `text_primary`. On Windows Terminal's default palette that reads at 10.8:1
+  in the dark theme and 15.7:1 in the light one; the old dark band held even
+  the title to 4.1:1.
+- **The light theme is legible.** Its greys, green and yellow were ANSI names,
+  which a terminal palette tunes for dark backgrounds: on Windows Terminal's
+  default palette, `text_disabled`, `border` and `code_comment` read at 1.4 to
+  1.5:1 on the light background, `warning` at 2.5:1, `success` at 3.3:1, and
+  the brand aqua at 1.7:1 as text and under the question chip's label. Those
+  slots are now fixed colours that clear WCAG AA (4.5:1 for text, 3:1 for a
+  border) on the grounds they are drawn on, and a test pins every pair:
+  `text_secondary` and `code_foreground` `#555555`, `text_disabled` and
+  `border` `#707070`, `code_comment` `#696969`, `success` and `code_string`
+  `#147536`, `warning` `#946200`, and `brand` `#0e7490`, the same aqua
+  deepened. The dark theme is unchanged.
+- **`mermaid --resume` follows `ui.theme` and `NO_COLOR`.** The picker draws
+  before the themed app exists and had its own hard-coded ANSI colours, so a
+  light terminal got white titles on white and `NO_COLOR` was ignored. It now
+  takes the palette the session is about to open with, resolved by the TUI's
+  own rule (`NO_COLOR` beats the theme choice). Under the default dark theme
+  it looks exactly as before.
+
+### Removed
+
+- **Eight theme slots that nothing drew with:** `border_focused`,
+  `status_bar`, `user_message`, `assistant_message`, `system_message`,
+  `mode_normal`, `mode_accept_edits` and `mode_bypass_all`. All three themes
+  defined them and no widget read them.
+
 ## [0.29.0] - 2026-09-30
 
 ### Added

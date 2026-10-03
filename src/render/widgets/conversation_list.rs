@@ -51,12 +51,19 @@ impl<'a> Widget for ConversationListWidget<'a> {
             .map(|(i, summary)| {
                 let highlighted = i == self.cursor;
                 let prefix = if highlighted { " > " } else { "   " };
-                let row_style = if highlighted {
-                    Style::default()
-                        .bg(self.theme.colors.text_disabled.to_color())
-                        .add_modifier(Modifier::BOLD)
+                let colors = &self.theme.colors;
+                // The highlighted row lies on the prompt band, bold, with its
+                // meta in the title's ink: the meta's usual text_disabled is
+                // too faint to read on a band.
+                let (row_style, meta_color) = if highlighted {
+                    (
+                        Style::default()
+                            .bg(colors.user_message_background.to_color())
+                            .add_modifier(Modifier::BOLD),
+                        colors.text_primary.to_color(),
+                    )
                 } else {
-                    Style::default()
+                    (Style::default(), colors.text_disabled.to_color())
                 };
                 let title = truncate_to_cells(&summary.title, 48);
                 let meta = format!(
@@ -66,14 +73,8 @@ impl<'a> Widget for ConversationListWidget<'a> {
                 );
                 Line::from(vec![
                     Span::raw(prefix),
-                    Span::styled(
-                        title,
-                        row_style.fg(self.theme.colors.text_primary.to_color()),
-                    ),
-                    Span::styled(
-                        meta,
-                        row_style.fg(self.theme.colors.text_disabled.to_color()),
-                    ),
+                    Span::styled(title, row_style.fg(colors.text_primary.to_color())),
+                    Span::styled(meta, row_style.fg(meta_color)),
                 ])
             })
             .collect();
@@ -116,6 +117,46 @@ mod tests {
     fn short_timestamp_passes_through_short_input() {
         assert_eq!(short_timestamp("2026"), "2026");
         assert_eq!(short_timestamp(""), "");
+    }
+
+    #[test]
+    fn highlighted_row_meta_is_readable_on_its_band() {
+        // On the highlighted row the meta takes the title's ink over the
+        // band; in the band's own colour it would not be seen at all.
+        let candidates = vec![ConversationSummary {
+            id: "a".to_string(),
+            title: "Fix the resolver panic".to_string(),
+            message_count: 14,
+            updated_at: "2026-01-01T12:34:00-04:00".to_string(),
+        }];
+        for make_theme in [Theme::dark, Theme::light] {
+            let theme = make_theme();
+            let area = Rect::new(0, 0, 80, 4);
+            let mut buf = Buffer::empty(area);
+            ConversationListWidget {
+                theme: &theme,
+                candidates: &candidates,
+                cursor: 0,
+            }
+            .render(area, &mut buf);
+            let x = (0..area.width)
+                .find(|&x| buf[(x, 1)].symbol() == "(")
+                .expect("the meta is drawn on the first row");
+            let cell = &buf[(x, 1)];
+            let colors = &theme.colors;
+            assert_eq!(
+                cell.bg,
+                colors.user_message_background.to_color(),
+                "{}",
+                theme.name
+            );
+            assert_eq!(cell.fg, colors.text_primary.to_color(), "{}", theme.name);
+            assert_ne!(
+                cell.fg, cell.bg,
+                "{}: meta drawn in its band's colour",
+                theme.name
+            );
+        }
     }
 
     #[test]

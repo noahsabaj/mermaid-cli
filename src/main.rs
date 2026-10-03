@@ -12,6 +12,7 @@ use mermaid_cli::{
     },
     cli::{Cli, Commands, OutputFormat, resolve_run_prompt},
     ollama::ensure_model as ensure_ollama_model,
+    render::theme::Theme,
     session::{ConversationManager, SessionEntry, select_conversation},
 };
 
@@ -180,7 +181,14 @@ async fn dispatch_interactive(cli: Cli, mut config: mermaid_domain::Config) -> R
     // F6 `--continue` / `--resume [id]`: optionally load a prior
     // conversation and seed the State with its history before the
     // first frame. Mutual exclusion is enforced by clap on Cli.
-    let seed_conversation = load_seed_conversation(&cwd, cli.continue_session, &cli.resume, true)?;
+    // Bare --resume draws its picker before the TUI exists; it takes the
+    // palette the TUI is about to open with.
+    let picker_theme = Theme::resolve(
+        config.ui.theme,
+        mermaid_cli::app::terminal::no_color_requested(),
+    );
+    let seed_conversation =
+        load_seed_conversation(&cwd, cli.continue_session, &cli.resume, Some(&picker_theme))?;
 
     let recorder = match cli.record.as_ref() {
         Some(path) => Some(mermaid_cli::app::Recorder::open(path.clone())?),
@@ -201,14 +209,14 @@ async fn dispatch_interactive(cli: Cli, mut config: mermaid_domain::Config) -> R
 /// Resolve `--continue` / `--resume [id]` into an optional seeded
 /// conversation, shared by the interactive and headless dispatches.
 /// Returns `Ok(None)` when neither flag is set or no saved session is
-/// available. Bare `--resume` (the searchable picker) is interactive-only;
-/// the headless caller passes `interactive = false` and gets a clear error
-/// telling it to supply the id.
+/// available. Bare `--resume` opens the searchable picker, drawn with
+/// `picker_theme`; the headless caller has no picker to draw, passes `None`,
+/// and gets a clear error telling it to supply the id.
 fn load_seed_conversation(
     cwd: &std::path::Path,
     continue_session: bool,
     resume: &Option<Option<String>>,
-    interactive: bool,
+    picker_theme: Option<&Theme>,
 ) -> Result<Option<mermaid_domain::ConversationHistory>> {
     if continue_session {
         return ConversationManager::new(cwd)?.load_last_conversation();
@@ -228,16 +236,18 @@ fn load_seed_conversation(
             })?;
             Ok(Some(history))
         },
-        Some(None) if !interactive => anyhow::bail!(
-            "--resume without a session id opens an interactive picker; \
-             pass --resume <session-id> or use --continue"
-        ),
         // Bare --resume: the searchable picker. `select_conversation` owns its
         // own mini-TUI — entering it before the main run loop keeps the two
         // terminal modes from fighting. Pair each conversation with its
         // on-disk size for the meta line; a stat failure just shows 0B rather
         // than dropping the row.
         Some(None) => {
+            let Some(theme) = picker_theme else {
+                anyhow::bail!(
+                    "--resume without a session id opens an interactive picker; \
+                     pass --resume <session-id> or use --continue"
+                );
+            };
             let manager = ConversationManager::new(cwd)?;
             let entries: Vec<SessionEntry> = manager
                 .list_conversations()?
@@ -253,7 +263,7 @@ fn load_seed_conversation(
                     }
                 })
                 .collect();
-            select_conversation(entries, &manager, chrono::Local::now())
+            select_conversation(entries, &manager, chrono::Local::now(), theme)
         },
     }
 }
@@ -325,7 +335,7 @@ async fn dispatch_non_interactive(
     // `--resume <id>` / `--continue` also work headless. A script asking for
     // continuity must not silently start fresh, so `--continue` with no saved
     // session is an error here (interactive mode tolerates it).
-    let seed = load_seed_conversation(&cwd, cli.continue_session, &cli.resume, false)?;
+    let seed = load_seed_conversation(&cwd, cli.continue_session, &cli.resume, None)?;
     if cli.continue_session && seed.is_none() {
         anyhow::bail!("--continue: no saved session found for {}", cwd.display());
     }
