@@ -164,6 +164,9 @@ Command groups:
 pub enum Commands {
     /// Initialize configuration
     Init,
+    /// Delete settings this version no longer uses from your config file
+    /// (a backup of the old file is kept; unknown keys are left alone)
+    CleanConfig,
     /// List available models
     List,
     /// List model/provider capability records
