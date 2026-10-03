@@ -26,6 +26,15 @@ use crossterm::terminal::{
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
+/// Whether the user asked for no colour (`NO_COLOR` set and non-empty).
+///
+/// See <https://no-color.org>. The shell reads it once for each surface that
+/// draws, before drawing; the render layer never reads the environment.
+#[must_use]
+pub fn no_color_requested() -> bool {
+    std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty())
+}
+
 static TERMINAL_NEEDS_RESTORE: AtomicBool = AtomicBool::new(false);
 
 /// Whether the kitty keyboard-enhancement flags were pushed at setup — they

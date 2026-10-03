@@ -48,26 +48,26 @@ impl<'a> Widget for RewindPickerWidget<'a> {
             .map(|(i, candidate)| {
                 let highlighted = i == self.cursor;
                 let prefix = if highlighted { " > " } else { "   " };
-                let row_style = if highlighted {
-                    Style::default()
-                        .bg(self.theme.colors.text_disabled.to_color())
-                        .add_modifier(Modifier::BOLD)
+                let colors = &self.theme.colors;
+                // Same highlight as the conversation list: the prompt band,
+                // bold, the meta in the excerpt's ink so it stays readable.
+                let (row_style, meta_color) = if highlighted {
+                    (
+                        Style::default()
+                            .bg(colors.user_message_background.to_color())
+                            .add_modifier(Modifier::BOLD),
+                        colors.text_primary.to_color(),
+                    )
                 } else {
-                    Style::default()
+                    (Style::default(), colors.text_disabled.to_color())
                 };
                 let excerpt = truncate_to_cells(&candidate.excerpt, 64);
                 // 1-based recency label: #1 = the newest user message.
                 let meta = format!("  (#{} back)", i + 1);
                 Line::from(vec![
                     Span::raw(prefix),
-                    Span::styled(
-                        excerpt,
-                        row_style.fg(self.theme.colors.text_primary.to_color()),
-                    ),
-                    Span::styled(
-                        meta,
-                        row_style.fg(self.theme.colors.text_disabled.to_color()),
-                    ),
+                    Span::styled(excerpt, row_style.fg(colors.text_primary.to_color())),
+                    Span::styled(meta, row_style.fg(meta_color)),
                 ])
             })
             .collect();
@@ -121,6 +121,39 @@ mod tests {
         assert!(text.contains("Rewind"), "{text}");
         assert!(text.contains("fix the resolver"), "{text}");
         assert!(text.contains("(#2 back)"), "{text}");
+    }
+
+    #[test]
+    fn highlighted_row_meta_is_readable_on_its_band() {
+        let list = candidates(&["fix the resolver", "add tests"]);
+        for make_theme in [Theme::dark, Theme::light] {
+            let theme = make_theme();
+            let area = Rect::new(0, 0, 90, 5);
+            let mut buf = Buffer::empty(area);
+            RewindPickerWidget {
+                theme: &theme,
+                candidates: &list,
+                cursor: 0,
+            }
+            .render(area, &mut buf);
+            let x = (0..area.width)
+                .find(|&x| buf[(x, 1)].symbol() == "(")
+                .expect("the recency label is drawn on the first row");
+            let cell = &buf[(x, 1)];
+            let colors = &theme.colors;
+            assert_eq!(
+                cell.bg,
+                colors.user_message_background.to_color(),
+                "{}",
+                theme.name
+            );
+            assert_eq!(cell.fg, colors.text_primary.to_color(), "{}", theme.name);
+            assert_ne!(
+                cell.fg, cell.bg,
+                "{}: meta drawn in its band's colour",
+                theme.name
+            );
+        }
     }
 
     #[test]
