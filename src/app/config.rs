@@ -250,12 +250,31 @@ fn collect_layer_warnings(layer: &LayerSource, warnings: &mut Vec<String>) {
         });
     if result.is_ok() {
         for path in ignored {
-            warnings.push(format!(
-                "unknown config key '{path}' in {} ({}) — check for a typo",
-                layer.layer.name(),
-                layer.origin
-            ));
+            warnings.push(unknown_key_warning(layer, &path));
         }
+    }
+}
+
+/// The warning for one ignored key. A key an older Mermaid read is not a
+/// spelling error, so it gets the release that dropped it and the way out
+/// (`mermaid clean-config` edits only the user file and its profiles).
+fn unknown_key_warning(layer: &LayerSource, path: &str) -> String {
+    let (name, origin) = (layer.layer.name(), &layer.origin);
+    let Some(removed) = super::removed_keys::removed_key_for(path) else {
+        return format!("unknown config key '{path}' in {name} ({origin}) — check for a typo");
+    };
+    let version = removed.version;
+    match layer.layer {
+        ConfigLayer::User | ConfigLayer::Profile => format!(
+            "Mermaid removed '{path}' in {version}. Delete it from {name} ({origin}), or run \
+             `mermaid clean-config` to delete it for you."
+        ),
+        ConfigLayer::Defaults | ConfigLayer::Project => {
+            format!("Mermaid removed '{path}' in {version}. Delete it from {name} ({origin}).")
+        },
+        ConfigLayer::Session => {
+            format!("Mermaid removed '{path}' in {version}. Drop it from the command line.")
+        },
     }
 }
 
@@ -503,7 +522,7 @@ fn save_config(config: &Config, path: Option<PathBuf>) -> Result<()> {
 /// creating the temp 0600 on Unix so the renamed file is never even briefly
 /// world-readable (this also tightens a pre-existing config, since the new
 /// file replaces the old one). Windows relies on the per-user profile ACL.
-fn write_config_bytes(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+pub(super) fn write_config_bytes(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
     #[cfg(unix)]
     mermaid_runtime::write_atomic_with_mode(path, bytes, 0o600)
         .with_context(|| format!("Failed to write config to {}", path.display()))?;
@@ -540,6 +559,13 @@ pub fn init_config() -> Result<()> {
 /// (`/model` then Alt+T) can interleave their loads and lose one write. Held
 /// only across the synchronous fs work — never across an `.await`.
 static PERSIST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Run `f` holding [`PERSIST_LOCK`], for writers of the user file that live
+/// outside this module (the removed-key cleanup).
+pub(super) fn with_persist_lock<T>(f: impl FnOnce() -> T) -> T {
+    let _guard = PERSIST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    f()
+}
 
 /// Read the raw USER config table, apply `mutate`, and write it back — under
 /// `PERSIST_LOCK` so concurrent persists can't clobber each other. Operating
@@ -1088,6 +1114,62 @@ mod tests {
                 .any(|w| w.contains("session_typo") && w.contains("session flags")),
             "got {warnings:?}"
         );
+    }
+
+    /// A key an older release read is not a spelling error: its warning
+    /// names the release that dropped it and the cleanup, and only a truly
+    /// unknown key keeps the typo hint.
+    #[test]
+    fn removed_keys_warn_with_their_release_not_a_typo_hint() {
+        let user: toml::Table = toml::from_str(
+            "speling = 1\n[plan]\nauto_approve = true\n[plan.permissions]\nweb = true\n\
+             [compaction]\ntool_output_max_chars = 9\n",
+        )
+        .unwrap();
+        let project: toml::Table = toml::from_str("[computer_use]\nx = 1\n").unwrap();
+        let (_, warnings) = merge_layers(vec![
+            LayerSource {
+                layer: ConfigLayer::User,
+                origin: "/tmp/user.toml".to_string(),
+                table: user,
+            },
+            LayerSource {
+                layer: ConfigLayer::Project,
+                origin: "/repo/.mermaid/config.toml".to_string(),
+                table: project,
+            },
+        ])
+        .expect("merges");
+        assert!(
+            warnings.contains(
+                &"Mermaid removed 'plan' in 0.28.0. Delete it from user config \
+                  (/tmp/user.toml), or run `mermaid clean-config` to delete it for you."
+                    .to_string()
+            ),
+            "got {warnings:?}"
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w
+                    .starts_with("Mermaid removed 'compaction.tool_output_max_chars' in 0.28.0.")),
+            "got {warnings:?}"
+        );
+        assert!(
+            warnings.contains(
+                &"Mermaid removed 'computer_use' in 0.26.0. Delete it from project config \
+                  (/repo/.mermaid/config.toml)."
+                    .to_string()
+            ),
+            "got {warnings:?}"
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("'speling'") && w.ends_with("check for a typo")),
+            "got {warnings:?}"
+        );
+        assert_eq!(warnings.len(), 4, "got {warnings:?}");
     }
 
     #[test]

@@ -32,6 +32,7 @@ mermaid status                                  # Lower-level Ollama, MCP, and p
 mermaid update                                  # Update to the latest release (or use brew/scoop)
 mermaid self-test                               # Fast deterministic Mermaid self-test
 mermaid init                                    # Create default config file
+mermaid clean-config                            # Delete config keys this version no longer uses (keeps a backup)
 mermaid cloud-setup                             # Configure Ollama Cloud API key
 mermaid run "fix the tests"                     # Non-interactive mode
 mermaid run "explain main.rs" -f json           # JSON output (single typed object)

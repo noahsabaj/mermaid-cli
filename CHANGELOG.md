@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Mermaid cleans up the config keys it no longer reads.** A config file
+  written by an older `mermaid init` still carries sections a later release
+  removed, such as `[plan]` (0.28.0) or `[computer_use]` and
+  `[non_interactive]` (0.26.0), and each one warned "check for a typo" on
+  every start. Those keys now warn with the release that removed them:
+  `Mermaid removed 'plan' in 0.28.0. Delete it from user config (...), or run
+  `mermaid clean-config` to delete it for you.` The new `mermaid clean-config`
+  deletes every such key from the user file (also inside `[profiles.*]`),
+  after copying the old file to `config.toml.bak` (never overwriting an
+  earlier backup); comments, key order and all other keys stay as they were,
+  and a key Mermaid does not know is never touched. Bare `mermaid` at a
+  terminal lists the keys and asks `Delete them now? [y/N]` first; headless
+  runs, pipes and scripts never ask and never edit.
+
 ### Fixed
 
 - **The highlighted row in `/load` and the rewind picker can be read.** Its

@@ -13,7 +13,9 @@ use mermaid_domain::{
 };
 
 use crate::{
-    app::{get_config_dir, init_config, load_config_or_warn},
+    app::{
+        clean_removed_config_keys, cleanup_report, get_config_dir, init_config, load_config_or_warn,
+    },
     ollama::{LocalModelListing, is_installed as is_ollama_installed, observe_models},
     providers::discovery::{configured_remote_provider_names, configured_remote_providers},
     runtime_client::{RuntimeClient, record_static_provider_probes},
@@ -49,6 +51,11 @@ pub async fn handle_command(
             println!("Initializing Mermaid configuration...");
             init_config()?;
             println!("Configuration initialized successfully!");
+            Ok(true)
+        },
+        Commands::CleanConfig => {
+            let cleanup = clean_removed_config_keys()?;
+            println!("{}", cleanup_report(&cleanup));
             Ok(true)
         },
         Commands::List => {
