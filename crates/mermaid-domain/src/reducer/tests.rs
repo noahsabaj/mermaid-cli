@@ -5632,7 +5632,7 @@ fn build_chat_request_neutralizes_a_superseded_denial() {
     let tool_msg = req
         .messages
         .iter()
-        .find(|m| m.role == MessageRole::Tool)
+        .find(|m| m.role == mermaid_model::models::MessageRole::Tool)
         .expect("the tool_result should survive into the request");
     assert!(
         !tool_msg.content.contains("blocked by policy"),
@@ -6944,6 +6944,124 @@ fn execute_tool_cmd_carries_the_session_anchor() {
         state.session.messages().len(),
         "stamped at dispatch, after the assistant tool_use commit"
     );
+}
+
+/// A turn whose model asked for `calls`, in order, each named as given.
+fn stream_done_with_calls(names: &[&str]) -> (State, Vec<Cmd>) {
+    let mut state = state_with_two_exchanges();
+    state.turn = TurnState::Generating {
+        id: TurnId(9),
+        started: std::time::SystemTime::now(),
+        partial_text: String::new(),
+        partial_reasoning: String::new(),
+        tokens: 0,
+        phase: GenPhase::Streaming,
+        provider_continuation: None,
+        pending_tool_calls: names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| mermaid_model::models::ToolCall {
+                id: Some(format!("call_{i}")),
+                function: mermaid_model::models::FunctionCall {
+                    name: (*name).to_string(),
+                    arguments: serde_json::json!({"action": "left_click"}),
+                },
+            })
+            .collect(),
+        continuation: false,
+    };
+    update(
+        state,
+        Msg::StreamDone {
+            turn: TurnId(9),
+            usage: None,
+            provider_continuation: None,
+            stop_reason: None,
+        },
+    )
+}
+
+fn dispatched(cmds: &[Cmd]) -> Vec<crate::ToolCallId> {
+    cmds.iter()
+        .filter_map(|c| match c {
+            Cmd::ExecuteTool { call_id, .. } => Some(*call_id),
+            _ => None,
+        })
+        .collect()
+}
+
+fn pending_ids(state: &State) -> Vec<crate::ToolCallId> {
+    match &state.turn {
+        TurnState::ExecutingTools { calls, .. } => calls.iter().map(|c| c.call_id).collect(),
+        other => panic!("expected ExecutingTools, got {other:?}"),
+    }
+}
+
+#[test]
+fn computer_actions_run_one_at_a_time_in_order() {
+    let (state, cmds) = stream_done_with_calls(&["computer", "read_file", "computer", "computer"]);
+    let ids = pending_ids(&state);
+    assert_eq!(
+        dispatched(&cmds),
+        vec![ids[0], ids[1]],
+        "the first computer action runs beside the other tools; the rest wait"
+    );
+    let (state, cmds) = update(
+        state,
+        Msg::ToolFinished {
+            turn: TurnId(9),
+            call_id: ids[0],
+            outcome: ToolOutcome::success("clicked", "clicked", 0.1),
+        },
+    );
+    assert_eq!(dispatched(&cmds), vec![ids[2]]);
+    let (_, cmds) = update(
+        state,
+        Msg::ToolFinished {
+            turn: TurnId(9),
+            call_id: ids[1],
+            outcome: ToolOutcome::success("text", "read", 0.1),
+        },
+    );
+    assert!(
+        dispatched(&cmds).is_empty(),
+        "another tool does not move the queue"
+    );
+}
+
+#[test]
+fn a_failed_computer_action_stops_the_rest_of_the_batch() {
+    let (state, _) = stream_done_with_calls(&["computer", "computer", "computer"]);
+    let ids = pending_ids(&state);
+    let (state, cmds) = update(
+        state,
+        Msg::ToolFinished {
+            turn: TurnId(9),
+            call_id: ids[0],
+            outcome: ToolOutcome::error("coordinate off the screen", None),
+        },
+    );
+    assert!(dispatched(&cmds).is_empty());
+    assert!(
+        !matches!(state.turn, TurnState::ExecutingTools { .. }),
+        "every action has a result, so the turn moves on"
+    );
+    let halted: Vec<_> = state
+        .session
+        .messages()
+        .iter()
+        .filter(|m| m.role == mermaid_model::models::MessageRole::Tool)
+        .rev()
+        .take(2)
+        .map(|m| m.content.clone())
+        .collect();
+    assert_eq!(halted.len(), 2);
+    for content in halted {
+        assert!(
+            content.contains(mermaid_model::models::adapters::computer_toolset::HALTED),
+            "{content}"
+        );
+    }
 }
 
 // ── Context-delta injector ───────────────────────────────────────

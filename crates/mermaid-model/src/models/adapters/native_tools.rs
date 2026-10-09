@@ -17,6 +17,7 @@
 
 use serde_json::{Value, json};
 
+use super::computer_toolset;
 use crate::constants::COMMAND_MAX_TIMEOUT_SECS;
 use crate::models::config::NativeTools;
 use crate::models::tool_call::FunctionCall;
@@ -48,6 +49,7 @@ const SHELL_TOOL: &str = "execute_command";
 pub(super) struct Advertised {
     pub(super) text_editor: bool,
     pub(super) bash: bool,
+    pub(super) computer: bool,
 }
 
 impl Advertised {
@@ -56,13 +58,33 @@ impl Advertised {
         Self {
             text_editor: wanted.text_editor && EDITOR_TOOLS.iter().all(|t| registered.contains(t)),
             bash: wanted.shell && registered.contains(&SHELL_TOOL),
+            computer: wanted.computer && registered.contains(&computer_toolset::TOOL),
+        }
+    }
+
+    /// Without the computer toolset: what a model that refused it is offered.
+    pub(super) fn without_computer(self) -> Self {
+        Self {
+            computer: false,
+            ..self
+        }
+    }
+
+    /// Without the text editor and bash: what a model that refused them is
+    /// offered.
+    pub(super) fn without_editor_and_bash(self) -> Self {
+        Self {
+            text_editor: false,
+            bash: false,
+            ..self
         }
     }
 
     /// Whether the Mermaid tool `name` goes out as its native stand-in
     /// instead of its own schema.
     pub(super) fn replaces(self, name: &str) -> bool {
-        self.text_editor && EDITOR_TOOLS.contains(&name)
+        (self.text_editor && EDITOR_TOOLS.contains(&name))
+            || (self.computer && name == computer_toolset::TOOL)
     }
 
     /// The `tools` entries to send.
@@ -74,7 +96,18 @@ impl Advertised {
         if self.bash {
             out.push(json!({"type": BASH_TYPE, "name": BASH_NAME}));
         }
+        if self.computer {
+            out.push(computer_toolset::declaration());
+        }
         out
+    }
+
+    /// The member call a `computer` call was rewritten from, when the
+    /// toolset is on offer in this request.
+    pub(super) fn to_computer_member(self, call: &FunctionCall) -> Option<(String, Value)> {
+        self.computer
+            .then(|| computer_toolset::to_native(call))
+            .flatten()
     }
 
     /// `call` in the native form, when it was made natively and that tool is
@@ -237,6 +270,7 @@ mod tests {
         NativeTools {
             text_editor: true,
             shell: true,
+            computer: false,
         }
     }
 
@@ -387,6 +421,7 @@ mod tests {
             NativeTools {
                 text_editor: true,
                 shell: false,
+                computer: false,
             },
             &FULL,
         );

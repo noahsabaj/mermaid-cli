@@ -1642,8 +1642,8 @@ pub enum ApprovalChoice {
 
 /// Category of the gated action — drives the prompt's label.
 ///
-/// A deliberately coarser projection of `mermaid_model::safety::ToolCategory`: seven
-/// prompt labels for twelve policy categories, plus `Classify` which has no
+/// A deliberately coarser projection of `mermaid_model::safety::ToolCategory`: eight
+/// prompt labels for thirteen policy categories, plus `Classify` which has no
 /// `ToolCategory` at all. The mapping is the `From` impl below, exhaustive so a
 /// new `ToolCategory` variant is a compile error in exactly one place.
 ///
@@ -1658,6 +1658,7 @@ pub enum ApprovalKind {
     Web,
     Mcp,
     Subagent,
+    Computer,
     Classify,
 }
 
@@ -1670,6 +1671,7 @@ impl From<mermaid_model::safety::ToolCategory> for ApprovalKind {
             C::Web | C::Network | C::ExternalDirectory => Self::Web,
             C::Mcp => Self::Mcp,
             C::Subagent => Self::Subagent,
+            C::Computer => Self::Computer,
             // `Read` and `Memory` resolve to Allow/Deny in `decide`, so neither
             // reaches an approval prompt; the arm exists to keep the match
             // total. The label is a poor fit and would read wrong if one ever

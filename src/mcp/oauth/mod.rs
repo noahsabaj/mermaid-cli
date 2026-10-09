@@ -313,20 +313,18 @@ pub(crate) async fn login_with(
     .to_string())
 }
 
-/// POST an unauthenticated `initialize` to read the server's challenge. A
-/// server that answers without 401/403 gives no challenge; discovery then
-/// falls back to the well-known URLs.
+/// POST an unauthenticated `server/discover` (a 2026-07-28 request; a legacy
+/// server rejects it the same way) to read the server's challenge. A server
+/// that answers without 401/403 gives no challenge; discovery then falls back
+/// to the well-known URLs.
 async fn probe(http: &reqwest::Client, url: &Url, allow_private: bool) -> Result<Challenge> {
+    use super::client::{MODERN_VERSION, with_meta};
     super::transport_http::check_ip_literal(url, allow_private)?;
     let body = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 0,
-        "method": "initialize",
-        "params": {
-            "protocolVersion": "2025-11-25",
-            "capabilities": {},
-            "clientInfo": { "name": "mermaid", "version": env!("CARGO_PKG_VERSION") },
-        },
+        "method": "server/discover",
+        "params": with_meta(serde_json::json!({})),
     });
     let response = http
         .post(url.clone())
@@ -334,6 +332,8 @@ async fn probe(http: &reqwest::Client, url: &Url, allow_private: bool) -> Result
             reqwest::header::ACCEPT,
             "application/json, text/event-stream",
         )
+        .header("MCP-Protocol-Version", MODERN_VERSION)
+        .header("Mcp-Method", "server/discover")
         .json(&body)
         .timeout(Duration::from_secs(PROBE_TIMEOUT_SECS))
         .send()

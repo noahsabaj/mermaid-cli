@@ -10,6 +10,8 @@
 /// adapter calls instead of carrying its own copy.
 pub(super) mod accumulator;
 pub mod anthropic;
+/// Anthropic's computer toolset, mapped onto Mermaid's `computer` tool.
+pub mod computer_toolset;
 /// One test suite driven over recorded response bodies, one per provider.
 /// In-crate rather than under `tests/` so it can reach the protocol
 /// structs, which are wire-format detail and not public API.
@@ -36,6 +38,8 @@ pub mod output_budget;
 /// and learned when refused.
 #[cfg(test)]
 mod server_compaction;
+/// Tool-returned images for providers whose tool messages are text only.
+mod tool_images;
 /// Every adapter, end to end, against a model the catalog has never seen.
 #[cfg(test)]
 mod unknown_model;

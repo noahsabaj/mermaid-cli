@@ -1,6 +1,5 @@
 //! The per-session event-log appender and fold-reader.
 //!
-//! Design: `docs/design/event-log.md`, then `docs/design/fold-first-resume.md`.
 //! One JSONL file per session at `.mermaid/conversations/<id>.jsonl`, cascaded
 //! by `delete_conversation`.
 //!
@@ -56,8 +55,7 @@ pub struct EventLog {
     dir: PathBuf,
     /// Per session, what THIS process last wrote: the next `seq` to use and
     /// the file length it left behind. The length is the concurrent-writer
-    /// baseline (moved here from the snapshot in
-    /// `docs/design/fold-first-resume.md`) — a `stat` is O(1), where
+    /// baseline (moved here from the snapshot) — a `stat` is O(1), where
     /// counting lines would reintroduce the per-append cost the whole
     /// arrangement exists to remove.
     ///
@@ -189,8 +187,7 @@ impl EventLog {
     }
 
     /// Refuse to append to a log another process has written since we last
-    /// did (moved from the snapshot in
-    /// `docs/design/fold-first-resume.md`).
+    /// did (moved here from the snapshot).
     ///
     /// A daemon run and an interactive session can hold the same session
     /// id. While the snapshot was authoritative, a last-writer-wins
