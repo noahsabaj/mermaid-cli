@@ -37,7 +37,7 @@ pub struct SlashPaletteWidget<'a> {
     pub entries: Vec<PaletteEntry<'a>>,
     /// Index into `commands` of the highlighted row. `render` clamps it to
     /// the valid range (or 0 when empty), so an out-of-range value from the
-    /// caller can't panic the row slice (#103).
+    /// caller can't panic the row slice.
     pub selected_index: usize,
 }
 
@@ -51,7 +51,7 @@ impl<'a> Widget for SlashPaletteWidget<'a> {
         let total = self.entries.len();
         // Clamp defensively: an out-of-range `selected_index` would drive
         // `scroll_offset` past `visible_end` and panic the
-        // `commands[scroll_offset..visible_end]` slice below (#103).
+        // `commands[scroll_offset..visible_end]` slice below.
         let selected = self.selected_index.min(total.saturating_sub(1));
         let scroll_offset = if selected >= MAX_VISIBLE_ROWS {
             selected + 1 - MAX_VISIBLE_ROWS
@@ -130,7 +130,7 @@ mod tests {
 
     #[test]
     fn out_of_bounds_selection_does_not_panic() {
-        // #103: a caller that lets `selected_index` exceed the filtered list
+        // A caller that lets `selected_index` exceed the filtered list
         // must not panic the `commands[scroll_offset..visible_end]` slice.
         let theme = Theme::dark();
         let entries = mermaid_domain::slash_commands::filter_entries("", &[]);

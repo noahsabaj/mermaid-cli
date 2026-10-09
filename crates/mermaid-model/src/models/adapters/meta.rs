@@ -304,7 +304,7 @@ impl StreamProtocol for MetaStream {
     }
 
     fn finish(self, _out: &mut Vec<StreamEvent>) -> Result<ModelResponse> {
-        // F56, Meta's spelling: the terminal event is explicit and carries
+        // Meta's spelling: the terminal event is explicit and carries
         // everything that round-trips, so its absence means the connection
         // dropped — never a short success.
         let Some((response, event_type)) = self.terminal else {

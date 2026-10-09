@@ -90,7 +90,7 @@ pub fn build_chat_request(state: &State) -> ChatRequest {
     // default), most MCP tools are replaced by one `tool_search` definition;
     // see `domain::tool_search`. The effect runner prepends built-in tools
     // before dispatching, so this vector is the MCP-only portion. Ordering
-    // is byte-stable across runs for prompt-cache warmth (#F68).
+    // is byte-stable across runs for prompt-cache warmth.
     let mcp_tools = super::tool_search::mcp_tool_definitions(state);
 
     // Run-summary lines ("Worked for …") are display-only UI — never send them

@@ -31,8 +31,8 @@ const MAX_RETRY_AFTER_MS: u64 = 60_000;
 /// are usually per-second/minute buckets, so the 5xx schedule (500ms→1s,
 /// ~1.5s total) retries inside the same bucket and always loses; spacing the
 /// two retries at ~2s and ~5s gives burst limits time to refill while
-/// keeping the worst silent wait around 7s. (The sleep is Esc-cancellable —
-/// see the #42 note below.)
+/// keeping the worst silent wait around 7s. (The sleep is Esc-cancellable;
+/// see the cancel note in the retry loop.)
 const RATE_LIMIT_DELAYS_MS: [u64; 2] = [2_000, 5_000];
 
 /// Retry a closure whose output is `Result<reqwest::Response>`
@@ -124,8 +124,8 @@ where
 
         // A server-provided `Retry-After` is the authoritative wait for ANY
         // retryable status — a 503 (or other 5xx) can carry it just like a 429,
-        // and must be honored rather than retried sooner under our own backoff
-        // (F26). Read it while we still hold the response; a connection-failure
+        // and must be honored rather than retried sooner under our own backoff.
+        // Read it while we still hold the response; a connection-failure
         // error carries no response, so `.ok()` yields `None` and we fall back
         // to the jittered backoff below.
         let retry_after_ms = if transience.is_transient() {
@@ -187,7 +187,7 @@ where
             reason = transience.reason(),
             "middleware: retrying transient upstream failure"
         );
-        // No explicit cancel race here (#42): this retry only runs inside a
+        // No explicit cancel race here: this retry only runs inside a
         // provider's `chat`, which the model wrapper drives under
         // `select! { ctx.token.cancelled() => …, chat_fut => … }` (the
         // model/mod.rs cancellation invariant). A cancel drops `chat_fut`, and
@@ -327,7 +327,7 @@ mod tests {
     }
 
     /// Like `fake_response`, but the response carries a `Retry-After` header
-    /// (delta-seconds form) so we can exercise the F26 5xx + Retry-After path.
+    /// (delta-seconds form) so we can exercise the 5xx + Retry-After path.
     async fn fake_response_with_retry_after(
         status: u16,
         retry_after_secs: u64,
@@ -442,7 +442,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn honors_retry_after_on_503() {
-        // F26: a 503 carrying `Retry-After` must drive the wait, not the
+        // A 503 carrying `Retry-After` must drive the wait, not the
         // (shorter) jittered exponential backoff. `Retry-After: 1` ⇒ the retry
         // sleeps ~1000ms; the attempt-1 backoff alone is jitter(500) ∈
         // [400,600]ms, so an elapsed ≥ 850ms proves the header was honored.
@@ -542,7 +542,7 @@ mod tests {
             },
         )
         .await;
-        // A persistent 429 retries, then surfaces as a typed RateLimit (#2).
+        // A persistent 429 retries, then surfaces as a typed RateLimit.
         assert!(matches!(result, Err(ModelError::RateLimit { .. })));
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }

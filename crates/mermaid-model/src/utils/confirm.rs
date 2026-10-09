@@ -1,7 +1,7 @@
 //! Shared interactive-confirmation gate for destructive / untrusted actions.
 //!
-//! One fail-closed y/N primitive, reused by `mermaid update` (#110), `mermaid
-//! restore` (#113), and the MCP untrusted-package gate (#10) so the
+//! One fail-closed y/N primitive, reused by `mermaid update`, `mermaid
+//! restore`, and the MCP untrusted-package gate so the
 //! TTY-detection + `--yes`/`--force` policy lives in exactly one place.
 
 use std::io::{self, IsTerminal, Write};

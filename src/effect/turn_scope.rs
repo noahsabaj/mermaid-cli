@@ -121,12 +121,12 @@ impl TurnScope {
     /// blocking. `JoinSet::is_empty` only flips to true after finished
     /// tasks are explicitly harvested via `join_next`; without this,
     /// `EffectRunner::reap_empty_scopes` would see finished-but-not-
-    /// joined scopes as "still busy" and never reap them. F12.
+    /// joined scopes as "still busy" and never reap them.
     pub fn drain_completed(&mut self) {
         while let Some(result) = self.joins.try_join_next() {
             // Mirror `drain`: a child that panicked surfaces here as a
             // non-cancelled `JoinError`. Without this it was harvested and
-            // dropped silently, so a panicking effect task left no trace (#43).
+            // dropped silently, so a panicking effect task left no trace.
             if let Err(e) = result
                 && !e.is_cancelled()
             {
@@ -254,7 +254,7 @@ mod tests {
 
     #[tokio::test]
     async fn drain_completed_harvests_a_panicked_task() {
-        // #43: a child that panics must still be harvested (and logged) by
+        // A child that panics must still be harvested (and logged) by
         // `drain_completed`, leaving the scope empty — not stuck on the
         // un-joined `JoinError`, which would make the scope look "busy" forever.
         let mut scope = TurnScope::new(TurnId(7));

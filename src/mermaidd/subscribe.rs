@@ -41,7 +41,7 @@ pub(super) fn terminal_result_event(
 /// How many catch-up events one attach replays. The whole projection is
 /// built in memory and written to a single socket before the first live
 /// event can flow, so a long run's log needs a ceiling — the same reflex as
-/// F24/RC-F on the transcript read. Tail-first: a subscriber joining now
+/// F on the transcript read. Tail-first: a subscriber joining now
 /// wants the recent end.
 pub(super) const MAX_CATCH_UP_EVENTS: usize = 1_000;
 
@@ -52,7 +52,7 @@ pub(super) const MAX_CATCH_UP_EVENTS: usize = 1_000;
 /// attaching at minute nine used to get nine minutes of silence and then
 /// whatever came next — not even the `session_started` line that names the
 /// session, the same empty-handed attach the terminal path was fixed for in
-/// #371. The session event log is the durable record of everything before
+/// The session event log is the durable record of everything before
 /// the attach, and `tasks.conversation_id` — stamped when the run announces
 /// its session, not just at terminal status — is the key to it.
 ///

@@ -399,7 +399,7 @@ impl HttpTransport {
                 if msg.get("method").is_some() {
                     match msg.get("id") {
                         // Server-initiated request: it blocks on a reply, so
-                        // POST one back rather than stalling the server (F79).
+                        // POST one back rather than stalling the server.
                         Some(rid) if !rid.is_null() => {
                             let rid = rid.clone();
                             self.answer_server_request(&msg, &rid).await;

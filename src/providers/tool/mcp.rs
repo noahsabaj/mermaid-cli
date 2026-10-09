@@ -135,7 +135,7 @@ fn mcp_metadata(server_name: &str, tool_name: &str) -> ToolRunMetadata {
 }
 
 /// Map a completed MCP `tools/call` result onto a `ToolOutcome`, honoring the
-/// MCP `isError` flag (#91). A successful JSON-RPC round-trip can still carry a
+/// MCP `isError` flag. A successful JSON-RPC round-trip can still carry a
 /// tool-level failure (`isError: true`); in that case the model must see an
 /// *error* outcome — the server's own content verbatim, status `Error` — not a
 /// success. Pure so both branches are unit-tested.

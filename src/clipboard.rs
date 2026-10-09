@@ -440,7 +440,7 @@ fn read_image_linux(backend: ClipboardBackend) -> Result<(Vec<u8>, String)> {
 fn read_image_macos() -> Result<(Vec<u8>, String)> {
     // Use osascript to save clipboard image to a temp file, then read it
     // 0700 per-user scratch dir, not a world-readable shared /tmp path
-    // another local user could read or pre-create/symlink (#11).
+    // another local user could read or pre-create/symlink.
     let temp_path = mermaid_model::utils::private_temp_dir()?.join("mermaid-clipboard-paste.png");
     let temp_str = temp_path.to_string_lossy();
     let script = format!(
@@ -482,7 +482,7 @@ fn read_image_macos() -> Result<(Vec<u8>, String)> {
 /// re-encoded bitmap) to a private temp file, which is then read back.
 fn read_image_windows() -> Result<(Vec<u8>, String)> {
     // 0700 per-user scratch dir, not a world-readable shared /tmp path
-    // another local user could read or pre-create/symlink (#11).
+    // another local user could read or pre-create/symlink.
     let temp_path = mermaid_model::utils::private_temp_dir()?.join("mermaid-clipboard-paste.png");
     let _ = std::fs::remove_file(&temp_path);
     // Two ways in, in this order:

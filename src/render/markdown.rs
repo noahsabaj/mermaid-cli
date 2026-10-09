@@ -843,7 +843,7 @@ mod tests {
 
     #[test]
     fn wide_table_fits_narrow_viewport() {
-        // #136: a 3-column table whose natural width far exceeds a narrow
+        // A 3-column table whose natural width far exceeds a narrow
         // viewport must shrink to fit, not overflow and clip at the edge.
         let width = 16;
         let lines = parse_markdown(

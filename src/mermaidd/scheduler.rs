@@ -242,7 +242,7 @@ pub(super) async fn execute_claimed_task(
     // when this function returns. Map the outcome to a terminal status + report
     // — an explicit cancel wins over whatever the interrupted run returned.
     let (status, report, hook_status) = classify_run_result(token.is_cancelled(), result);
-    // F20: persist the terminal status DURABLY (see persist_terminal_status).
+    // Persist the terminal status DURABLY (see persist_terminal_status).
     persist_terminal_status(&task.id, status, &report).await;
     // AFTER the terminal status persists: late subscribers now read the row
     // and synthesize a terminal event instead of racing the live stream.
@@ -312,7 +312,7 @@ pub(super) async fn early_backlink(
     }
 }
 
-/// Durably persist a task's terminal status + report (F20). The daemon's spawned
+/// Durably persist a task's terminal status + report. The daemon's spawned
 /// run task is the only writer of this final state; if the write is lost the task
 /// is left `running` and the next startup reconcile fails it (discarding the real
 /// report). Retry a few times, reopening the store each attempt, and log loudly
