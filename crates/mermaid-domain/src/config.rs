@@ -808,6 +808,9 @@ pub struct AgentTypeConfig {
     /// Isolate a type you fan out with; leave a type shared when its writes
     /// need to be visible to the parent immediately.
     pub isolation: Option<String>,
+    /// When to use this type, shown to the model in the `agent` tool's
+    /// description next to the type's name.
+    pub description: Option<String>,
 }
 
 /// User-supplied remote provider configuration. All fields are optional for a

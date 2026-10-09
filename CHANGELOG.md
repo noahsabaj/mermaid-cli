@@ -22,7 +22,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `[goal] model` names another. `--resume` keeps the goal, and
   `mermaid run "/goal ..."` runs the loop headless, with a `goal:` error when
   it ends unmet. Claude Code, Codex and Cursor have the same command.
-
+- **Mermaid reads Claude Code's files.** A user who moved from Claude Code
+  used to lose their instructions, skills, commands and agents, because
+  Mermaid read only `AGENTS.md`, `MERMAID.md` and `.mermaid/skills/`. Now
+  `CLAUDE.md` (or `.claude/CLAUDE.md`) loads when a directory has no
+  `AGENTS.md`, and Mermaid reads `skills/`, `commands/` and `agents/` from
+  `.mermaid/`, `.claude/` and `.agents/` in the project and from
+  `~/.config/mermaid/`, `~/.claude/` and `~/.agents/`; `.mermaid/` wins on a
+  same name. A `commands/*.md` file is a prompt command (`$ARGUMENTS`, `$1`,
+  `$2`, ...), so you can add your own commands without writing a plugin. An
+  `agents/*.md` file is an agent type: Claude Code tool names map to
+  Mermaid's, an agent that cannot write gets a `read_only` ceiling, and a
+  project file cannot redefine `general` or `explore`. The `agent` tool now
+  lists the configured types with their new `description`, so the model knows
+  they exist. See docs/plugins.md, "Files from other tools".
 - **Mermaid cleans up the config keys it no longer reads.** A config file
   written by an older `mermaid init` still carries sections a later release
   removed, such as `[plan]` (0.28.0) or `[computer_use]` and

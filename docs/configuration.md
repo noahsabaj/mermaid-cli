@@ -218,6 +218,11 @@ timeout_secs = 1200
 # preamble = "You are a scout: find and report, fast."
 # model = "ollama/qwen3:8b"   # default model for this type; per-call `model` wins
 # isolation = "worktree"  # private git checkout; per-call `isolation` wins
+# description = "Fast file search; reports paths and facts."  # shown to the model
+#
+# Agent types can also live in files, one per type: `agents/<name>.md` under
+# `.mermaid/`, `.claude/` or `.agents/` in the project, or under
+# `~/.config/mermaid/`, `~/.claude/` or `~/.agents/`. See docs/plugins.md.
 
 # Per-model reasoning preferences (remembered across sessions)
 [reasoning_per_model]
