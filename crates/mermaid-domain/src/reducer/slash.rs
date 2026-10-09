@@ -179,6 +179,8 @@ pub fn handle_query_result(state: &mut State, cmds: &mut Vec<Cmd>, result: Query
             // The loaded conversation has its own id — the previous session's
             // scratch dir no longer applies. Recompute (same as `/clear`).
             refresh_scratchpad(state, cmds);
+            // Side questions were about the conversation being left.
+            state.side_questions.reset();
             emit_title_if_changed(state, cmds);
         },
         QueryResult::AvailableModelsListed(candidates) => {
@@ -701,6 +703,7 @@ pub fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
         SlashCmd::OutputStyle { name, project } => {
             handle_output_style_command(state, cmds, name.as_deref(), project);
         },
+        SlashCmd::Btw(question) => handle_btw(state, cmds, question),
         SlashCmd::Editor => {
             // `/editor` opens on whatever draft remains after the command
             // itself was consumed (usually empty); Ctrl+O is the
@@ -1104,6 +1107,8 @@ pub fn handle_confirm_accepted(state: &mut State, cmds: &mut Vec<Cmd>) {
             // New conversation id -> new scratch dir. The old one stays on
             // disk until the sweep reaps it (its pid lock expires with us).
             refresh_scratchpad(state, cmds);
+            // Side questions were about the conversation being left.
+            state.side_questions.reset();
             emit_title_if_changed(state, cmds);
         },
     }

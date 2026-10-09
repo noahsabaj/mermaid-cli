@@ -316,6 +316,20 @@ pub enum Msg {
     /// Generic daemon/runtime text response.
     RuntimeText(String),
 
+    // ── Side questions (`/btw`) ─────────────────────────────────────
+    /// A streamed chunk of a side question's answer. Keyed by the side
+    /// question's own id, never a `TurnId`: the main turn neither gates nor
+    /// sees it.
+    SideQuestionText {
+        id: u64,
+        chunk: String,
+    },
+    /// A side question's call ended.
+    SideQuestionFinished {
+        id: u64,
+        outcome: crate::side_question::SideOutcome,
+    },
+
     // ── Misc model operations ───────────────────────────────────────
     /// `/model <name>` finished pulling (Ollama only).
     ModelPullFinished {
@@ -622,6 +636,9 @@ pub enum SlashCmd {
         name: Option<String>,
         project: bool,
     },
+    /// `/btw`: `Some(question)` asks a side question; `None` reopens the
+    /// side-question pane on the newest exchange.
+    Btw(Option<String>),
     /// Compose the input draft in `$VISUAL`/`$EDITOR` (also Ctrl+O).
     Editor,
     Help,
@@ -701,6 +718,8 @@ impl Msg {
             | Self::QueryResult(_)
             | Self::ScratchpadReady { .. }
             | Self::RuntimeText(_)
+            | Self::SideQuestionText { .. }
+            | Self::SideQuestionFinished { .. }
             | Self::ModelPullFinished { .. }
             | Self::ModelPullProgress(_)
             | Self::Tick
@@ -763,6 +782,9 @@ impl Msg {
             Self::QueryResult(_) => MsgKind::QueryResult,
             Self::ScratchpadReady { .. } => MsgKind::ScratchpadReady,
             Self::RuntimeText(_) => MsgKind::RuntimeStore,
+            Self::SideQuestionText { .. } | Self::SideQuestionFinished { .. } => {
+                MsgKind::SideQuestion
+            },
             Self::ModelPullFinished { .. } => MsgKind::ModelPullFinished,
             Self::ModelPullProgress(_) => MsgKind::ModelPullProgress,
             Self::Tick => MsgKind::Tick,
@@ -822,6 +844,7 @@ pub enum MsgKind {
     QueryResult,
     ScratchpadReady,
     RuntimeStore,
+    SideQuestion,
     ModelPullFinished,
     ModelPullProgress,
     Tick,

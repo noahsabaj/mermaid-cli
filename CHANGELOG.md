@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`/btw` asks a side question without touching the conversation.** Type
+  `/btw what was that config file called?` at any time, also while the agent
+  works. The model answers from the session so far in a pane under the
+  composer, as a separate call that does not interrupt the running turn. The
+  question and answer are never saved, compacted, or sent with later turns;
+  later side questions see the newest 20 earlier ones. The side call has no
+  tools. Esc closes the pane, Up/Down scrolls, Left/Right steps through
+  earlier answers, `c` copies the answer, `x` clears the earlier ones, and a
+  bare `/btw` reopens the newest answer.
 - **Mermaid cleans up the config keys it no longer reads.** A config file
   written by an older `mermaid init` still carries sections a later release
   removed, such as `[plan]` (0.28.0) or `[computer_use]` and

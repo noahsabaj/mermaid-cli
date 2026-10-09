@@ -1511,6 +1511,22 @@ impl EffectRunner {
                     consolidate_memory(tx, providers, workdir, model_id).await;
                 });
             },
+            Cmd::AskSideQuestion { id, mut request } => {
+                // The built-in tools ride along exactly as on `CallModel`:
+                // the history holds calls to them, and the same tool list
+                // keeps the provider's prompt cache warm. The side answer
+                // never runs one.
+                if let Some(tools) = &self.tools {
+                    let mut enriched = tools.describe_all();
+                    enriched.append(&mut request.tools);
+                    request.tools = enriched;
+                }
+                let tx = self.msg_tx.clone();
+                let providers = self.providers.clone();
+                self.detached.spawn(async move {
+                    answer_side_question(tx, providers, id, request).await;
+                });
+            },
             Cmd::Query(query) => self.dispatch_query(query),
             Cmd::ShowRuntimeProcessLogs { id } => {
                 let tx = self.msg_tx.clone();
@@ -1993,11 +2009,13 @@ fn note_stream_usage(
 mod compaction;
 mod memory;
 mod model_call;
+mod side_question;
 mod tool_call;
 
 use compaction::*;
 use memory::*;
 use model_call::*;
+use side_question::*;
 use tool_call::*;
 
 #[cfg(test)]
@@ -2313,6 +2331,31 @@ mod tests {
         };
         r.dispatch(Cmd::CallModel { turn, request });
         assert_eq!(r.scope_count(), 1);
+    }
+
+    /// `/btw` runs detached: it opens no turn scope, so the main turn
+    /// neither waits on it nor cancels it. Without a provider it still
+    /// settles, with a failure the pane can show.
+    #[tokio::test]
+    async fn a_side_question_opens_no_scope_and_always_settles() {
+        let (mut r, mut rx) = runner();
+        let request = mermaid_domain::ChatRequest {
+            model_id: "test/m".to_string(),
+            ..mermaid_domain::ChatRequest::default()
+        };
+        r.dispatch(Cmd::AskSideQuestion { id: 4, request });
+        assert_eq!(r.scope_count(), 0);
+        let msg = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("the side question settled")
+            .expect("channel alive");
+        assert!(matches!(
+            msg,
+            Msg::SideQuestionFinished {
+                id: 4,
+                outcome: mermaid_domain::side_question::SideOutcome::Failed(_),
+            }
+        ));
     }
 
     /// F12: after a spawned task completes (here via the

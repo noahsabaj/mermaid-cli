@@ -155,6 +155,46 @@ fn busy_streaming() {
     });
 }
 
+/// `/btw` while the main turn streams: the side pane owns the bottom zone,
+/// earlier side questions dimmed above the one on view, the main spinner
+/// still running above the composer.
+#[test]
+fn side_question_pane() {
+    use mermaid_domain::side_question::SideOutcome;
+    assert_scene("side_question_pane", || {
+        let mut s = scene_state();
+        s.session
+            .append(ChatMessage::user("refactor the config loader"), s.now);
+        s.turn = TurnState::Generating {
+            id: TurnId(1),
+            started: std::time::SystemTime::from(fixed_now() - chrono::Duration::seconds(3)),
+            partial_text: "Moving the defaults into one table".to_string(),
+            partial_reasoning: String::new(),
+            tokens: 12,
+            phase: GenPhase::Streaming,
+            provider_continuation: None,
+            pending_tool_calls: Vec::new(),
+            continuation: false,
+        };
+        let earlier = s.side_questions.ask("is this on main?".to_string());
+        s.side_questions
+            .push_chunk(earlier, "Yes, the branch is main.");
+        s.side_questions
+            .finish(earlier, SideOutcome::Done { tried_tools: false });
+        let id = s
+            .side_questions
+            .ask("what was the config file called?".to_string());
+        s.side_questions.push_chunk(
+            id,
+            "It is `src/app/config.rs`. The loader reads `config.toml` from the \
+             user config directory, then the project's `.mermaid/config.toml`.",
+        );
+        s.side_questions
+            .finish(id, SideOutcome::Done { tried_tools: false });
+        s
+    });
+}
+
 #[test]
 fn busy_tools_with_queue() {
     assert_scene("busy_tools_with_queue", || {

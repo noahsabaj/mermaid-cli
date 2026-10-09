@@ -342,6 +342,19 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             widgets::question_modal_height(qset, &rstate.theme, frame.area().width)
         }),
         BottomPane::Confirm => 6,
+        // Grows with the answer, but leaves the transcript, the composer and
+        // a few rows of chat on screen.
+        BottomPane::SideQuestion => widgets::side_question_height(
+            &state.side_questions,
+            &rstate.theme,
+            frame.area().width,
+            (frame.area().height / 2).min(
+                frame
+                    .area()
+                    .height
+                    .saturating_sub(input_height + status_line_height + 6),
+            ),
+        ),
         BottomPane::ConversationList | BottomPane::Rewind => 12,
         BottomPane::ModelPicker => widgets::MODEL_PICKER_HEIGHT,
         BottomPane::FilePicker => {
@@ -602,6 +615,13 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
                 frame.render_widget(widget, chunks[4]);
             }
         },
+        BottomPane::SideQuestion => {
+            let widget = widgets::SideQuestionWidget {
+                theme: &rstate.theme,
+                side: &state.side_questions,
+            };
+            frame.render_widget(widget, chunks[4]);
+        },
         BottomPane::ModelPicker => {
             if let mermaid_domain::UiMode::ModelPicker {
                 candidates,
@@ -723,6 +743,7 @@ enum BottomPane<'a> {
     Approval,
     Question,
     Confirm,
+    SideQuestion,
     ModelPicker,
     ConversationList,
     Rewind,
@@ -737,6 +758,7 @@ fn bottom_pane(state: &mermaid_domain::State) -> BottomPane<'_> {
         Focus::ApprovalModal => BottomPane::Approval,
         Focus::QuestionModal => BottomPane::Question,
         Focus::ConfirmModal => BottomPane::Confirm,
+        Focus::SideQuestion => BottomPane::SideQuestion,
         Focus::Picker => match state.ui.mode {
             UiMode::ModelPicker { .. } => BottomPane::ModelPicker,
             UiMode::ConversationList { .. } => BottomPane::ConversationList,

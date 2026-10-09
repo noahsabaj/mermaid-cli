@@ -104,6 +104,10 @@ pub const KEYBINDINGS: &[(&str, &str)] = &[
     ("End", "Jump to the newest message"),
     ("Ctrl+V", "Paste (including images)"),
     ("Ctrl+O", "Compose the prompt in $VISUAL/$EDITOR"),
+    (
+        "In the /btw pane",
+        "Esc close · Up/Down scroll · Left/Right older/newer · c copy · x clear earlier",
+    ),
     ("Ctrl+B", "Background a running command"),
     ("Ctrl+T", "Expand or collapse the task checklist"),
     ("Alt+T", "Cycle reasoning depth"),
@@ -184,6 +188,14 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         aliases: &["todo"],
         description: "Show or edit the task checklist",
         arg_hint: Some("[add <subject>|rm <id>|done <id>|clear]"),
+        usage_note: None,
+        group: SlashCommandGroup::Everyday,
+    },
+    SlashCommand {
+        name: "btw",
+        aliases: &[],
+        description: "Ask a side question; the answer stays out of the conversation",
+        arg_hint: Some("[question]"),
         usage_note: None,
         group: SlashCommandGroup::Everyday,
     },
@@ -657,6 +669,7 @@ pub fn parse_slash_command(raw: &str) -> Option<crate::SlashCmd> {
         Some("list") => SlashCmd::List,
         Some("usage") => SlashCmd::Usage,
         Some("todos") => SlashCmd::Todos(arg),
+        Some("btw") => SlashCmd::Btw(arg.filter(|a| !a.is_empty())),
         Some("scratchpad") => SlashCmd::Scratchpad,
         Some("context") => {
             use crate::ContextCmd;

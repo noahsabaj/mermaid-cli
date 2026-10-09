@@ -524,7 +524,7 @@ pub(super) async fn run_provider_error_hook(
 /// The native shell is a bash tool, so it is offered only where commands run
 /// under `sh`: on Windows they run under PowerShell, and a model writing bash
 /// for it would be wrong every time.
-fn native_tools_for(config: &Config) -> mermaid_model::models::NativeTools {
+pub(super) fn native_tools_for(config: &Config) -> mermaid_model::models::NativeTools {
     let on = config.tools.provider_native;
     mermaid_model::models::NativeTools {
         text_editor: on,

@@ -92,6 +92,13 @@ pub enum Cmd {
         turn: TurnId,
         request: CompactionRequest,
     },
+    /// `/btw`: answer a side question with one model call beside the main
+    /// run. Detached, never turn-scoped: it must not join, block or be
+    /// cancelled with the main turn. The runner adds the built-in tools the
+    /// way it does for `CallModel` (so the prompt cache still matches) and
+    /// streams back `Msg::SideQuestionText`, then one
+    /// `Msg::SideQuestionFinished`.
+    AskSideQuestion { id: u64, request: ChatRequest },
     /// Run one tool in parallel with any other tools in the same turn.
     /// The runner wires the exec context's cancellation token to the turn's
     /// scope so `Cmd::CancelScope` aborts them all at once. Everything the
@@ -490,6 +497,7 @@ impl Cmd {
             Self::RememberMemory { .. } => "remember_memory",
             Self::ForgetMemory { .. } => "forget_memory",
             Self::ConsolidateMemory { .. } => "consolidate_memory",
+            Self::AskSideQuestion { .. } => "ask_side_question",
             Self::Query(query) => query.tag(),
             Self::ShowRuntimeProcessLogs { .. } => "show_runtime_process_logs",
             Self::StopRuntimeProcess { .. } => "stop_runtime_process",
@@ -582,6 +590,7 @@ impl Cmd {
             | Self::RememberMemory { .. }
             | Self::ForgetMemory { .. }
             | Self::ConsolidateMemory { .. }
+            | Self::AskSideQuestion { .. }
             | Self::Query(_)
             | Self::ShowRuntimeProcessLogs { .. }
             | Self::StopRuntimeProcess { .. }
@@ -710,6 +719,11 @@ impl Cmd {
             Self::RememberMemory { .. } => "remember_memory".to_string(),
             Self::ForgetMemory { .. } => "forget_memory".to_string(),
             Self::ConsolidateMemory { .. } => "consolidate_memory".to_string(),
+            Self::AskSideQuestion { id, request } => format!(
+                "ask_side_question(id={id}, model={}, msgs={})",
+                request.model_id,
+                request.messages.len()
+            ),
             Self::Query(query) => query.summary(),
             Self::ShowRuntimeProcessLogs { id } => format!("show_runtime_process_logs({id})"),
             Self::StopRuntimeProcess { id } => format!("stop_runtime_process({id})"),

@@ -434,7 +434,7 @@ pub struct ChatWidget<'a> {
 /// without re-parsing or re-wrapping (#134). The cache key folds in content,
 /// theme, and width; role prefix/color are constant on this (assistant-only)
 /// path, so they need not be keyed.
-fn wrap_assistant_content(
+pub(super) fn wrap_assistant_content(
     content: &str,
     content_width: u16,
     role_prefix: &str,
