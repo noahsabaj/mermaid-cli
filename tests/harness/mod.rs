@@ -254,6 +254,16 @@ impl Terminal {
             self.press(&[*byte]);
             std::thread::sleep(Duration::from_millis(15));
         }
+        // Wait until the app has drawn what was typed before the caller sends
+        // Enter. The app folds key presses that are already queued when it
+        // reads them into one paste, Enter included, and a pasted Enter is a
+        // newline, not a submit. On a loaded runner the app can fall that far
+        // behind: the typed text and the Enter then land together, and the
+        // command never runs. Seeing the text on the screen proves it was
+        // read. The text can legitimately be drawn differently (a picker's
+        // filter, say), so a miss falls through to the pause below rather
+        // than failing here; whatever the caller waits for next will report.
+        let _ = self.wait_for_text(text, Duration::from_secs(10));
         // Let the last keystroke land before the caller sends Enter. Without
         // this the submit can overtake the final character and the command
         // dispatches short.
