@@ -145,6 +145,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `[providers.<name>]` entries, keep Chat Completions; a proxy that serves only
   Chat Completions can be set up as a custom provider. Meta's adapter shares
   the new Responses code.
+- **`/autocompact` sets when automatic compaction starts.** The threshold was
+  only a percentage of the window, the same for every model, and only in
+  config.toml. `/autocompact 250000` now compacts the current model at 250k
+  tokens; `all-models` sets it for every model, and `project` writes it to
+  `<git-root>/.mermaid/config.toml` in place of the user config. A bare
+  `/autocompact` shows the threshold and where it comes from, `off` and `on`
+  turn automatic compaction off and on, and `reset` removes a value. The
+  config keys are `[compaction] auto_threshold_tokens` and
+  `[compaction.auto_threshold_tokens_per_model]`. A change applies from the
+  next turn, also on providers that compact server-side.
 
 ### Fixed
 

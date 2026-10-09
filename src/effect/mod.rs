@@ -1463,6 +1463,24 @@ impl EffectRunner {
                     }
                 });
             },
+            Cmd::PersistAutoCompact(change) => {
+                let tx = self.msg_tx.clone();
+                let workdir = self.workdir.clone();
+                self.detached.spawn(async move {
+                    let msg = match crate::app::persist_auto_compact(&workdir, &change) {
+                        // Read both files back so the session follows the same
+                        // priority the next one will.
+                        Ok(path) => Msg::AutoCompactSaved {
+                            path: path.display().to_string(),
+                            compaction: crate::app::load_project_scoped_config(&workdir).compaction,
+                        },
+                        Err(err) => Msg::TransientStatus {
+                            text: format!("Couldn't save the auto-compact setting: {err:#}"),
+                        },
+                    };
+                    let _ = tx.send(msg).await;
+                });
+            },
             Cmd::ComposeInEditor { .. } => {
                 // Run-loop-intercepted in the interactive TUI (it owns the
                 // terminal + event stream). Reaching the effect runner means a
@@ -2387,6 +2405,7 @@ mod tests {
             output_schema: None,
             suppress_auto_compact: false,
             requested_compaction: None,
+            compaction: Default::default(),
             native_compaction: None,
             native_tools: mermaid_model::models::NativeTools::default(),
         };
@@ -2472,6 +2491,7 @@ mod tests {
             output_schema: None,
             suppress_auto_compact: false,
             requested_compaction: None,
+            compaction: Default::default(),
             native_compaction: None,
             native_tools: mermaid_model::models::NativeTools::default(),
         };
@@ -2563,6 +2583,7 @@ mod tests {
                 output_schema: None,
                 suppress_auto_compact: false,
                 requested_compaction: None,
+                compaction: Default::default(),
                 native_compaction: None,
                 native_tools: mermaid_model::models::NativeTools::default(),
             },
@@ -2597,6 +2618,7 @@ mod tests {
             output_schema: None,
             suppress_auto_compact: false,
             requested_compaction: None,
+            compaction: Default::default(),
             native_compaction: None,
             native_tools: mermaid_model::models::NativeTools::default(),
         };

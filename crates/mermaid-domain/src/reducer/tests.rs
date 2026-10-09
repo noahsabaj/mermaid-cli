@@ -8792,3 +8792,87 @@ fn a_double_slash_is_prose_not_a_command() {
         "//forget everything"
     );
 }
+
+#[test]
+fn autocompact_sends_the_change_and_applies_what_comes_back() {
+    use crate::autocompact::{AutoCompactChange, AutoCompactSetting, ConfigFile};
+    let (state, cmds) = update(
+        fresh_state(),
+        Msg::Slash(SlashCmd::AutoCompact(Some("250k project".to_string()))),
+    );
+    let sent: Vec<_> = cmds
+        .iter()
+        .filter_map(|c| match c {
+            Cmd::PersistAutoCompact(change) => Some(change.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        sent,
+        [AutoCompactChange {
+            setting: AutoCompactSetting::Tokens(250_000),
+            file: ConfigFile::Project,
+            model_id: Some("ollama/test".to_string()),
+        }]
+    );
+    assert_eq!(
+        state
+            .settings
+            .compaction
+            .auto_threshold_tokens_per_model
+            .len(),
+        0,
+        "nothing applies before the file is written"
+    );
+
+    let mut saved = crate::config::CompactionConfig::default();
+    saved
+        .auto_threshold_tokens_per_model
+        .insert("ollama/test".to_string(), 250_000);
+    let (state, _) = update(
+        state,
+        Msg::AutoCompactSaved {
+            path: "/tmp/project/.mermaid/config.toml".to_string(),
+            compaction: saved,
+        },
+    );
+    let last = state.session.messages().last().expect("a status line");
+    assert!(
+        last.content
+            .contains("Saved to /tmp/project/.mermaid/config.toml")
+    );
+    assert!(
+        last.content.contains("250k tokens (set for this model)"),
+        "{}",
+        last.content
+    );
+    assert_eq!(
+        build_chat_request(&state).compaction.auto_threshold_tokens,
+        Some(250_000),
+        "the next request uses the new threshold"
+    );
+}
+
+#[test]
+fn autocompact_bare_shows_the_threshold_and_bad_input_shows_why() {
+    let (state, cmds) = update(fresh_state(), Msg::Slash(SlashCmd::AutoCompact(None)));
+    assert!(!cmds.iter().any(|c| matches!(c, Cmd::PersistAutoCompact(_))));
+    let last = state.session.messages().last().expect("a status line");
+    assert!(
+        last.content.starts_with("Auto-compact for ollama/test"),
+        "{}",
+        last.content
+    );
+
+    let (state, cmds) = update(
+        state,
+        Msg::Slash(SlashCmd::AutoCompact(Some("1000".to_string()))),
+    );
+    assert!(!cmds.iter().any(|c| matches!(c, Cmd::PersistAutoCompact(_))));
+    let last = state.session.messages().last().expect("an error line");
+    assert!(
+        last.content.contains("smallest threshold"),
+        "{}",
+        last.content
+    );
+}

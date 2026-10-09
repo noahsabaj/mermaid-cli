@@ -134,10 +134,9 @@ pub(super) async fn dispatch_call_model(
         })
         .await;
 
-    // The live `[compaction]` policy, not the constants: auto-compaction is the
-    // one path the user never invokes by hand, so it is the one that most needs
-    // to honor their settings.
-    let policy = factory.config().compaction.policy();
+    // The live `[compaction]` policy for this model, carried on the request so
+    // an `/autocompact` change applies from the next turn.
+    let policy = request.compaction;
     // Where the provider compacts server-side, it takes the automatic
     // threshold over: same trigger point, its summary instead of ours.
     let native_compaction = native_compaction_for(
@@ -145,6 +144,7 @@ pub(super) async fn dispatch_call_model(
         factory.config(),
         policy,
         max_context_tokens,
+        policy.response_reserve(&request),
     );
     let mut compacted_before_stream = false;
     // A checkpoint the model asked for (`compact_context`) runs whatever the
@@ -536,19 +536,52 @@ pub(super) fn native_tools_for(config: &Config) -> mermaid_model::models::Native
 
 /// Server-side compaction for this turn: when automatic compaction is on, the
 /// user lets the provider do it (`[compaction] provider_native`), the window is
-/// known, and the provider can. It triggers at the same fill the client-side
-/// threshold would.
+/// known, and the provider can. It triggers at the same point the client-side
+/// threshold would, except that a token threshold is held below the window
+/// minus `reserve`: past that, the request fails before the provider compacts.
 fn native_compaction_for(
     provider_can: bool,
     config: &Config,
     policy: mermaid_domain::CompactionPolicy,
     window: Option<usize>,
+    reserve: usize,
 ) -> Option<mermaid_model::models::NativeCompaction> {
     if !(provider_can && policy.auto_enabled && config.compaction.provider_native) {
         return None;
     }
     let window = window?;
-    Some(mermaid_model::models::NativeCompaction {
-        trigger_tokens: window * usize::from(policy.auto_threshold_percent) / 100,
-    })
+    let trigger_tokens = match policy.auto_threshold_tokens {
+        Some(tokens) => tokens.min(window.saturating_sub(reserve)),
+        None => policy.trigger_tokens(window),
+    };
+    Some(mermaid_model::models::NativeCompaction { trigger_tokens })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_native_trigger_stays_where_the_request_still_fits() {
+        let config = Config::default();
+        let policy = |tokens| mermaid_domain::CompactionPolicy {
+            auto_threshold_tokens: tokens,
+            ..mermaid_domain::CompactionPolicy::default()
+        };
+        let trigger = |tokens| {
+            native_compaction_for(true, &config, policy(tokens), Some(1_000_000), 64_000)
+                .map(|native| native.trigger_tokens)
+        };
+        assert_eq!(trigger(None), Some(850_000), "85% of the window");
+        assert_eq!(trigger(Some(250_000)), Some(250_000));
+        assert_eq!(
+            trigger(Some(2_000_000)),
+            Some(936_000),
+            "window less the reserve"
+        );
+        assert_eq!(
+            native_compaction_for(false, &config, policy(None), Some(1_000_000), 64_000),
+            None
+        );
+    }
 }

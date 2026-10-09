@@ -187,6 +187,11 @@ max_truncation_recoveries = 3
 # compaction entirely to `/compact`.
 # auto_enabled = true
 # auto_threshold_percent = 85        # clamped to 1..=100
+# A context size in tokens replaces the percentage (minimum 50000). One for a
+# single model overrides the one for all models. `/autocompact` sets both.
+# auto_threshold_tokens = 250000
+# Per model, in its own [compaction.auto_threshold_tokens_per_model] table,
+# with lines like "openai/gpt-5.6" = 400000.
 # Let a provider that compacts server-side (Anthropic, OpenAI) do the automatic
 # compaction at the same threshold, with its own summary. A model that
 # refuses it falls back to Mermaid's. false always compacts client-side.
