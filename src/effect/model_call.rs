@@ -42,7 +42,7 @@ pub(super) async fn dispatch_call_model(
     let provider = match factory.resolve(&request.model_id).await {
         Ok(p) => p,
         Err(e) => {
-            let error = classify_error_for_ui(&e);
+            let error = e.to_user_facing();
             let _ = msg_tx.send(Msg::UpstreamError { turn, error }).await;
             return;
         },
@@ -312,7 +312,7 @@ pub(super) async fn dispatch_call_model(
                     }
                 }
             }
-            let error = classify_error_for_ui(&e);
+            let error = e.to_user_facing();
             run_provider_error_hook(&request.model_id, &error).await;
             let _ = msg_tx.send(Msg::UpstreamError { turn, error }).await;
         },
@@ -467,7 +467,7 @@ pub(super) async fn dispatch_provider_stream(
     match provider.chat(request, ctx).await {
         Ok(_) | Err(ModelError::Cancelled) => {},
         Err(e) => {
-            let error = classify_error_for_ui(&e);
+            let error = e.to_user_facing();
             run_provider_error_hook(&model_id, &error).await;
             let _ = msg_tx.send(Msg::UpstreamError { turn, error }).await;
         },

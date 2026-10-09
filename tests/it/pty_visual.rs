@@ -124,7 +124,7 @@ fn a_multiline_paste_never_submits() {
     std::thread::sleep(Duration::from_millis(300));
     let screen = term.frame_text();
     assert!(
-        !screen.contains("Auth error") && !screen.contains("Worked for"),
+        !screen.contains("Authentication failed") && !screen.contains("Worked for"),
         "a pasted line was submitted as a message. Screen:\n{screen}",
     );
     assert!(

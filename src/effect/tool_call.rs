@@ -509,59 +509,6 @@ pub(super) async fn dispatch_copy_to_clipboard(text: String, tx: MsgSender) {
     let _ = tx.send(msg).await;
 }
 
-pub(super) fn classify_error_for_ui(
-    e: &mermaid_model::models::ModelError,
-) -> mermaid_model::models::UserFacingError {
-    use mermaid_model::models::{ErrorCategory, ModelError, UserFacingError};
-    match e {
-        ModelError::Backend(b) => UserFacingError {
-            summary: "Backend error".to_string(),
-            message: b.to_string(),
-            suggestion: "Check the provider endpoint / API key.".to_string(),
-            category: ErrorCategory::Connection,
-            recoverable: true,
-        },
-        ModelError::Authentication(msg) => UserFacingError {
-            summary: "Auth error".to_string(),
-            message: msg.clone(),
-            suggestion: "Set the env var the provider expects.".to_string(),
-            category: ErrorCategory::Auth,
-            recoverable: false,
-        },
-        ModelError::RateLimit {
-            retry_after,
-            message,
-        } => UserFacingError {
-            summary: "Rate limited".to_string(),
-            // The provider's own reason distinguishes "slow down" from
-            // "daily quota exhausted" — show it when the 429 body had one.
-            message: message.clone().unwrap_or_else(|| {
-                "The provider rejected the request with 429 (too many requests).".to_string()
-            }),
-            suggestion: match retry_after {
-                Some(secs) => format!("The provider asked to retry after {secs}s."),
-                None => "Retry shortly; if it persists, check your plan's quota.".to_string(),
-            },
-            category: ErrorCategory::Temporary,
-            recoverable: true,
-        },
-        ModelError::StreamError(msg) => UserFacingError {
-            summary: "Stream error".to_string(),
-            message: msg.clone(),
-            suggestion: "Retry the request.".to_string(),
-            category: ErrorCategory::Connection,
-            recoverable: true,
-        },
-        other => UserFacingError {
-            summary: "Model error".to_string(),
-            message: other.to_string(),
-            suggestion: String::new(),
-            category: ErrorCategory::Internal,
-            recoverable: false,
-        },
-    }
-}
-
 /// Report a tool call's outcome to the reducer.
 async fn send_finished(
     msg_tx: &MsgSender,

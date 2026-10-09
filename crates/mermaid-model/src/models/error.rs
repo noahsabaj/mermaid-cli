@@ -198,7 +198,7 @@ impl ModelError {
                 let (summary, suggestion) = match status {
                     401 | 403 => (
                         "Authentication failed",
-                        "Check your API key in ~/.config/mermaid/config.toml",
+                        "Check the provider's API key: its environment variable, or `mermaid login <provider>`",
                     ),
                     404 => (
                         "Model not found",
@@ -369,7 +369,7 @@ impl ModelError {
                 summary: "Authentication failed".to_string(),
                 message: format!("Authentication error: {msg}"),
                 suggestion:
-                    "Check your API key in ~/.config/mermaid/config.toml or environment variables"
+                    "Check the provider's API key: its environment variable, or `mermaid login <provider>`"
                         .to_string(),
                 category: ErrorCategory::Auth,
                 recoverable: false,
