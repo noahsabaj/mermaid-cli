@@ -195,6 +195,17 @@ what you did or found, including the concrete paths, names, numbers, and \
 facts the parent needs. Do not offer follow-ups, ask for confirmation, or \
 end mid-task.";
 
+/// What `/init` sends as the user's message. It states the purpose of the
+/// file and what a future session lacks; how to find that out is the
+/// model's call.
+pub const INIT_PROMPT: &str = "\
+Write AGENTS.md at the project root. Mermaid and other coding agents load it \
+into every future session in this project, so it holds what an agent cannot \
+learn quickly from the code: the exact commands to build, test, lint and run \
+the project, the layout of the main directories, and the conventions and \
+pitfalls a new contributor would get wrong. Keep it short. If AGENTS.md \
+already exists, improve it and keep what is still true.";
+
 pub const DEFAULT_OUTPUT_STYLE: &str = "default";
 
 pub struct BuiltinStyle {

@@ -2,6 +2,7 @@
 // All external access must go through this gateway
 
 // Private submodules - not directly accessible from outside
+pub mod added_dirs;
 mod config;
 mod editor;
 pub mod event_source;

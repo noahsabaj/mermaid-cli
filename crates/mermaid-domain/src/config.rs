@@ -135,6 +135,10 @@ pub struct Config {
     #[serde(default)]
     pub exec: ExecConfig,
 
+    /// Extra working roots beside the project directory (`[workspace]`).
+    #[serde(default)]
+    pub workspace: WorkspaceConfig,
+
     /// How the built-in tools are offered to the model (`[tools]` table).
     #[serde(default)]
     pub tools: ToolsConfig,
@@ -148,6 +152,10 @@ pub struct Config {
     #[serde(default)]
     pub output: OutputConfig,
 
+    /// Where `/usage` finds the prices behind its cost estimate
+    /// (`[pricing]` table).
+    #[serde(default)]
+    pub pricing: PricingConfig,
     /// `/goal` settings (`[goal]` table): which model checks a goal and how
     /// many turns a goal may run before it pauses for the user.
     #[serde(default)]
@@ -204,6 +212,21 @@ impl ExecConfig {
     }
 }
 
+/// Directories the agent works in beside the project root (`[workspace]`
+/// table). User-scope only: the project config's allowlist omits the table,
+/// so a cloned repository can never widen where the agent may write.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WorkspaceConfig {
+    /// Extra roots with the project root's trust: paths inside them resolve
+    /// for the file tools and the policy gate like project paths, and
+    /// `--confine-fs` lets shell commands write there. `--add-dir` adds to
+    /// this list. The shell canonicalizes every entry at startup (a missing
+    /// directory is an error), so once a session starts this holds real,
+    /// absolute paths.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_dirs: Vec<std::path::PathBuf>,
+}
+
 /// How the built-in tools reach the model (`[tools]` table).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -225,6 +248,42 @@ impl Default for ToolsConfig {
         Self {
             provider_native: true,
             computer: false,
+        }
+    }
+}
+
+/// The public model catalog `/usage` reads prices from by default. It lists
+/// list prices for the hosted providers Mermaid supports, keyed by provider
+/// and model, in US dollars per million tokens.
+pub const DEFAULT_PRICE_CATALOG_URL: &str = "https://models.dev/api.json";
+
+/// Prices for `/usage` cost estimates (`[pricing]` table).
+///
+/// ```toml
+/// [pricing]
+/// catalog_url = ""   # never fetch the catalog
+///
+/// [pricing.models."openrouter/acme/coder-1"]
+/// input = 0.5        # US dollars per million tokens
+/// output = 2.0
+/// cache_read = 0.05  # optional; defaults to the input price
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PricingConfig {
+    /// JSON catalog fetched (then cached for a day) when a model has no price
+    /// in `models`. An empty string turns the fetch off. Never fetched when
+    /// `safety.network = "deny"`.
+    pub catalog_url: String,
+    /// Prices by full model id (`provider/name`). These beat the catalog.
+    pub models: HashMap<String, crate::cost::ModelPrice>,
+}
+
+impl Default for PricingConfig {
+    fn default() -> Self {
+        Self {
+            catalog_url: DEFAULT_PRICE_CATALOG_URL.to_string(),
+            models: HashMap::new(),
         }
     }
 }

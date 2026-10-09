@@ -72,7 +72,7 @@ Then ask for normal coding-agent work:
 - "find the bug in this failing test and fix it"
 - "review the current branch for regressions"
 
-Inside the TUI, use `/help` for grouped commands, `/doctor` for the session readiness report, `/context` to inspect prompt budget, `/compact [focus]` to create a handoff checkpoint, and Esc to interrupt the agent loop.
+Inside the TUI, use `/help` for grouped commands, `/doctor` for the session readiness report, `/init` to have the agent write an AGENTS.md, `/usage` for tokens and estimated cost, `/context` to inspect prompt budget, `/compact [focus]` to create a handoff checkpoint, and Esc to interrupt the agent loop.
 
 ## Usage
 
@@ -111,8 +111,9 @@ The model calls these autonomously:
 | `ask_user_question` | Multiple-choice questions when a decision is the user's to make |
 | `context_archive` | Search or read back the session's full history, including what compaction removed |
 | `compact_context` | Checkpoint the context now instead of waiting for the automatic threshold |
+| `list_mcp_resources`, `read_mcp_resource` | List and read MCP server resources (only while a server offers them) |
 
-MCP servers contribute tools under the `mcp__<server>__<tool>` prefix, **deferred** by default: one `tool_search` tool promotes matches for the rest of the session, so unpromoted schemas never count against `/context`. Opt out with `mcp_defer_tools = false`.
+MCP servers contribute tools under the `mcp__<server>__<tool>` prefix, **deferred** by default: one `tool_search` tool promotes matches for the rest of the session, so unpromoted schemas never count against `/context`. Opt out with `mcp_defer_tools = false`. Servers that offer prompts add them to the `/` palette as `/mcp__<server>__<prompt>`; see [docs/tools.md](docs/tools.md#mcp-tools).
 
 ## Safety
 

@@ -27,7 +27,7 @@ pub struct PluginAssets {
     /// prefix would pollute the `mcp__<server>__<tool>` tool names).
     pub mcp_servers: HashMap<String, McpServerConfig>,
     /// Prompt-backed slash commands.
-    pub commands: Vec<mermaid_domain::PluginCommand>,
+    pub commands: Vec<mermaid_domain::PromptCommand>,
     /// Agent types, merged into `config.agents.types` for absent names only.
     pub agent_types: HashMap<String, AgentTypeConfig>,
     pub warnings: Vec<String>,
@@ -199,11 +199,13 @@ pub(crate) fn assets_from_manifest(
             ));
             continue;
         }
-        assets.commands.push(mermaid_domain::PluginCommand {
+        assets.commands.push(mermaid_domain::PromptCommand {
             name,
             description: description.unwrap_or_default(),
-            body: body.trim().to_string(),
-            origin: format!("plugin:{plugin}"),
+            source: mermaid_domain::PromptSource::Markdown {
+                origin: format!("plugin:{plugin}"),
+                body: body.trim().to_string(),
+            },
         });
     }
     for entry in &manifest.agents {
@@ -327,7 +329,10 @@ mod tests {
         assert_eq!(assets.mcp_servers["context7"].command, "npx");
         assert_eq!(assets.commands.len(), 1);
         assert_eq!(assets.commands[0].name, "deploy");
-        assert_eq!(assets.commands[0].body, "Deploy to $ARGUMENTS now.");
+        assert!(matches!(
+            &assets.commands[0].source,
+            mermaid_domain::PromptSource::Markdown { body, .. } if body == "Deploy to $ARGUMENTS now."
+        ));
         assert_eq!(
             assets.agent_types["scout"].safety.as_deref(),
             Some("read_only")
