@@ -22,8 +22,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and a key Mermaid does not know is never touched. Bare `mermaid` at a
   terminal lists the keys and asks `Delete them now? [y/N]` first; headless
   runs, pipes and scripts never ask and never edit.
+- **The model can follow the processes it starts in the background.** Before,
+  a command run with `mode="background"` returned a pid and log path, and only
+  the user could check it with `/logs` or end it with `/stop`; a foreground
+  command is killed after 300 seconds, so the model could not wait for a long
+  build or test run except by polling with `sleep`. The new
+  `background_process` tool takes the `bg-<pid>` id: `read` returns the output
+  written since the last read, `wait` blocks until the process exits, a text
+  appears in its output, or a timeout of up to an hour passes (Esc ends it),
+  `stop` ends the process tree, and `list` shows the session's processes. It
+  reaches only processes this session started, never a raw pid.
 
 ### Fixed
+
+- **A background command that exits at once is reported as exited on Linux.**
+  The liveness check used `kill -0`, which succeeds on a process that has
+  exited but has not been reaped yet. In a container whose pid 1 reaps late,
+  a command that failed during startup was reported as started and running.
+  The check now reads the process state from `/proc` first.
 
 - **The highlighted row in `/load` and the rewind picker can be read.** Its
   meta, `(14 msg · 2026-01-01 12:34)` or `(#1 back)`, was drawn in
