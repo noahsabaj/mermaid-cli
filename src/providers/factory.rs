@@ -670,6 +670,9 @@ fn user_profile_to_static(
         reasoning_extraction: ReasoningExtraction::None,
         max_tokens_param: mermaid_model::models::MaxTokensParam::MaxTokens,
         disable_parallel_tool_calls_for: &[],
+        // Only OpenAI's own profile speaks Responses; a custom endpoint is
+        // OpenAI-compatible, which means Chat Completions.
+        wire_api: mermaid_model::models::WireApi::ChatCompletions,
     });
     let leaked: &'static ProviderProfile = Box::leak(profile);
     cache.insert(cache_key, leaked);

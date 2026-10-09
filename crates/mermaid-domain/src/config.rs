@@ -148,6 +148,11 @@ pub struct Config {
     #[serde(default)]
     pub output: OutputConfig,
 
+    /// `/goal` settings (`[goal]` table): which model checks a goal and how
+    /// many turns a goal may run before it pauses for the user.
+    #[serde(default)]
+    pub goal: GoalConfig,
+
     /// Runtime-only prompt customizations supplied by CLI flags. These are
     /// deliberately skipped when saving config so one-off agent personas do
     /// not pollute the user's persistent Mermaid settings.
@@ -209,12 +214,17 @@ pub struct ToolsConfig {
     /// every safety gate applies. A model that refuses them gets Mermaid's.
     /// `false` always sends Mermaid's.
     pub provider_native: bool,
+    /// Give the model the `computer` tool: screenshots, mouse and keyboard on
+    /// the user's real screen. Off unless the user turns it on, since every
+    /// screenshot sends what is on the screen to the model's provider.
+    pub computer: bool,
 }
 
 impl Default for ToolsConfig {
     fn default() -> Self {
         Self {
             provider_native: true,
+            computer: false,
         }
     }
 }
@@ -563,6 +573,33 @@ impl Default for DaemonConfig {
     }
 }
 
+/// `/goal` settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GoalConfig {
+    /// Model id that checks whether the goal is met after each run. `None`
+    /// checks with the session's active model. A small, fast model is
+    /// enough: the check reads the conversation and answers in one line.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Goal turns that may run without a message from the user before the
+    /// goal pauses. Each message from the user starts the count again. `0`
+    /// means no limit.
+    pub max_turns: u32,
+}
+
+/// Default for [`GoalConfig::max_turns`].
+pub const DEFAULT_GOAL_MAX_TURNS: u32 = 50;
+
+impl Default for GoalConfig {
+    fn default() -> Self {
+        Self {
+            model: None,
+            max_turns: DEFAULT_GOAL_MAX_TURNS,
+        }
+    }
+}
+
 /// Durable semantic memory settings (v0.10.0).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -621,6 +658,28 @@ pub struct CompactionConfig {
     /// reserve no longer fits".
     pub auto_threshold_percent: u8,
 
+    /// Context size, in tokens, at which auto-compaction triggers for every
+    /// model. Replaces `auto_threshold_percent` when set. Raised to at least
+    /// [`crate::MIN_AUTO_THRESHOLD_TOKENS`].
+    ///
+    /// Example:
+    /// ```toml
+    /// [compaction]
+    /// auto_threshold_tokens = 250000
+    /// ```
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_threshold_tokens: Option<usize>,
+
+    /// Token thresholds for single models, keyed by model ID. One here
+    /// overrides `auto_threshold_tokens` for that model.
+    ///
+    /// Example:
+    /// ```toml
+    /// [compaction.auto_threshold_tokens_per_model]
+    /// "openai/gpt-5.6" = 400000
+    /// ```
+    pub auto_threshold_tokens_per_model: HashMap<String, usize>,
+
     /// How many trailing user turns survive compaction verbatim. Clamped to at
     /// least 1 — a compaction that preserved no turn would hand the model a
     /// summary with no live thread to continue.
@@ -662,6 +721,8 @@ impl Default for CompactionConfig {
             auto_enabled: policy.auto_enabled,
             provider_native: true,
             auto_threshold_percent: policy.auto_threshold_percent,
+            auto_threshold_tokens: None,
+            auto_threshold_tokens_per_model: HashMap::new(),
             tail_turns: policy.tail_turns,
             tail_token_budget: policy.tail_token_budget,
             summary_max_tokens: policy.summary_max_tokens,
@@ -684,12 +745,35 @@ impl CompactionConfig {
     /// smaller *maximum* and quietly under-reserve on every turn.
     #[must_use]
     pub fn policy(&self) -> crate::CompactionPolicy {
+        self.policy_with_tokens(self.auto_threshold_tokens)
+    }
+
+    /// [`Self::policy`] for `model_id`, whose own token threshold, if it has
+    /// one, overrides the one for every model.
+    #[must_use]
+    pub fn policy_for(&self, model_id: &str) -> crate::CompactionPolicy {
+        self.policy_with_tokens(self.model_threshold_tokens(model_id))
+    }
+
+    /// The token threshold that applies to `model_id`, from its own entry or
+    /// the one for every model.
+    #[must_use]
+    pub fn model_threshold_tokens(&self, model_id: &str) -> Option<usize> {
+        self.auto_threshold_tokens_per_model
+            .get(model_id)
+            .copied()
+            .or(self.auto_threshold_tokens)
+    }
+
+    fn policy_with_tokens(&self, tokens: Option<usize>) -> crate::CompactionPolicy {
         let defaults = crate::CompactionPolicy::default();
         let min_reserve = self.min_response_reserve_tokens;
         let max_reserve = self.max_response_reserve_tokens;
         crate::CompactionPolicy {
             auto_enabled: self.auto_enabled,
             auto_threshold_percent: self.auto_threshold_percent.clamp(1, 100),
+            // Below this, every turn would compact.
+            auto_threshold_tokens: tokens.map(|t| t.max(crate::MIN_AUTO_THRESHOLD_TOKENS)),
             tail_turns: self.tail_turns.max(1),
             // A zero budget would drop the whole tail; fall back to the default
             // rather than produce a checkpoint with nothing after it.

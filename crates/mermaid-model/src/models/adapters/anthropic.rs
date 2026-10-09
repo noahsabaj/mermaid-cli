@@ -40,8 +40,10 @@ use crate::models::reasoning::{
 use crate::models::stream::{StreamEvent, StreamSink};
 use crate::models::tool_call::{FunctionCall, ToolCall};
 use crate::models::traits::Model;
+use crate::utils::base64_image_media_type;
 
 use super::ModelLimits;
+use super::computer_toolset;
 use super::learning::{Learning, Optional, ParamMemory, Rejections};
 use super::native_tools::{self, Advertised};
 use super::output_budget::{OutputBudgetInputs, OutputCapMode, resolve_output_budget};
@@ -99,6 +101,7 @@ fn finalize_block(
         BlockAccumulator::ToolUse {
             id,
             name,
+            toolset,
             input_buf,
         } => {
             let arguments: Value = if input_buf.is_empty() {
@@ -109,6 +112,7 @@ fn finalize_block(
             let tc = tool_calls.push(
                 if id.is_empty() { None } else { Some(id) },
                 FunctionCall { name, arguments },
+                toolset.as_deref(),
             );
             out.push(StreamEvent::ToolCall(tc));
         },
@@ -165,10 +169,23 @@ impl ToolCalls {
     /// Record a finished `tool_use` as the reducer should see it: a call to
     /// one of Anthropic's own tools is rewritten onto the Mermaid tool it
     /// stands for, and its id noted so history can send it back as written.
-    fn push(&mut self, id: Option<String>, mut function: FunctionCall) -> ToolCall {
-        if native_tools::canonicalize(&mut function)
-            && let Some(id) = &id
-        {
+    fn push(
+        &mut self,
+        id: Option<String>,
+        mut function: FunctionCall,
+        toolset: Option<&str>,
+    ) -> ToolCall {
+        let member = (toolset == Some(computer_toolset::TOOLSET_NAME))
+            .then(|| computer_toolset::canonicalize(&function.name, &function.arguments))
+            .flatten();
+        let native = match member {
+            Some(call) => {
+                function = call;
+                true
+            },
+            None => native_tools::canonicalize(&mut function),
+        };
+        if native && let Some(id) = &id {
             self.native.push(id.clone());
         }
         let call = ToolCall { id, function };
@@ -369,15 +386,26 @@ fn sent_optionals(body: &Value) -> Vec<Optional> {
             &[COMPACTION_PARAM, "compact"],
         ));
     }
-    let native_declared = body
+    let declared: Vec<&str> = body
         .get("tools")
         .and_then(Value::as_array)
-        .is_some_and(|tools| tools.iter().any(|t| t["type"] != "custom"));
-    if native_declared {
+        .map(|tools| tools.iter().filter_map(|t| t["type"].as_str()).collect())
+        .unwrap_or_default();
+    if declared
+        .iter()
+        .any(|t| *t != "custom" && *t != computer_toolset::TOOLSET_TYPE)
+    {
         sent.push(Optional::new(
             native_tools::REJECTION,
             "Anthropic's text editor and bash tools",
             native_tools::REJECTION_NAMES,
+        ));
+    }
+    if declared.contains(&computer_toolset::TOOLSET_TYPE) {
+        sent.push(Optional::new(
+            computer_toolset::REJECTION,
+            "Anthropic's computer toolset",
+            computer_toolset::REJECTION_NAMES,
         ));
     }
     sent
@@ -420,15 +448,19 @@ fn to_anthropic_tools(openai_tools: &[&Value], native: Advertised) -> Vec<Value>
 /// Anthropic's own tools this request offers: what the turn allows, unless
 /// this model has refused them.
 fn advertised_native_tools(config: &ModelConfig, rejected: &Rejections) -> Advertised {
-    if rejected.contains(native_tools::REJECTION) {
-        return Advertised::default();
-    }
     let names: Vec<&str> = config
         .tools
         .iter()
         .filter_map(|t| t.pointer("/function/name").and_then(Value::as_str))
         .collect();
-    Advertised::resolve(config.native_tools, &names)
+    let mut advertised = Advertised::resolve(config.native_tools, &names);
+    if rejected.contains(native_tools::REJECTION) {
+        advertised = advertised.without_editor_and_bash();
+    }
+    if rejected.contains(computer_toolset::REJECTION) {
+        advertised = advertised.without_computer();
+    }
+    advertised
 }
 
 /// The request's `tools`: every registered tool in Anthropic's shape, the
@@ -555,6 +587,8 @@ fn coalesce_consecutive_roles(msgs: Vec<Value>) -> Vec<Value> {
 fn convert_messages(messages: &[ChatMessage], native: Advertised) -> (Option<String>, Vec<Value>) {
     let mut system: Option<String> = None;
     let mut out: Vec<Value> = Vec::new();
+    // Calls sent back as computer toolset members: their results must say so.
+    let mut member_calls: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     let mut i = 0;
     while i < messages.len() {
@@ -589,6 +623,12 @@ fn convert_messages(messages: &[ChatMessage], native: Advertised) -> (Option<Str
             },
             MessageRole::Assistant => {
                 let content_blocks = assistant_content_blocks(msg, native);
+                member_calls.extend(
+                    content_blocks
+                        .iter()
+                        .filter(|b| b.get("toolset_name").is_some())
+                        .filter_map(|b| b["id"].as_str().map(str::to_string)),
+                );
                 if content_blocks.is_empty() {
                     // Skip empty assistant messages — an artifact of
                     // tool-only responses where content is "" and there
@@ -607,11 +647,15 @@ fn convert_messages(messages: &[ChatMessage], native: Advertised) -> (Option<Str
                 while i < messages.len() && messages[i].role == MessageRole::Tool {
                     let t = &messages[i];
                     let tool_use_id = t.tool_call_id.clone().unwrap_or_default();
-                    tool_blocks.push(json!({
+                    let mut block = json!({
                         "type": "tool_result",
                         "tool_use_id": tool_use_id,
-                        "content": t.content,
-                    }));
+                        "content": tool_result_content(t),
+                    });
+                    if member_calls.contains(&tool_use_id) {
+                        block["toolset_name"] = json!(computer_toolset::TOOLSET_NAME);
+                    }
+                    tool_blocks.push(block);
                     i += 1;
                 }
                 out.push(json!({"role": "user", "content": tool_blocks}));
@@ -633,21 +677,7 @@ fn user_content(msg: &ChatMessage) -> Value {
         }));
     }
     // Vision: convert each base64 image to an image block.
-    if let Some(ref images) = msg.images {
-        for data in images {
-            // Default media type is png — matches Mermaid's
-            // clipboard module output. Unsupported formats
-            // surface a clear 415 from the API.
-            content_blocks.push(json!({
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": "image/png",
-                    "data": data,
-                },
-            }));
-        }
-    }
+    content_blocks.extend(msg.images.iter().flatten().map(|data| image_block(data)));
     if content_blocks.len() == 1 && content_blocks[0]["type"] == "text" {
         // Optimization: a single text block can serialize as
         // a string (Anthropic accepts both shapes; string is
@@ -661,6 +691,33 @@ fn user_content(msg: &ChatMessage) -> Value {
     } else {
         json!(content_blocks)
     }
+}
+
+/// One base64 image as an Anthropic `image` block.
+fn image_block(data: &str) -> Value {
+    json!({
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": base64_image_media_type(data),
+            "data": data,
+        },
+    })
+}
+
+/// The `content` of a `tool_result`: the tool's text, followed by an image
+/// block for each image the tool returned (a `read_file` of a picture, an MCP
+/// tool's screenshot). Text alone stays a bare string.
+fn tool_result_content(msg: &ChatMessage) -> Value {
+    let Some(images) = msg.images.as_ref().filter(|images| !images.is_empty()) else {
+        return json!(msg.content);
+    };
+    let mut blocks = Vec::with_capacity(images.len() + 1);
+    if !msg.content.is_empty() {
+        blocks.push(json!({"type": "text", "text": msg.content}));
+    }
+    blocks.extend(images.iter().map(|data| image_block(data)));
+    json!(blocks)
 }
 
 /// The content blocks of an assistant turn, in Anthropic's required order:
@@ -714,6 +771,19 @@ fn assistant_content_blocks(msg: &ChatMessage, native: Advertised) -> Vec<Value>
                 .provider_continuation
                 .as_ref()
                 .is_some_and(|c| c.is_anthropic_native_call(&id));
+            if let Some((member, input)) = made_natively
+                .then(|| native.to_computer_member(&tc.function))
+                .flatten()
+            {
+                content_blocks.push(json!({
+                    "type": "tool_use",
+                    "id": id,
+                    "name": member,
+                    "input": input,
+                    "toolset_name": computer_toolset::TOOLSET_NAME,
+                }));
+                continue;
+            }
             let (name, input) = made_natively
                 .then(|| native.to_native(&tc.function))
                 .flatten()
@@ -1104,13 +1174,19 @@ impl AnthropicAdapter {
                         signature = sig;
                     }
                 },
-                ContentBlockOut::ToolUse { id, name, input } => {
+                ContentBlockOut::ToolUse {
+                    id,
+                    name,
+                    input,
+                    toolset_name,
+                } => {
                     tool_calls.push(
                         Some(id),
                         FunctionCall {
                             name,
                             arguments: input,
                         },
+                        toolset_name.as_deref(),
                     );
                 },
                 ContentBlockOut::Other => {},
@@ -1376,9 +1452,14 @@ fn block_accumulator_for(block: Option<&Value>) -> BlockAccumulator {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
+            let toolset = block
+                .and_then(|b| b.get("toolset_name"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
             BlockAccumulator::ToolUse {
                 id,
                 name,
+                toolset,
                 input_buf: String::new(),
             }
         },
@@ -1701,6 +1782,9 @@ enum ContentBlockOut {
         id: String,
         name: String,
         input: Value,
+        /// The client toolset the call belongs to (`"computer"`).
+        #[serde(default)]
+        toolset_name: Option<String>,
     },
     /// Catch-all for content types we don't model (server-tool results,
     /// future block types). Falls through cleanly via serde's untagged
@@ -1723,6 +1807,8 @@ enum BlockAccumulator {
     ToolUse {
         id: String,
         name: String,
+        /// The client toolset the call belongs to (`"computer"`).
+        toolset: Option<String>,
         input_buf: String,
     },
     /// A server-side `compaction` block, as opened, with its deltas applied.
@@ -1869,6 +1955,7 @@ mod tests {
             BlockAccumulator::ToolUse {
                 id: "tu_1".to_string(),
                 name: "read_file".to_string(),
+                toolset: None,
                 input_buf: r#"{"path":"a.txt"}"#.to_string(),
             },
             &mut text,
@@ -2288,6 +2375,30 @@ mod tests {
         assert_eq!(content[1]["source"]["type"], "base64");
         assert_eq!(content[1]["source"]["media_type"], "image/png");
         assert_eq!(content[1]["source"]["data"], "BASE64DATA");
+    }
+
+    #[test]
+    fn a_tool_result_carries_the_images_its_tool_returned() {
+        use super::super::tool_images::{JPEG_B64, tool_loop_with_image};
+        let (_, msgs) = convert_messages(&tool_loop_with_image(), Advertised::default());
+        let results = msgs[2]["content"].as_array().expect("tool results");
+        let with_image = results[0]["content"].as_array().expect("text and image");
+        assert_eq!(
+            with_image[0],
+            json!({"type": "text", "text": "[image/jpeg, 14 bytes]"})
+        );
+        assert_eq!(with_image[1]["type"], "image");
+        assert_eq!(with_image[1]["source"]["media_type"], "image/jpeg");
+        assert_eq!(with_image[1]["source"]["data"], JPEG_B64);
+        assert_eq!(
+            results[1]["content"], "plain text",
+            "text alone stays a string"
+        );
+        assert_eq!(
+            msgs.len(),
+            4,
+            "no extra turn: the image rides in the result"
+        );
     }
 
     // --- Request body ---

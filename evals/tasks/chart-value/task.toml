@@ -1,0 +1,14 @@
+# Read a value off a picture. Only a model that sees the picture (`read_file`
+# returns it to vision models) can answer.
+fixture = "chart"
+prompt = """
+How many widgets were shipped in April, according to chart.png?
+"""
+
+[[check]]
+kind = "answer_contains"
+any = ["87"]
+
+[[check]]
+kind = "unchanged"
+paths = ["."]

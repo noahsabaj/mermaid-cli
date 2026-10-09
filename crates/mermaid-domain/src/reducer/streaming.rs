@@ -6,6 +6,7 @@ use crate::request::*;
 use crate::state::{State, StatusKind, TokenUsageTotals, ToolOutcome, TurnState};
 use crate::transition::commit_assistant_message;
 use mermaid_model::ids::TurnId;
+use mermaid_model::models::adapters::computer_toolset::TOOL as COMPUTER_TOOL;
 use mermaid_model::models::{ChatMessage, MessageRole, ProviderContinuation, TokenUsage};
 
 /// How one API request's usage folds into the session/run counters.
@@ -24,6 +25,9 @@ pub enum UsageFold {
     /// inside one (auto/recovery) — a manual `/compact` is not run spend.
     /// The caller rebuilds the context gauge from the compaction snapshot.
     Compaction { mid_run: bool },
+    /// A `/goal` check: part of the run's spend, but a side request, so it
+    /// never becomes `last_token_usage` (the context gauge).
+    GoalCheck,
     /// A detached background agent's final usage: cumulative only — it is
     /// not part of whichever run may be active when it lands, so it never
     /// touches `last_token_usage` or the run counter.
@@ -52,6 +56,7 @@ pub fn fold_token_usage(
             session.last_token_usage = Some(totals);
             mid_run
         },
+        UsageFold::GoalCheck => true,
         UsageFold::Detached => false,
     };
     if bank_run_output {
@@ -592,11 +597,8 @@ pub fn handle_stream_done(
                     .as_ref()
                     .and_then(|s| s.max_tokens)
                     .or(state.runtime.provider_capabilities.max_context_tokens);
-                let reserve = state
-                    .settings
-                    .compaction
-                    .policy()
-                    .response_reserve(&build_chat_request(state));
+                let request = build_chat_request(state);
+                let reserve = request.compaction.response_reserve(&request);
                 match crate::compaction::classify_length_stop(usage.as_ref(), window, reserve) {
                     crate::compaction::LengthCause::OutputCapped => {
                         // Never compact for an output-cap stop — the input
@@ -726,31 +728,32 @@ pub fn handle_stream_done(
                 )
             })
             .collect();
-        // Captured once for the whole batch: the live safety mode + the
-        // user's goal (for the Auto-mode classifier).
-        let goal = crate::user_goal::user_goal(&state.session);
-        let safety_mode = state.session.safety_mode;
-        for call in &pending {
-            if call.source.function.name == crate::tool_search::TOOL_SEARCH_NAME {
+        // A goal turn that calls tools is making progress (stall guard).
+        state.runtime.goal.used_tools = true;
+        // Computer actions act on one screen, so they run one at a time, in
+        // the order the model wrote them: only the first is dispatched here,
+        // and `handle_tool_finished` dispatches each next one.
+        let first_computer = pending
+            .iter()
+            .position(|call| call.source.function.name == COMPUTER_TOOL);
+        for (index, call) in pending.iter().enumerate() {
+            if call.source.function.name == crate::tool_search::TOOL_SEARCH_NAME
+                || (call.source.function.name == COMPUTER_TOOL && Some(index) != first_computer)
+            {
                 continue;
             }
+            let computer_batch = if Some(index) == first_computer {
+                computer_batch(pending.iter().map(|call| &call.source))
+            } else {
+                Vec::new()
+            };
             cmds.push(Cmd::ExecuteTool {
                 turn,
                 call_id: call.call_id,
                 source: call.source.clone(),
                 dispatch: crate::cmd::ToolDispatch {
-                    model_id: state.session.model_id.clone(),
-                    safety_mode,
-                    goal: goal.clone(),
-                    reasoning: state.session.reasoning,
-                    // Checkpoint anchoring: conversation id + length at
-                    // DISPATCH. History here is [..., user@k,
-                    // assistant(tool_use)], so any checkpoint this run takes
-                    // has message_index >= k+1 and a fork at k discards it
-                    // iff message_index > k (strict).
-                    session_id: state.session.conversation.id.clone(),
-                    message_index: state.session.messages().len(),
-                    scratchpad: state.session.scratchpad.clone(),
+                    computer_batch,
+                    ..tool_dispatch(state)
                 },
             });
         }
@@ -782,11 +785,11 @@ pub fn handle_stream_done(
         };
         cmds.push(Cmd::CompactConversation {
             turn: comp_turn,
-            request: CompactionRequest::auto(
-                build_chat_request(state),
-                CompactionTrigger::TruncationRecovery,
-                state.settings.compaction.policy(),
-            ),
+            request: {
+                let request = build_chat_request(state);
+                let policy = request.compaction;
+                CompactionRequest::auto(request, CompactionTrigger::TruncationRecovery, policy)
+            },
         });
         return;
     }
@@ -843,6 +846,11 @@ pub fn handle_stream_done(
             continuation,
         );
         push_call_model(state, cmds, next_turn);
+        return;
+    }
+
+    // With a `/goal` set, a check decides whether the run goes on.
+    if begin_goal_check(state, cmds) {
         return;
     }
 
@@ -1021,6 +1029,7 @@ pub fn handle_upstream_error(
     };
     state.session.append(msg, state.now);
 
+    note_goal_interrupted(state, cmds);
     // The error ends the run: record how long it worked and what it spent —
     // an errored run's log is exactly where those numbers matter.
     finish_run(state, cmds, RunEnd::Interrupted);

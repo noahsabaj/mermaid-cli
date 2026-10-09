@@ -399,6 +399,16 @@ jobs:
         run: "cargo nextest run --test integration --run-ignored only it::sandbox_read_only::"
       - name: Self-test (deterministic, model-free)
         run: cargo run --bin mermaid -- self-test --format json
+      # The `computer` tool against a real X server, and the screen evals,
+      # which start an Xvfb display of their own for each run.
+      - name: Install Xvfb
+        run: command -v Xvfb || (sudo apt-get update && sudo apt-get install -y --no-install-recommends xvfb)
+      - name: Computer tool on X11 (ignored, Xvfb)
+        run: 'xvfb-run -a -s "-screen 0 1280x800x24" cargo nextest run -p mermaid-cli --lib --run-ignored only x11_'
+      - name: Evals with the screen tasks
+        run: "cargo nextest run --test integration it::evals::"
+        env:
+          MERMAID_EVAL_REQUIRE_SCREEN: "1"
 
   # The managed-search test downloads the pinned bundle, starts the real
   # Granian/SearXNG process, performs a JSON search, and verifies shutdown. Run

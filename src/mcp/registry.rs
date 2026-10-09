@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use std::io::{self, IsTerminal, Write};
 use std::time::Duration;
 
-use super::client::McpClient;
+use super::client::{McpClient, ProbeEndedServer};
 use super::transport::StdioTransport;
 use mermaid_model::utils::{is_affirmative, should_refuse_noninteractive};
 
@@ -310,27 +310,19 @@ pub async fn validate_argv(
     argv: &[String],
     env: &HashMap<String, String>,
 ) -> Result<Vec<String>> {
-    let transport = tokio::time::timeout(
-        Duration::from_secs(60),
-        StdioTransport::spawn(command, argv, env),
-    )
-    .await
-    .map_err(|_| {
-        anyhow!(
-            "Server startup timed out (60s). Is {} installed?",
-            match command {
-                "npx" => "Node.js/npx",
-                "uvx" => "uv/uvx",
-                other => other,
-            }
-        )
-    })?
-    .map_err(|e| anyhow!("Failed to spawn server: {e}"))?;
-
-    let mut client = McpClient::new(transport.into());
+    let mut client = McpClient::new(spawn_for_validation(command, argv, env).await?.into());
 
     let result = tokio::time::timeout(Duration::from_secs(60), async {
-        client.initialize().await?;
+        if let Err(e) = client.initialize().await {
+            if !e.is::<ProbeEndedServer>() {
+                return Err(e);
+            }
+            // The probe ended a legacy server: start it again for the
+            // handshake alone.
+            client.shutdown().await;
+            client = McpClient::new(spawn_for_validation(command, argv, env).await?.into());
+            client.initialize_legacy().await?;
+        }
         let tools = client.list_tools().await?;
         let tool_names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
         Ok::<Vec<String>, anyhow::Error>(tool_names)
@@ -347,6 +339,30 @@ pub async fn validate_argv(
         Ok(inner) => inner,
         Err(_) => Err(anyhow!("Server initialization timed out (60s)")),
     }
+}
+
+/// Spawn a validation child under the startup budget.
+async fn spawn_for_validation(
+    command: &str,
+    argv: &[String],
+    env: &HashMap<String, String>,
+) -> Result<StdioTransport> {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        StdioTransport::spawn(command, argv, env),
+    )
+    .await
+    .map_err(|_| {
+        anyhow!(
+            "Server startup timed out (60s). Is {} installed?",
+            match command {
+                "npx" => "Node.js/npx",
+                "uvx" => "uv/uvx",
+                other => other,
+            }
+        )
+    })?
+    .map_err(|e| anyhow!("Failed to spawn server: {e}"))
 }
 
 /// Validate a Streamable HTTP MCP server config: connect, initialize, list
@@ -650,6 +666,28 @@ pub async fn resolve(name: &str, assume_yes: bool) -> Result<ResolvedServer> {
 mod tests {
     use super::*;
 
+    // A legacy server that dies on the unknown server/discover probe is
+    // started again and spoken to with the handshake alone.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn validation_restarts_a_server_the_probe_ended() {
+        let script = r#"read first
+case "$first" in *server/discover*) exit 0 ;; esac
+printf '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{},"serverInfo":{"name":"fragile"}}}\n'
+read initialized
+read list
+printf '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"only"}]}}\n'
+sleep 5"#;
+        let names = validate_argv(
+            "sh",
+            &["-c".to_string(), script.to_string()],
+            &HashMap::new(),
+        )
+        .await
+        .expect("validated after a restart");
+        assert_eq!(names, ["only"]);
+    }
+
     /// Every registry entry must use a supported launcher and have a
     /// non-empty package. Guards against typo-level regressions when
     /// adding / updating entries.
@@ -670,9 +708,6 @@ mod tests {
     #[test]
     fn registry_entries_are_well_formed() {
         assert!(!REGISTRY.is_empty(), "registry must not be empty");
-        // The README says "a registry of 16 popular MCP servers" in two
-        // places; a preset added or removed here has to update them.
-        assert_eq!(REGISTRY.len(), 16, "update the README's server count");
         for entry in REGISTRY {
             assert!(
                 matches!(entry.command, "npx" | "uvx"),

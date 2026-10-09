@@ -31,12 +31,18 @@ pub struct StatusWidget<'a> {
     pub requested_level: Option<ReasoningLevel>,
     /// Live session safety mode. Never the spinner/status widget: this is the persistent mode line.
     pub safety_mode: SafetyMode,
+    /// `goal 4m` while a `/goal` is set; see [`goal_segment`].
+    pub goal: Option<String>,
 }
 
 impl<'a> Widget for StatusWidget<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let width = area.width as usize;
-        let left = footer_left(self.safety_mode, self.reasoning_level, self.requested_level);
+        let mut left = footer_left(self.safety_mode, self.reasoning_level, self.requested_level);
+        if let Some(goal) = &self.goal {
+            left.push_str(" · ");
+            left.push_str(goal);
+        }
         let right = footer_right(
             self.model_name,
             context_segment(self.context_usage).as_deref(),
@@ -68,6 +74,30 @@ pub(crate) fn footer_left(
         None => format!("reasoning: {}", reasoning_level.as_str()),
     };
     format!("safety: {} · {reasoning}", safety_mode.as_str())
+}
+
+/// `goal` while a `/goal` is set, with how long it has run once it has
+/// started (a goal restored by `--resume` has not, until the next message).
+pub(crate) fn goal_segment(
+    active: bool,
+    started: Option<std::time::SystemTime>,
+    now: std::time::SystemTime,
+) -> Option<String> {
+    if !active {
+        return None;
+    }
+    // Whole minutes: a footer that ticks every second is noise.
+    Some(match started.and_then(|t| now.duration_since(t).ok()) {
+        Some(elapsed) => {
+            let minutes = elapsed.as_secs() / 60;
+            if minutes < 60 {
+                format!("goal {minutes}m")
+            } else {
+                format!("goal {}h {}m", minutes / 60, minutes % 60)
+            }
+        },
+        None => "goal".to_string(),
+    })
 }
 
 /// The context gauge, or nothing until the provider has reported usage:
@@ -114,6 +144,18 @@ mod tests {
             Some(ReasoningLevel::Max),
         );
         assert_eq!(s, "safety: ask · reasoning: high (max requested)");
+    }
+
+    #[test]
+    fn goal_segment_shows_only_while_a_goal_is_set() {
+        let now = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000);
+        let started = now - std::time::Duration::from_secs(240);
+        assert_eq!(goal_segment(false, Some(started), now), None);
+        assert_eq!(goal_segment(true, None, now).as_deref(), Some("goal"));
+        assert_eq!(
+            goal_segment(true, Some(started), now).as_deref(),
+            Some("goal 4m")
+        );
     }
 
     #[test]

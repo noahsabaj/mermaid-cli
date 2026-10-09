@@ -24,3 +24,5 @@ tests/snapshots/*.txt text eol=lf
 # the exact text it replaces, and a CRLF checkout would turn that into a
 # different (fuzzy) match on a Windows runner.
 evals/** text eol=lf
+# Pictures among them are bytes, not text.
+*.png binary

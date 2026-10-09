@@ -713,6 +713,70 @@ pub fn persist_ollama_allow_ram_offload(enabled: bool) -> Result<()> {
     )
 }
 
+/// Write an `/autocompact` change to the file it names, and return that
+/// file's path. `cwd` locates the project file.
+///
+/// # Errors
+///
+/// The read-modify-write of that file, and for the project file, `cwd` not
+/// being inside a git repository.
+pub fn persist_auto_compact(
+    cwd: &std::path::Path,
+    change: &mermaid_domain::autocompact::AutoCompactChange,
+) -> Result<PathBuf> {
+    use mermaid_domain::autocompact::ConfigFile;
+    let mutate = |table: &mut toml::Table| apply_auto_compact_change(table, change);
+    match change.file {
+        ConfigFile::User => {
+            update_user_config_table(mutate)?;
+            get_config_path()
+        },
+        ConfigFile::Project => super::project_config::update_project_config_table(cwd, mutate),
+    }
+}
+
+/// `change` applied to a raw config table. A reset for every model removes
+/// every automatic compaction value in the file.
+fn apply_auto_compact_change(
+    table: &mut toml::Table,
+    change: &mermaid_domain::autocompact::AutoCompactChange,
+) -> Result<()> {
+    use mermaid_domain::autocompact::AutoCompactSetting;
+    const SECTION: &str = "compaction";
+    const ENABLED: &str = "auto_enabled";
+    const TOKENS: &str = "auto_threshold_tokens";
+    const PER_MODEL: &str = "auto_threshold_tokens_per_model";
+    let model = change.model_id.as_deref();
+    match change.setting {
+        AutoCompactSetting::Tokens(tokens) => {
+            let value = toml::Value::Integer(i64::try_from(tokens)?);
+            match model {
+                Some(model) => deep_set_segments(table, &[SECTION, PER_MODEL, model], value),
+                None => deep_set_segments(table, &[SECTION, TOKENS], value),
+            }
+        },
+        AutoCompactSetting::Off => {
+            deep_set_segments(table, &[SECTION, ENABLED], toml::Value::Boolean(false))
+        },
+        AutoCompactSetting::On => {
+            deep_set_segments(table, &[SECTION, ENABLED], toml::Value::Boolean(true))
+        },
+        AutoCompactSetting::Reset => {
+            match model {
+                Some(model) => {
+                    deep_remove_segments(table, &[SECTION, PER_MODEL, model]);
+                },
+                None => {
+                    for key in [ENABLED, TOKENS, PER_MODEL] {
+                        deep_remove_segments(table, &[SECTION, key]);
+                    }
+                },
+            }
+            Ok(())
+        },
+    }
+}
+
 /// Resolve which model to use: CLI arg > `last_used` > `[default_model]` > a
 /// local Ollama model > a configured provider's `default_model`.
 ///
@@ -1960,6 +2024,76 @@ port = 11434
         let c: Config =
             toml::from_str("[compaction]\nauto_threshold_percent = 0\n").expect("parses");
         assert_eq!(c.compaction.policy().auto_threshold_percent, 1);
+    }
+
+    #[test]
+    fn a_model_token_threshold_overrides_the_one_for_all_models() {
+        let c: Config = toml::from_str(
+            "[compaction]\n\
+             auto_threshold_tokens = 250000\n\
+             [compaction.auto_threshold_tokens_per_model]\n\
+             \"openai/gpt-5.6\" = 400000\n\
+             \"ollama/tiny\" = 10\n",
+        )
+        .expect("parses");
+        let tokens = |model: &str| c.compaction.policy_for(model).auto_threshold_tokens;
+        assert_eq!(tokens("openai/gpt-5.6"), Some(400_000));
+        assert_eq!(tokens("anthropic/claude-opus-5-5"), Some(250_000));
+        assert_eq!(
+            tokens("ollama/tiny"),
+            Some(mermaid_domain::MIN_AUTO_THRESHOLD_TOKENS),
+            "a threshold that would compact every turn is raised"
+        );
+        assert_eq!(
+            Config::default().compaction.policy_for("openai/gpt-5.6"),
+            mermaid_domain::CompactionPolicy::default()
+        );
+    }
+
+    fn auto_compact(
+        setting: mermaid_domain::autocompact::AutoCompactSetting,
+        model: Option<&str>,
+    ) -> mermaid_domain::autocompact::AutoCompactChange {
+        mermaid_domain::autocompact::AutoCompactChange {
+            setting,
+            file: mermaid_domain::autocompact::ConfigFile::User,
+            model_id: model.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn auto_compact_changes_write_only_their_own_keys() {
+        use mermaid_domain::autocompact::AutoCompactSetting::{Off, Reset, Tokens};
+        let mut table: toml::Table =
+            toml::from_str("[compaction]\ntail_turns = 3\n").expect("parses");
+        let model = "ollama/qwen3.5:8b";
+        apply_auto_compact_change(&mut table, &auto_compact(Tokens(250_000), Some(model)))
+            .expect("set model");
+        apply_auto_compact_change(&mut table, &auto_compact(Tokens(500_000), None))
+            .expect("set all");
+        apply_auto_compact_change(&mut table, &auto_compact(Off, None)).expect("off");
+        let c: Config = toml::from_str(&toml::to_string(&table).expect("writes")).expect("parses");
+        assert_eq!(c.compaction.tail_turns, 3);
+        assert_eq!(c.compaction.auto_threshold_tokens, Some(500_000));
+        assert_eq!(
+            c.compaction.auto_threshold_tokens_per_model.get(model),
+            Some(&250_000),
+            "a model ID with dots is one key"
+        );
+        assert!(!c.compaction.auto_enabled);
+
+        apply_auto_compact_change(&mut table, &auto_compact(Reset, Some(model))).expect("reset");
+        let c: Config = toml::from_str(&toml::to_string(&table).expect("writes")).expect("parses");
+        assert!(c.compaction.auto_threshold_tokens_per_model.is_empty());
+        assert_eq!(c.compaction.auto_threshold_tokens, Some(500_000));
+
+        apply_auto_compact_change(&mut table, &auto_compact(Reset, None)).expect("reset all");
+        assert_eq!(
+            table["compaction"]
+                .as_table()
+                .map(|t| t.keys().collect::<Vec<_>>()),
+            Some(vec![&"tail_turns".to_string()])
+        );
     }
 
     /// Config with one remote provider carrying an explicit `default_model`.

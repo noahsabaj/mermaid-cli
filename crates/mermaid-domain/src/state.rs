@@ -98,6 +98,10 @@ pub struct State {
     /// emits `Cmd::ResolveQuestion`, unblocking the parked tool task. Empty in
     /// headless mode (no broker → the tool proceeds without asking).
     pub pending_question: VecDeque<PendingQuestionSet>,
+    /// `/btw` side questions and the pane that shows them. Outside the
+    /// conversation by design: nothing here is persisted or sent on a main
+    /// turn (see `side_question`).
+    pub side_questions: crate::side_question::SideQuestions,
     /// Runtime-only observability state: process registry, provider
     /// capability snapshot, and lifecycle timeline. Not sent to the
     /// model.
@@ -213,6 +217,7 @@ impl State {
             confirm: None,
             pending_approval: VecDeque::new(),
             pending_question: VecDeque::new(),
+            side_questions: crate::side_question::SideQuestions::default(),
             runtime,
             should_exit: false,
             output_schema: None,
@@ -890,6 +895,13 @@ pub enum TurnState {
         /// would commit its remaining text unmarked.
         resume_continuation: bool,
     },
+    /// The run would have ended, and a `/goal` is active: a one-shot model
+    /// call checks whether the goal is met. "Not yet" starts the next goal
+    /// turn; "met", "impossible" or a failed check ends the run.
+    EvaluatingGoal {
+        id: TurnId,
+        started: SystemTime,
+    },
     /// `CancelTurn` was dispatched. The reducer has already emitted a
     /// `Cmd::CancelScope` — now we wait for the final `Cancelled` /
     /// `StreamDone` that the effect runner sends back when the scope's
@@ -911,6 +923,7 @@ impl TurnState {
             Self::Generating { id, .. }
             | Self::ExecutingTools { id, .. }
             | Self::Compacting { id, .. }
+            | Self::EvaluatingGoal { id, .. }
             | Self::Cancelling { id, .. } => Some(*id),
         }
     }
@@ -1412,6 +1425,8 @@ pub enum Focus {
     QuestionModal,
     /// A yes/no confirmation (`/clear`).
     ConfirmModal,
+    /// The `/btw` side-question pane.
+    SideQuestion,
     /// One of the `UiMode` pickers (model / conversations / rewind).
     Picker,
     /// The plain composer.
@@ -1431,6 +1446,8 @@ impl State {
             Focus::QuestionModal
         } else if self.confirm.is_some() {
             Focus::ConfirmModal
+        } else if self.side_questions.view.is_some() {
+            Focus::SideQuestion
         } else if matches!(
             self.ui.mode,
             UiMode::ModelPicker { .. }
@@ -1633,8 +1650,8 @@ pub enum ApprovalChoice {
 
 /// Category of the gated action — drives the prompt's label.
 ///
-/// A deliberately coarser projection of `mermaid_model::safety::ToolCategory`: seven
-/// prompt labels for twelve policy categories, plus `Classify` which has no
+/// A deliberately coarser projection of `mermaid_model::safety::ToolCategory`: eight
+/// prompt labels for thirteen policy categories, plus `Classify` which has no
 /// `ToolCategory` at all. The mapping is the `From` impl below, exhaustive so a
 /// new `ToolCategory` variant is a compile error in exactly one place.
 ///
@@ -1649,6 +1666,7 @@ pub enum ApprovalKind {
     Web,
     Mcp,
     Subagent,
+    Computer,
     Classify,
 }
 
@@ -1661,6 +1679,7 @@ impl From<mermaid_model::safety::ToolCategory> for ApprovalKind {
             C::Web | C::Network | C::ExternalDirectory => Self::Web,
             C::Mcp => Self::Mcp,
             C::Subagent => Self::Subagent,
+            C::Computer => Self::Computer,
             // `Read` and `Memory` resolve to Allow/Deny in `decide`, so neither
             // reaches an approval prompt; the arm exists to keep the match
             // total. The label is a poor fit and would read wrong if one ever

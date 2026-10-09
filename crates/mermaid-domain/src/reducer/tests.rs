@@ -5632,7 +5632,7 @@ fn build_chat_request_neutralizes_a_superseded_denial() {
     let tool_msg = req
         .messages
         .iter()
-        .find(|m| m.role == MessageRole::Tool)
+        .find(|m| m.role == mermaid_model::models::MessageRole::Tool)
         .expect("the tool_result should survive into the request");
     assert!(
         !tool_msg.content.contains("blocked by policy"),
@@ -6944,6 +6944,153 @@ fn execute_tool_cmd_carries_the_session_anchor() {
         state.session.messages().len(),
         "stamped at dispatch, after the assistant tool_use commit"
     );
+}
+
+/// A turn whose model asked for `calls`, in order, each named as given.
+fn stream_done_with_calls(names: &[&str]) -> (State, Vec<Cmd>) {
+    let mut state = state_with_two_exchanges();
+    state.turn = TurnState::Generating {
+        id: TurnId(9),
+        started: std::time::SystemTime::now(),
+        partial_text: String::new(),
+        partial_reasoning: String::new(),
+        tokens: 0,
+        phase: GenPhase::Streaming,
+        provider_continuation: None,
+        pending_tool_calls: names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| mermaid_model::models::ToolCall {
+                id: Some(format!("call_{i}")),
+                function: mermaid_model::models::FunctionCall {
+                    name: (*name).to_string(),
+                    arguments: serde_json::json!({"action": "left_click"}),
+                },
+            })
+            .collect(),
+        continuation: false,
+    };
+    update(
+        state,
+        Msg::StreamDone {
+            turn: TurnId(9),
+            usage: None,
+            provider_continuation: None,
+            stop_reason: None,
+        },
+    )
+}
+
+fn dispatched(cmds: &[Cmd]) -> Vec<crate::ToolCallId> {
+    cmds.iter()
+        .filter_map(|c| match c {
+            Cmd::ExecuteTool { call_id, .. } => Some(*call_id),
+            _ => None,
+        })
+        .collect()
+}
+
+fn pending_ids(state: &State) -> Vec<crate::ToolCallId> {
+    match &state.turn {
+        TurnState::ExecutingTools { calls, .. } => calls.iter().map(|c| c.call_id).collect(),
+        other => panic!("expected ExecutingTools, got {other:?}"),
+    }
+}
+
+#[test]
+fn computer_actions_run_one_at_a_time_in_order() {
+    let (state, cmds) = stream_done_with_calls(&["computer", "read_file", "computer", "computer"]);
+    let ids = pending_ids(&state);
+    assert_eq!(
+        dispatched(&cmds),
+        vec![ids[0], ids[1]],
+        "the first computer action runs beside the other tools; the rest wait"
+    );
+    let (state, cmds) = update(
+        state,
+        Msg::ToolFinished {
+            turn: TurnId(9),
+            call_id: ids[0],
+            outcome: ToolOutcome::success("clicked", "clicked", 0.1),
+        },
+    );
+    assert_eq!(dispatched(&cmds), vec![ids[2]]);
+    let (_, cmds) = update(
+        state,
+        Msg::ToolFinished {
+            turn: TurnId(9),
+            call_id: ids[1],
+            outcome: ToolOutcome::success("text", "read", 0.1),
+        },
+    );
+    assert!(
+        dispatched(&cmds).is_empty(),
+        "another tool does not move the queue"
+    );
+}
+
+fn batch_sizes(cmds: &[Cmd]) -> Vec<usize> {
+    cmds.iter()
+        .filter_map(|c| match c {
+            Cmd::ExecuteTool { dispatch, .. } => Some(dispatch.computer_batch.len()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn every_computer_action_carries_its_whole_batch_for_the_gate() {
+    let (state, cmds) = stream_done_with_calls(&["computer", "read_file", "computer"]);
+    assert_eq!(
+        batch_sizes(&cmds),
+        vec![2, 0],
+        "the gate sees both computer actions; other tools see none"
+    );
+    let ids = pending_ids(&state);
+    let (_, cmds) = update(
+        state,
+        Msg::ToolFinished {
+            turn: TurnId(9),
+            call_id: ids[0],
+            outcome: ToolOutcome::success("clicked", "clicked", 0.1),
+        },
+    );
+    assert_eq!(batch_sizes(&cmds), vec![2]);
+}
+
+#[test]
+fn a_failed_computer_action_stops_the_rest_of_the_batch() {
+    let (state, _) = stream_done_with_calls(&["computer", "computer", "computer"]);
+    let ids = pending_ids(&state);
+    let (state, cmds) = update(
+        state,
+        Msg::ToolFinished {
+            turn: TurnId(9),
+            call_id: ids[0],
+            outcome: ToolOutcome::error("coordinate off the screen", None),
+        },
+    );
+    assert!(dispatched(&cmds).is_empty());
+    assert!(
+        !matches!(state.turn, TurnState::ExecutingTools { .. }),
+        "every action has a result, so the turn moves on"
+    );
+    let halted: Vec<_> = state
+        .session
+        .messages()
+        .iter()
+        .filter(|m| m.role == mermaid_model::models::MessageRole::Tool)
+        .rev()
+        .take(2)
+        .map(|m| m.content.clone())
+        .collect();
+    assert_eq!(halted.len(), 2);
+    for content in halted {
+        assert!(
+            content.contains(mermaid_model::models::adapters::computer_toolset::HALTED),
+            "{content}"
+        );
+    }
 }
 
 // ── Context-delta injector ───────────────────────────────────────
@@ -8643,5 +8790,89 @@ fn a_double_slash_is_prose_not_a_command() {
     assert_eq!(
         state.session.messages().last().unwrap().content,
         "//forget everything"
+    );
+}
+
+#[test]
+fn autocompact_sends_the_change_and_applies_what_comes_back() {
+    use crate::autocompact::{AutoCompactChange, AutoCompactSetting, ConfigFile};
+    let (state, cmds) = update(
+        fresh_state(),
+        Msg::Slash(SlashCmd::AutoCompact(Some("250k project".to_string()))),
+    );
+    let sent: Vec<_> = cmds
+        .iter()
+        .filter_map(|c| match c {
+            Cmd::PersistAutoCompact(change) => Some(change.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        sent,
+        [AutoCompactChange {
+            setting: AutoCompactSetting::Tokens(250_000),
+            file: ConfigFile::Project,
+            model_id: Some("ollama/test".to_string()),
+        }]
+    );
+    assert_eq!(
+        state
+            .settings
+            .compaction
+            .auto_threshold_tokens_per_model
+            .len(),
+        0,
+        "nothing applies before the file is written"
+    );
+
+    let mut saved = crate::config::CompactionConfig::default();
+    saved
+        .auto_threshold_tokens_per_model
+        .insert("ollama/test".to_string(), 250_000);
+    let (state, _) = update(
+        state,
+        Msg::AutoCompactSaved {
+            path: "/tmp/project/.mermaid/config.toml".to_string(),
+            compaction: saved,
+        },
+    );
+    let last = state.session.messages().last().expect("a status line");
+    assert!(
+        last.content
+            .contains("Saved to /tmp/project/.mermaid/config.toml")
+    );
+    assert!(
+        last.content.contains("250k tokens (set for this model)"),
+        "{}",
+        last.content
+    );
+    assert_eq!(
+        build_chat_request(&state).compaction.auto_threshold_tokens,
+        Some(250_000),
+        "the next request uses the new threshold"
+    );
+}
+
+#[test]
+fn autocompact_bare_shows_the_threshold_and_bad_input_shows_why() {
+    let (state, cmds) = update(fresh_state(), Msg::Slash(SlashCmd::AutoCompact(None)));
+    assert!(!cmds.iter().any(|c| matches!(c, Cmd::PersistAutoCompact(_))));
+    let last = state.session.messages().last().expect("a status line");
+    assert!(
+        last.content.starts_with("Auto-compact for ollama/test"),
+        "{}",
+        last.content
+    );
+
+    let (state, cmds) = update(
+        state,
+        Msg::Slash(SlashCmd::AutoCompact(Some("1000".to_string()))),
+    );
+    assert!(!cmds.iter().any(|c| matches!(c, Cmd::PersistAutoCompact(_))));
+    let last = state.session.messages().last().expect("an error line");
+    assert!(
+        last.content.contains("smallest threshold"),
+        "{}",
+        last.content
     );
 }

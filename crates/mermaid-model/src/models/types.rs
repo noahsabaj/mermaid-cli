@@ -27,7 +27,48 @@ pub enum ProviderContinuation {
         native_tool_calls: Vec<String>,
     },
     /// Meta Responses output items, including encrypted reasoning state.
-    MetaResponses { output: Vec<MetaResponseItem> },
+    MetaResponses { output: Vec<ResponseItem> },
+    /// OpenAI Responses output items: encrypted reasoning, native tool calls
+    /// in the form the model wrote them, and any server-side compaction item.
+    /// `model` is the model that wrote them: encrypted state is replayed only
+    /// to that model, and a session that switches model replays plain history.
+    OpenaiResponses {
+        model: String,
+        output: Vec<ResponseItem>,
+    },
+    /// Gemini's thought signatures on this turn's function calls, and the
+    /// calls it made through its own computer tool. Gemini 3 refuses a
+    /// function call of the current turn that comes back without the
+    /// signature it carried. `model` is the model that wrote them; they go
+    /// back only to that model.
+    Gemini {
+        model: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        signatures: Vec<GeminiSignature>,
+        /// Computer calls as the model wrote them. They are stored under
+        /// Mermaid's `computer` tool so every gate sees the tool it knows;
+        /// these say what to send back.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        native_calls: Vec<GeminiNativeCall>,
+    },
+}
+
+/// One call Gemini made through its computer tool, as it wrote it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GeminiNativeCall {
+    pub call_id: String,
+    pub name: String,
+    pub args: serde_json::Value,
+}
+
+/// The thought signature Gemini attached to one function call.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GeminiSignature {
+    pub call_id: String,
+    /// Opaque, so stored as base64 bytes like the other encrypted state: the
+    /// persistence redaction must not mistake it for a credential.
+    #[serde(with = "crate::utils::serde_base64::string")]
+    pub signature: String,
 }
 
 impl ProviderContinuation {
@@ -45,12 +86,12 @@ impl ProviderContinuation {
     pub fn anthropic_signature(&self) -> Option<&str> {
         match self {
             Self::Anthropic { signature, .. } => Some(signature.as_str()).filter(|s| !s.is_empty()),
-            Self::MetaResponses { .. } => None,
+            Self::MetaResponses { .. } | Self::OpenaiResponses { .. } | Self::Gemini { .. } => None,
         }
     }
 
-    /// The same continuation without its server-side compaction block;
-    /// `None` when that block was all it held.
+    /// The same continuation without its server-side compaction state;
+    /// `None` when that was all it held.
     #[must_use]
     pub fn without_compaction(self) -> Option<Self> {
         match self {
@@ -68,7 +109,11 @@ impl ProviderContinuation {
                 compaction: None,
                 native_tool_calls,
             }),
-            meta @ Self::MetaResponses { .. } => Some(meta),
+            kept @ (Self::MetaResponses { .. } | Self::Gemini { .. }) => Some(kept),
+            Self::OpenaiResponses { model, mut output } => {
+                output.retain(|item| !item.is_compaction());
+                (!output.is_empty()).then_some(Self::OpenaiResponses { model, output })
+            },
         }
     }
 
@@ -77,7 +122,18 @@ impl ProviderContinuation {
     pub const fn anthropic_compaction(&self) -> Option<&serde_json::Value> {
         match self {
             Self::Anthropic { compaction, .. } => compaction.as_ref(),
-            Self::MetaResponses { .. } => None,
+            Self::MetaResponses { .. } | Self::OpenaiResponses { .. } | Self::Gemini { .. } => None,
+        }
+    }
+
+    /// Whether the provider compacted the conversation server-side on this
+    /// turn, so that it reads everything before it from this turn's state.
+    #[must_use]
+    pub fn carries_server_compaction(&self) -> bool {
+        match self {
+            Self::Anthropic { compaction, .. } => compaction.is_some(),
+            Self::MetaResponses { .. } | Self::Gemini { .. } => false,
+            Self::OpenaiResponses { output, .. } => output.iter().any(ResponseItem::is_compaction),
         }
     }
 
@@ -89,33 +145,103 @@ impl ProviderContinuation {
             Self::Anthropic {
                 native_tool_calls, ..
             } => native_tool_calls.iter().any(|call| call == id),
-            Self::MetaResponses { .. } => false,
+            Self::MetaResponses { .. } | Self::OpenaiResponses { .. } | Self::Gemini { .. } => {
+                false
+            },
         }
     }
 
     #[must_use]
-    pub fn meta_output(&self) -> Option<&[MetaResponseItem]> {
+    pub fn meta_output(&self) -> Option<&[ResponseItem]> {
         match self {
             Self::MetaResponses { output } => Some(output),
-            Self::Anthropic { .. } => None,
+            Self::Anthropic { .. } | Self::OpenaiResponses { .. } | Self::Gemini { .. } => None,
         }
     }
 
-    pub fn retain_meta_function_calls(&mut self, mut keep: impl FnMut(&str) -> bool) {
-        if let Self::MetaResponses { output } = self {
-            output.retain(|item| item.function_call_id().is_none_or(&mut keep));
+    /// The OpenAI output items to replay to `model`: `None` for another
+    /// provider's state, or for state another model wrote.
+    #[must_use]
+    pub fn openai_output(&self, model: &str) -> Option<&[ResponseItem]> {
+        match self {
+            Self::OpenaiResponses {
+                model: wrote,
+                output,
+            } if wrote == model => Some(output),
+            Self::Anthropic { .. }
+            | Self::MetaResponses { .. }
+            | Self::OpenaiResponses { .. }
+            | Self::Gemini { .. } => None,
+        }
+    }
+
+    /// The Gemini signatures to send back to `model`: `None` for another
+    /// provider's state, or for state another model wrote.
+    #[must_use]
+    pub fn gemini_signatures(&self, model: &str) -> Option<&[GeminiSignature]> {
+        match self {
+            Self::Gemini {
+                model: wrote,
+                signatures,
+                ..
+            } if wrote == model => Some(signatures),
+            Self::Anthropic { .. }
+            | Self::MetaResponses { .. }
+            | Self::OpenaiResponses { .. }
+            | Self::Gemini { .. } => None,
+        }
+    }
+
+    /// The computer call `id` as `model` wrote it, when `model` made it
+    /// through Gemini's computer tool.
+    #[must_use]
+    pub fn gemini_native_call(&self, model: &str, id: &str) -> Option<&GeminiNativeCall> {
+        match self {
+            Self::Gemini {
+                model: wrote,
+                native_calls,
+                ..
+            } if wrote == model => native_calls.iter().find(|call| call.call_id == id),
+            Self::Anthropic { .. }
+            | Self::MetaResponses { .. }
+            | Self::OpenaiResponses { .. }
+            | Self::Gemini { .. } => None,
+        }
+    }
+
+    /// Keep only the replayed tool calls whose id `keep` accepts.
+    pub fn retain_tool_calls(&mut self, mut keep: impl FnMut(&str) -> bool) {
+        match self {
+            Self::MetaResponses { output } | Self::OpenaiResponses { output, .. } => {
+                output.retain(|item| item.call_id().is_none_or(&mut keep));
+            },
+            Self::Gemini {
+                signatures,
+                native_calls,
+                ..
+            } => {
+                signatures.retain(|s| keep(&s.call_id));
+                native_calls.retain(|c| keep(&c.call_id));
+            },
+            Self::Anthropic { .. } => {},
         }
     }
 }
 
-/// One Meta Responses output item saved for stateless replay. Reasoning items
-/// split their encrypted payload from the remaining JSON so the ciphertext can
-/// be serialized as base64 bytes. This keeps generic persistence redaction from
-/// mistaking a ciphertext for a credential and corrupting the replay state.
+/// One Responses-API output item saved for stateless replay. Items that carry
+/// encrypted state (reasoning, a server-side compaction) split the payload
+/// from the remaining JSON so the ciphertext can be serialized as base64
+/// bytes. This keeps generic persistence redaction from mistaking a
+/// ciphertext for a credential and corrupting the replay state.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum MetaResponseItem {
+pub enum ResponseItem {
     Reasoning {
+        item: serde_json::Value,
+        #[serde(with = "crate::utils::serde_base64::string")]
+        encrypted_content: String,
+    },
+    Compaction {
         item: serde_json::Value,
         #[serde(with = "crate::utils::serde_base64::string")]
         encrypted_content: String,
@@ -125,19 +251,33 @@ pub enum MetaResponseItem {
     },
 }
 
-impl MetaResponseItem {
+/// The output item types that are tool calls, each answered by an item of
+/// the same name with `_output` appended.
+const CALL_ITEM_TYPES: [&str; 3] = ["function_call", "apply_patch_call", "computer_call"];
+
+impl ResponseItem {
     pub fn from_wire(mut item: serde_json::Value) -> Self {
-        let is_reasoning =
-            item.get("type").and_then(serde_json::Value::as_str) == Some("reasoning");
-        if is_reasoning
+        let kind = item
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        if matches!(kind.as_str(), "reasoning" | "compaction")
             && let Some(encrypted) = item
                 .as_object_mut()
                 .and_then(|object| object.remove("encrypted_content"))
                 .and_then(|value| value.as_str().map(str::to_string))
         {
-            return Self::Reasoning {
-                item,
-                encrypted_content: encrypted,
+            return if kind == "reasoning" {
+                Self::Reasoning {
+                    item,
+                    encrypted_content: encrypted,
+                }
+            } else {
+                Self::Compaction {
+                    item,
+                    encrypted_content: encrypted,
+                }
             };
         }
         Self::Other { item }
@@ -147,6 +287,10 @@ impl MetaResponseItem {
     pub fn to_wire(&self) -> serde_json::Value {
         match self {
             Self::Reasoning {
+                item,
+                encrypted_content,
+            }
+            | Self::Compaction {
                 item,
                 encrypted_content,
             } => {
@@ -163,13 +307,40 @@ impl MetaResponseItem {
         }
     }
 
-    pub fn function_call_id(&self) -> Option<&str> {
-        let item = match self {
-            Self::Reasoning { item, .. } | Self::Other { item } => item,
-        };
-        (item.get("type").and_then(serde_json::Value::as_str) == Some("function_call"))
-            .then(|| item.get("call_id").and_then(serde_json::Value::as_str))
+    fn item(&self) -> &serde_json::Value {
+        match self {
+            Self::Reasoning { item, .. } | Self::Compaction { item, .. } | Self::Other { item } => {
+                item
+            },
+        }
+    }
+
+    /// The item's wire `type`.
+    #[must_use]
+    pub fn kind(&self) -> &str {
+        self.item()
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+    }
+
+    /// The `call_id` of a tool-call item (`function_call`, `apply_patch_call`,
+    /// `computer_call`).
+    #[must_use]
+    pub fn call_id(&self) -> Option<&str> {
+        CALL_ITEM_TYPES
+            .contains(&self.kind())
+            .then(|| {
+                self.item()
+                    .get("call_id")
+                    .and_then(serde_json::Value::as_str)
+            })
             .flatten()
+    }
+
+    #[must_use]
+    pub const fn is_compaction(&self) -> bool {
+        matches!(self, Self::Compaction { .. })
     }
 }
 
@@ -215,7 +386,7 @@ pub struct ChatMessage {
     #[serde(default)]
     pub tool_name: Option<String>,
     /// Provider-owned continuation state. Anthropic stores its signed thinking
-    /// block; Meta stores ordered Responses output items for encrypted replay.
+    /// block; Meta and OpenAI store ordered Responses output items for encrypted replay.
     /// Other providers leave this unset and ignore it on the wire.
     #[serde(default)]
     pub provider_continuation: Option<ProviderContinuation>,
@@ -233,8 +404,7 @@ impl ChatMessage {
             .rposition(|m| {
                 m.provider_continuation
                     .as_ref()
-                    .and_then(ProviderContinuation::anthropic_compaction)
-                    .is_some()
+                    .is_some_and(ProviderContinuation::carries_server_compaction)
             })
             .unwrap_or(0);
         &history[start..]
@@ -410,6 +580,11 @@ pub enum ChatMessageKind {
     /// with the mode — hidden from the transcript (the status band is the
     /// human announcement), and unlike `RecoveryNudge` NEVER swept.
     ContextMarker,
+    /// A `/goal` check that found the goal not met yet: the check's reason
+    /// and the goal restated. Starts the next goal turn, so the model must
+    /// read it; unlike a nudge it stays visible and is never swept, because
+    /// the transcript should show why the run kept going.
+    GoalCheck,
     /// A kind written by a NEWER build that this one doesn't model. Mapped
     /// here by `#[serde(other)]` instead of failing the whole conversation parse;
     /// it's neither a checkpoint nor a run summary, so every `matches!` site
@@ -453,7 +628,9 @@ impl ChatMessageKind {
         match self {
             // Injected to steer the model — the whole point is that it reads
             // them. Hidden from the transcript, never from the model.
-            Self::RecoveryNudge | Self::ContextMarker => MessageAudience::ModelDirected,
+            Self::RecoveryNudge | Self::ContextMarker | Self::GoalCheck => {
+                MessageAudience::ModelDirected
+            },
             Self::Normal
             | Self::ContextCheckpoint
             | Self::RunSummary
@@ -614,6 +791,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn gemini_signatures_persist_as_bytes_and_follow_kept_calls() {
+        let mut continuation = ProviderContinuation::Gemini {
+            model: "gemini-3-flash".to_string(),
+            signatures: vec![
+                GeminiSignature {
+                    call_id: "call_0".to_string(),
+                    signature: "c2lnLWE=".to_string(),
+                },
+                GeminiSignature {
+                    call_id: "call_1".to_string(),
+                    signature: "c2lnLWI=".to_string(),
+                },
+            ],
+            native_calls: Vec::new(),
+        };
+        let saved = serde_json::to_string(&continuation).unwrap();
+        assert!(!saved.contains("c2lnLWE="), "stored as bytes: {saved}");
+        let loaded: ProviderContinuation = serde_json::from_str(&saved).unwrap();
+        assert_eq!(loaded, continuation);
+
+        continuation.retain_tool_calls(|id| id == "call_1");
+        let kept = continuation.gemini_signatures("gemini-3-flash").unwrap();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].call_id, "call_1");
+        assert_eq!(
+            continuation.clone().without_compaction(),
+            Some(continuation)
+        );
+    }
+
+    #[test]
     fn test_message_role_equality() {
         let user1 = MessageRole::User;
         let user2 = MessageRole::User;
@@ -703,7 +911,7 @@ mod tests {
         let original = "eyJopaque.reasoning.payload";
         let message = ChatMessage::assistant("done").with_provider_continuation(
             ProviderContinuation::MetaResponses {
-                output: vec![MetaResponseItem::from_wire(serde_json::json!({
+                output: vec![ResponseItem::from_wire(serde_json::json!({
                     "type": "reasoning",
                     "id": "rs_1",
                     "summary": [],

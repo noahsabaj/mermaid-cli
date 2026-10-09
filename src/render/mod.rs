@@ -206,19 +206,20 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         let now_sys = std::time::SystemTime::from(state.now);
         let elapsed_since =
             |t: std::time::SystemTime| now_sys.duration_since(t).unwrap_or_default();
-        let elapsed = match &state.turn {
-            // A model run (generating + executing tools) anchors to the run start
-            // so the timer spans the whole agentic loop, not just this step.
-            TurnState::Generating { started, .. } | TurnState::ExecutingTools { started, .. } => {
-                state
+        let elapsed =
+            match &state.turn {
+                // A model run (generating + executing tools) anchors to the run start
+                // so the timer spans the whole agentic loop, not just this step.
+                TurnState::Generating { started, .. }
+                | TurnState::ExecutingTools { started, .. } => state
                     .runtime
                     .run_started
-                    .map_or_else(|| elapsed_since(*started), elapsed_since)
-            },
-            TurnState::Compacting { started, .. } => elapsed_since(*started),
-            TurnState::Cancelling { since, .. } => elapsed_since(*since),
-            TurnState::Idle => std::time::Duration::ZERO,
-        };
+                    .map_or_else(|| elapsed_since(*started), elapsed_since),
+                TurnState::Compacting { started, .. }
+                | TurnState::EvaluatingGoal { started, .. } => elapsed_since(*started),
+                TurnState::Cancelling { since, .. } => elapsed_since(*since),
+                TurnState::Idle => std::time::Duration::ZERO,
+            };
         let (agent_rows, status_override, bg_available) = agent_panel_data(state);
         // Claude Code parity: while a checklist task is in_progress its
         // active_form IS the spinner headline ("Wiring the broker…"), with
@@ -243,7 +244,10 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         let tokens_display = match &state.turn {
             TurnState::Generating { tokens, .. } => Some(committed.output_tokens + *tokens),
             TurnState::ExecutingTools { .. } => Some(committed.output_tokens + live_child_tokens),
-            TurnState::Compacting { .. } | TurnState::Cancelling { .. } | TurnState::Idle => None,
+            TurnState::Compacting { .. }
+            | TurnState::EvaluatingGoal { .. }
+            | TurnState::Cancelling { .. }
+            | TurnState::Idle => None,
         };
         build_status_lines(
             GenerationStatus::from_turn(&state.turn),
@@ -342,6 +346,19 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             widgets::question_modal_height(qset, &rstate.theme, frame.area().width)
         }),
         BottomPane::Confirm => 6,
+        // Grows with the answer, but leaves the transcript, the composer and
+        // a few rows of chat on screen.
+        BottomPane::SideQuestion => widgets::side_question_height(
+            &state.side_questions,
+            &rstate.theme,
+            frame.area().width,
+            (frame.area().height / 2).min(
+                frame
+                    .area()
+                    .height
+                    .saturating_sub(input_height + status_line_height + 6),
+            ),
+        ),
         BottomPane::ConversationList | BottomPane::Rewind => 12,
         BottomPane::ModelPicker => widgets::MODEL_PICKER_HEIGHT,
         BottomPane::FilePicker => {
@@ -599,6 +616,13 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
                 frame.render_widget(widget, chunks[4]);
             }
         },
+        BottomPane::SideQuestion => {
+            let widget = widgets::SideQuestionWidget {
+                theme: &rstate.theme,
+                side: &state.side_questions,
+            };
+            frame.render_widget(widget, chunks[4]);
+        },
         BottomPane::ModelPicker => {
             if let mermaid_domain::UiMode::ModelPicker {
                 candidates,
@@ -669,6 +693,11 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
                 reasoning_level: effective,
                 requested_level,
                 safety_mode: state.session.safety_mode,
+                goal: widgets::goal_segment(
+                    state.session.conversation.goal.is_some(),
+                    state.runtime.goal.started,
+                    std::time::SystemTime::from(state.now),
+                ),
             };
             frame.render_widget(status_widget, chunks[4]);
         },
@@ -720,6 +749,7 @@ enum BottomPane<'a> {
     Approval,
     Question,
     Confirm,
+    SideQuestion,
     ModelPicker,
     ConversationList,
     Rewind,
@@ -734,6 +764,7 @@ fn bottom_pane(state: &mermaid_domain::State) -> BottomPane<'_> {
         Focus::ApprovalModal => BottomPane::Approval,
         Focus::QuestionModal => BottomPane::Question,
         Focus::ConfirmModal => BottomPane::Confirm,
+        Focus::SideQuestion => BottomPane::SideQuestion,
         Focus::Picker => match state.ui.mode {
             UiMode::ModelPicker { .. } => BottomPane::ModelPicker,
             UiMode::ConversationList { .. } => BottomPane::ConversationList,

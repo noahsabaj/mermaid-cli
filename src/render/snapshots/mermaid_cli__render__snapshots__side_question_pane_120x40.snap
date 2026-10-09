@@ -1,0 +1,44 @@
+---
+source: src/render/snapshots.rs
+expression: frame
+---
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+ > refactor the config loader                                                                                           
+                                                                                                                        
+ ● Moving the defaults into one table                                                                                   
+                                                                                                                        
+ ◐ Streaming... (esc to interrupt · 3s · ↓ 12 tokens)                                                                   
+╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ >                                                                                                                    │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+┌ /btw · side question · not added to the conversation ────────────────────────────────────────────────────────────────┐
+│> is this on main?                                                                                                    │
+│> what was the config file called?                                                                                    │
+│⎿ It is src/app/config.rs. The loader reads config.toml from the user config directory, then the project's            │
+│  .mermaid/config.toml.                                                                                               │
+└ Esc close · ↑↓ scroll · ←→ 2 of 2 · c copy · f fork · x clear earlier ───────────────────────────────────────────────┘

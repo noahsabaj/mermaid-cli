@@ -563,6 +563,12 @@ pub fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: K
             handle_confirm_key(state, cmds, code);
             return;
         },
+        // Above the busy-Esc guard: Esc closes the pane and never cancels
+        // the main turn the side question runs beside.
+        Focus::SideQuestion => {
+            handle_side_question_key(state, cmds, code, mods);
+            return;
+        },
         // Pickers dispatch BELOW the busy-Esc guard and the composer
         // chords (Ctrl+D still quits, Alt+T still cycles, with a picker
         // open) — same order the guard chain always had.
@@ -1151,6 +1157,8 @@ pub fn fork_conversation_at(state: &mut State, cmds: &mut Vec<Cmd>, message_inde
     // dir too — the original session's scratch contents describe work on
     // the timeline being discarded.
     refresh_scratchpad(state, cmds);
+    // Side questions were about the conversation being left.
+    state.side_questions.reset();
 
     // 4. `state.ids.image` is NOT re-based: the allocator stays monotonic, so
     //    image numbers remain unique across the fork (seed_conversation's
@@ -1756,6 +1764,7 @@ pub fn handle_submit_prompt(
 
     commit_user_message(state, text, attachment_ids);
     state.ui.input_buffer.clear();
+    note_user_prompt(state);
 
     // The first user message derives the conversation title; every
     // subsequent message keeps it. Either way, emit SetTerminalTitle

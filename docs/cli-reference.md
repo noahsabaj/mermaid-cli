@@ -45,6 +45,9 @@ mermaid run "summarize this repo" --output-schema schema.json -f json
                                                 # Native constrained output on OpenAI-compatible
                                                 # providers, Gemini, Ollama, and Anthropic
                                                 # (output_config.format on current models).
+mermaid run "/goal all tests pass"              # Keep working until a check finds the goal met
+                                                #   (see Goals below; the run's errors say
+                                                #   when it stopped without meeting it)
 mermaid --resume <id> run "and now the tests"   # Continue a saved session headless (id from
                                                 #   ndjson session_started/result, json result,
                                                 #   or the `session:` line on stderr)
@@ -133,7 +136,9 @@ Everyday:
 - `/handoff [id]`, `/report [id]` — write a current-context report or inspect a task report
 - `/theme [dark|light]` — switch the color theme (persisted); `NO_COLOR` disables colors entirely
 - `/todos` — show or edit the task checklist the agent keeps for the current run
+- `/goal [condition|clear]` — keep working until the condition is met (see Goals below); no argument shows the goal's status
 - `/scratchpad` — show the session's scratch directory and what is in it
+- `/btw <question>` — ask a side question while the agent works; see [Side questions](#side-questions)
 - `/editor` — compose the prompt in `$VISUAL`/`$EDITOR` (Ctrl+O keeps the current draft)
 - `/help` (`/h`), `/quit` (`/q`)
 
@@ -143,6 +148,7 @@ Model and context:
 - `/reasoning <level>` — set reasoning: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`
 - `/visible-reasoning [on|off|toggle]` — show or hide reasoning blocks in the transcript
 - `/usage`, `/context`, `/compact [instructions]`
+- `/autocompact [tokens|off|on|reset] [global|project] [current-model|all-models]` — show or set when automatic compaction starts. `/autocompact 250000` compacts the current model at 250k tokens. The value goes to your user config, or to the project config with `project`; `all-models` sets it for every model. A value for one model overrides the one for all models. `off` and `on` apply to all models. `reset all-models` removes every auto-compact value from that file
 - `/model-info <model>`
 - `/output-style [name] [--project]` — show or set the output style (voice/format preset: `default`, `proactive`, `concise`, `explanatory`, `learning`, or a custom style file). Persists to your user config, or to the project config with `--project`; applies to the next message, subagents keep the stock prompt
 
@@ -169,4 +175,54 @@ Advanced runtime:
 - `/agents` — list background subagents, or kill one
 - `/processes`, `/logs <id>`, `/stop <id>`, `/restart <id>`, `/open <target>`, `/ports`
 
+### Goals
+
+`/goal <condition>` sets a completion condition and starts a turn with the condition as the
+request. Each time the run would end, a separate model call reads the latest part of the
+conversation and answers met, not met, or impossible. Not met starts the next turn with the
+check's reason and the goal restated; the transcript shows both. Met or impossible clears the
+goal. One goal is active at a time; a new `/goal` replaces it.
+
+The check judges only what the conversation shows, so write a condition the agent's own tool
+output can prove: "`cargo test` passes and `cargo clippy` is clean", not "the code is good". To
+bound a goal, say so in the condition ("or stop after 10 turns"); the check sees how many checks
+have run.
+
+The goal pauses, still set, when you press Esc, when a turn fails, after `[goal] max_turns` goal
+turns without a message from you (default 50), or after 3 goal turns in a row with no tool call.
+Send a message to continue, or `/goal clear` (also `stop`, `off`, `reset`, `none`, `cancel`) to
+remove it. A message you send while the goal runs goes first, and the goal is checked again after
+it. The footer shows `goal 4m` while a goal is set. `--resume` and `--continue` keep the goal;
+it runs again after your next message.
+
+The check uses the session's model unless `[goal] model` names another (see
+[configuration](configuration.md)); its tokens count toward the session's spend. Headless,
+`mermaid run "/goal <condition>"` runs the loop to the end; a goal that did not end met adds a
+`goal:` line to the run's errors. The 20-minute limit of a headless run still applies.
+
 Reasoning choices persist per-model: set `/reasoning high` on one model and `/reasoning low` on another, and each is remembered independently across sessions.
+
+### Side questions
+
+`/btw <question>` asks about the current work without adding to the conversation:
+
+```
+/btw what was the name of that config file again?
+```
+
+The model answers from what the session already holds: your messages, its replies, and the tool results it has gathered. It sees everything except the reply still being written. You can ask while the agent works; the side question runs as its own model call and does not interrupt the main turn. It has no tools, so it cannot read files, run commands, or search; if the model asks for a tool anyway, the answer says that nothing was run.
+
+The question and its answer never enter the conversation. They are not saved, not compacted, and not sent with later turns. A later side question does see your earlier ones (the newest 20), so you can ask a follow-up. The answer shows in a pane under the composer:
+
+| Key | Action |
+| --- | --- |
+| Esc, Enter, Space | Close the pane |
+| Up / Down | Scroll the answer |
+| Left / Right (or `[` / `]`, Tab / Shift+Tab) | Step to older / newer side questions |
+| `c` | Copy the answer as raw Markdown |
+| `f` | Fork: start a background agent that carries on from this answer with full tools |
+| `x` | Clear the earlier side questions, keeping the one on view |
+
+The five newest earlier questions show dimmed above the current one. Run `/btw` with no question to reopen the pane on the newest answer; if an answer arrives after you close the pane, a short note says it is ready. `/clear`, `/load`, and a rewind fork start a fresh side-question thread. Because the side question sends the same prompt as the main turn, a provider prompt cache that is still warm makes it cheap.
+
+The fork (`f`) is for an answer you want to act on. The agent starts from the whole conversation plus the side question and its answer, runs in the background like a Ctrl+B agent, and does not interrupt the main turn. `/agents` lists it, and its report is posted to the conversation when it finishes. Wait for the answer to finish before you fork it.

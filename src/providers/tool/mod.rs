@@ -18,6 +18,7 @@
 
 pub mod apply_patch;
 pub mod ask_user_question;
+pub mod computer;
 pub mod context;
 pub mod exec;
 pub mod filesystem;
@@ -226,6 +227,19 @@ impl ToolRegistry {
         r.register(Arc::new(context::ContextArchiveTool));
         r.register(Arc::new(context::CompactContextTool));
         r.register(Arc::new(mcp::McpToolProxy));
+
+        // `computer` drives the user's real screen, and every screenshot goes
+        // to the model's provider, so it exists only when the user turns it on.
+        match (config.tools.computer, computer::availability()) {
+            (true, Ok(())) => r.register(Arc::new(computer::ComputerTool::new())),
+            (true, Err(reason)) => r.note_unavailable("computer", reason),
+            (false, _) => r.note_unavailable(
+                "computer",
+                "computer is off; the user turns it on with `computer = true` under `[tools]` \
+                 in config.toml"
+                    .to_string(),
+            ),
+        }
 
         // `safety.network = "deny"` is a global egress kill-switch, not only
         // a shell sandbox flag. Omit web capabilities entirely so adapters and

@@ -1,9 +1,8 @@
 //! The append-only session event log: one durable schema for session content.
 //!
-//! Design: `docs/design/event-log.md`. A session's committed history is a
-//! sequence of [`SessionEvent`]s, one JSON line each, at
-//! `.mermaid/conversations/<id>.jsonl`. The conversation snapshot stays the
-//! resume authority; the log is the history behind it — [`fold_session`]
+//! A session's committed history is a sequence of [`SessionEvent`]s, one JSON
+//! line each, at `.mermaid/conversations/<id>.jsonl`. The log is the resume
+//! authority; the `<id>.json` snapshot is a checkpoint of it — [`fold_session`]
 //! rebuilds the snapshot from the events, and the `fold == snapshot`
 //! invariant test in `reducer.rs` is what keeps every transcript mutation
 //! honest about emitting.
@@ -154,6 +153,9 @@ pub struct SessionScalars {
     pub forked_from: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_session: Option<String>,
+    /// The active `/goal` condition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<String>,
 }
 
 impl SessionScalars {
@@ -175,6 +177,7 @@ impl SessionScalars {
             cli_version: snapshot.cli_version.clone(),
             forked_from: snapshot.forked_from.clone(),
             parent_session: snapshot.parent_session.clone(),
+            goal: snapshot.goal.clone(),
         }
     }
 
@@ -193,6 +196,7 @@ impl SessionScalars {
         conversation.cli_version.clone_from(&self.cli_version);
         conversation.forked_from.clone_from(&self.forked_from);
         conversation.parent_session.clone_from(&self.parent_session);
+        conversation.goal.clone_from(&self.goal);
     }
 }
 
@@ -237,8 +241,7 @@ pub fn fold_session(events: impl IntoIterator<Item = SessionEvent>) -> Option<Co
 }
 
 /// Replay `events` onto a conversation that already holds an earlier prefix
-/// of the same log — the checkpoint half of fold-first resume (see
-/// `docs/design/fold-first-resume.md`).
+/// of the same log — the checkpoint half of fold-first resume.
 ///
 /// This is [`fold_session`] minus the identity step, and it is the same
 /// `apply` either way, so a resume that replays a tail and one that folds
@@ -364,6 +367,7 @@ mod tests {
             cli_version: None,
             forked_from: None,
             parent_session: None,
+            goal: None,
         };
         assert_eq!(
             serde_json::to_string(&SessionEvent::State(Box::new(scalars))).unwrap(),

@@ -17,25 +17,15 @@
 //! tags inside `delta.content` (Together-R1),
 //! or not at all (OpenAI Chat Completions encrypts).
 //!
-//! # Why Chat Completions, not Responses API
+//! # OpenAI itself speaks Responses
 //!
-//! As of 2026-04, OpenAI's official docs flag the Responses API
-//! (`POST /responses`) as the recommended default and Chat Completions
-//! (`POST /chat/completions`) as legacy. Mermaid uses Chat Completions
-//! deliberately because it's the universal OpenAI-compat shape: Groq,
-//! OpenRouter, Cerebras, DeepInfra, Together, Fireworks, vLLM, and
-//! SambaNova all implement Chat Completions; the Responses API is
-//! OpenAI-only. Migrating this adapter would either (a) break OpenAI-
-//! compat coverage for those providers, or (b) require a separate
-//! OpenAI-direct adapter that bypasses this path. Both are non-trivial
-//! work for marginal gain — Chat Completions still works on the OpenAI
-//! direct endpoint, just without Responses-specific features (built-in
-//! reasoning summaries, structured-output tools, etc.).
-//!
-//! When/if a Responses-only feature becomes load-bearing for Mermaid,
-//! the right move is a focused new adapter (`openai_responses.rs`)
-//! routed through `providers::factory::ProviderFactory` for `provider == "openai"`,
-//! leaving this OpenAI-compat path for everyone else.
+//! Chat Completions is the universal OpenAI-compatible shape, so it stays the
+//! default here. OpenAI's own profile says `WireApi::Responses`: on Chat
+//! Completions its reasoning models lose their reasoning at every tool call,
+//! and its native tools and server-side compaction exist only on Responses.
+//! Those requests are built by `openai_responses` and read by the shared
+//! Responses stream (`responses`); the client, the retries, the learning
+//! loop and the model listing are this adapter's for both.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -49,6 +39,9 @@ use super::accumulator::{
     CappedText, ended_without_terminal, error_body, parse_tool_args, push_tool_arg,
 };
 use super::learning::{Learning, Optional, ParamMemory, Rejections};
+use super::openai_responses;
+use super::responses::{Provider, ResponsesStream};
+use super::tool_images::{ToolImage, images_after_tool_run};
 use crate::models::ModelCapabilities;
 use crate::models::adapters::driver::{
     Flow, Framing, StreamProtocol, drive_stream, plain_http_error,
@@ -56,7 +49,7 @@ use crate::models::adapters::driver::{
 use crate::models::config::ModelConfig;
 use crate::models::error::{BackendError, ModelError, Result};
 use crate::models::providers::{
-    MaxTokensParam, ProviderProfile, ReasoningExtraction, ReasoningStrategy,
+    MaxTokensParam, ProviderProfile, ReasoningExtraction, ReasoningStrategy, WireApi,
 };
 use crate::models::reasoning::{
     ReasoningCapability, ReasoningChunk, ReasoningLevel, nearest_effort,
@@ -65,6 +58,7 @@ use crate::models::stream::{StreamEvent, StreamSink};
 use crate::models::tool_call::{FunctionCall, ToolCall};
 use crate::models::traits::Model;
 use crate::models::types::{ChatMessage, FinishReason, MessageRole, ModelResponse, TokenUsage};
+use crate::utils::base64_image_media_type;
 
 /// Map OpenAI's `finish_reason` onto the normalized [`FinishReason`].
 fn map_openai_finish_reason(s: &str) -> FinishReason {
@@ -200,6 +194,29 @@ fn sent_optionals(body: &Value) -> Vec<Optional> {
     sent
 }
 
+/// One base64 image as an `image_url` content part.
+fn image_part(data: &str) -> Value {
+    let media_type = base64_image_media_type(data);
+    json!({
+        "type": "image_url",
+        "image_url": { "url": format!("data:{media_type};base64,{data}") },
+    })
+}
+
+/// The user turn that carries the images a run of tool results returned.
+fn tool_images_message(images: &[ToolImage<'_>]) -> Value {
+    let parts: Vec<Value> = images
+        .iter()
+        .flat_map(|image| {
+            [
+                json!({ "type": "text", "text": image.label() }),
+                image_part(image.data),
+            ]
+        })
+        .collect();
+    json!({ "role": "user", "content": parts })
+}
+
 /// One transcript message in OpenAI's `/chat/completions` wire shape.
 fn wire_message(msg: &ChatMessage) -> Value {
     let role = match msg.role {
@@ -214,22 +231,16 @@ fn wire_message(msg: &ChatMessage) -> Value {
     // base64 data URL). Previously images were dropped silently, so
     // vision models saw nothing. Non-user roles / no images use a plain
     // string content. Assistant-attached artifacts (screenshots) are not
-    // sent — OpenAI rejects images in assistant turns — matching the
-    // Anthropic adapter, which also only sends images on user messages.
+    // sent — OpenAI rejects images in assistant turns — and a tool
+    // message is text only, so its images follow as a user turn
+    // (`tool_images_message`).
     if msg.role == MessageRole::User && msg.images.as_ref().is_some_and(|images| !images.is_empty())
     {
         let mut parts: Vec<Value> = Vec::new();
         if !msg.content.is_empty() {
             parts.push(json!({ "type": "text", "text": msg.content }));
         }
-        for data in msg.images.iter().flatten() {
-            // Default media type png — matches Mermaid's clipboard output;
-            // an unsupported format surfaces a clear 4xx from the API.
-            parts.push(json!({
-                "type": "image_url",
-                "image_url": { "url": format!("data:image/png;base64,{data}") },
-            }));
-        }
+        parts.extend(msg.images.iter().flatten().map(|data| image_part(data)));
         json_msg["content"] = json!(parts);
     } else {
         json_msg["content"] = json!(msg.content);
@@ -314,7 +325,10 @@ impl OpenAICompatAdapter {
                 })
             })?;
 
-        let capabilities = derive_capabilities(profile, &model_name);
+        let mut capabilities = derive_capabilities(profile, &model_name);
+        if profile.wire_api == WireApi::Responses {
+            capabilities = capabilities.with_provider_continuation();
+        }
 
         Ok(Self {
             client,
@@ -333,6 +347,18 @@ impl OpenAICompatAdapter {
     #[must_use]
     pub const fn param_memory(&self) -> &ParamMemory {
         &self.memory
+    }
+
+    /// Whether this model can take server-side compaction: on the Responses
+    /// API, until the provider refuses it. Only meaningful once the memory is
+    /// seeded.
+    #[must_use]
+    pub fn compacts_natively(&self) -> bool {
+        self.profile.wire_api == WireApi::Responses
+            && !self
+                .memory
+                .snapshot()
+                .contains(openai_responses::COMPACTION_PARAM)
     }
 
     /// Build the JSON request body for `/chat/completions`, avoiding what the
@@ -370,8 +396,12 @@ impl OpenAICompatAdapter {
             }));
         }
 
-        for msg in messages {
+        for (idx, msg) in messages.iter().enumerate() {
             json_messages.push(wire_message(msg));
+            let images = images_after_tool_run(messages, idx);
+            if !images.is_empty() {
+                json_messages.push(tool_images_message(&images));
+            }
         }
 
         // Tool registration is the single capability boundary. If a tool
@@ -465,12 +495,13 @@ impl OpenAICompatAdapter {
         body
     }
 
-    /// POST `/chat/completions` and return the raw response.
+    /// POST `body` to the endpoint `path` (`chat/completions`, `responses`)
+    /// and return the raw response.
     /// Transparently retries on 5xx, 429, or reqwest connect failures
     /// via `crate::models::retry::retry_transient_http`. Useful for Groq /
     /// OpenRouter / etc. when an upstream relay hiccups.
-    async fn send_chat(&self, body: &Value) -> Result<reqwest::Response> {
-        let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
+    async fn post(&self, path: &str, body: &Value) -> Result<reqwest::Response> {
+        let url = format!("{}/{path}", self.base_url.trim_end_matches('/'));
         // A stable idempotency key, generated ONCE and reused across every retry
         // attempt, lets an OpenAI-compatible endpoint that honors `Idempotency-Key`
         // (OpenAI, Groq, OpenRouter, …) dedupe a retried POST instead of generating
@@ -499,6 +530,45 @@ impl OpenAICompatAdapter {
                 })
             })
         })
+        .await
+    }
+
+    /// One turn on the Responses API (see `openai_responses`). Always
+    /// streamed, since that is the only shape the encrypted reasoning arrives
+    /// in; a sink-less call drives the same stream and drops the events.
+    async fn chat_responses(
+        &self,
+        messages: &[ChatMessage],
+        config: &ModelConfig,
+        sink: Option<StreamSink>,
+    ) -> Result<ModelResponse> {
+        let mut learning = Learning::start(&self.memory, &self.model_name, sink.as_ref());
+        let response = loop {
+            let body = openai_responses::build_request_body(
+                messages,
+                config,
+                &self.model_name,
+                &self.capabilities.supports_reasoning,
+                learning.rejections(),
+            );
+            let response = self.post("responses", &body).await?;
+            if !learning.is_retryable(&response) {
+                break response;
+            }
+            let err = plain_http_error(response).await;
+            learning
+                .retry_or_fail(err, &openai_responses::sent_optionals(&body))
+                .await?;
+        };
+        learning.settle(&response);
+        if !response.status().is_success() {
+            return Err(plain_http_error(response).await);
+        }
+        drive_stream(
+            response.bytes_stream(),
+            ResponsesStream::new(Provider::OpenAi, self.model_name.clone()),
+            sink.as_ref(),
+        )
         .await
     }
 
@@ -1090,6 +1160,9 @@ impl Model for OpenAICompatAdapter {
         config: &ModelConfig,
         sink: Option<StreamSink>,
     ) -> Result<ModelResponse> {
+        if self.profile.wire_api == WireApi::Responses {
+            return self.chat_responses(messages, config, sink).await;
+        }
         let stream = sink.is_some();
         // Optimistic send; a 400/422 naming an optional parameter takes it
         // back and retries (see `learning`).
@@ -1097,7 +1170,7 @@ impl Model for OpenAICompatAdapter {
         let response = loop {
             let body =
                 self.build_request_body_with(messages, config, stream, learning.rejections());
-            let response = self.send_chat(&body).await?;
+            let response = self.post("chat/completions", &body).await?;
             if !learning.is_retryable(&response) {
                 break response;
             }
@@ -2184,6 +2257,30 @@ mod tests {
         assert_eq!(
             image["image_url"]["url"],
             "data:image/png;base64,BASE64DATA"
+        );
+    }
+
+    #[test]
+    fn tool_images_follow_the_tool_results_as_a_user_turn() {
+        // A tool message is text only, so the picture a tool returned comes
+        // right after the run of results, labelled with its call.
+        use super::super::tool_images::{JPEG_B64, tool_loop_with_image};
+        let adapter = test_adapter();
+        let body =
+            adapter.build_request_body(&tool_loop_with_image(), &ModelConfig::default(), false);
+        let msgs = body["messages"].as_array().unwrap();
+        let roles: Vec<&str> = msgs.iter().map(|m| m["role"].as_str().unwrap()).collect();
+        assert_eq!(
+            roles,
+            ["user", "assistant", "tool", "tool", "user", "assistant"]
+        );
+        assert_eq!(msgs[2]["content"], "[image/jpeg, 14 bytes]");
+        assert_eq!(
+            msgs[4]["content"],
+            json!([
+                {"type": "text", "text": "Image returned by tool call c1:"},
+                {"type": "image_url", "image_url": {"url": format!("data:image/jpeg;base64,{JPEG_B64}")}},
+            ])
         );
     }
 

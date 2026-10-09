@@ -8,6 +8,7 @@ mod confirm;
 pub mod credentials;
 pub mod dirs;
 mod host_memory;
+mod image;
 mod logger;
 mod ndjson;
 mod net;
@@ -30,6 +31,7 @@ pub use bounded::{CappedLine, read_capped, read_file_capped, read_line_capped};
 pub use confirm::{confirm_or_refuse, is_affirmative, should_refuse_noninteractive};
 pub use credentials::{CredentialStore, default_store};
 pub use host_memory::{gpu_vram_bytes, system_ram_bytes};
+pub use image::{base64_image_media_type, image_media_type};
 pub use logger::{
     TraceRing, init_logger, log_debug, log_error, log_file_path, log_info, log_progress, log_warn,
     trace_ring,

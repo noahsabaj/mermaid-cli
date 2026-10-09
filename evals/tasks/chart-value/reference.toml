@@ -1,0 +1,6 @@
+[[turn]]
+tool = "read_file"
+args = { path = "chart.png" }
+
+[[turn]]
+say = "The chart shows 87 widgets shipped in April."

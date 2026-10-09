@@ -180,6 +180,10 @@ fn mcp_endpoint(req: &Req, base: &str, valid: &Mutex<Vec<String>>) -> Resp {
     match v.get("id") {
         Some(id) => {
             let result = match v["method"].as_str() {
+                Some("server/discover") => serde_json::json!({
+                    "supportedVersions": ["2026-07-28"],
+                    "capabilities": {},
+                }),
                 Some("initialize") => serde_json::json!({
                     "protocolVersion": "2025-11-25",
                     "capabilities": {},
@@ -335,6 +339,7 @@ async fn login_with_metadata_document_then_transport_uses_the_token() {
             .unwrap();
     let mut client = McpClient::new(transport.into());
     client.initialize().await.expect("initialize with token");
+    assert_eq!(client.era(), crate::mcp::client::Era::Modern);
     assert_eq!(client.list_tools().await.expect("tools").len(), 1);
 }
 

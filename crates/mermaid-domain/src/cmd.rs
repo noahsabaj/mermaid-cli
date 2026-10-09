@@ -71,6 +71,11 @@ pub struct ToolDispatch {
     /// `None` until `Msg::ScratchpadReady` lands — tools fall back to
     /// workdir-relative temp space.
     pub scratchpad: Option<PathBuf>,
+    /// For a `computer` call: the arguments of every `computer` call the
+    /// model made in this turn, in order. The calls run one at a time, and
+    /// the gate shows and decides the whole batch at the first. Empty for
+    /// every other tool.
+    pub computer_batch: Vec<serde_json::Value>,
 }
 
 /// A single side-effect request. Most variants are one-shot; `CallModel`
@@ -92,6 +97,28 @@ pub enum Cmd {
         turn: TurnId,
         request: CompactionRequest,
     },
+    /// `/btw`: answer a side question with one model call beside the main
+    /// run. Detached, never turn-scoped: it must not join, block or be
+    /// cancelled with the main turn. The runner adds the built-in tools the
+    /// way it does for `CallModel` (so the prompt cache still matches) and
+    /// streams back `Msg::SideQuestionText`, then one
+    /// `Msg::SideQuestionFinished`.
+    AskSideQuestion { id: u64, request: ChatRequest },
+    /// `/btw` pane, `f`: start a background subagent that inherits the
+    /// conversation (`history`) and continues from one side question and its
+    /// answer with full tool access. The user asked for it, so the runner
+    /// skips the spawn gate; the child's own tool calls stay gated at the
+    /// live safety mode. It runs detached from the start and reports like
+    /// any Ctrl+B-backgrounded agent.
+    ForkSideQuestion {
+        prompt: String,
+        description: String,
+        history: Vec<ChatMessage>,
+        dispatch: ToolDispatch,
+    },
+    /// Ask a model whether the active `/goal` is met. One-shot, no tools;
+    /// answered by `Msg::GoalEvaluated`. Turn-scoped so Esc cancels it.
+    EvaluateGoal { turn: TurnId, request: ChatRequest },
     /// Run one tool in parallel with any other tools in the same turn.
     /// The runner wires the exec context's cancellation token to the turn's
     /// scope so `Cmd::CancelScope` aborts them all at once. Everything the
@@ -213,6 +240,9 @@ pub enum Cmd {
     },
     /// Persist the Ollama RAM-offload toggle (`/context offload on|off`).
     PersistOllamaOffload(bool),
+    /// Write an `/autocompact` change to its config file, then report the
+    /// settings that now apply with [`Msg::AutoCompactSaved`].
+    PersistAutoCompact(crate::autocompact::AutoCompactChange),
     /// Persist the `/theme` choice as `ui.theme` in the user config file.
     PersistUiTheme(crate::ThemeChoice),
     /// Persist the `/output-style` choice as `output.style` in the user
@@ -391,6 +421,9 @@ pub struct ChatRequest {
     /// dispatch: compact before sending this request, whatever the fill.
     /// Rides on the request for the same reason `suppress_auto_compact` does.
     pub requested_compaction: Option<crate::RequestedCompaction>,
+    /// The automatic compaction policy for this request's model, from the live
+    /// settings, so a change made during the session applies next turn.
+    pub compaction: crate::CompactionPolicy,
     /// Let the provider compact this turn itself. Set by the effect layer,
     /// never the reducer, when `[compaction] provider_native` is on and the
     /// provider has not refused it; the automatic threshold is then skipped.
@@ -466,6 +499,7 @@ impl Cmd {
         match self {
             Self::CallModel { .. } => "call_model",
             Self::CompactConversation { .. } => "compact_conversation",
+            Self::EvaluateGoal { .. } => "evaluate_goal",
             Self::ExecuteTool { .. } => "execute_tool",
             Self::CancelScope(_) => "cancel_scope",
             Self::BackgroundScope(_) => "background_scope",
@@ -485,11 +519,14 @@ impl Cmd {
             Self::PersistOllamaOffload(_) => "persist_ollama_offload",
             Self::PersistUiTheme(_) => "persist_ui_theme",
             Self::PersistOutputStyle { .. } => "persist_output_style",
+            Self::PersistAutoCompact(_) => "persist_auto_compact",
             Self::PersistProjectOutputStyle { .. } => "persist_project_output_style",
             Self::ListMemory => "list_memory",
             Self::RememberMemory { .. } => "remember_memory",
             Self::ForgetMemory { .. } => "forget_memory",
             Self::ConsolidateMemory { .. } => "consolidate_memory",
+            Self::AskSideQuestion { .. } => "ask_side_question",
+            Self::ForkSideQuestion { .. } => "fork_side_question",
             Self::Query(query) => query.tag(),
             Self::ShowRuntimeProcessLogs { .. } => "show_runtime_process_logs",
             Self::StopRuntimeProcess { .. } => "stop_runtime_process",
@@ -545,6 +582,7 @@ impl Cmd {
         match self {
             Self::CallModel { turn, .. }
             | Self::CompactConversation { turn, .. }
+            | Self::EvaluateGoal { turn, .. }
             | Self::ExecuteTool { turn, .. } => Some(*turn),
             // Everything below runs detached (or is handled inline by the
             // dispatcher) and must never populate a turn's scope.
@@ -567,10 +605,13 @@ impl Cmd {
             | Self::PersistUiTheme(_)
             | Self::PersistOutputStyle { .. }
             | Self::PersistProjectOutputStyle { .. }
+            | Self::PersistAutoCompact(_)
             | Self::ListMemory
             | Self::RememberMemory { .. }
             | Self::ForgetMemory { .. }
             | Self::ConsolidateMemory { .. }
+            | Self::AskSideQuestion { .. }
+            | Self::ForkSideQuestion { .. }
             | Self::Query(_)
             | Self::ShowRuntimeProcessLogs { .. }
             | Self::StopRuntimeProcess { .. }
@@ -623,6 +664,9 @@ impl Cmd {
                 request.trigger.as_str(),
                 request.chat.messages.len()
             ),
+            Self::EvaluateGoal { turn, request } => {
+                format!("evaluate_goal(turn={}, model={})", turn, request.model_id)
+            },
             Self::ExecuteTool {
                 turn,
                 call_id,
@@ -692,6 +736,7 @@ impl Cmd {
             },
             Self::PersistUiTheme(theme) => format!("persist_ui_theme({})", theme.as_str()),
             Self::PersistOutputStyle { style } => format!("persist_output_style({style})"),
+            Self::PersistAutoCompact(change) => format!("persist_auto_compact({change:?})"),
             Self::PersistProjectOutputStyle { style } => {
                 format!("persist_project_output_style({style})")
             },
@@ -699,6 +744,14 @@ impl Cmd {
             Self::RememberMemory { .. } => "remember_memory".to_string(),
             Self::ForgetMemory { .. } => "forget_memory".to_string(),
             Self::ConsolidateMemory { .. } => "consolidate_memory".to_string(),
+            Self::ForkSideQuestion { history, .. } => {
+                format!("fork_side_question(msgs={})", history.len())
+            },
+            Self::AskSideQuestion { id, request } => format!(
+                "ask_side_question(id={id}, model={}, msgs={})",
+                request.model_id,
+                request.messages.len()
+            ),
             Self::Query(query) => query.summary(),
             Self::ShowRuntimeProcessLogs { id } => format!("show_runtime_process_logs({id})"),
             Self::StopRuntimeProcess { id } => format!("stop_runtime_process({id})"),
@@ -772,6 +825,7 @@ mod tests {
             output_schema: None,
             suppress_auto_compact: false,
             requested_compaction: None,
+            compaction: crate::CompactionPolicy::default(),
             native_compaction: None,
             native_tools: mermaid_model::models::NativeTools::default(),
         };
@@ -842,6 +896,7 @@ mod model_config_tests {
             output_schema: Some(serde_json::json!({"type": "object"})),
             suppress_auto_compact: false,
             requested_compaction: None,
+            compaction: crate::CompactionPolicy::default(),
             native_compaction: None,
             native_tools: mermaid_model::models::NativeTools::default(),
         };

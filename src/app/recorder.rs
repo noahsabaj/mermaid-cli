@@ -705,6 +705,7 @@ mod tests {
                 | MsgKind::BuiltinToolSchemaTokens
                 | MsgKind::CompactionFinished
                 | MsgKind::CompactionFailed
+                | MsgKind::GoalEvaluated
                 | MsgKind::StreamDone
                 | MsgKind::UpstreamError
                 | MsgKind::ToolStarted
@@ -724,6 +725,7 @@ mod tests {
                 | MsgKind::QueryResult
                 | MsgKind::ScratchpadReady
                 | MsgKind::RuntimeStore
+                | MsgKind::SideQuestion
                 | MsgKind::ModelPullFinished
                 | MsgKind::ModelPullProgress
                 | MsgKind::Tick
@@ -732,6 +734,7 @@ mod tests {
                 | MsgKind::FocusChanged
                 | MsgKind::OpenImageAt
                 | MsgKind::TransientStatus
+                | MsgKind::AutoCompactSaved
                 | MsgKind::Toast
                 | MsgKind::EditorReturned
                 | MsgKind::BackgroundAgent
@@ -785,6 +788,8 @@ mod tests {
                 texts: vec!["hook says hi".to_string()],
             },
             Msg::Slash(SlashCmd::Compact(None)),
+            Msg::Slash(SlashCmd::Btw(Some("which file?".to_string()))),
+            Msg::Slash(SlashCmd::Btw(None)),
             Msg::CancelTurn,
             Msg::BackgroundAgentStarted {
                 agent_id: "a7".to_string(),
@@ -864,6 +869,18 @@ mod tests {
                 warn: true,
             },
             Msg::BuiltinToolSchemaTokens(1234),
+            Msg::GoalEvaluated {
+                turn: TurnId(2),
+                reply: Ok(mermaid_domain::goal::GoalReply {
+                    text: "NOT_MET: tests still fail".to_string(),
+                    reasoning: None,
+                    usage: None,
+                }),
+            },
+            Msg::GoalEvaluated {
+                turn: TurnId(2),
+                reply: Err("timeout".to_string()),
+            },
             Msg::CompactionFailed {
                 turn: TurnId(2),
                 trigger: mermaid_domain::CompactionTrigger::Manual,
@@ -992,6 +1009,18 @@ mod tests {
                 path: std::path::PathBuf::from("/data/tmp/scratchpad/-proj/20260702_120000_123"),
             },
             Msg::RuntimeText("daemon says hi".to_string()),
+            Msg::SideQuestionText {
+                id: 1,
+                chunk: "src/parser.rs".to_string(),
+            },
+            Msg::SideQuestionFinished {
+                id: 1,
+                outcome: mermaid_domain::side_question::SideOutcome::Done { tried_tools: true },
+            },
+            Msg::SideQuestionFinished {
+                id: 2,
+                outcome: mermaid_domain::side_question::SideOutcome::Failed("offline".to_string()),
+            },
             Msg::QueryResult(QueryResult::RuntimeTasksListed(Vec::new())),
             Msg::QueryResult(QueryResult::RuntimeTaskLoaded {
                 task: None,
@@ -1013,6 +1042,13 @@ mod tests {
             },
             Msg::TransientStatus {
                 text: "saved".to_string(),
+            },
+            Msg::AutoCompactSaved {
+                path: "/home/u/.config/mermaid/config.toml".to_string(),
+                compaction: mermaid_domain::config::CompactionConfig {
+                    auto_threshold_tokens: Some(250_000),
+                    ..Default::default()
+                },
             },
             Msg::MouseScroll { delta: -3 },
             Msg::FocusChanged(false),

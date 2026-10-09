@@ -10,6 +10,8 @@
 /// adapter calls instead of carrying its own copy.
 pub(super) mod accumulator;
 pub mod anthropic;
+/// Anthropic's computer toolset, mapped onto Mermaid's `computer` tool.
+pub mod computer_toolset;
 /// One test suite driven over recorded response bodies, one per provider.
 /// In-crate rather than under `tests/` so it can reach the protocol
 /// structs, which are wire-format detail and not public API.
@@ -17,6 +19,11 @@ pub mod anthropic;
 mod conformance;
 pub mod driver;
 pub mod gemini;
+/// Gemini end to end: thought signatures and the computer use tool.
+#[cfg(test)]
+mod gemini_calls;
+/// Gemini's computer use tool, mapped onto Mermaid's `computer` tool.
+mod gemini_computer;
 /// Capability discovery by rejection: send optimistically, learn from a 400.
 pub mod learning;
 pub mod meta;
@@ -31,11 +38,24 @@ pub mod native_tools;
 pub mod ollama;
 pub mod ollama_sizing;
 pub mod openai_compat;
+/// OpenAI's `computer` tool, mapped onto Mermaid's `computer` tool.
+mod openai_computer;
+/// OpenAI's requests on the Responses API: kept reasoning, its own
+/// `apply_patch` tool, server-side compaction.
+mod openai_responses;
+/// OpenAI on Responses end to end: kept reasoning, `apply_patch` translated
+/// and replayed, refusals learned.
+#[cfg(test)]
+mod openai_responses_calls;
 pub mod output_budget;
+/// The Responses wire format the Meta and OpenAI adapters share.
+pub(crate) mod responses;
 /// Anthropic's server-side compaction, end to end: asked for, replayed,
 /// and learned when refused.
 #[cfg(test)]
 mod server_compaction;
+/// Tool-returned images for providers whose tool messages are text only.
+mod tool_images;
 /// Every adapter, end to end, against a model the catalog has never seen.
 #[cfg(test)]
 mod unknown_model;
