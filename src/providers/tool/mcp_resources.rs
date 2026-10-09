@@ -51,9 +51,8 @@ impl ToolExecutor for ListMcpResourcesTool {
             .get("server")
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty());
-        let manager = match ready_manager().await {
-            Ok(manager) => manager,
-            Err(outcome) => return outcome,
+        let Some(manager) = ready_manager().await else {
+            return not_initialized();
         };
         let servers = match filter {
             Some(server) => vec![server.to_string()],
@@ -121,9 +120,8 @@ impl ToolExecutor for ReadMcpResourceTool {
         let Some(uri) = str_arg("uri") else {
             return ToolOutcome::error("read_mcp_resource requires 'uri'", None);
         };
-        let manager = match ready_manager().await {
-            Ok(manager) => manager,
-            Err(outcome) => return outcome,
+        let Some(manager) = ready_manager().await else {
+            return not_initialized();
         };
         if let Some(blocked) = gate(
             &ctx,
@@ -167,7 +165,7 @@ impl ToolExecutor for ReadMcpResourceTool {
 /// The installed manager once startup has settled — waiting, bounded, for a
 /// model that calls on its very first message (same race as
 /// `McpToolProxy`). The wait runs BEFORE the gate; it has no side effects.
-async fn ready_manager() -> Result<&'static McpServerManager, ToolOutcome> {
+async fn ready_manager() -> Option<&'static McpServerManager> {
     if !manager_ref::is_ready() {
         let _ = tokio::time::timeout(
             std::time::Duration::from_secs(10),
@@ -175,9 +173,11 @@ async fn ready_manager() -> Result<&'static McpServerManager, ToolOutcome> {
         )
         .await;
     }
-    manager_ref::get()
-        .map(AsRef::as_ref)
-        .ok_or_else(|| ToolOutcome::error("MCP servers not initialized", None))
+    manager_ref::get().map(AsRef::as_ref)
+}
+
+fn not_initialized() -> ToolOutcome {
+    ToolOutcome::error("MCP servers not initialized", None)
 }
 
 /// The MCP policy gate, fed the same `{server_name, tool_name, arguments}`
