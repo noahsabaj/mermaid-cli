@@ -22,7 +22,6 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::LoadedInstructions;
-use crate::McpServerConfig;
 use mermaid_model::models::tool_call::ToolCall as ModelToolCall;
 use mermaid_model::models::{
     FinishReason, ProviderContinuation, ReasoningChunk, ReasoningLevel, TokenUsage, UserFacingError,
@@ -864,15 +863,6 @@ pub enum MsgKind {
     Toast,
     EditorReturned,
     CopySelection,
-}
-
-/// Helper for `app::event_source` — pass through the MCP config that
-/// `effect::mcp` needs to dispatch `InitMcpServers` as its first effect.
-/// Not a `Msg` because it's startup-only.
-#[derive(Debug, Clone)]
-pub struct StartupConfig {
-    pub mcp_servers: std::collections::HashMap<String, McpServerConfig>,
-    pub cwd: PathBuf,
 }
 
 #[cfg(test)]

@@ -171,8 +171,8 @@ mod tests {
         crate::PromptCommand {
             name: name.to_string(),
             description: "does things".to_string(),
-            source: crate::PromptSource::Plugin {
-                plugin: "demo".to_string(),
+            source: crate::PromptSource::Markdown {
+                origin: "plugin:demo".to_string(),
                 body: "body".to_string(),
             },
         }

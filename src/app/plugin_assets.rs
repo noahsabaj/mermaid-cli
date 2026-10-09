@@ -202,8 +202,8 @@ pub(crate) fn assets_from_manifest(
         assets.commands.push(mermaid_domain::PromptCommand {
             name,
             description: description.unwrap_or_default(),
-            source: mermaid_domain::PromptSource::Plugin {
-                plugin: plugin.clone(),
+            source: mermaid_domain::PromptSource::Markdown {
+                origin: format!("plugin:{plugin}"),
                 body: body.trim().to_string(),
             },
         });
@@ -259,8 +259,8 @@ pub fn apply(config: &mut mermaid_domain::Config, assets: &PluginAssets) -> Vec<
     for (name, agent) in &assets.agent_types {
         if config.agents.types.contains_key(name) {
             warnings.push(format!(
-                "plugin agent type '{name}' is shadowed by [agents.types.{name}] in config; \
-                 using the config entry"
+                "plugin agent type '{name}' is shadowed by [agents.types.{name}] in config \
+                 or an agent file; using that one"
             ));
             continue;
         }
@@ -331,7 +331,7 @@ mod tests {
         assert_eq!(assets.commands[0].name, "deploy");
         assert!(matches!(
             &assets.commands[0].source,
-            mermaid_domain::PromptSource::Plugin { body, .. } if body == "Deploy to $ARGUMENTS now."
+            mermaid_domain::PromptSource::Markdown { body, .. } if body == "Deploy to $ARGUMENTS now."
         ));
         assert_eq!(
             assets.agent_types["scout"].safety.as_deref(),
@@ -477,6 +477,7 @@ mod tests {
                 preamble: None,
                 model: None,
                 isolation: None,
+                description: None,
             },
         );
         let warnings = apply(&mut config, &assets);

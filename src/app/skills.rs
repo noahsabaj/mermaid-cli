@@ -1,7 +1,9 @@
 //! SKILL.md discovery + the always-injected skills index.
 //!
 //! Progressive disclosure without a synthetic tool: at startup we discover
-//! `SKILL.md` playbooks (project > user > enabled plugins), render a compact
+//! `SKILL.md` playbooks (project > user > enabled plugins; within project and
+//! user, Mermaid's own directory beats `.claude/`, which beats `.agents/` —
+//! see `file_assets::asset_roots`), render a compact
 //! index (name, one-line description, absolute path), and inject it into the
 //! instructions channel — the same pattern as the memory index. The model
 //! activates a skill by reading its `SKILL.md` with the existing policy-gated
@@ -29,17 +31,12 @@ const MAX_SKILL_FILE_BYTES: usize = 8 * 1024;
 /// a broken skill must not take down startup.
 #[must_use]
 pub fn load(cwd: &Path) -> Option<LoadedSkills> {
-    let project_root = crate::app::memory::find_git_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
-    let project = discover_dir(
-        &project_root.join(".mermaid").join("skills"),
-        SkillSource::Project,
-    );
-    let user = match crate::app::get_config_dir() {
-        Ok(dir) => discover_dir(&dir.join("skills"), SkillSource::User),
-        Err(_) => Vec::new(),
-    };
-    let plugin = plugin_entries();
-    let entries = merge_by_precedence(vec![project, user, plugin]);
+    let mut groups: Vec<Vec<SkillEntry>> = crate::app::file_assets::asset_roots(cwd)
+        .into_iter()
+        .map(|root| discover_dir(&root.dir.join("skills"), root.source))
+        .collect();
+    groups.push(plugin_entries());
+    let entries = merge_by_precedence(groups);
     if entries.is_empty() {
         return None;
     }
@@ -108,48 +105,126 @@ fn parse_skill_frontmatter(raw: &str) -> (Option<String>, Option<String>) {
 }
 
 /// [`parse_skill_frontmatter`] plus the body after the fence — the shared
-/// dialect for skills AND plugin prompt commands (`app::plugin_assets`).
+/// dialect for skills AND prompt commands (`app::plugin_assets`,
+/// `app::file_assets`).
 pub(crate) fn parse_frontmatter_with_body(raw: &str) -> (Option<String>, Option<String>, String) {
-    let raw = raw.strip_prefix('\u{feff}').unwrap_or(raw);
-    let mut name = None;
-    let mut description = None;
-    let mut body_lines: Vec<&str> = Vec::new();
-    let mut lines = raw.lines();
-    if lines.next().map(str::trim) == Some("---") {
-        let mut in_fm = true;
-        for line in lines {
-            if in_fm {
-                if line.trim() == "---" {
-                    in_fm = false;
-                    continue;
-                }
-                if let Some((key, value)) = line.split_once(':') {
-                    let value = value.trim().trim_matches('"').to_string();
-                    match key.trim() {
-                        "name" if !value.is_empty() => name = Some(value),
-                        "description" if !value.is_empty() => description = Some(value),
-                        _ => {},
-                    }
-                }
-            } else {
-                body_lines.push(line);
-            }
-        }
-        if in_fm {
-            // Unclosed fence — not real frontmatter; treat the file as body.
-            name = None;
-            description = None;
-            body_lines = raw.lines().collect();
-        }
-    } else {
-        body_lines = raw.lines().collect();
-    }
-    let first_body_line = body_lines
-        .iter()
-        .map(|l| l.trim())
+    let (fields, body) = parse_frontmatter_fields(raw);
+    let field = |key: &str| {
+        fields
+            .iter()
+            .find(|(k, v)| k == key && !v.is_empty())
+            .map(|(_, v)| v.clone())
+    };
+    let first_body_line = body
+        .lines()
+        .map(str::trim)
         .find(|l| !l.is_empty())
         .map(str::to_string);
-    (name, description.or(first_body_line), body_lines.join("\n"))
+    (
+        field("name"),
+        field("description").or(first_body_line),
+        body,
+    )
+}
+
+/// Split a leading `---` frontmatter fence into `(key, value)` pairs and the
+/// body after it. Line-based, no YAML dependency, but it reads the YAML that
+/// Claude Code and Codex files use in practice: `key: value` (quotes
+/// stripped), a list as `key: [a, b]` or as `- item` lines under the key
+/// (joined with `, `), and text continued on indented lines, plain or after
+/// `key: |` / `key: >` (joined with spaces). A missing or unclosed fence means the whole
+/// file is body and there are no fields.
+pub(crate) fn parse_frontmatter_fields(raw: &str) -> (Vec<(String, String)>, String) {
+    let raw = raw.strip_prefix('\u{feff}').unwrap_or(raw);
+    let mut lines = raw.lines();
+    if lines.next().map(str::trim) != Some("---") {
+        return (Vec::new(), raw.lines().collect::<Vec<_>>().join("\n"));
+    }
+    let mut fields: Vec<(String, String)> = Vec::new();
+    let mut fm_lines = Vec::new();
+    let mut closed = false;
+    for line in lines.by_ref() {
+        if line.trim() == "---" {
+            closed = true;
+            break;
+        }
+        fm_lines.push(line);
+    }
+    if !closed {
+        return (Vec::new(), raw.lines().collect::<Vec<_>>().join("\n"));
+    }
+    // Whether the last key opened a `|`/`>` block (continuation lines are
+    // text) rather than a plain or list value (continuation lines are items).
+    let mut in_block = false;
+    for line in fm_lines {
+        let indented = line.starts_with(' ') || line.starts_with('\t');
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if let Some((_, value)) = fields.last_mut() {
+            if in_block && indented {
+                if !value.is_empty() {
+                    value.push(' ');
+                }
+                value.push_str(trimmed);
+                continue;
+            }
+            if let Some(item) = trimmed
+                .strip_prefix("- ")
+                .or((trimmed == "-").then_some(""))
+            {
+                let item = unquote(item.trim());
+                if !item.is_empty() {
+                    if !value.is_empty() {
+                        value.push_str(", ");
+                    }
+                    value.push_str(item);
+                }
+                continue;
+            }
+            // A plain value continued on indented lines (YAML folds them).
+            if indented && !value.is_empty() {
+                value.push(' ');
+                value.push_str(trimmed);
+                continue;
+            }
+        }
+        if indented {
+            continue; // nested mapping we don't read
+        }
+        let Some((key, value)) = trimmed.split_once(':') else {
+            continue;
+        };
+        let value = value.trim();
+        in_block = matches!(value, "|" | ">" | "|-" | ">-" | "|+" | ">+");
+        let value = if in_block {
+            String::new()
+        } else if let Some(list) = value.strip_prefix('[').and_then(|v| v.strip_suffix(']')) {
+            list.split(',')
+                .map(|item| unquote(item.trim()))
+                .filter(|item| !item.is_empty())
+                .collect::<Vec<_>>()
+                .join(", ")
+        } else {
+            unquote(value).to_string()
+        };
+        fields.push((key.trim().to_string(), value));
+    }
+    (fields, lines.collect::<Vec<_>>().join("\n"))
+}
+
+/// Strip one pair of matching outer quotes.
+fn unquote(value: &str) -> &str {
+    for quote in ['"', '\''] {
+        if let Some(inner) = value
+            .strip_prefix(quote)
+            .and_then(|v| v.strip_suffix(quote))
+        {
+            return inner;
+        }
+    }
+    value
 }
 
 /// Resolve a plugin's declared skill paths to canonical SKILL.md files,
@@ -318,6 +393,28 @@ mod tests {
         let (name, desc) = parse_skill_frontmatter("Just a body.\n");
         assert_eq!(name, None);
         assert_eq!(desc.as_deref(), Some("Just a body."));
+    }
+
+    #[test]
+    fn frontmatter_reads_lists_and_folded_text() {
+        let (fields, body) = parse_frontmatter_fields(
+            "---\nname: 'reviewer'\ndescription: >\n  Reviews code.\n  Use often.\n\
+             tools:\n  - Read\n  - \"Grep\"\nmodel: [a, 'b']\nlong: one\n  two\n\
+             metadata:\n  type: x\n---\nBody line\n",
+        );
+        let get = |k: &str| {
+            fields
+                .iter()
+                .find(|(key, _)| key == k)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(get("name"), Some("reviewer"));
+        assert_eq!(get("description"), Some("Reviews code. Use often."));
+        assert_eq!(get("tools"), Some("Read, Grep"));
+        assert_eq!(get("model"), Some("a, b"));
+        assert_eq!(get("long"), Some("one two"));
+        assert_eq!(get("metadata"), Some(""));
+        assert_eq!(body, "Body line");
     }
 
     #[test]

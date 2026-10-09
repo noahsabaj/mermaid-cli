@@ -10,7 +10,7 @@ An open-source AI coding assistant for the terminal. Multi-provider — Ollama (
 - **Safety modes** — `read_only`/`ask`/`auto`/`full_access`, cycled live with Shift+Tab; `auto` is classifier-backed, and gated actions prompt inline rather than erroring out
 - **Checkpoints** — shadow-git snapshots before mutations; inspect with `/checkpoints`, roll back with `/restore <id>`
 - **Durable memory** — the agent remembers facts across sessions; a compact index auto-loads into every prompt
-- **Project instructions and skills** — auto-loads `AGENTS.md` and `MERMAID.md`, plus task-specific playbooks loaded on demand
+- **Project instructions and skills** — auto-loads `AGENTS.md` (or `CLAUDE.md`) and `MERMAID.md`, plus task-specific playbooks loaded on demand
 - **MCP servers** — stdio JSON-RPC client with a built-in registry of 16 popular servers
 - **Sessions** — conversations auto-save; `--continue` reopens the last one here, `--resume` opens a picker, double-Esc forks the timeline at an earlier message
 - **Context compaction** — automatic checkpoint-and-continue when the window fills; manual `/compact [focus]`
@@ -129,6 +129,7 @@ The model calls these autonomously:
 | `delete_file` | Delete files (timestamped backup) |
 | `create_directory` | Create directories |
 | `execute_command` | Run shell commands; background mode tracks PID, log, and URL |
+| `background_process` | Read new output from, wait on, or stop a process `execute_command` left running |
 | `memory` | Durable cross-session memory (project, shared, or global scope) |
 | `web_search` | Search the web (managed local SearXNG by default) |
 | `web_fetch` | Fetch a URL into a bounded session snapshot (in-process, no key) |
@@ -154,6 +155,8 @@ Enforcement is seccomp-BPF plus Landlock on Linux, Seatbelt on macOS, AppContain
 ## Project instructions
 
 Create an `AGENTS.md` (the cross-tool open standard) and/or a `MERMAID.md` (mermaid-specific) at your project root with conventions, tool versions, naming patterns, and run commands. Both load from the nearest matching directory — `AGENTS.md` first, then `MERMAID.md`, so MERMAID.md overrides on conflict. They auto-reload when the files change, and the walk stops at the `.git` root or `$HOME`. This repo's own [AGENTS.md](AGENTS.md) is a worked example.
+
+Coming from Claude Code? A `CLAUDE.md` loads when there is no `AGENTS.md`, and the skills, commands and agents in `.claude/` and `.agents/` (project and `~/`) load too. Put your own prompt commands in `.mermaid/commands/` as markdown. See [docs/plugins.md](docs/plugins.md#files-from-other-tools).
 
 ## Configuration
 

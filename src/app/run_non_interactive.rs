@@ -115,11 +115,13 @@ pub async fn run_non_interactive_with(
     prompt: String,
     opts: RunOptions,
 ) -> Result<RunResult> {
-    // Fold enabled plugins' MCP servers + agent types into the merged
-    // config before anything consumes it (same policy as the interactive
-    // path; warnings go to stderr — there is no transcript here yet).
-    let plugin_assets = crate::app::plugin_assets::load();
-    for warning in crate::app::plugin_assets::apply(&mut config, &plugin_assets) {
+    // Fold agent files and enabled plugins' MCP servers + agent types into
+    // the merged config before anything consumes it (same policy as the
+    // interactive path; warnings go to stderr — there is no transcript here
+    // yet).
+    let (prompt_commands, asset_warnings) =
+        crate::app::file_assets::load_with_plugins(&mut config, &cwd);
+    for warning in asset_warnings {
         eprintln!("mermaid: {warning}");
     }
     let providers = std::sync::Arc::new(crate::providers::ProviderFactory::new(config.clone()));
@@ -184,7 +186,7 @@ pub async fn run_non_interactive_with(
     state.instructions = instructions;
     state.memory = memory;
     state.skills = skills;
-    state.prompt_commands = plugin_assets.commands;
+    state.prompt_commands = prompt_commands;
 
     // Bootstrap effects (MCP init) before the first prompt.
     //

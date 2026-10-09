@@ -6207,8 +6207,8 @@ fn plugin_cmd(name: &str, body: &str) -> crate::PromptCommand {
     crate::PromptCommand {
         name: name.to_string(),
         description: "does things".to_string(),
-        source: crate::PromptSource::Plugin {
-            plugin: "demo".to_string(),
+        source: crate::PromptSource::Markdown {
+            origin: "plugin:demo".to_string(),
             body: body.to_string(),
         },
     }
@@ -6530,6 +6530,22 @@ fn plugin_command_expand_cases() {
     let cmd = plugin_cmd("x", "Just do it.");
     assert_eq!(expand(&cmd, ""), "Just do it.");
     assert_eq!(expand(&cmd, "with args"), "Just do it.\n\nwith args");
+}
+
+#[test]
+fn prompt_command_expands_positional_arguments() {
+    let cmd = plugin_cmd("x", "Fix issue #$1 with priority $2. All: $ARGUMENTS");
+    assert_eq!(
+        expand(&cmd, "123 high"),
+        "Fix issue #123 with priority high. All: 123 high"
+    );
+    // A missing positional argument expands to nothing, and the args are not
+    // appended a second time.
+    let cmd = plugin_cmd("x", "Review $1$3 now.");
+    assert_eq!(expand(&cmd, "pr-7"), "Review pr-7 now.");
+    // `$` not followed by a positive number stays as written.
+    let cmd = plugin_cmd("x", "Keep $HOME and $0 and $");
+    assert_eq!(expand(&cmd, "a"), "Keep $HOME and $0 and $\n\na");
 }
 
 #[test]

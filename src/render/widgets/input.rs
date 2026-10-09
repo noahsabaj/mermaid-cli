@@ -2,79 +2,54 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::Style,
-    widgets::{Block, BorderType, Borders, Padding, Paragraph, StatefulWidget, Widget},
+    widgets::{Block, BorderType, Borders, Padding, Paragraph, Widget},
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::render::theme::Theme;
 
-/// State for the input widget
-#[derive(Debug, Clone)]
-pub struct InputState {
-    /// Cursor position in the input string
-    pub cursor_position: usize,
-}
+/// Calculate cursor position for wrapped text.
+///
+/// `content_width` is in **display cells**. Returns `(row, col)` where
+/// `col` is also in display cells — required because `Frame::set_cursor_
+/// position` is cell-based, not byte-based. CJK / emoji input previously
+/// mispositioned the cursor because the column was returned in bytes.
+///
+/// Uses the shared `layout_rows` helper so the wrapping decisions match
+/// `wrap_input_with_prompt` exactly (the two would silently drift
+/// otherwise — `cursor_and_wrap_agree_on_line_structure` guards this).
+#[must_use]
+pub fn input_cursor_position(input: &str, cursor_pos: usize, content_width: usize) -> (u16, u16) {
+    let cursor_pos = cursor_pos.min(input.len());
 
-impl InputState {
-    /// Create a new input state
-    #[must_use]
-    pub fn new() -> Self {
-        Self { cursor_position: 0 }
+    if content_width < 3 || input.is_empty() {
+        return (0, 0);
     }
 
-    /// Calculate cursor position for wrapped text.
-    ///
-    /// `content_width` is in **display cells**. Returns `(row, col)` where
-    /// `col` is also in display cells — required because `Frame::set_cursor_
-    /// position` is cell-based, not byte-based. CJK / emoji input previously
-    /// mispositioned the cursor because the column was returned in bytes.
-    ///
-    /// Uses the shared `layout_rows` helper so the wrapping decisions match
-    /// `wrap_input_with_prompt` exactly (the two would silently drift
-    /// otherwise — `cursor_and_wrap_agree_on_line_structure` guards this).
-    #[must_use]
-    pub fn calculate_cursor_position(
-        input: &str,
-        cursor_pos: usize,
-        content_width: usize,
-    ) -> (u16, u16) {
-        let cursor_pos = cursor_pos.min(input.len());
-
-        if content_width < 3 || input.is_empty() {
-            return (0, 0);
-        }
-
-        // Available cells per line after the 2-cell prefix ("> " or "  ")
-        let line_width = content_width.saturating_sub(2);
-        if line_width == 0 {
-            return (0, 0);
-        }
-
-        let rows = layout_rows(input, line_width);
-        for (idx, row) in rows.iter().enumerate() {
-            let content_end = row.start + row.len;
-            let gap_end = content_end + row.gap;
-            let is_last = idx + 1 == rows.len();
-
-            // Cursor belongs to this row if it falls within the row chars or
-            // the whitespace/newline gap after it, or if this is the last row.
-            if cursor_pos < gap_end || is_last {
-                // Cap at the row's content so trailing/gap whitespace doesn't
-                // overflow past the visible line.
-                let cursor_byte_in_line = cursor_pos.saturating_sub(row.start).min(row.len);
-                let line_text = &input[row.start..content_end];
-                let col_cells = line_text[..cursor_byte_in_line.min(line_text.len())].width();
-                return (idx as u16, col_cells as u16);
-            }
-        }
-        (0, 0)
+    // Available cells per line after the 2-cell prefix ("> " or "  ")
+    let line_width = content_width.saturating_sub(2);
+    if line_width == 0 {
+        return (0, 0);
     }
-}
 
-impl Default for InputState {
-    fn default() -> Self {
-        Self::new()
+    let rows = layout_rows(input, line_width);
+    for (idx, row) in rows.iter().enumerate() {
+        let content_end = row.start + row.len;
+        let gap_end = content_end + row.gap;
+        let is_last = idx + 1 == rows.len();
+
+        // Cursor belongs to this row if it falls within the row chars or
+        // the whitespace/newline gap after it, or if this is the last row.
+        if cursor_pos < gap_end || is_last {
+            // Cap at the row's content so trailing/gap whitespace doesn't
+            // overflow past the visible line.
+            let cursor_byte_in_line = cursor_pos.saturating_sub(row.start).min(row.len);
+            let line_text = &input[row.start..content_end];
+            let col_cells = line_text[..cursor_byte_in_line.min(line_text.len())].width();
+            return (idx as u16, col_cells as u16);
+        }
     }
+    (0, 0)
 }
 
 /// Props for `InputWidget`. The slash-command palette is rendered
@@ -100,10 +75,8 @@ pub struct InputWidget<'a> {
     pub rewind_armed: bool,
 }
 
-impl<'a> StatefulWidget for InputWidget<'a> {
-    type State = InputState;
-
-    fn render(self, area: Rect, buf: &mut Buffer, _state: &mut Self::State) {
+impl Widget for InputWidget<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
         let input_style = Style::new().fg(self.theme.colors.text_primary.to_color());
 
         // Manually wrap input text with proper indentation (Claude Code style)
@@ -175,7 +148,7 @@ impl<'a> StatefulWidget for InputWidget<'a> {
 /// progress: if even the first character exceeds `line_width`, returns
 /// the byte offset *after* it so the caller can't infinite-loop.
 ///
-/// Shared between `InputState::calculate_cursor_position` and
+/// Shared between `input_cursor_position` and
 /// `wrap_input_with_prompt` so both make identical wrapping decisions.
 fn find_line_break(remaining: &str, line_width: usize) -> usize {
     if remaining.is_empty() {
@@ -231,7 +204,7 @@ fn find_line_break(remaining: &str, line_width: usize) -> usize {
 /// `start..start+len` is the row's visible text. `gap` is the
 /// whitespace/newline consumed after it before the next row begins (trimmed
 /// inter-word whitespace from a soft wrap, plus the `\n` byte of a hard
-/// break). Shared by `wrap_input_with_prompt` and `calculate_cursor_position`
+/// break). Shared by `wrap_input_with_prompt` and `input_cursor_position`
 /// so they never disagree on line structure.
 struct RowSpan {
     start: usize,
@@ -300,7 +273,7 @@ fn layout_rows(input: &str, line_width: usize) -> Vec<RowSpan> {
 /// How many rendered rows `input` occupies at `content_width` display cells.
 ///
 /// `content_width` is the box's inner width — the same value
-/// `calculate_cursor_position` takes — and the 2-cell `"> "` / `"  "` prefix is
+/// `input_cursor_position` takes — and the 2-cell `"> "` / `"  "` prefix is
 /// subtracted here, so a caller passes one width and cannot get the two out of
 /// step.
 ///
@@ -311,7 +284,7 @@ fn layout_rows(input: &str, line_width: usize) -> Vec<RowSpan> {
 /// final line and the caret was drawn on the row the box did not have.
 #[must_use]
 pub fn rendered_row_count(input: &str, content_width: usize) -> usize {
-    // Mirrors `calculate_cursor_position`'s degenerate-width guards: below
+    // Mirrors `input_cursor_position`'s degenerate-width guards: below
     // this the prefix does not fit and the widget stops wrapping at all.
     if content_width < 3 || input.is_empty() {
         return 1;
@@ -357,7 +330,7 @@ fn wrap_input_with_prompt(input: &str, width: usize) -> String {
 mod tests {
     use super::*;
 
-    /// Parity: for every byte offset in `input`, `calculate_cursor_position`
+    /// Parity: for every byte offset in `input`, `input_cursor_position`
     /// must return a (row, col) that lands in the same visual line emitted
     /// by `wrap_input_with_prompt`. Catches silent drift between the two
     /// functions going forward.
@@ -404,8 +377,7 @@ mod tests {
                 if !input.is_char_boundary(cursor_pos) {
                     continue;
                 }
-                let (row, _col) =
-                    InputState::calculate_cursor_position(input, cursor_pos, content_width);
+                let (row, _col) = input_cursor_position(input, cursor_pos, content_width);
                 assert!(
                     (row as usize) < rendered_lines.len().max(1),
                     "cursor row {} out of wrap range ({} lines) for input {:?} at byte {}",
@@ -497,10 +469,10 @@ mod tests {
     #[test]
     fn cursor_tracks_rows_across_newlines() {
         // "a\nb": byte 0=before a, 1=after a (on \n), 2=before b, 3=after b.
-        assert_eq!(InputState::calculate_cursor_position("a\nb", 0, 20), (0, 0));
-        assert_eq!(InputState::calculate_cursor_position("a\nb", 1, 20), (0, 1));
-        assert_eq!(InputState::calculate_cursor_position("a\nb", 2, 20), (1, 0));
-        assert_eq!(InputState::calculate_cursor_position("a\nb", 3, 20), (1, 1));
+        assert_eq!(input_cursor_position("a\nb", 0, 20), (0, 0));
+        assert_eq!(input_cursor_position("a\nb", 1, 20), (0, 1));
+        assert_eq!(input_cursor_position("a\nb", 2, 20), (1, 0));
+        assert_eq!(input_cursor_position("a\nb", 3, 20), (1, 1));
     }
 
     /// The box must be exactly as tall as the text it renders. `render/mod.rs`

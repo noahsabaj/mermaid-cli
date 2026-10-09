@@ -214,7 +214,7 @@ rather than passing prose off as structured output.
    action asks the same endpoint for a verdict, so the reference has a
    `say = "ALLOW"` turn right after that tool call.
 
-4. `cargo test --test integration it::evals` must pass.
+4. `cargo nextest run --test integration it::evals` must pass.
 
 Check an outcome, never a wording. If a task can only be scored by matching the
 model's phrasing, it is the wrong task.

@@ -209,6 +209,17 @@ impl ToolExecutor for ExecuteCommandTool {
         }
     }
 
+    async fn execute(&self, args: serde_json::Value, ctx: ExecContext) -> ToolOutcome {
+        let session_id = ctx.session_id.clone();
+        let outcome = self.run(args, ctx).await;
+        // A process this call left running (mode="background" or Ctrl+B) is
+        // now one the model can follow with `background_process`.
+        jobs::track(&outcome, session_id.as_deref());
+        outcome
+    }
+}
+
+impl ExecuteCommandTool {
     #[expect(
         clippy::too_many_lines,
         reason = "the shell tool's whole path: cwd containment, the policy gate with its \
@@ -217,7 +228,7 @@ impl ToolExecutor for ExecuteCommandTool {
          settled, and the two spawn paths must call the same finish so their semantics cannot \
          drift, which is easiest to see with both in one place"
     )]
-    async fn execute(&self, args: serde_json::Value, ctx: ExecContext) -> ToolOutcome {
+    async fn run(&self, args: serde_json::Value, ctx: ExecContext) -> ToolOutcome {
         // The native `bash` tool's `restart` (see the Anthropic adapter's
         // native tools). There is no session to restart: every command
         // already starts a fresh shell. Not in the advertised schema.
@@ -277,10 +288,6 @@ impl ToolExecutor for ExecuteCommandTool {
         let mut policy_request =
             mermaid_runtime::ActionRequest::new("execute_command", category, command.to_string());
         policy_request.command = Some(command.to_string());
-        // The gate must resolve command-relative paths against the directory
-        // this command actually runs in (`cmd.current_dir` below), not the
-        // project root — see `ActionRequest::cwd`.
-        policy_request.cwd = Some(effective_workdir.clone());
         // Resolved before the gate so the gate and the spawn agree on whether
         // this command runs contained: the flag below is only ever set for a
         // spawn that will carry `--read-only`.
@@ -606,7 +613,7 @@ fn finish_foreground_command(
             let duration_secs = start.elapsed().as_secs_f64();
             let log_path_str = log_path.display().to_string();
             let output = format!(
-                "Moved to background.\nPID: {pid}\nLog: {log_path_str}\nManage it with /processes, /logs {pid}, /stop {pid}."
+                "Moved to background.\nPID: {pid}\nLog: {log_path_str}\nFollow it with background_process (id bg-{pid}); the user can use /logs {pid} and /stop {pid}."
             );
             let process = ManagedProcess {
                 id: format!("bg-{pid}"),
@@ -680,6 +687,7 @@ fn finish_foreground_command(
 
 pub(crate) mod background;
 pub(crate) mod capture;
+pub(crate) mod jobs;
 pub(crate) mod pty;
 pub(crate) mod sandbox;
 pub(crate) mod shell;

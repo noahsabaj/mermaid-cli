@@ -1147,10 +1147,11 @@ pub struct LiveToolStatus {
     pub tokens: usize,
 }
 
-/// One prompt-backed slash command: an enabled plugin's markdown prompt
-/// (`manifest.prompts`) or a prompt advertised by a ready MCP server
-/// (`prompts/list`). Plain data — parsing/IO happens in
-/// `app::plugin_assets` and `mcp`; the reducer only expands and submits.
+/// One prompt-backed slash command: a markdown prompt from an enabled
+/// plugin's `manifest.prompts` or a `commands/*.md` file in a project or user
+/// directory, or a prompt advertised by a ready MCP server (`prompts/list`).
+/// Plain data — parsing/IO happens in `app::plugin_assets`,
+/// `app::file_assets` and `mcp`; the reducer only expands and submits.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PromptCommand {
     /// Command name without the leading `/`, lowercase: `[a-z0-9-]+` for a
@@ -1164,10 +1165,12 @@ pub struct PromptCommand {
 /// Where a [`PromptCommand`]'s text comes from.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PromptSource {
-    /// A plugin's markdown prompt. `$ARGUMENTS` in `body` is replaced with
-    /// the typed args; without the token, non-empty args append as a final
-    /// paragraph. Expanded purely, in the reducer.
-    Plugin { plugin: String, body: String },
+    /// A markdown prompt. `$ARGUMENTS` and `$1`, `$2`, ... in `body` are
+    /// replaced with the typed args; without them, non-empty args append as
+    /// a final paragraph. Expanded purely, in the reducer. `origin` is shown
+    /// in parentheses in the palette and `/help`: `plugin:<name>`, `project`
+    /// or `user`.
+    Markdown { origin: String, body: String },
     /// An MCP server prompt. Its text is only known after a `prompts/get`
     /// round-trip, so running it is a `Query`, not a pure expansion.
     Mcp(McpPrompt),
@@ -1194,12 +1197,12 @@ pub struct McpPromptArg {
 }
 
 impl PromptCommand {
-    /// Origin tag shown after the description: `plugin:<name>` or
-    /// `mcp:<server>`.
+    /// Origin tag shown after the description: `plugin:<name>`, `project`,
+    /// `user` or `mcp:<server>`.
     #[must_use]
     pub fn origin(&self) -> String {
         match &self.source {
-            PromptSource::Plugin { plugin, .. } => format!("plugin:{plugin}"),
+            PromptSource::Markdown { origin, .. } => origin.clone(),
             PromptSource::Mcp(prompt) => format!("mcp:{}", prompt.server),
         }
     }
@@ -1209,7 +1212,7 @@ impl PromptCommand {
     pub fn mcp_server(&self) -> Option<&str> {
         match &self.source {
             PromptSource::Mcp(prompt) => Some(&prompt.server),
-            PromptSource::Plugin { .. } => None,
+            PromptSource::Markdown { .. } => None,
         }
     }
 
@@ -1219,7 +1222,7 @@ impl PromptCommand {
     #[must_use]
     pub fn invoke(&self, args: &str) -> PromptInvocation {
         match &self.source {
-            PromptSource::Plugin { body, .. } => PromptInvocation::Text(expand_body(body, args)),
+            PromptSource::Markdown { body, .. } => PromptInvocation::Text(expand_body(body, args)),
             PromptSource::Mcp(prompt) => {
                 PromptInvocation::Slash(prompt.invocation(&self.name, args))
             },
@@ -1236,12 +1239,41 @@ pub enum PromptInvocation {
     Slash(crate::SlashCmd),
 }
 
-/// Plugin-body expansion: replace-all of `$ARGUMENTS` when the token is
-/// present, else append the args as a new paragraph when non-empty.
+/// Markdown-body expansion: replace-all of `$ARGUMENTS` and of the
+/// positional `$1`, `$2`, ... (whitespace-split args, empty when absent —
+/// Claude Code's command syntax) when any is present, else append the args
+/// as a new paragraph when non-empty.
 fn expand_body(body: &str, args: &str) -> String {
     let args = args.trim();
-    if body.contains("$ARGUMENTS") {
-        return body.replace("$ARGUMENTS", args);
+    let positional: Vec<&str> = args.split_whitespace().collect();
+    let mut out = String::with_capacity(body.len() + args.len());
+    let mut found = false;
+    let mut rest = body;
+    while let Some(at) = rest.find('$') {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + 1..];
+        if let Some(tail) = after.strip_prefix("ARGUMENTS") {
+            out.push_str(args);
+            rest = tail;
+            found = true;
+            continue;
+        }
+        let digits = after.len() - after.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+        match after[..digits].parse::<usize>() {
+            Ok(n) if n >= 1 => {
+                out.push_str(positional.get(n - 1).copied().unwrap_or(""));
+                rest = &after[digits..];
+                found = true;
+            },
+            _ => {
+                out.push('$');
+                rest = after;
+            },
+        }
+    }
+    out.push_str(rest);
+    if found {
+        return out;
     }
     if args.is_empty() {
         body.to_string()

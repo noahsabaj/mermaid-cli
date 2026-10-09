@@ -335,7 +335,7 @@ jobs:
         run: cargo build --workspace --release
 
   # Dependency-free source guards: no emoji in user-facing output; the pure
-  # `src/domain` / `src/render` / `src/prompts.rs` layers only reach downward
+  # `mermaid-domain` and `src/render` layers only reach downward
   # and stay free of I/O and the wall clock.
   #
   # The layering guard ratchets against `.github/baselines/layering.txt`, which
