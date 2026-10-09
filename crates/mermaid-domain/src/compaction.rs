@@ -824,7 +824,7 @@ pub(crate) fn drop_orphan_tool_calls(messages: &mut Vec<ChatMessage>, preserve_p
             .filter_map(|call| call.id.as_deref())
             .collect();
         if let Some(continuation) = &mut m.provider_continuation {
-            continuation.retain_meta_function_calls(|call_id| kept.contains(call_id));
+            continuation.retain_tool_calls(|call_id| kept.contains(call_id));
         }
     }
 
@@ -1669,7 +1669,7 @@ mod tests {
         orphan.tool_calls = Some(vec![tool_call("call_1", "do_thing")]);
         orphan.provider_continuation =
             Some(mermaid_model::models::ProviderContinuation::MetaResponses {
-                output: vec![mermaid_model::models::MetaResponseItem::from_wire(
+                output: vec![mermaid_model::models::ResponseItem::from_wire(
                     serde_json::json!({
                         "type": "function_call",
                         "call_id": "call_1",

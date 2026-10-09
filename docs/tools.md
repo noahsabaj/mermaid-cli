@@ -26,9 +26,15 @@ for before anything runs (`view` is a line-numbered `read_file`, `str_replace` a
 gate, the read-only sandbox, checkpoints and approvals see the same tool they always do, and
 history sends the call back to the model as it wrote it. `bash` is not offered on Windows,
 where commands run under PowerShell. A model that refuses these tools gets Mermaid's schemas
-from then on; `[tools] provider_native = false` always sends Mermaid's. OpenAI's `apply_patch`
-and `shell` tools exist only in the Responses API, which Mermaid does not use for OpenAI;
-Mermaid's own `apply_patch` already takes the same patch format.
+from then on; `[tools] provider_native = false` always sends Mermaid's.
+
+On OpenAI, the model gets OpenAI's own `apply_patch` tool in place of Mermaid's `apply_patch`
+schema. Each call names one file operation (`create_file`, `update_file`, `delete_file`) whose
+diff is already the body of Mermaid's `*** Begin Patch` envelope, so it is rewritten onto
+Mermaid's `apply_patch` before anything runs and passes through the same gates; history sends
+the call back as the model wrote it, answered as an `apply_patch_call_output`. OpenAI's `shell`
+tool is not offered: it runs a list of commands and wants an exit outcome for each, which
+`execute_command` does not report.
 
 Pictures: `read_file` returns a PNG, JPEG, GIF or WebP file (known by its first bytes) as an
 image beside a one-line `[image/png, 48213 bytes]` result, up to 3.75 MiB. Any tool's images
