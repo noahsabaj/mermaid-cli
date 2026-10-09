@@ -105,6 +105,7 @@ The model calls these autonomously:
 | `memory` | Durable cross-session memory (project, shared, or global scope) |
 | `web_search` | Search the web (managed local SearXNG by default) |
 | `web_fetch` | Fetch a URL into a bounded session snapshot (in-process, no key) |
+| `computer` | Screenshots, mouse and keyboard on your screen (off until `[tools] computer = true`) |
 | `agent` | Spawn an autonomous subagent for parallel tasks |
 | `task_create`, `task_update`, `task_list` | The live task checklist (`/todos`) |
 | `ask_user_question` | Multiple-choice questions when a decision is the user's to make |

@@ -46,6 +46,22 @@ reaches only processes this Mermaid process started for the calling session, nev
 it needs no approval in any safety mode. Exit codes are not recorded. The user's `/logs` and
 `/stop` work on the same processes.
 
+Computer: with `computer = true` under `[tools]`, the `computer` tool takes screenshots and drives
+the mouse and keyboard of the user's real screen. It is off by default because every screenshot
+goes to the model's provider. Its actions are those of Anthropic's computer toolset: `screenshot`,
+`zoom`, `cursor_position`, `left_click`, `right_click`, `middle_click`, `double_click`,
+`triple_click`, `left_click_drag`, `mouse_move`, `left_mouse_down`, `left_mouse_up`, `scroll`,
+`type`, `key`, `hold_key` and `wait`. On Anthropic, Claude gets the toolset itself
+(`computer_toolset_20260801`), rewritten onto the tool as it arrives, with `provider_native`;
+other vision models call the tool directly. A screenshot is fitted to 1568 px on its long edge and
+1.15 megapixels, and coordinates are pixels of the last screenshot, scaled back to the primary
+screen. Input actions wait 0.5 s before they return. Calls in one message run in order, and after
+one fails the rest return "Not executed: an earlier computer action in this turn failed." without
+running. Screenshots, `zoom`, `cursor_position` and `wait` run in every safety mode; the other
+actions are gated as external access, so `read_only` blocks them and `ask` asks for each one.
+Windows and macOS use xcap and enigo (macOS asks the terminal for Screen Recording and
+Accessibility). Linux needs an X11 session; Wayland is not supported yet.
+
 Paths outside the project (absolute, or traversing out of it) resolve to where they point and
 are gated as external access: `read_only` denies, `ask` prompts with a per-directory
 "don't ask again", `auto` classifies, `full_access` allows. See the README's [Safety](../README.md#safety) section.

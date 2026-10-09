@@ -100,6 +100,8 @@ pub enum ToolCategory {
     Shell,
     Web,
     ExternalDirectory,
+    /// Mouse and keyboard on the user's real screen.
+    Computer,
     Mcp,
     Subagent,
     Network,
@@ -121,6 +123,7 @@ impl ToolCategory {
             Self::Shell => "shell",
             Self::Web => "web",
             Self::ExternalDirectory => "external_directory",
+            Self::Computer => "computer",
             Self::Mcp => "mcp",
             Self::Subagent => "subagent",
             Self::Network => "network",

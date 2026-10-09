@@ -71,6 +71,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   appears in its output, or a timeout of up to an hour passes (Esc ends it),
   `stop` ends the process tree, and `list` shows the session's processes. It
   reaches only processes this session started, never a raw pid.
+- **The model can use the screen: the `computer` tool, off by default.** With
+  `computer = true` under `[tools]`, a vision model takes screenshots and
+  drives the mouse and keyboard of the user's real screen. Claude gets
+  Anthropic's computer toolset (`computer_toolset_20260801`), the tool it is
+  trained on, rewritten onto Mermaid's `computer` tool like the text editor;
+  other models call that tool directly with the same actions. Mermaid only
+  does the physics: each screenshot is fitted to 1568 px and 1.15 megapixels,
+  the model's coordinates are scaled back to the screen, and input actions
+  wait half a second for the screen to change. Actions in one message run in
+  order, and after one fails the rest are not run. Screenshots, `zoom` and
+  `cursor_position` run in every safety mode; mouse and keyboard actions are
+  gated as external access (`read_only` blocks them, `ask` asks for each).
+  Windows and macOS use xcap and enigo; Linux speaks X11 directly, so no C
+  library is linked. Wayland is not supported yet. Off by default because
+  every screenshot sends the screen to the model's provider.
 
 ### Fixed
 
