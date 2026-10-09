@@ -54,6 +54,18 @@ pub struct ProviderProfile {
     /// Model IDs that support tools but must be forced to single tool-call
     /// mode because the provider default enables unsupported parallel calls.
     pub disable_parallel_tool_calls_for: &'static [&'static str],
+    /// Which endpoint the provider's chat requests go to.
+    pub wire_api: WireApi,
+}
+
+/// The endpoint a provider's chat requests go to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WireApi {
+    /// `POST /chat/completions`, the shape every conformant clone speaks.
+    ChatCompletions,
+    /// `POST /responses`: OpenAI's own, which keeps encrypted reasoning
+    /// across tool calls and carries its native tools and compaction.
+    Responses,
 }
 
 /// Provider-specific spelling for the completion-token budget.
@@ -186,11 +198,12 @@ pub const REGISTRY: &[ProviderProfile] = &[
         key_hint: Some("create one at https://platform.openai.com/api-keys"),
         extra_headers: &[],
         reasoning_strategy: ReasoningStrategy::Effort,
-        // Chat Completions doesn't stream reasoning content for o-series
-        // (encrypted server-side); only the Responses API does, so None.
+        // Only read on Chat Completions, which OpenAI no longer uses: its
+        // reasoning arrives as Responses summary events instead.
         reasoning_extraction: ReasoningExtraction::None,
         max_tokens_param: MaxTokensParam::MaxTokens,
         disable_parallel_tool_calls_for: &[],
+        wire_api: WireApi::Responses,
     },
     ProviderProfile {
         name: "groq",
@@ -204,6 +217,7 @@ pub const REGISTRY: &[ProviderProfile] = &[
         reasoning_extraction: ReasoningExtraction::DeltaContentField("reasoning"),
         max_tokens_param: MaxTokensParam::MaxTokens,
         disable_parallel_tool_calls_for: &[],
+        wire_api: WireApi::ChatCompletions,
     },
     ProviderProfile {
         name: "openrouter",
@@ -221,6 +235,7 @@ pub const REGISTRY: &[ProviderProfile] = &[
         reasoning_extraction: ReasoningExtraction::DeltaContentField("reasoning"),
         max_tokens_param: MaxTokensParam::MaxTokens,
         disable_parallel_tool_calls_for: &[],
+        wire_api: WireApi::ChatCompletions,
     },
     ProviderProfile {
         name: "cerebras",
@@ -235,6 +250,7 @@ pub const REGISTRY: &[ProviderProfile] = &[
         reasoning_extraction: ReasoningExtraction::None,
         max_tokens_param: MaxTokensParam::MaxCompletionTokens,
         disable_parallel_tool_calls_for: &["gpt-oss-120b"],
+        wire_api: WireApi::ChatCompletions,
     },
     ProviderProfile {
         name: "deepinfra",
@@ -248,6 +264,7 @@ pub const REGISTRY: &[ProviderProfile] = &[
         reasoning_extraction: ReasoningExtraction::DeltaContentField("reasoning_content"),
         max_tokens_param: MaxTokensParam::MaxTokens,
         disable_parallel_tool_calls_for: &[],
+        wire_api: WireApi::ChatCompletions,
     },
     ProviderProfile {
         name: "together",
@@ -261,6 +278,7 @@ pub const REGISTRY: &[ProviderProfile] = &[
         reasoning_extraction: ReasoningExtraction::InlineThinkTags,
         max_tokens_param: MaxTokensParam::MaxTokens,
         disable_parallel_tool_calls_for: &[],
+        wire_api: WireApi::ChatCompletions,
     },
     ProviderProfile {
         name: "nvidia",
@@ -278,6 +296,7 @@ pub const REGISTRY: &[ProviderProfile] = &[
         reasoning_extraction: ReasoningExtraction::DeltaContentField("reasoning_content"),
         max_tokens_param: MaxTokensParam::MaxTokens,
         disable_parallel_tool_calls_for: &[],
+        wire_api: WireApi::ChatCompletions,
     },
     ProviderProfile {
         name: "cloudflare",
@@ -302,6 +321,7 @@ pub const REGISTRY: &[ProviderProfile] = &[
         reasoning_extraction: ReasoningExtraction::DeltaContentField("reasoning_content"),
         max_tokens_param: MaxTokensParam::MaxTokens,
         disable_parallel_tool_calls_for: &[],
+        wire_api: WireApi::ChatCompletions,
     },
     ProviderProfile {
         name: "grok",
@@ -315,6 +335,7 @@ pub const REGISTRY: &[ProviderProfile] = &[
         reasoning_extraction: ReasoningExtraction::None,
         max_tokens_param: MaxTokensParam::MaxTokens,
         disable_parallel_tool_calls_for: &[],
+        wire_api: WireApi::ChatCompletions,
     },
     ProviderProfile {
         name: "xai",
@@ -326,6 +347,7 @@ pub const REGISTRY: &[ProviderProfile] = &[
         reasoning_extraction: ReasoningExtraction::None,
         max_tokens_param: MaxTokensParam::MaxTokens,
         disable_parallel_tool_calls_for: &[],
+        wire_api: WireApi::ChatCompletions,
     },
 ];
 

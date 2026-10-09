@@ -89,10 +89,11 @@ pub struct ModelConfig {
     pub native_tools: NativeTools,
 }
 
-/// The provider-defined tools a turn may advertise: a file editor standing in
-/// for `read_file`/`write_file`/`edit_file`, and a shell beside
-/// `execute_command`. Their calls are translated back onto those tools, so
-/// every gate still sees the tool it knows.
+/// The provider-defined tools a turn may advertise: a file editor (Anthropic's
+/// text editor, standing in for `read_file`/`write_file`/`edit_file`; OpenAI's
+/// `apply_patch`, standing in for Mermaid's `apply_patch`), and a shell beside
+/// `execute_command` (Anthropic only). Their calls are translated back onto
+/// those tools, so every gate still sees the tool it knows.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct NativeTools {
     pub text_editor: bool,

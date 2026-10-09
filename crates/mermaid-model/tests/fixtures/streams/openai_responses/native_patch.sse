@@ -1,0 +1,8 @@
+data: {"type":"response.created","response":{"id":"resp_7"}}
+
+data: {"type":"response.reasoning_summary_text.delta","delta":"Rename the function."}
+
+data: {"type":"response.output_item.done","item":{"type":"apply_patch_call","id":"apc_1","call_id":"call_p","status":"completed","operation":{"type":"update_file","path":"lib/fib.py","diff":"@@\n-def fib(n):\n+def fibonacci(n):\n"}}}
+
+data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"Rename the function."}],"encrypted_content":"gAAAAopaque"},{"type":"apply_patch_call","id":"apc_1","call_id":"call_p","status":"completed","operation":{"type":"update_file","path":"lib/fib.py","diff":"@@\n-def fib(n):\n+def fibonacci(n):\n"}}],"usage":{"input_tokens":40,"output_tokens":20,"total_tokens":60}}}
+

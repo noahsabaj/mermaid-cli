@@ -139,7 +139,8 @@ checkpoint_on_mutation = true
 
 [tools]
 # Send a provider's own tool definitions where it has them (Anthropic's text
-# editor and bash) instead of Mermaid's schemas for the same tools. The calls
+# editor and bash, OpenAI's apply_patch) instead of Mermaid's schemas for the
+# same tools. The calls
 # still run through Mermaid's file and shell tools, so every safety gate
 # applies. false always sends Mermaid's.
 # provider_native = true
@@ -186,7 +187,7 @@ max_truncation_recoveries = 3
 # compaction entirely to `/compact`.
 # auto_enabled = true
 # auto_threshold_percent = 85        # clamped to 1..=100
-# Let a provider that compacts server-side (Anthropic) do the automatic
+# Let a provider that compacts server-side (Anthropic, OpenAI) do the automatic
 # compaction at the same threshold, with its own summary. A model that
 # refuses it falls back to Mermaid's. false always compacts client-side.
 # provider_native = true
@@ -381,6 +382,15 @@ Meta Muse Spark uses Meta's Responses API so encrypted reasoning state survives
 Mermaid's model/tool loop without Meta retaining the response server-side.
 Mermaid requests automatic reasoning summaries for the existing reasoning panel
 and keeps the encrypted continuation only in private local session data.
+
+OpenAI works the same way: `openai/<model>` goes to OpenAI's Responses API
+(`POST /responses` with `store: false`), so a reasoning model keeps its
+reasoning from one tool call to the next instead of starting again at each
+step. The encrypted reasoning is replayed only to the model that wrote it;
+after `/model` switches to another OpenAI model, the history goes back as plain
+messages. Every other OpenAI-compatible provider, and a custom
+`[providers.<name>]` entry, keeps Chat Completions. A proxy that serves only
+Chat Completions can be reached as a custom provider (`compat = "openai-effort"`).
 
 ```bash
 export MODEL_API_KEY="your-meta-api-key"
