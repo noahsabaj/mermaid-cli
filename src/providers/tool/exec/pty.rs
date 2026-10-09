@@ -16,7 +16,7 @@ pub(crate) struct PtyDrain {
 impl PtyDrain {
     async fn push(&mut self, chunk: &[u8]) {
         // Tee RAW bytes (ANSI kept — tailing a backgrounded log renders
-        // correctly); same bound as the pipe path (#126).
+        // correctly); same bound as the pipe path.
         if let Some(file) = &self.log
             && !self.log_capped
         {
@@ -323,7 +323,7 @@ fn pty_completed_output(raw: &str, status: &portable_pty::ExitStatus) -> Command
 /// which segments the command the way `sh -c` would and classifies each head on
 /// the TOKENIZED form — so spacing, case, quoting, flag bundling, and chaining
 /// can't trivially evade it (the substring blocklist this replaced could be
-/// dodged by `RM -RF /`, `rm  -rf  /`, or `echo x; rm -rf /` — #114). NOT a
+/// dodged by `RM -RF /`, `rm  -rf  /`, or `echo x; rm -rf /`). NOT a
 /// security boundary: the real boundary is deny-by-default + the policy engine,
 /// whose hard-deny this mirrors.
 pub(crate) fn contains_dangerous_command(command: &str) -> bool {

@@ -34,7 +34,7 @@
 //!   keep calls and results in arrival order so positional matching holds. This
 //!   is an inherent Gemini limitation, not fixable in the wire format.
 //!
-//! # Caching note (Step 5b)
+//! # Caching note
 //!
 //! Gemini 2.5+ enables **implicit caching** by default — repeated
 //! content prefixes get cost discounts automatically with no client
@@ -685,7 +685,7 @@ impl GeminiAdapter {
             raw: None,
         })?;
 
-        // F52: a prompt-level safety block returns `promptFeedback.blockReason`
+        // A prompt-level safety block returns `promptFeedback.blockReason`
         // with NO candidates. Without this guard the `candidates.into_iter()
         // .next()` below is `None`, the block is skipped, and we return an empty
         // `Ok` with `stop_reason: None`. Surface a typed refusal instead — the
@@ -756,8 +756,8 @@ impl GeminiAdapter {
         let raw_prompt_tokens = json.usage_metadata.prompt_token_count.unwrap_or(0);
         let cached_tokens = json.usage_metadata.cached_content_token_count.unwrap_or(0);
         // Gemini's promptTokenCount INCLUDES cachedContentTokenCount; subtract it
-        // so the input breakdown (fresh prompt + cached) isn't double-counted
-        // (#137), matching openai_compat's token_usage_from_wire.
+        // so the input breakdown (fresh prompt + cached) isn't double-counted,
+        // matching openai_compat's token_usage_from_wire.
         let prompt_tokens = raw_prompt_tokens.saturating_sub(cached_tokens);
         let completion_tokens = json.usage_metadata.candidates_token_count.unwrap_or(0);
         let reasoning_tokens = json.usage_metadata.thoughts_token_count.unwrap_or(0);
@@ -837,7 +837,7 @@ impl StreamProtocol for GeminiStream {
     }
 
     fn finish(self, _out: &mut Vec<StreamEvent>) -> Result<ModelResponse> {
-        // F56: a stream that ended before any candidate `finishReason` was
+        // A stream that ended before any candidate `finishReason` was
         // dropped mid-response. Surface a stream error instead of a clean `Ok`
         // (with `stop_reason: None`) that would be indistinguishable from a real
         // completion. A `MAX_TOKENS` truncation set a real `finishReason`, so it
@@ -850,7 +850,7 @@ impl StreamProtocol for GeminiStream {
             ));
         }
 
-        // F3: the wrapper emits the authoritative `Done`. See
+        // The wrapper emits the authoritative `Done`. See
         // adapters/anthropic.rs for rationale.
         let usage = self.state.usage();
 
@@ -887,16 +887,16 @@ struct StreamState {
     cached_input_tokens: usize,
     reasoning_output_tokens: usize,
     /// Set once a `usageMetadata` block is seen, so a stream that never reports
-    /// usage returns `None` instead of a misleading zero (#125).
+    /// usage returns `None` instead of a misleading zero.
     saw_usage: bool,
     finish_reason: Option<FinishReason>,
 }
 
 impl StreamState {
-    /// Build the response usage. `None` when no `usageMetadata` arrived (#125),
+    /// Build the response usage. `None` when no `usageMetadata` arrived,
     /// so the reducer keeps its estimate rather than resetting to zero. The
     /// fresh-prompt component subtracts cached, which Gemini folds into
-    /// `promptTokenCount`, so the input breakdown isn't double-counted (#137).
+    /// `promptTokenCount`, so the input breakdown isn't double-counted.
     fn usage(&self) -> Option<TokenUsage> {
         self.saw_usage.then(|| {
             let fresh_prompt = self.prompt_tokens.saturating_sub(self.cached_input_tokens);
@@ -938,7 +938,7 @@ fn process_chunk_payload(
         }));
     }
 
-    // F52: a prompt-level safety block streams as a chunk carrying
+    // A prompt-level safety block streams as a chunk carrying
     // `promptFeedback.blockReason` and NO candidates. The no-parts branch below
     // would otherwise swallow it as a benign empty success — there's no
     // candidate `finishReason` to trip its block check. Surface a typed refusal,
@@ -1158,7 +1158,7 @@ struct GeminiResponse {
     #[serde(default, rename = "usageMetadata")]
     usage_metadata: UsageMetadata,
     // A prompt-level safety block returns `promptFeedback.blockReason` and NO
-    // candidates (F52). Captured so `decode_non_streaming` can surface a typed
+    // candidates. Captured so `decode_non_streaming` can surface a typed
     // refusal instead of an empty `Ok`.
     #[serde(default, rename = "promptFeedback")]
     prompt_feedback: Option<PromptFeedback>,
@@ -1310,7 +1310,7 @@ mod tests {
 
     #[test]
     fn empty_response_benign_only_for_non_blocks() {
-        // #51: both the streaming and non-streaming paths now treat an empty
+        // Both the streaming and non-streaming paths now treat an empty
         // response as benign for these reasons (UNSPECIFIED included — not a
         // block); a real block like SAFETY/RECITATION still surfaces an error.
         assert!(gemini_empty_is_benign("STOP"));
@@ -1322,7 +1322,7 @@ mod tests {
 
     #[test]
     fn prompt_block_response_parses_with_no_candidates() {
-        // F52: a prompt-level block returns `promptFeedback.blockReason` and NO
+        // A prompt-level block returns `promptFeedback.blockReason` and NO
         // candidates. The wire type must capture it so `decode_non_streaming`
         // can surface a refusal instead of an empty Ok.
         let json = serde_json::json!({
@@ -1340,7 +1340,7 @@ mod tests {
 
     #[test]
     fn stream_prompt_block_surfaces_provider_error() {
-        // F52 (streaming): a chunk carrying `promptFeedback.blockReason` with no
+        // Streaming: a chunk carrying `promptFeedback.blockReason` with no
         // candidates must surface a typed ProviderError, not be swallowed by the
         // no-parts branch as a silent empty success.
         let mut state = StreamState::default();
@@ -1788,7 +1788,7 @@ mod tests {
         assert_eq!(sys["parts"][0]["text"], "You are helpful.");
     }
 
-    /// Step 5h: Gemini doesn't expose per-block cache markers in this path.
+    /// Gemini doesn't expose per-block cache markers in this path.
     /// The dynamic MERMAID.md suffix is concatenated onto the static system
     /// instruction with a `---` separator. Both halves reach the model in
     /// one systemInstruction payload.
@@ -1810,7 +1810,7 @@ mod tests {
         assert!(text.contains("---"));
     }
 
-    /// Step 5c: gemini-3-pro (the test adapter's model) now uses
+    /// `gemini-3-pro` (the test adapter's model) now uses
     /// `thinkingLevel` enum, not `thinkingBudget` int. Same Medium
     /// reasoning request maps to `thinkingLevel: "medium"`.
     #[test]
@@ -1829,7 +1829,7 @@ mod tests {
         assert!(tc.get("thinkingBudget").is_none());
     }
 
-    /// Step 5c: Gemini 3 has no `max` tier — Max collapses to `high`.
+    /// Gemini 3 has no `max` tier — Max collapses to `high`.
     #[test]
     fn build_request_body_thinking_level_for_max_collapses_to_high_on_gemini_3() {
         let adapter = test_adapter(); // gemini-3-pro
@@ -1845,7 +1845,7 @@ mod tests {
         );
     }
 
-    /// Step 5c: Gemini 3 cannot truly disable thinking — `None` maps to
+    /// Gemini 3 cannot truly disable thinking — `None` maps to
     /// `thinkingLevel: "minimal"` (closest-to-off per Google's docs).
     #[test]
     fn build_request_body_thinking_level_minimal_for_none_on_gemini_3() {
@@ -1862,7 +1862,7 @@ mod tests {
         assert_eq!(tc["includeThoughts"], false);
     }
 
-    /// Step 5c: gemini-2.5-pro uses thinkingBudget int with floor 128.
+    /// `gemini-2.5-pro` uses thinkingBudget int with floor 128.
     /// `--reasoning none` clamps UP to 128 (can't actually disable).
     #[test]
     fn build_request_body_thinking_budget_clamps_to_min_128_on_gemini_2_5_pro_for_none() {
@@ -1885,7 +1885,7 @@ mod tests {
         assert_eq!(tc["includeThoughts"], true);
     }
 
-    /// Step 5c: gemini-2.5-flash CAN disable. `--reasoning none` → 0.
+    /// `gemini-2.5-flash` CAN disable. `--reasoning none` → 0.
     #[test]
     fn build_request_body_thinking_budget_zero_for_none_on_gemini_2_5_flash() {
         let adapter = GeminiAdapter::new(
@@ -1905,7 +1905,7 @@ mod tests {
         assert_eq!(tc["includeThoughts"], false);
     }
 
-    /// Step 5c: gemini-2.5-flash with Max → -1 (adaptive sentinel).
+    /// `gemini-2.5-flash` with Max → -1 (adaptive sentinel).
     #[test]
     fn build_request_body_thinking_budget_adaptive_for_max_on_gemini_2_5_flash() {
         let adapter = GeminiAdapter::new(
@@ -1926,7 +1926,7 @@ mod tests {
         );
     }
 
-    /// Step 5c: legacy Gemini models (2.0, 1.5) don't support
+    /// Legacy Gemini models (2.0, 1.5) don't support
     /// thinkingConfig — sending one would 400 with a syntax error per
     /// the official docs. Adapter must omit the field entirely.
     #[test]
@@ -2208,7 +2208,7 @@ mod tests {
 
     #[test]
     fn stream_usage_is_none_without_usage_metadata() {
-        // #125: a stream that never carried a `usageMetadata` block yields None,
+        // A stream that never carried a `usageMetadata` block yields None,
         // so the reducer keeps its char/4 estimate instead of resetting to zero.
         let mut events: Vec<StreamEvent> = Vec::new();
         let mut state = StreamState::default();
@@ -2221,7 +2221,7 @@ mod tests {
 
     #[test]
     fn stream_usage_does_not_double_count_cached_input() {
-        // #137: Gemini folds cached tokens into promptTokenCount; the input
+        // Gemini folds cached tokens into promptTokenCount; the input
         // breakdown must not add them a second time.
         let mut events: Vec<StreamEvent> = Vec::new();
         let mut state = StreamState::default();
@@ -2378,7 +2378,7 @@ mod tests {
     fn stream_safety_block_with_no_parts_errors() {
         let mut events: Vec<StreamEvent> = Vec::new();
         let mut state = StreamState::default();
-        // A content-free SAFETY block must error, not silently succeed (#1).
+        // A content-free SAFETY block must error, not silently succeed.
         let chunk = json!({ "candidates": [{ "finishReason": "SAFETY" }] }).to_string();
         assert!(process_chunk_payload(&chunk, &mut state, &mut events).is_err());
     }
@@ -2401,7 +2401,7 @@ mod tests {
 
     #[test]
     fn stream_closed_abnormally_when_no_finish_reason_observed() {
-        // F56: content chunks with no finishReason leave the stream incomplete
+        // Content chunks with no finishReason leave the stream incomplete
         // until a terminal finishReason lands. A drop here must surface as an
         // error, not a clean Ok indistinguishable from a real completion.
         let mut events: Vec<StreamEvent> = Vec::new();
@@ -2435,7 +2435,7 @@ mod tests {
 
     #[test]
     fn parallel_same_tool_calls_keep_call_order() {
-        // #8: Gemini's wire protocol has no call id, so two calls to the SAME
+        // Gemini's wire protocol has no call id, so two calls to the SAME
         // tool in one turn are associated by POSITION. We synthesize ids in
         // arrival order and must emit results in the same order — that ordering
         // is the only correctness lever, so pin it against accidental reordering.

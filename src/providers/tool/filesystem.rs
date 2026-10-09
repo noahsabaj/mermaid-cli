@@ -34,7 +34,7 @@ fn defn(name: &str, description: &str, input_schema: serde_json::Value) -> ToolD
     }
 }
 
-/// Aggregate cap for a multi-file `read_file` result (#F45). Each file is
+/// Aggregate cap for a multi-file `read_file` result. Each file is
 /// individually bounded at `MAX_RESPONSE_CHARS` by `read_one`, but a batch of up
 /// to `MAX_BATCH_TOOL_ITEMS` files could otherwise sum to ~12.8 MB in a single
 /// tool result — far past any sane model-context budget. This bounds the
@@ -249,7 +249,7 @@ impl ToolExecutor for ReadFileTool {
             }
         }
 
-        // F45: bound the COMBINED multi-file result. Each file is already capped
+        // Bound the COMBINED multi-file result. Each file is already capped
         // at MAX_RESPONSE_CHARS by read_one, but a batch of files can still sum to
         // ~12.8 MB in one tool result — past any sane context budget. Only the
         // multi-file accumulation needs this (single-file output is already
@@ -301,7 +301,7 @@ fn read_outcome(
                 byte_count,
                 // The REAL truncation flag from the bounded read — not a sniff
                 // for the marker string, which a file containing that literal
-                // text would falsely trip (#78).
+                // text would falsely trip.
                 truncated,
             },
             line_count: Some(line_count),
@@ -636,7 +636,7 @@ impl ToolExecutor for WriteFileTool {
             biased;
             _ = ctx.token.cancelled() => ToolOutcome::cancelled(),
             // The prior-content read (for the display diff) now happens INSIDE
-            // this blocking job and BOUNDED (#F44/RC-L) — never a synchronous
+            // this blocking job and BOUNDED — never a synchronous
             // unbounded `read_to_string` on the async worker thread.
             result = tokio::task::spawn_blocking(move || write_with_diff_blocking(&root, &abs_path, &rel, &content)) => {
                 match result {
@@ -1130,18 +1130,18 @@ const MAX_IMAGE_BYTES: usize = 3_932_160;
 /// (possibly marker-footed) text with the REAL truncation flag from the
 /// bounded read, so the caller propagates that rather than sniffing the
 /// output for the marker string — which a file whose own content contains
-/// that literal text would otherwise falsely trip (#78). A picture is known
+/// that literal text would otherwise falsely trip. A picture is known
 /// by its first bytes, not its name.
 ///
 /// The root-relative path feeds the confined fd read, so the bytes come from
 /// the inode the kernel resolved under `RESOLVE_BENEATH` rather than whatever
-/// a concurrently-swapped symlink now points at (#77).
+/// a concurrently-swapped symlink now points at.
 async fn read_one(root: PathBuf, rel: PathBuf) -> std::io::Result<Read> {
     tokio::task::spawn_blocking(move || {
         let file = mermaid_runtime::open_beneath(&root, &rel, mermaid_runtime::OpenIntent::Read)?;
         // Bounded read: never pull more than the cap (+1 probe byte) into RAM,
         // so a model pointing `read_file` at a multi-gigabyte file can't OOM the
-        // process — a full read would have slurped the whole thing first (#15).
+        // process — a full read would have slurped the whole thing first.
         let cap = MAX_FILE_READ_BYTES.max(MAX_IMAGE_BYTES);
         let (mut data, over_cap) = mermaid_model::utils::read_capped(file, cap)?;
         if let Some(media_type) = mermaid_model::utils::image_media_type(&data) {
@@ -1176,7 +1176,7 @@ async fn read_one(root: PathBuf, rel: PathBuf) -> std::io::Result<Read> {
 /// dirs the same confined way. The bytes are written to a temp and
 /// `renameat`-swapped over the target, all beneath the directory fd the kernel
 /// resolved under `RESOLVE_BENEATH`: a parent dir swapped for an escaping
-/// symlink can't redirect the write (#77), and a crash/kill/disk-full
+/// symlink can't redirect the write, and a crash/kill/disk-full
 /// mid-write leaves the previous file intact rather than a truncated or
 /// half-written one.
 fn write_one_blocking(root: &Path, rel: &Path, content: &str) -> std::io::Result<usize> {
@@ -1196,7 +1196,7 @@ struct WriteResult {
 }
 
 /// Write `content` and build the display diff against the prior file in ONE
-/// blocking job (#F44/RC-L). The prior content is read BOUNDED via
+/// blocking job. The prior content is read BOUNDED via
 /// [`mermaid_model::utils::read_file_capped`] — overwriting a multi-gigabyte file must
 /// not slurp it into RAM on the async worker just to render a diff. A prior file
 /// larger than the read cap (or otherwise unreadable) is elided from the diff
@@ -1850,7 +1850,7 @@ mod tests {
 
     #[tokio::test]
     async fn read_file_multi_aggregate_is_capped() {
-        // F45: many files in one call can't blow past the aggregate cap. Each
+        // Many files in one call can't blow past the aggregate cap. Each
         // file is under the per-file cap, but their sum exceeds the aggregate.
         let dir = temp_root("read_aggregate_cap");
         let chunk = "a".repeat(MAX_READ_AGGREGATE_CHARS * 2 / 3);
@@ -1882,7 +1882,7 @@ mod tests {
 
     #[tokio::test]
     async fn write_file_elides_diff_for_oversized_existing_file() {
-        // F44: overwriting a file larger than the read cap must NOT slurp it into
+        // Overwriting a file larger than the read cap must NOT slurp it into
         // RAM for a diff — the diff is elided with a marker instead.
         let dir = temp_root("write_oversized_diff");
         let big = "a".repeat(MAX_FILE_READ_BYTES + 1);
@@ -1922,7 +1922,7 @@ mod tests {
 
     #[tokio::test]
     async fn read_file_with_marker_in_content_is_not_flagged_truncated() {
-        // #78: a small file whose own content contains the truncation-marker
+        // A small file whose own content contains the truncation-marker
         // string must NOT be reported as truncated — the flag comes from the
         // bounded read now, not a substring sniff of the output.
         let dir = temp_root("read_marker_content");
@@ -2082,11 +2082,11 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    // ─── F10: absolute-path block ───────────────────────────────────
+    // ─── absolute-path block ───────────────────────────────────
 
     /// Reading `/etc/passwd` (or any absolute path outside workdir)
     /// must fail with a clear "outside the project" error. The tool
-    /// schema advertises this contract; before F10 it was a lie.
+    /// schema advertises this contract; before this it was a lie.
     /// Reading an absolute path outside workdir succeeds.
     #[tokio::test]
     async fn read_file_allows_absolute_path_outside_workdir() {

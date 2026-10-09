@@ -341,7 +341,7 @@ const NATIVE_FETCH_UA: &str =
 
 /// Carries the HTTP status of a non-success response so the retry classifier can
 /// tell retryable (5xx / 429) from terminal (4xx) responses without
-/// string-matching the error message (#85).
+/// string-matching the error message.
 #[derive(Debug)]
 pub struct HttpStatusError {
     status: u16,
@@ -1409,7 +1409,7 @@ pub fn format_results(results: &[SearchResult]) -> String {
 /// misconfigured endpoint could return a multi-gigabyte body and OOM the
 /// (long-lived) process. We reject early on an oversized `Content-Length` and
 /// also enforce the cap while streaming (a lying or absent header can't bypass
-/// it) (#28).
+/// it).
 async fn read_body_capped(
     response: reqwest::Response,
     max_bytes: usize,

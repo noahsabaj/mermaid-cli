@@ -14,7 +14,7 @@
 //! locally. Reasoning content arrives in either a named delta field
 //! (`delta.reasoning_content` for vLLM/DeepInfra/DeepSeek, `delta.reasoning`
 //! for Groq parsed mode + OpenRouter), inline `<think>...</think>`
-//! tags inside `delta.content` (Together-R1, Wave 6 adds the stripper),
+//! tags inside `delta.content` (Together-R1),
 //! or not at all (OpenAI Chat Completions encrypts).
 //!
 //! # Why Chat Completions, not Responses API
@@ -101,8 +101,8 @@ pub struct OpenAICompatAdapter {
     memory: ParamMemory,
 }
 
-/// A random 128-bit `Idempotency-Key`, hex-encoded, for safe retry de-duplication
-/// (#F27). On the (vanishingly rare) OS-RNG failure, fall back to a
+/// A random 128-bit `Idempotency-Key`, hex-encoded, for safe retry de-duplication.
+/// On the (vanishingly rare) OS-RNG failure, fall back to a
 /// process+time value so we still send *a* stable key rather than none.
 fn random_idempotency_key() -> String {
     let mut bytes = [0u8; 16];
@@ -378,7 +378,7 @@ impl OpenAICompatAdapter {
     ) -> Value {
         let mut json_messages = Vec::new();
 
-        // Step 5h: combined_system_prompt joins the static base with
+        // Combined_system_prompt joins the static base with
         // any MERMAID.md content (separator `---`). On OpenAI-compat
         // we have no per-block cache markers, so this is the right
         // shape — the model just sees one extended system message.
@@ -409,7 +409,7 @@ impl OpenAICompatAdapter {
         });
         // Temperature is sent unless the catalog hints the model rejects it or
         // the provider already did: OpenAI o-series / gpt-5 reasoning models
-        // reject any non-default `temperature` with a 400 (#124), and
+        // reject any non-default `temperature` with a 400, and
         // gateway-served claude-opus-4-7+ ids reject sampling params the same
         // way. Clamp to the accepted 0..=2 (a stale config value otherwise
         // 400s).
@@ -498,7 +498,7 @@ impl OpenAICompatAdapter {
         // attempt, lets an OpenAI-compatible endpoint that honors `Idempotency-Key`
         // (OpenAI, Groq, OpenRouter, …) dedupe a retried POST instead of generating
         // — and billing — a second completion when a transient 5xx/connection drop
-        // is retried after the server already produced one (#F27). Endpoints that
+        // is retried after the server already produced one. Endpoints that
         // ignore the header are unaffected. (Anthropic has no documented
         // equivalent; its retries mirror the official SDK default.)
         let idempotency_key = random_idempotency_key();
@@ -654,7 +654,7 @@ pub(crate) struct OpenAICompatStream {
     /// The full token breakdown (cached-input + reasoning) from the last usage
     /// frame. Stays `None` until a usage frame arrives, so a stream that never
     /// reports usage returns `None` (the reducer then keeps its estimate)
-    /// rather than a misleading zero (#125).
+    /// rather than a misleading zero.
     usage_acc: Option<TokenUsage>,
     /// Whether this provider emits `<think>...</think>` inline in
     /// `delta.content`, so the content channel has to be split.
@@ -688,7 +688,7 @@ impl StreamProtocol for OpenAICompatStream {
         // A mid-stream error frame (common on OpenRouter) is an
         // `{"error": ...}` object, not a chat chunk. Surface it as a
         // typed provider error instead of the confusing "missing field
-        // choices" parse failure (#123) — mirrors the Gemini path.
+        // choices" parse failure — mirrors the Gemini path.
         let value: serde_json::Value = match serde_json::from_str(frame) {
             Ok(v) => v,
             Err(e) => {
@@ -727,7 +727,7 @@ impl StreamProtocol for OpenAICompatStream {
         };
 
         if let Some(usage) = parsed.usage {
-            // #12: capture the cached-input + reasoning breakdown via the
+            // Capture the cached-input + reasoning breakdown via the
             // same converter the non-stream path uses. The last usage
             // frame wins.
             self.usage_acc = Some(token_usage_from_wire(usage));
@@ -803,7 +803,7 @@ impl StreamProtocol for OpenAICompatStream {
     }
 
     fn finish(mut self, out: &mut Vec<StreamEvent>) -> Result<ModelResponse> {
-        // F56: a stream that ended before any `finish_reason` was dropped
+        // A stream that ended before any `finish_reason` was dropped
         // mid-response. Surface a stream error rather than a clean `Ok` (with
         // `stop_reason: None`) that's indistinguishable from a real completion —
         // checked before finalizing/emitting tool calls so a dropped connection
@@ -844,7 +844,7 @@ impl StreamProtocol for OpenAICompatStream {
             }
         }
 
-        // F3: wrapper emits the authoritative `Done` from the returned
+        // Wrapper emits the authoritative `Done` from the returned
         // `ModelResponse`. See adapters/anthropic.rs for rationale.
 
         let thinking = if self.thinking_acc.is_empty() {
@@ -875,7 +875,7 @@ impl StreamProtocol for OpenAICompatStream {
         Ok(ModelResponse {
             content: self.content_acc.into_string(),
             // `None` when the stream never reported usage, so the reducer keeps
-            // its char/4 estimate instead of resetting the gauge to zero (#125).
+            // its char/4 estimate instead of resetting the gauge to zero.
             usage: self.usage_acc,
             model_name: self.model_name,
             stop_reason: self.stop_reason,
@@ -1172,7 +1172,7 @@ struct ResponseMessage {
 struct ChatCompletionChunk {
     // A final usage-only frame (and some providers' keep-alives) carry no
     // `choices`; default to empty so it parses instead of 400-ing the stream
-    // with "missing field choices" (#123).
+    // with "missing field choices".
     #[serde(default)]
     choices: Vec<StreamingChoice>,
     #[serde(default)]
@@ -1500,7 +1500,7 @@ impl From<CfModelEntry> for ModelListing {
     }
 }
 
-// ===== Inline <think> tag stripping (Wave 6) =====
+// ===== Inline <think> tag stripping =====
 //
 // Some OpenAI-compatible providers (Together for DeepSeek-R1, Groq in
 // `reasoning_format=raw` mode, Fireworks Qwen with `/think` suffixes)
@@ -1768,7 +1768,7 @@ mod tests {
 
     #[test]
     fn stream_closed_abnormally_distinguishes_drop_from_completion() {
-        // F56: no finish_reason observed → the stream dropped mid-response and
+        // No finish_reason observed → the stream dropped mid-response and
         // must surface as a stream error, not a clean Ok.
         assert!(ended_without_terminal(None));
         // A real terminal finish_reason → clean completion.
@@ -1781,7 +1781,7 @@ mod tests {
     #[test]
     fn think_tags_stripped_via_feed_then_flush() {
         // The non-streaming InlineThinkTags path feeds the whole body then
-        // flushes, splitting reasoning out of content (#5).
+        // flushes, splitting reasoning out of content.
         let mut ts = ThinkTagState::new();
         let (mut text, mut reasoning) = ts.feed("<think>weighing</think>answer");
         let (t2, r2) = ts.flush();
@@ -1825,7 +1825,7 @@ mod tests {
 
     #[test]
     fn chat_completion_chunk_parses_usage_only_frame() {
-        // #123: a final usage-only frame carries no `choices`; with the field
+        // A final usage-only frame carries no `choices`; with the field
         // defaulted it must parse instead of failing "missing field choices".
         let chunk: ChatCompletionChunk = serde_json::from_str(
             r#"{"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}"#,
@@ -1979,7 +1979,7 @@ mod tests {
 
     #[test]
     fn cache_hit_does_not_double_count_input_total() {
-        // #6: OpenAI nests cached tokens inside prompt_tokens; input_total must
+        // OpenAI nests cached tokens inside prompt_tokens; input_total must
         // be 100 (the real input), not 100 + 40.
         let usage = token_usage_from_wire(UsageWire {
             prompt_tokens: Some(100),
@@ -2261,7 +2261,7 @@ mod tests {
         assert_eq!(messages_arr[0]["content"], "You are a helpful assistant.");
     }
 
-    /// Step 5h: OpenAI-compat doesn't expose per-block cache markers, so
+    /// OpenAI-compat doesn't expose per-block cache markers, so
     /// the dynamic MERMAID.md suffix is concatenated onto the static system
     /// message with a `---` separator. Single system message; both halves
     /// reach the model in one content payload.
@@ -2286,7 +2286,7 @@ mod tests {
     #[test]
     fn build_request_body_includes_tools_and_omits_temperature_for_reasoning() {
         // gpt-5-mini is a reasoning model: tools still pass through, but
-        // `temperature` must be omitted — OpenAI 400s on it (#124).
+        // `temperature` must be omitted — OpenAI 400s on it.
         let adapter = test_adapter();
         let messages = vec![ChatMessage::user("hi")];
         // v7: tools come from config (populated by the provider
@@ -2348,7 +2348,7 @@ mod tests {
 
     #[test]
     fn build_request_body_includes_temperature_for_non_reasoning_model() {
-        // A non-reasoning model (gpt-4o) still receives `temperature` (#124).
+        // A non-reasoning model (gpt-4o) still receives `temperature`.
         let adapter = OpenAICompatAdapter::new(
             test_profile(),
             "https://api.openai.com/v1".to_string(),
@@ -2657,7 +2657,7 @@ mod tests {
         assert_eq!(parsed[1].function.name, "fn_b");
     }
 
-    // --- ThinkTagState (Wave 6) ---
+    // --- ThinkTagState ---
 
     #[test]
     fn think_state_passes_plain_text_through() {

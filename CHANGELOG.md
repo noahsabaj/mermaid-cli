@@ -69,7 +69,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exited but has not been reaped yet. In a container whose pid 1 reaps late,
   a command that failed during startup was reported as started and running.
   The check now reads the process state from `/proc` first.
-
+- **Provider errors show the full message.** The TUI and `mermaid run`
+  built their error lines from a short fallback mapping, so the fuller one
+  in `mermaid-model` never ran: a 401 read "Backend error", a JSON error body
+  was printed raw instead of its `message`, and the `(request-id: ...,
+  cf-ray: ...)` line promised for provider failures never appeared. Errors
+  now go through that mapping: "Authentication failed", "Rate limited",
+  "Model not found", the provider's own message, and the request ids when
+  the response carried them.
 - **The highlighted row in `/load` and the rewind picker can be read.** Its
   meta, `(14 msg · 2026-01-01 12:34)` or `(#1 back)`, was drawn in
   `text_disabled` on a `text_disabled` band, the same colour, so it vanished

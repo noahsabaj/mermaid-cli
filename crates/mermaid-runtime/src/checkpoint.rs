@@ -87,7 +87,7 @@ pub fn create_checkpoint_for_task(
     origin: CheckpointOrigin,
 ) -> Result<CheckpointManifest> {
     // Collision-hardened id (salt+seq+nanos) — the old time-only id could repeat
-    // within a coarse-clock tick and overwrite a prior checkpoint's files (#117).
+    // within a coarse-clock tick and overwrite a prior checkpoint's files.
     let id = crate::storage::fresh_id("checkpoint");
     let root = data_dir()?.join("checkpoints").join(&id);
     let files_dir = root.join("files");
@@ -154,7 +154,7 @@ pub fn create_checkpoint_for_task(
     crate::write_atomic(&manifest_path, &serde_json::to_vec_pretty(&manifest)?)?;
 
     if let Ok(store) = RuntimeStore::open_default() {
-        // Don't swallow the insert error (#117): a failed insert means the
+        // Don't swallow the insert error: a failed insert means the
         // manifest+files are on disk but the DB has no row, so a later restore
         // can't find them. Roll the on-disk checkpoint back and surface it.
         if let Err(error) = store.checkpoints().create(NewCheckpoint {
@@ -219,9 +219,9 @@ pub fn restore_checkpoint(id: &str) -> Result<CheckpointManifest> {
 
     // Plan the restore as two ordered phases so a mid-way failure can't leave a
     // half-applied tree: validate + collect every write and delete first (recording
-    // each snapshot's validated SOURCE PATH, not its bytes — F71), then apply all
+    // each snapshot's validated SOURCE PATH, not its bytes), then apply all
     // writes (each reads one snapshot and writes it atomically) and only then the
-    // deletes. Prior state is moved aside into a staging dir (F72), so on any error
+    // deletes. Prior state is moved aside into a staging dir, so on any error
     // we roll the applied ops back best-effort — including non-empty directories —
     // instead of returning with the project half-restored.
     let mut writes: Vec<RestoreOp> = Vec::new();
@@ -265,7 +265,7 @@ pub fn restore_checkpoint(id: &str) -> Result<CheckpointManifest> {
                     continue;
                 },
             };
-            // Defer reading the snapshot until apply time (F71): the planner only
+            // Defer reading the snapshot until apply time: the planner only
             // records the validated source PATH, so the restore holds at most one
             // file in memory at a time instead of every snapshot at once.
             writes.push(RestoreOp::Write { target, source });
@@ -276,7 +276,7 @@ pub fn restore_checkpoint(id: &str) -> Result<CheckpointManifest> {
 
     // Stage prior state inside the project root so displaced files/dirs are moved
     // (rename), not held in memory or deleted outright: same-filesystem keeps the
-    // rename atomic, and a non-empty prior directory survives a rollback (F72). The
+    // rename atomic, and a non-empty prior directory survives a rollback. The
     // fresh, hidden name can't collide with a (already-resolved) restore target.
     let staging = project_root.join(format!(
         ".mermaid-restore.{}",
@@ -327,7 +327,7 @@ pub fn restore_checkpoint(id: &str) -> Result<CheckpointManifest> {
 /// delete so a failure can't strand the tree in a half-applied state. A write
 /// carries the validated snapshot SOURCE path (not its bytes); the bytes are read
 /// one file at a time at apply time, so peak memory is bounded by the largest
-/// single file rather than the whole checkpoint (F71).
+/// single file rather than the whole checkpoint.
 enum RestoreOp {
     Write { target: PathBuf, source: PathBuf },
     Delete { target: PathBuf },
@@ -336,7 +336,7 @@ enum RestoreOp {
 /// A target's prior state, captured for rollback. The displaced file or directory
 /// subtree (when the target existed) was moved into the staging area via rename,
 /// so rollback restores it by moving it back — no prior bytes are held in memory
-/// and a non-empty directory is preserved in full (F71/F72).
+/// and a non-empty directory is preserved in full.
 struct PriorState {
     target: PathBuf,
     /// Staging path the prior file/dir was renamed to, or `None` if the target did
@@ -390,8 +390,8 @@ fn remove_path(path: &Path) {
 
 /// Apply writes (each via the atomic temp+rename writer) then deletes. Prior state
 /// is moved aside into `staging` (rename) and recorded in `applied` so the caller
-/// can roll back on error. Reads at most one snapshot file into memory at a time
-/// (F71), and preserves a non-empty prior directory across rollback (F72).
+/// can roll back on error. Reads at most one snapshot file into memory at a time,
+/// and preserves a non-empty prior directory across rollback.
 fn apply_restore(
     writes: &[RestoreOp],
     deletes: &[RestoreOp],
@@ -403,7 +403,7 @@ fn apply_restore(
         if let RestoreOp::Write { target, source } = op {
             // Read just THIS snapshot (bounded by one file) BEFORE displacing the
             // target, so a missing/unreadable source fails without moving the prior
-            // file aside (F71).
+            // file aside.
             let bytes = std::fs::read(source).with_context(|| {
                 format!("failed to read checkpoint snapshot {}", source.display())
             })?;
@@ -425,7 +425,7 @@ fn apply_restore(
             && target.exists()
         {
             // Move the prior file/dir aside instead of deleting it outright, so a
-            // later failure can roll a non-empty directory subtree back (F72).
+            // later failure can roll a non-empty directory subtree back.
             let staged = stage_prior(target, staging, &mut counter)?;
             applied.push(PriorState {
                 target: target.clone(),
@@ -439,7 +439,7 @@ fn apply_restore(
 /// Best-effort undo of the ops in `applied`, newest first: remove whatever the
 /// restore put at each target, then move the staged prior file/directory back. A
 /// non-empty prior directory is restored in full because it was moved aside
-/// (rename) rather than deleted (F72).
+/// (rename) rather than deleted.
 fn rollback_restore(applied: &[PriorState]) {
     for prior in applied.iter().rev() {
         remove_path(&prior.target);
@@ -594,12 +594,12 @@ pub(crate) fn project_hash(path: &Path) -> String {
     crate::hex_lower(&hasher.finalize())
 }
 
-/// Best-effort GC of on-disk checkpoint directories older than `retention_days`
-/// (#130): removes `checkpoints/<id>/` whose mtime is past the window so the tree
+/// Best-effort GC of on-disk checkpoint directories older than `retention_days`:
+/// removes `checkpoints/<id>/` whose mtime is past the window so the tree
 /// can't grow without bound, while keeping recent (still-restorable) checkpoints.
 /// Returns the count removed; never fails the caller (a bad entry is skipped).
 ///
-/// F23 (RC-F): each pruned directory's DB row is deleted in the same pass.
+/// Each pruned directory's DB row is deleted in the same pass.
 /// Storage `gc()` only removes ARCHIVED checkpoint rows, so without this a
 /// never-archived old checkpoint would lose its on-disk directory here while its
 /// row survived — and a later [`restore_checkpoint`] would then fail on the
@@ -733,7 +733,7 @@ mod tests {
 
     #[test]
     fn restore_rejects_tampered_project_root() {
-        // #3: a manifest whose `project_path` is rewritten to `/` (so lexical
+        // A manifest whose `project_path` is rewritten to `/` (so lexical
         // containment passes for ANY absolute path) must be rejected — the
         // root can't be redirected to a filesystem root or disagree with the
         // DB-recorded path.
@@ -779,7 +779,7 @@ mod tests {
 
     #[test]
     fn mid_restore_failure_restores_nonempty_prior_directory() {
-        // F72: a restore that displaces a non-empty directory must put the whole
+        // A restore that displaces a non-empty directory must put the whole
         // subtree back when a later step fails — not just an empty dir. Drive
         // `apply_restore` to a real mid-way failure (a write whose snapshot source
         // is missing) AFTER a directory has been staged, then assert rollback

@@ -1,8 +1,8 @@
 //! What a fresh daemon does before it serves: reconcile state a crashed
 //! predecessor stranded, rebuild the session index, prune old rows and logs.
 
-/// Recover state stranded by a previous daemon's crash (#120, #118) and prune
-/// old runtime rows + checkpoint dirs (#130). Must run singleton-guarded — by
+/// Recover state stranded by a previous daemon's crash and prune
+/// old runtime rows + checkpoint dirs. Must run singleton-guarded — by
 /// the unix flock or the windows first-pipe-instance — so it executes once per
 /// live daemon. All best-effort.
 pub(super) fn startup_recovery() {

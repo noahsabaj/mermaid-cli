@@ -13,7 +13,7 @@
 //! env or clock read sneaks into `render()`, it fails here before the pinned
 //! snapshots start flaking across machines.
 //!
-//! Timezone: the suite is TZ-INDEPENDENT rather than TZ-pinned (#296). It used
+//! Timezone: the suite is TZ-INDEPENDENT rather than TZ-pinned. It used
 //! to set `TZ=UTC` around each scene — which is what kept it off Windows, where
 //! chrono reads the system zone and ignores `TZ`. That pinning did not work on
 //! unix either: chrono resolves the local zone once per process and caches it,

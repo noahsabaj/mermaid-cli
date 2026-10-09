@@ -179,7 +179,7 @@ async fn dispatch_interactive(cli: Cli, mut config: mermaid_domain::Config) -> R
         tracing::warn!(error = %err, "failed to persist last-used model");
     }
 
-    // F6 `--reasoning <level>`: overlay onto config so `State::new`
+    // `--reasoning <level>`: overlay onto config so `State::new`
     // picks it up via the per-model lookup. Also persist to disk so
     // subsequent sessions without the flag remember the choice.
     if let Some(level) = cli.reasoning {
@@ -191,7 +191,7 @@ async fn dispatch_interactive(cli: Cli, mut config: mermaid_domain::Config) -> R
 
     let cwd = cli.path.clone().unwrap_or(std::env::current_dir()?);
 
-    // F6 `--continue` / `--resume [id]`: optionally load a prior
+    // `--continue` / `--resume [id]`: optionally load a prior
     // conversation and seed the State with its history before the
     // first frame. Mutual exclusion is enforced by clap on Cli.
     // Bare --resume draws its picker before the TUI exists; it takes the
@@ -337,7 +337,7 @@ async fn dispatch_non_interactive(
         tracing::warn!(error = %err, "failed to persist last-used model");
     }
 
-    // F6 `--reasoning <level>`: same overlay as the interactive path.
+    // `--reasoning <level>`: same overlay as the interactive path.
     if let Some(level) = cli.reasoning {
         config.reasoning_per_model.insert(model_id.clone(), level);
         if let Err(err) = persist_reasoning_for_model(&model_id, level) {

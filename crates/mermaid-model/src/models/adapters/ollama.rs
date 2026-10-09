@@ -35,12 +35,12 @@ struct StreamAccumulator {
     /// Set once the terminal `done` chunk reports real eval counts. A stream cut
     /// before `done` (or a `done` without counts) leaves this `false`, so
     /// `usage()` returns `None` rather than a zero `TokenUsage` that would reset
-    /// the reducer's context gauge (F54, mirrors gemini's `saw_usage` / #125).
+    /// the reducer's context gauge (mirrors gemini's `saw_usage`).
     saw_usage: bool,
     /// Ollama's `done_reason` from the terminal chunk, mapped to a
-    /// `FinishReason` for the final `ModelResponse` instead of `None` (#13).
+    /// `FinishReason` for the final `ModelResponse` instead of `None`.
     done_reason: Option<String>,
-    /// True once Ollama's terminal `done` chunk has been observed (F56). The
+    /// True once Ollama's terminal `done` chunk has been observed. The
     /// `done` chunk is the authoritative terminal frame; a stream that ends
     /// without it was dropped mid-response. Tracked SEPARATELY from `done_reason`
     /// on purpose: the context-full truncation arrives as a real `done` chunk
@@ -54,13 +54,13 @@ impl StreamAccumulator {
     /// Final token usage, or `None` when the stream never reported eval counts
     /// (e.g. it was cut before Ollama's terminal `done` chunk). Returning `None`
     /// rather than a zero `TokenUsage` keeps the reducer's context gauge from
-    /// being reset to zero (F54, mirrors gemini's `saw_usage` guard / #125).
+    /// being reset to zero (mirrors gemini's `saw_usage` guard).
     fn usage(&self) -> Option<TokenUsage> {
         self.saw_usage
             .then(|| TokenUsage::provider(self.prompt_tokens, self.completion_tokens))
     }
 
-    /// F56: whether the stream closed abnormally — it ended before Ollama's
+    /// Whether the stream closed abnormally — it ended before Ollama's
     /// terminal `done` chunk was ever observed (a connection dropped
     /// mid-response). Returning a clean `Ok` here would be indistinguishable
     /// from a real completion. Keyed off `saw_done` (the terminal frame), NOT
@@ -107,7 +107,7 @@ pub struct OllamaAdapter {
     /// Whether the model advertises the `thinking` capability via `/api/show`.
     /// Probed lazily on the first chat and cached, so `new` stays network-free.
     /// `None` until resolved; recent Ollama 400s a `think` field sent to a
-    /// non-thinking model, so the send is gated on this (#122).
+    /// non-thinking model, so the send is gated on this.
     thinking_cap: tokio::sync::OnceCell<bool>,
     /// Whether the model advertises the `vision` capability via `/api/show`.
     /// Probed lazily and cached like `thinking_cap`. Drives the no-vision-model
@@ -150,7 +150,7 @@ fn uses_effort_string_think(model_name: &str) -> bool {
 /// learn from, which is why the catalog hint picks the string there. Every
 /// other model gets the bool, gated by `supports_thinking` (the model's
 /// probed `thinking` capability): a non-thinking model 400s on a stray
-/// `think` (#122). A shape this model's server rejected anyway is stepped
+/// `think`. A shape this model's server rejected anyway is stepped
 /// past (see `learning`). Returns `None` when no `think` field should be
 /// sent at all.
 fn think_for_ollama(
@@ -550,9 +550,9 @@ impl OllamaAdapter {
 
         // Capture token usage + stop reason from the `done` chunk. `saw_usage`
         // is set only when a real eval count arrives, so a stream cut before
-        // `done` reports `None` usage instead of zero (F54).
+        // `done` reports `None` usage instead of zero.
         if json_chunk.done {
-            // F56: the terminal frame arrived — the stream completed normally
+            // The terminal frame arrived — the stream completed normally
             // (even when `done_reason`/eval counts are absent).
             acc.saw_done = true;
             if let Some(count) = json_chunk.prompt_eval_count {
@@ -632,7 +632,7 @@ impl OllamaAdapter {
         // `think` parameter: most Ollama models accept `think: bool`, gpt-oss
         // requires a string enum, and a model that doesn't advertise `thinking`
         // must not receive the field at all (it 400s). `think_for_ollama`
-        // returns `None` in that last case so the key is omitted (#122).
+        // returns `None` in that last case so the key is omitted.
         if let Some(think) = think_for_ollama(
             &self.model_name,
             config.reasoning,
@@ -956,7 +956,7 @@ impl StreamProtocol for OllamaStream {
     }
 
     fn finish(self, _out: &mut Vec<StreamEvent>) -> Result<ModelResponse> {
-        // F56: a stream that ended before Ollama's terminal `done` chunk was
+        // A stream that ended before Ollama's terminal `done` chunk was
         // dropped mid-response. Surface it as a stream error instead of a clean
         // `Ok` that's indistinguishable from a real completion. Keyed off the
         // `done` frame (not `done_reason`), so a context-full truncation — a
@@ -971,7 +971,7 @@ impl StreamProtocol for OllamaStream {
         }
 
         // `None` when the stream never reported eval counts, so the reducer keeps
-        // its estimate instead of resetting the context gauge to zero (F54).
+        // its estimate instead of resetting the context gauge to zero.
         // Computed before the fields move below so `usage()` can borrow `acc`.
         let usage = self.acc.usage();
         let stop_reason = self.acc.done_reason.as_deref().map(map_ollama_done_reason);
@@ -986,7 +986,7 @@ impl StreamProtocol for OllamaStream {
             Some(self.acc.tool_calls)
         };
 
-        // F3: the adapter never emits a terminal `Done`. The provider
+        // The adapter never emits a terminal `Done`. The provider
         // wrapper (`providers::model::*`) emits the authoritative
         // `StreamEvent::Done { usage, provider_continuation, stop_reason }`
         // from the returned `ModelResponse`; emitting one here would race it
@@ -1021,7 +1021,7 @@ struct OllamaStreamChunk {
 #[derive(Debug, Serialize, Deserialize)]
 struct OllamaMessage {
     role: String,
-    // F55: a frame may omit `content` (vs sending `""`) — e.g. a thinking-only
+    // A frame may omit `content` (vs sending `""`) — e.g. a thinking-only
     // or tool-call-only delta. Without `default` the whole-chunk parse fails
     // ("missing field content") and tears down the entire stream, matching the
     // `thinking`/`tool_calls` siblings which already default.
@@ -1055,7 +1055,7 @@ struct OllamaShowResponse {
     #[serde(default)]
     model_info: serde_json::Value,
     /// Advertised capabilities (`completion`, `tools`, `thinking`, `vision`, …).
-    /// Absent on older Ollama; used to gate the `think` field (#122).
+    /// Absent on older Ollama; used to gate the `think` field.
     #[serde(default)]
     capabilities: Vec<String>,
 }
@@ -1115,7 +1115,7 @@ fn append_reason_hint(error: ModelError, hint: &str) -> ModelError {
 
 /// Parse one newline-delimited Ollama stream frame into an `OllamaStreamChunk`.
 ///
-/// F53: a mid-stream `{"error":"..."}` frame lacks the `message`/`done` fields
+/// A mid-stream `{"error":"..."}` frame lacks the `message`/`done` fields
 /// of `OllamaStreamChunk`, so a direct typed parse fails with a generic
 /// `ParseError("missing field `message`")` and the real provider error survives
 /// only inside `raw`. Check for a top-level `error` string first and surface it
@@ -1141,7 +1141,7 @@ fn parse_ollama_stream_frame(line: &str) -> Result<OllamaStreamChunk> {
 /// Map Ollama's `done_reason` to the shared `FinishReason`. Ollama emits `"stop"`
 /// (natural end) and `"length"` (hit `num_predict`/context); anything else
 /// (operational reasons like `"load"`) is preserved via `Other` so it still
-/// surfaces rather than being dropped to `None` (#13).
+/// surfaces rather than being dropped to `None`.
 fn map_ollama_done_reason(s: &str) -> FinishReason {
     match s {
         "stop" => FinishReason::Stop,
@@ -1203,7 +1203,7 @@ fn normalize_url(url: &str) -> String {
 
     // Add a scheme if missing, chosen by host class: loopback / private / LAN
     // hosts may use cleartext http, but a public host defaults to https so
-    // prompt data isn't sent over the open internet in the clear (#86). An
+    // prompt data isn't sent over the open internet in the clear. An
     // explicit scheme (http or https) is always respected. Mirrors the factory's
     // `validate_provider_base_url` gate.
     if !normalized.starts_with("http://") && !normalized.starts_with("https://") {
@@ -1323,7 +1323,7 @@ mod tests {
 
     #[test]
     fn normalize_url_public_host_defaults_to_https() {
-        // #86: a scheme-less public host must not be addressed over cleartext.
+        // A scheme-less public host must not be addressed over cleartext.
         assert_eq!(
             normalize_url("my-remote-ollama.com:11434"),
             "https://my-remote-ollama.com:11434"
@@ -1337,7 +1337,7 @@ mod tests {
         assert_eq!(normalize_url("127.0.0.1:11434"), "http://127.0.0.1:11434");
     }
 
-    // --- think mapping from ReasoningLevel (Step 4) ---
+    // --- think mapping from ReasoningLevel ---
 
     use super::OllamaAdapter;
     use crate::models::config::{BackendConfig, ModelConfig};
@@ -1537,7 +1537,7 @@ mod tests {
 
     #[tokio::test]
     async fn ollama_request_body_omits_think_when_unsupported() {
-        // #122: a model that doesn't advertise the `thinking` capability must
+        // A model that doesn't advertise the `thinking` capability must
         // not receive a `think` field at all — recent Ollama 400s on it.
         let adapter = make_adapter().await;
         let config = ModelConfig {
@@ -1746,8 +1746,8 @@ mod tests {
 
     #[test]
     fn process_stream_chunk_captures_done_reason_and_saturates_tokens() {
-        // #13: the terminal chunk's done_reason is recorded (was hardcoded None).
-        // #49: token totals use saturating_add (here near usize::MAX).
+        // The terminal chunk's done_reason is recorded (was hardcoded None).
+        // Token totals use saturating_add (here near usize::MAX).
         use super::{OllamaMessage, OllamaStreamChunk, StreamAccumulator};
         let mut acc = StreamAccumulator {
             content: CappedText::new(),
@@ -1775,10 +1775,10 @@ mod tests {
         assert_eq!(acc.done_reason.as_deref(), Some("length"));
         assert_eq!(acc.prompt_tokens, usize::MAX);
         assert_eq!(acc.completion_tokens, 10);
-        // F54: real eval counts arrived → usage is reported (not None).
+        // Real eval counts arrived → usage is reported (not None).
         assert!(acc.saw_usage);
         assert!(acc.usage().is_some());
-        // #49: the total saturates instead of wrapping/panicking.
+        // The total saturates instead of wrapping/panicking.
         assert_eq!(
             acc.prompt_tokens.saturating_add(acc.completion_tokens),
             usize::MAX
@@ -1800,7 +1800,7 @@ mod tests {
 
     #[test]
     fn stream_usage_is_none_when_counts_absent_then_some_after_done() {
-        // F54: a stream cut before the terminal `done` chunk (no eval counts)
+        // A stream cut before the terminal `done` chunk (no eval counts)
         // must report `None` usage so the reducer keeps its estimate instead of
         // resetting the context gauge to zero. A real `done` flips it to `Some`.
         use super::{OllamaMessage, OllamaStreamChunk};
@@ -1847,7 +1847,7 @@ mod tests {
 
     #[test]
     fn closed_abnormally_until_terminal_done_chunk_seen() {
-        // F56: a stream is abnormal until Ollama's terminal `done` chunk lands.
+        // A stream is abnormal until Ollama's terminal `done` chunk lands.
         use super::{OllamaMessage, OllamaStreamChunk};
         let mut acc = empty_accumulator();
         // Fresh / before any frame → abnormal (nothing terminal observed yet).
@@ -1925,7 +1925,7 @@ mod tests {
 
     #[test]
     fn stream_frame_error_becomes_typed_provider_error() {
-        // F53: a mid-stream `{"error":"..."}` frame must surface as a typed
+        // A mid-stream `{"error":"..."}` frame must surface as a typed
         // ProviderError carrying the real message, not a generic
         // `ParseError("missing field `message`")`.
         use super::{BackendError, ModelError, parse_ollama_stream_frame};
@@ -1956,7 +1956,7 @@ mod tests {
 
     #[test]
     fn ollama_message_defaults_missing_content() {
-        // F55: a frame that omits `content` (vs sending `""`) must still parse —
+        // A frame that omits `content` (vs sending `""`) must still parse —
         // `content` defaults to "" rather than tearing down the whole stream.
         let chunk: super::OllamaStreamChunk = serde_json::from_str(
             r#"{"message":{"role":"assistant","thinking":"hmm"},"done":false}"#,
@@ -1966,7 +1966,7 @@ mod tests {
         assert_eq!(chunk.message.thinking.as_deref(), Some("hmm"));
     }
 
-    /// Step 5h: Ollama doesn't cache, so the dynamic MERMAID.md suffix is
+    /// Ollama doesn't cache, so the dynamic MERMAID.md suffix is
     /// concatenated onto the static system message with a `---` separator.
     /// Both halves reach the model in one system message payload.
     #[tokio::test]

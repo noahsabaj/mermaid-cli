@@ -148,7 +148,7 @@ impl ApprovalBroker {
         if let Some(entry) = entry {
             // An empty key marks a non-allowlistable action (content-bearing
             // external tools): never persist it, so "approve always" can't be
-            // recorded for them even if the choice somehow arrives (#6, #31).
+            // recorded for them even if the choice somehow arrives.
             if decision == ApprovalDecision::ApproveAlways && !entry.allowlist_key.is_empty() {
                 self.allowlist
                     .lock()
@@ -165,7 +165,7 @@ impl ApprovalBroker {
 /// arguments. A blanket "don't ask again" for these is unsafe — it would mean
 /// "always type anything" or "always run any MCP tool" — so they are
 /// non-allowlistable: an empty key, which the gate and modal treat as "no
-/// approve-always" (#6, #31).
+/// approve-always".
 /// The filesystem tools whose external-path approvals are scoped to the
 /// target's directory (see [`allowlist_key`]).
 const FILE_TOOLS: &[&str] = &[
@@ -243,7 +243,7 @@ pub fn is_domain_allowed(allowed_domains: &[String], url_or_command: &str) -> bo
 /// - `execute_command` keys on the **full normalized command** (whitespace
 ///   collapsed), so approving `curl https://safe.example` does NOT also clear
 ///   `curl https://evil.example` — argv0 keying was too coarse for a tool whose
-///   danger lives entirely in its arguments (#6). A command run OUTSIDE the
+///   danger lives entirely in its arguments. A command run OUTSIDE the
 ///   project additionally keys on its working directory: `make` approved in
 ///   the project must not cover `make` in a directory whose Makefile the
 ///   model chose later, since the same string runs different code there.
@@ -325,7 +325,7 @@ mod tests {
     #[test]
     fn allowlist_key_is_per_tool_with_full_command() {
         assert_eq!(allowlist_key("write_file", None, None), "write_file");
-        // #6: execute_command keys on the FULL normalized command, so approving
+        // Execute_command keys on the FULL normalized command, so approving
         // one invocation can't clear a different-argument one.
         assert_eq!(
             allowlist_key("execute_command", Some("ls -la"), None),
@@ -340,7 +340,7 @@ mod tests {
 
     #[test]
     fn allowlist_key_distinguishes_argument_variants() {
-        // #6: approving `curl https://safe` must NOT also clear `curl https://evil`.
+        // Approving `curl https://safe` must NOT also clear `curl https://evil`.
         assert_ne!(
             allowlist_key("execute_command", Some("curl https://safe.example"), None),
             allowlist_key("execute_command", Some("curl https://evil.example"), None),
@@ -409,7 +409,7 @@ mod tests {
 
     #[test]
     fn content_bearing_tools_are_non_allowlistable() {
-        // #6/#31: a blanket "approve always" for these is unsafe (their risk is
+        // A blanket "approve always" for these is unsafe (their risk is
         // context-dependent), so the key is empty ⇒ non-allowlistable.
         for tool in [
             "type_text",
