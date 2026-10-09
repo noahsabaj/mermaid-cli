@@ -269,13 +269,15 @@ impl StdioTransport {
             Ok(Ok(value)) => value,
             Ok(Err(_)) => {
                 self.pending.lock().await.remove(&id);
-                return Err(anyhow!("MCP response channel closed unexpectedly"));
+                return Err(ConnectionClosed.into());
             },
             Err(_) => {
                 self.pending.lock().await.remove(&id);
-                return Err(anyhow!(
-                    "MCP request timed out after {response_timeout_secs}s: {method}"
-                ));
+                return Err(RequestTimeout {
+                    method: method.to_string(),
+                    secs: response_timeout_secs,
+                }
+                .into());
             },
         };
 
@@ -304,6 +306,11 @@ impl StdioTransport {
             .await
             .map_err(|_| anyhow!("Timed out flushing MCP notification (method: {method})"))??;
         Ok(())
+    }
+
+    /// True once the child process has exited.
+    pub async fn has_exited(&self) -> bool {
+        matches!(self.child.lock().await.try_wait(), Ok(Some(_)))
     }
 
     /// Gracefully shut down the MCP server process per MCP spec guidance:
@@ -414,12 +421,15 @@ impl Transport {
         }
     }
 
-    /// Like [`Self::send_request`], but with an explicit response-wait budget.
-    pub async fn send_request_with_timeout(
+    /// Like [`Self::send_request`], but with an explicit response-wait budget
+    /// and extra HTTP headers (the 2026-07-28 `Mcp-Name` / `Mcp-Param-*`
+    /// headers; stdio has no headers and ignores them).
+    pub async fn send_request_with(
         &self,
         method: &str,
         params: Value,
         response_timeout_secs: u64,
+        headers: &reqwest::header::HeaderMap,
     ) -> Result<Value> {
         match self {
             Self::Stdio(t) => {
@@ -427,9 +437,34 @@ impl Transport {
                     .await
             },
             Self::Http(t) => {
-                t.send_request_with_timeout(method, params, response_timeout_secs)
+                t.send_request_with_headers(method, params, response_timeout_secs, headers)
                     .await
             },
+        }
+    }
+
+    /// True for a remote (Streamable HTTP) server.
+    pub fn is_http(&self) -> bool {
+        matches!(self, Self::Http(_))
+    }
+
+    /// Switch the transport to the 2026-07-28 ("modern") protocol: HTTP sends
+    /// `MCP-Protocol-Version: 2026-07-28` and `Mcp-Method` on every request
+    /// and keeps no session. `None` goes back to the session-based shape.
+    /// No-op on stdio, which has no headers.
+    pub fn set_modern(&self, modern: Option<&str>) {
+        match self {
+            Self::Stdio(_) => {},
+            Self::Http(t) => t.set_modern(modern),
+        }
+    }
+
+    /// True when a stdio server process has exited (an HTTP server never
+    /// reports that).
+    pub async fn has_exited(&self) -> bool {
+        match self {
+            Self::Stdio(t) => t.has_exited().await,
+            Self::Http(_) => false,
         }
     }
 
@@ -460,16 +495,77 @@ impl Transport {
     }
 }
 
+/// The stdio server closed its stdout before answering: it exited or
+/// crashed. Typed so the era probe can tell "the probe ended the server"
+/// from "the server answered with an error".
+#[derive(Debug)]
+pub(super) struct ConnectionClosed;
+
+impl std::fmt::Display for ConnectionClosed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("MCP response channel closed unexpectedly")
+    }
+}
+
+impl std::error::Error for ConnectionClosed {}
+
+/// No response within the request's budget. Typed so the stdio era probe
+/// can treat silence as "legacy server".
+#[derive(Debug)]
+pub(super) struct RequestTimeout {
+    pub method: String,
+    pub secs: u64,
+}
+
+impl std::fmt::Display for RequestTimeout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "MCP request timed out after {}s: {}",
+            self.secs, self.method
+        )
+    }
+}
+
+impl std::error::Error for RequestTimeout {}
+
+/// A JSON-RPC `error` member, kept typed so callers can act on its code
+/// (era detection reads the 2026-07-28 protocol errors).
+#[derive(Debug, Clone)]
+pub(super) struct JsonRpcError {
+    pub code: i64,
+    pub message: String,
+    pub data: Option<Value>,
+}
+
+impl JsonRpcError {
+    /// Parse a JSON-RPC `error` object.
+    pub(super) fn from_error_member(error: &Value) -> Self {
+        Self {
+            code: error.get("code").and_then(|c| c.as_i64()).unwrap_or(-1),
+            message: error
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("Unknown error")
+                .to_string(),
+            data: error.get("data").cloned(),
+        }
+    }
+}
+
+impl std::fmt::Display for JsonRpcError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "MCP error (code {}): {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for JsonRpcError {}
+
 /// Turn a full JSON-RPC response object into its `result`, mapping a JSON-RPC
-/// `error` member to an `Err`. Shared by both transports.
+/// `error` member to an `Err` (a [`JsonRpcError`]). Shared by both transports.
 pub(super) fn extract_jsonrpc_result(response: Value) -> Result<Value> {
     if let Some(error) = response.get("error") {
-        let code = error.get("code").and_then(|c| c.as_i64()).unwrap_or(-1);
-        let message = error
-            .get("message")
-            .and_then(|m| m.as_str())
-            .unwrap_or("Unknown error");
-        return Err(anyhow!("MCP error (code {code}): {message}"));
+        return Err(JsonRpcError::from_error_member(error).into());
     }
     response
         .get("result")

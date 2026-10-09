@@ -98,6 +98,8 @@ pub struct ModelConfig {
 pub struct NativeTools {
     pub text_editor: bool,
     pub shell: bool,
+    /// Anthropic's computer toolset in place of Mermaid's `computer` tool.
+    pub computer: bool,
 }
 
 /// Provider-side compaction for one turn: once the prompt passes

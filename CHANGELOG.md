@@ -26,6 +26,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `[providers.<name>]` entries, keep Chat Completions; a proxy that serves only
   Chat Completions can be set up as a custom provider. Meta's adapter shares
   the new Responses code.
+- **Mermaid speaks MCP 2026-07-28, the newest protocol revision.** Each
+  server gets a `server/discover` request first. A 2026-07-28 server then
+  gets stateless requests with the version, client info and capabilities in
+  `_meta`, with no `initialize` handshake or session. Over HTTP the requests
+  also carry `Mcp-Method`, `Mcp-Name` and the `Mcp-Param-*` headers a tool
+  asks for with `x-mcp-header`, and a tool with invalid annotations is left
+  out. A tool call that answers `input_required` with only a `requestState`
+  is sent again with it. Servers that speak only 2025-11-25 keep working:
+  an error, an HTTP `4xx` or a silent stdio server falls back to the
+  `initialize` handshake, and a stdio server that exits on the probe is
+  started again for it. `x-mcp-header` is removed from the schemas the
+  model sees.
 - **Mermaid reads Claude Code's files.** A user who moved from Claude Code
   used to lose their instructions, skills, commands and agents, because
   Mermaid read only `AGENTS.md`, `MERMAID.md` and `.mermaid/skills/`. Now
@@ -88,6 +100,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   appears in its output, or a timeout of up to an hour passes (Esc ends it),
   `stop` ends the process tree, and `list` shows the session's processes. It
   reaches only processes this session started, never a raw pid.
+- **The model can use the screen: the `computer` tool, off by default.** With
+  `computer = true` under `[tools]`, a vision model takes screenshots and
+  drives the mouse and keyboard of the user's real screen. Claude gets
+  Anthropic's computer toolset (`computer_toolset_20260801`), the tool it is
+  trained on, rewritten onto Mermaid's `computer` tool like the text editor;
+  other models call that tool directly with the same actions. Mermaid only
+  does the physics: each screenshot is fitted to 1568 px and 1.15 megapixels,
+  the model's coordinates are scaled back to the screen, and input actions
+  wait half a second for the screen to change. Actions in one message run in
+  order, and after one fails the rest are not run. Screenshots, `zoom` and
+  `cursor_position` run in every safety mode; mouse and keyboard actions are
+  gated as external access (`read_only` blocks them, `ask` asks for each).
+  Windows and macOS use xcap and enigo; Linux speaks X11 directly, so no C
+  library is linked. Wayland is not supported yet. Off by default because
+  every screenshot sends the screen to the model's provider.
 
 ### Fixed
 

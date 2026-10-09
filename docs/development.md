@@ -1,11 +1,8 @@
 # Development
 
-Contributor guardrails live in [`AGENTS.md`](../AGENTS.md) (MVU purity, the no-emoji
-rule, no back-compat shims, the ratchet baselines). The one-command pre-PR gate is:
-
-```
-just check    # cargo fmt --check + clippy -D warnings + guards + cargo nextest run
-```
+Contributor guardrails and the pre-PR gate (`just check`) live in
+[`AGENTS.md`](../AGENTS.md) (MVU purity, the no-emoji rule, no back-compat
+shims, the ratchet baselines, the commands).
 
 Tests run under [`cargo-nextest`](https://nexte.st) (`cargo install cargo-nextest --locked`),
 which gives every test its own process and applies the retry policy in
@@ -13,23 +10,11 @@ which gives every test its own process and applies the retry policy in
 and is not a supported way to run the suite. There are no doctests, so nextest
 skipping them loses nothing.
 
-Or run the pieces directly if you don't have [`just`](https://github.com/casey/just):
-
-```
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo nextest run --workspace
-```
-
-That gate runs the same suites on every platform, including the render
+The gate runs the same suites on every platform, including the render
 snapshots. What is still `#[cfg(unix)]` is per-test and covers what Windows does
 not have — file modes, signals, `sh`, seccomp, Landlock, Seatbelt — with
 `#[cfg(windows)]` tests covering the `cmd`, ConPTY and clipboard paths in their
 place.
-
-CI additionally runs dependency-free source guards (`.github/scripts/`): no
-emoji/pictographs in source, and `mermaid-domain` stays a pure MVU core (no I/O, no
-wall clock).
 
 A PR runs the suite on Linux, macOS and Windows against **stable**, and all
 three must pass to merge. `beta` and `nightly` answer a different question — is
@@ -44,8 +29,7 @@ Branch off `main`, never commit to it directly. Then, in one commit:
 
 1. Bump the version in **every** manifest — `Cargo.toml` plus each
    `crates/*/Cargo.toml`, both the `[package] version` and every
-   intra-workspace `version =` requirement. That is 13 strings across four
-   manifests as of v0.23.0.
+   intra-workspace `version =` requirement.
 2. Run `cargo update --workspace` so `Cargo.lock` follows.
 3. Cut `## [Unreleased]` in the CHANGELOG to `## [x.y.z] - <date>`, leaving a
    fresh empty `## [Unreleased]`. Update the link block at the bottom: add a
@@ -54,7 +38,7 @@ Branch off `main`, never commit to it directly. Then, in one commit:
 Then verify, **before tagging**:
 
 ```
-just preflight 0.23.0    # the target version, with or without a leading `v`
+just preflight X.Y.Z     # the target version, with or without a leading `v`
 just check
 ```
 
@@ -68,13 +52,14 @@ five-second local check.
 Open a PR, wait for all legs, merge. Then tag the merged commit and push:
 
 ```
-git tag -a v0.23.0 -m "v0.23.0"
-git push origin v0.23.0
+git tag -a vX.Y.Z -m "vX.Y.Z"
+git push origin vX.Y.Z
 ```
 
-The tag triggers `release.yml`: it verifies the versions again, builds five
-platforms, publishes the crates in dependency order (model, runtime, domain,
-cli), then the package managers.
+Where you cannot push a tag, run `release.yml` from the Actions tab
+(`workflow_dispatch`) on `main` with version `vX.Y.Z`; it creates the tag.
+The workflow verifies the versions again, builds every platform, then
+publishes the crates and the package managers.
 
 If a build fails, nothing is published — the publish jobs `needs:` the builds.
 Confirm with `gh release view` and crates.io, then delete the tag

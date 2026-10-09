@@ -54,7 +54,7 @@ const TOOL_IMAGE_ELIDED_MARKER: &str = "\n[tool image not persisted]";
 /// Top-level key in a checkpoint file naming the last log `seq` folded into
 /// it. Absent on legacy snapshots and on any file written before the log
 /// existed, which is exactly the signal to fold from zero instead of
-/// trusting the checkpoint. See `docs/design/fold-first-resume.md`.
+/// trusting the checkpoint.
 const CHECKPOINT_SEQ_KEY: &str = "checkpoint_seq";
 
 /// Return a sanitized copy of `messages` with tool-returned image bytes

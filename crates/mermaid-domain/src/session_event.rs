@@ -1,9 +1,8 @@
 //! The append-only session event log: one durable schema for session content.
 //!
-//! Design: `docs/design/event-log.md`. A session's committed history is a
-//! sequence of [`SessionEvent`]s, one JSON line each, at
-//! `.mermaid/conversations/<id>.jsonl`. The conversation snapshot stays the
-//! resume authority; the log is the history behind it — [`fold_session`]
+//! A session's committed history is a sequence of [`SessionEvent`]s, one JSON
+//! line each, at `.mermaid/conversations/<id>.jsonl`. The log is the resume
+//! authority; the `<id>.json` snapshot is a checkpoint of it — [`fold_session`]
 //! rebuilds the snapshot from the events, and the `fold == snapshot`
 //! invariant test in `reducer.rs` is what keeps every transcript mutation
 //! honest about emitting.
@@ -237,8 +236,7 @@ pub fn fold_session(events: impl IntoIterator<Item = SessionEvent>) -> Option<Co
 }
 
 /// Replay `events` onto a conversation that already holds an earlier prefix
-/// of the same log — the checkpoint half of fold-first resume (see
-/// `docs/design/fold-first-resume.md`).
+/// of the same log — the checkpoint half of fold-first resume.
 ///
 /// This is [`fold_session`] minus the identity step, and it is the same
 /// `apply` either way, so a resume that replays a tail and one that folds
