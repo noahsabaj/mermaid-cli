@@ -57,6 +57,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `status_bar`, `user_message`, `assistant_message`, `system_message`,
   `mode_normal`, `mode_accept_edits` and `mode_bypass_all`. All three themes
   defined them and no widget read them.
+- **Code nothing called.** A sweep that let the compiler see past `pub`
+  found functions and fields with no caller left in the workspace:
+  `ActionRequest::cwd` and `resolve_dir` (only plan mode read them; the exec
+  tool still set the field), `ReasoningExtraction::parse_delta` and
+  `ChatMessage::extract_thinking` (the adapters parse inline),
+  `Cmd::is_turn_scoped` (the effect runner uses `scope_turn`),
+  `PromptConfig::render_system_prompt`, `StartupConfig`,
+  `EffectRunner::pair_with_bindings`, `TurnScope::join_next`,
+  `Engine::is_settled`, `EngineGone::into_message`, five `RuntimeClient`
+  wrappers the CLI never called, and the input widget's unread cursor
+  state. Comments and manifests that named moved or deleted files now name
+  the real ones. No behaviour changes.
 
 ## [0.29.0] - 2026-09-30
 

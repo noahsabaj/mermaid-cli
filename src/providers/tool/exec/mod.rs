@@ -271,10 +271,6 @@ impl ToolExecutor for ExecuteCommandTool {
         let mut policy_request =
             mermaid_runtime::ActionRequest::new("execute_command", category, command.to_string());
         policy_request.command = Some(command.to_string());
-        // The gate must resolve command-relative paths against the directory
-        // this command actually runs in (`cmd.current_dir` below), not the
-        // project root — see `ActionRequest::cwd`.
-        policy_request.cwd = Some(effective_workdir.clone());
         // Resolved before the gate so the gate and the spawn agree on whether
         // this command runs contained: the flag below is only ever set for a
         // spawn that will carry `--read-only`.

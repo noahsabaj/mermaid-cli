@@ -418,8 +418,8 @@ pub(crate) async fn run_command(
             // able to outlive the turn on Ctrl+B detach; on Esc-cancel we've
             // just force-killed its whole process tree, so its `await`s would
             // unblock at EOF momentarily anyway — the abort just makes teardown
-            // immediate before we drop the tee log. See the doc note in
-            // `src/domain/reducer.rs` and `docs/architecture.md`.
+            // immediate before we drop the tee log. See the module doc of
+            // `crates/mermaid-domain/src/reducer/mod.rs`.
             driver.abort();
             let _ = tokio::fs::remove_file(&log_path).await;
             Ok(CommandRunResult::Cancelled)

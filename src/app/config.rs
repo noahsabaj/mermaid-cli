@@ -1,8 +1,8 @@
 //! Loading, layering, merging and persisting [`mermaid_domain::Config`].
 //!
-//! The types themselves live in `src/domain/config.rs` — see that module for
-//! why. This half is the impure one: it reads files, walks the layer cascade
-//! (defaults < user < project < session flags) and writes back.
+//! The types themselves live in `crates/mermaid-domain/src/config.rs` — see
+//! that module for why. This half is the impure one: it reads files, walks the
+//! layer cascade (defaults < user < project < session flags) and writes back.
 
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
@@ -1863,7 +1863,7 @@ port = 11434
             .push("extra instructions".to_string());
 
         assert_eq!(
-            cfg.prompt.render_system_prompt("default"),
+            cfg.prompt.append_extras(cfg.prompt.base_prompt("default")),
             "base\n\nextra instructions"
         );
 
