@@ -46,6 +46,7 @@ pub use session_header::{
 };
 pub use slash_palette::SlashPaletteWidget;
 pub use status::StatusWidget;
+pub(crate) use status::goal_segment;
 pub use status_line::{AgentPanelRow, build_status_lines, spinner_glyph};
 pub use tasks::{build_task_lines, tasks_height, tasks_visible};
 
@@ -131,6 +132,7 @@ pub enum GenerationStatus {
     Streaming,
     RunningTools,
     Compacting,
+    CheckingGoal,
     Cancelling,
 }
 
@@ -144,6 +146,7 @@ impl GenerationStatus {
             Self::Streaming => "Streaming",
             Self::RunningTools => "Running tools",
             Self::Compacting => "Compacting",
+            Self::CheckingGoal => "Checking goal",
             Self::Cancelling => "Cancelling",
         }
     }
@@ -165,6 +168,7 @@ impl GenerationStatus {
             },
             TurnState::ExecutingTools { .. } => Self::RunningTools,
             TurnState::Compacting { .. } => Self::Compacting,
+            TurnState::EvaluatingGoal { .. } => Self::CheckingGoal,
             TurnState::Cancelling { .. } => Self::Cancelling,
         }
     }

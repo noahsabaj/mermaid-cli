@@ -148,6 +148,16 @@ checkpoint_on_mutation = true
 # Mouse and keyboard actions are gated like other external access.
 # computer = false
 
+[goal]
+# Model that checks a `/goal` after each run. Omit to check with the session's
+# model; a small, fast model is enough, because the check reads the end of the
+# conversation and answers in one line. User config only: a project file cannot
+# set it.
+# model = "<provider>/<small-fast-model>"
+# Goal turns that may run without a message from you before the goal pauses.
+# Each message from you starts the count again. 0 means no limit.
+# max_turns = 50
+
 [ui]
 # TUI color theme: "dark" (default) or "light". Switch live with
 # `/theme dark|light` (persists here); the `--resume` picker follows it too.

@@ -92,6 +92,16 @@ MCP servers contribute additional tools under the `mcp__<server>__<tool>` prefix
 
 Servers start concurrently at launch and report ready/errored individually.
 
+Mermaid speaks MCP 2026-07-28 and still works with servers that only speak 2025-11-25. Each server
+gets a `server/discover` request first. A server that answers it speaks 2026-07-28: there is no
+`initialize` handshake or session, and every request carries the protocol version, client info and
+capabilities in `_meta`. Any other answer (an error, an HTTP `4xx`, or silence from a stdio
+server for 20 seconds) means 2025-11-25, and Mermaid runs the `initialize` handshake instead. On a
+2026-07-28 HTTP server, calls also carry the `Mcp-Method`, `Mcp-Name` and `Mcp-Param-*` headers;
+a tool whose `x-mcp-header` annotations are invalid is left out with a warning. Mermaid declares
+no client capabilities (no sampling, elicitation or roots), so a tool call that asks for that
+kind of input fails with an error.
+
 By default MCP tools are **deferred**: instead of advertising every server's tools on every request, the model gets one `tool_search` tool that searches deferred tool names/descriptions and promotes matches to direct advertisement for the rest of the session — deferred schemas don't count against `/context` until promoted. Opt out globally with `mcp_defer_tools = false` at the top level of config, or per server with `defer = false` on its `[mcp_servers.<name>]` entry.
 
 ### Remote servers and sign-in

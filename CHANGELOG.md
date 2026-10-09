@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`/goal` keeps Mermaid working until a condition is met.** `/goal all tests
+  pass and clippy is clean` starts a turn with the condition as the request.
+  Each time the run would end, a separate model call with no tools reads the
+  end of the conversation and answers met, not met, or impossible. Not met
+  starts the next turn with the check's reason and the goal restated, both
+  visible in the transcript; met or impossible clears the goal. Esc, a failed
+  turn, `[goal] max_turns` turns without a message from you (default 50), or 3
+  turns in a row with no tool call pause the goal with it still set. `/goal`
+  alone shows the condition, time, checks and tokens; `/goal clear` removes
+  it; the footer shows `goal 4m`. The check uses the session's model unless
+  `[goal] model` names another. `--resume` keeps the goal, and
+  `mermaid run "/goal ..."` runs the loop headless, with a `goal:` error when
+  it ends unmet. Claude Code, Codex and Cursor have the same command.
+
+- **Mermaid speaks MCP 2026-07-28, the newest protocol revision.** Each
+  server gets a `server/discover` request first. A 2026-07-28 server then
+  gets stateless requests with the version, client info and capabilities in
+  `_meta`, with no `initialize` handshake or session. Over HTTP the requests
+  also carry `Mcp-Method`, `Mcp-Name` and the `Mcp-Param-*` headers a tool
+  asks for with `x-mcp-header`, and a tool with invalid annotations is left
+  out. A tool call that answers `input_required` with only a `requestState`
+  is sent again with it. Servers that speak only 2025-11-25 keep working:
+  an error, an HTTP `4xx` or a silent stdio server falls back to the
+  `initialize` handshake, and a stdio server that exits on the probe is
+  started again for it. `x-mcp-header` is removed from the schemas the
+  model sees.
+
 - **Mermaid reads Claude Code's files.** A user who moved from Claude Code
   used to lose their instructions, skills, commands and agents, because
   Mermaid read only `AGENTS.md`, `MERMAID.md` and `.mermaid/skills/`. Now
