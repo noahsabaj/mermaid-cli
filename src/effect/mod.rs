@@ -1103,6 +1103,34 @@ impl EffectRunner {
                     }
                 });
             },
+            Cmd::EvaluateGoal { turn, request } => {
+                let tx = self.msg_tx.clone();
+                let providers = self.providers.clone();
+                let scope = self.scope_mut(turn);
+                let token = scope.token();
+                scope.spawn(async move {
+                    use futures::FutureExt;
+                    let fallback_tx = tx.clone();
+                    if std::panic::AssertUnwindSafe(evaluate_goal(
+                        tx, providers, turn, request, token,
+                    ))
+                    .catch_unwind()
+                    .await
+                    .is_err()
+                    {
+                        // Without a reply the reducer would wait in
+                        // `EvaluatingGoal` until Esc; report the failure so
+                        // the goal pauses instead.
+                        tracing::error!(turn = %turn, "evaluate_goal panicked");
+                        let _ = fallback_tx
+                            .send(Msg::GoalEvaluated {
+                                turn,
+                                reply: Err("the goal check task panicked".to_string()),
+                            })
+                            .await;
+                    }
+                });
+            },
             Cmd::ExecuteTool {
                 turn,
                 call_id,
@@ -2038,12 +2066,14 @@ fn note_stream_usage(
 }
 
 mod compaction;
+mod goal;
 mod memory;
 mod model_call;
 mod side_question;
 mod tool_call;
 
 use compaction::*;
+use goal::*;
 use memory::*;
 use model_call::*;
 use side_question::*;

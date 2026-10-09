@@ -705,6 +705,7 @@ mod tests {
                 | MsgKind::BuiltinToolSchemaTokens
                 | MsgKind::CompactionFinished
                 | MsgKind::CompactionFailed
+                | MsgKind::GoalEvaluated
                 | MsgKind::StreamDone
                 | MsgKind::UpstreamError
                 | MsgKind::ToolStarted
@@ -867,6 +868,18 @@ mod tests {
                 warn: true,
             },
             Msg::BuiltinToolSchemaTokens(1234),
+            Msg::GoalEvaluated {
+                turn: TurnId(2),
+                reply: Ok(mermaid_domain::goal::GoalReply {
+                    text: "NOT_MET: tests still fail".to_string(),
+                    reasoning: None,
+                    usage: None,
+                }),
+            },
+            Msg::GoalEvaluated {
+                turn: TurnId(2),
+                reply: Err("timeout".to_string()),
+            },
             Msg::CompactionFailed {
                 turn: TurnId(2),
                 trigger: mermaid_domain::CompactionTrigger::Manual,

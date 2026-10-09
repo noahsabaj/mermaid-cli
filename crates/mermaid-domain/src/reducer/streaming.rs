@@ -25,6 +25,9 @@ pub enum UsageFold {
     /// inside one (auto/recovery) — a manual `/compact` is not run spend.
     /// The caller rebuilds the context gauge from the compaction snapshot.
     Compaction { mid_run: bool },
+    /// A `/goal` check: part of the run's spend, but a side request, so it
+    /// never becomes `last_token_usage` (the context gauge).
+    GoalCheck,
     /// A detached background agent's final usage: cumulative only — it is
     /// not part of whichever run may be active when it lands, so it never
     /// touches `last_token_usage` or the run counter.
@@ -53,6 +56,7 @@ pub fn fold_token_usage(
             session.last_token_usage = Some(totals);
             mid_run
         },
+        UsageFold::GoalCheck => true,
         UsageFold::Detached => false,
     };
     if bank_run_output {
@@ -727,6 +731,8 @@ pub fn handle_stream_done(
                 )
             })
             .collect();
+        // A goal turn that calls tools is making progress (stall guard).
+        state.runtime.goal.used_tools = true;
         // Computer actions act on one screen, so they run one at a time, in
         // the order the model wrote them: only the first is dispatched here,
         // and `handle_tool_finished` dispatches each next one.
@@ -835,6 +841,11 @@ pub fn handle_stream_done(
             continuation,
         );
         push_call_model(state, cmds, next_turn);
+        return;
+    }
+
+    // With a `/goal` set, a check decides whether the run goes on.
+    if begin_goal_check(state, cmds) {
         return;
     }
 
@@ -1013,6 +1024,7 @@ pub fn handle_upstream_error(
     };
     state.session.append(msg, state.now);
 
+    note_goal_interrupted(state, cmds);
     // The error ends the run: record how long it worked and what it spent —
     // an errored run's log is exactly where those numbers matter.
     finish_run(state, cmds, RunEnd::Interrupted);

@@ -1764,6 +1764,7 @@ pub fn handle_submit_prompt(
 
     commit_user_message(state, text, attachment_ids);
     state.ui.input_buffer.clear();
+    note_user_prompt(state);
 
     // The first user message derives the conversation title; every
     // subsequent message keeps it. Either way, emit SetTerminalTitle

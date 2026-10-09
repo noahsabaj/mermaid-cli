@@ -45,6 +45,9 @@ mermaid run "summarize this repo" --output-schema schema.json -f json
                                                 # Native constrained output on OpenAI-compatible
                                                 # providers, Gemini, Ollama, and Anthropic
                                                 # (output_config.format on current models).
+mermaid run "/goal all tests pass"              # Keep working until a check finds the goal met
+                                                #   (see Goals below; the run's errors say
+                                                #   when it stopped without meeting it)
 mermaid --resume <id> run "and now the tests"   # Continue a saved session headless (id from
                                                 #   ndjson session_started/result, json result,
                                                 #   or the `session:` line on stderr)
@@ -133,6 +136,7 @@ Everyday:
 - `/handoff [id]`, `/report [id]` — write a current-context report or inspect a task report
 - `/theme [dark|light]` — switch the color theme (persisted); `NO_COLOR` disables colors entirely
 - `/todos` — show or edit the task checklist the agent keeps for the current run
+- `/goal [condition|clear]` — keep working until the condition is met (see Goals below); no argument shows the goal's status
 - `/scratchpad` — show the session's scratch directory and what is in it
 - `/btw <question>` — ask a side question while the agent works; see [Side questions](#side-questions)
 - `/editor` — compose the prompt in `$VISUAL`/`$EDITOR` (Ctrl+O keeps the current draft)
@@ -169,6 +173,31 @@ Advanced runtime:
 - `/tasks`, `/task <id>`, `/pause <id>`, `/resume <id>`
 - `/agents` — list background subagents, or kill one
 - `/processes`, `/logs <id>`, `/stop <id>`, `/restart <id>`, `/open <target>`, `/ports`
+
+### Goals
+
+`/goal <condition>` sets a completion condition and starts a turn with the condition as the
+request. Each time the run would end, a separate model call reads the latest part of the
+conversation and answers met, not met, or impossible. Not met starts the next turn with the
+check's reason and the goal restated; the transcript shows both. Met or impossible clears the
+goal. One goal is active at a time; a new `/goal` replaces it.
+
+The check judges only what the conversation shows, so write a condition the agent's own tool
+output can prove: "`cargo test` passes and `cargo clippy` is clean", not "the code is good". To
+bound a goal, say so in the condition ("or stop after 10 turns"); the check sees how many checks
+have run.
+
+The goal pauses, still set, when you press Esc, when a turn fails, after `[goal] max_turns` goal
+turns without a message from you (default 50), or after 3 goal turns in a row with no tool call.
+Send a message to continue, or `/goal clear` (also `stop`, `off`, `reset`, `none`, `cancel`) to
+remove it. A message you send while the goal runs goes first, and the goal is checked again after
+it. The footer shows `goal 4m` while a goal is set. `--resume` and `--continue` keep the goal;
+it runs again after your next message.
+
+The check uses the session's model unless `[goal] model` names another (see
+[configuration](configuration.md)); its tokens count toward the session's spend. Headless,
+`mermaid run "/goal <condition>"` runs the loop to the end; a goal that did not end met adds a
+`goal:` line to the run's errors. The 20-minute limit of a headless run still applies.
 
 Reasoning choices persist per-model: set `/reasoning high` on one model and `/reasoning low` on another, and each is remembered independently across sessions.
 

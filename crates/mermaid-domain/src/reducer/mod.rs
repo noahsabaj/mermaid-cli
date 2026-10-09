@@ -27,6 +27,7 @@
 //!     queued-message auto-submit) without self-invoking the
 //!     reducer.
 
+pub(crate) mod goal_loop;
 pub(crate) mod input;
 pub(crate) mod lifecycle;
 pub(crate) mod safety_mode;
@@ -39,6 +40,7 @@ pub(crate) mod tools;
 #[cfg(test)]
 mod tests;
 
+pub use goal_loop::*;
 pub use input::*;
 pub use lifecycle::*;
 pub use safety_mode::*;
@@ -168,6 +170,9 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
         },
         Msg::CancelTurn => {
             handle_cancel_turn(&mut state, &mut cmds);
+        },
+        Msg::GoalEvaluated { turn, reply } => {
+            handle_goal_evaluated(&mut state, &mut cmds, turn, reply);
         },
         Msg::ConfirmAccepted => {
             handle_confirm_accepted(&mut state, &mut cmds);

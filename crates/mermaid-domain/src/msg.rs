@@ -170,6 +170,12 @@ pub enum Msg {
         message: String,
         kind: StatusKind,
     },
+    /// A `/goal` check came back: the raw reply, or why the call failed.
+    /// Parsed in the reducer so a recording replays the same verdict.
+    GoalEvaluated {
+        turn: TurnId,
+        reply: Result<crate::goal::GoalReply, String>,
+    },
     /// Stream complete. Carries final token count and opaque provider state
     /// that must round-trip on the next request.
     StreamDone {
@@ -638,6 +644,9 @@ pub enum SlashCmd {
     /// `/btw`: `Some(question)` asks a side question; `None` reopens the
     /// side-question pane on the newest exchange.
     Btw(Option<String>),
+    /// `/goal`: no arg → status; a clear word → clear; anything else sets
+    /// the condition and starts working toward it.
+    Goal(Option<String>),
     /// Compose the input draft in `$VISUAL`/`$EDITOR` (also Ctrl+O).
     Editor,
     Help,
@@ -675,6 +684,7 @@ impl Msg {
             | Self::ContextUsageEstimated { turn, .. }
             | Self::CompactionFinished { turn, .. }
             | Self::CompactionFailed { turn, .. }
+            | Self::GoalEvaluated { turn, .. }
             | Self::StreamDone { turn, .. }
             | Self::UpstreamError { turn, .. }
             | Self::ToolStarted { turn, .. }
@@ -760,6 +770,7 @@ impl Msg {
             Self::BuiltinToolSchemaTokens(_) => MsgKind::BuiltinToolSchemaTokens,
             Self::CompactionFinished { .. } => MsgKind::CompactionFinished,
             Self::CompactionFailed { .. } => MsgKind::CompactionFailed,
+            Self::GoalEvaluated { .. } => MsgKind::GoalEvaluated,
             Self::StreamDone { .. } => MsgKind::StreamDone,
             Self::UpstreamError { .. } => MsgKind::UpstreamError,
             Self::ToolStarted { .. } => MsgKind::ToolStarted,
@@ -824,6 +835,7 @@ pub enum MsgKind {
     BuiltinToolSchemaTokens,
     CompactionFinished,
     CompactionFailed,
+    GoalEvaluated,
     StreamDone,
     UpstreamError,
     ToolStarted,

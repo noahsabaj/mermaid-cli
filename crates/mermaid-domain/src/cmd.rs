@@ -111,6 +111,9 @@ pub enum Cmd {
         history: Vec<ChatMessage>,
         dispatch: ToolDispatch,
     },
+    /// Ask a model whether the active `/goal` is met. One-shot, no tools;
+    /// answered by `Msg::GoalEvaluated`. Turn-scoped so Esc cancels it.
+    EvaluateGoal { turn: TurnId, request: ChatRequest },
     /// Run one tool in parallel with any other tools in the same turn.
     /// The runner wires the exec context's cancellation token to the turn's
     /// scope so `Cmd::CancelScope` aborts them all at once. Everything the
@@ -485,6 +488,7 @@ impl Cmd {
         match self {
             Self::CallModel { .. } => "call_model",
             Self::CompactConversation { .. } => "compact_conversation",
+            Self::EvaluateGoal { .. } => "evaluate_goal",
             Self::ExecuteTool { .. } => "execute_tool",
             Self::CancelScope(_) => "cancel_scope",
             Self::BackgroundScope(_) => "background_scope",
@@ -566,6 +570,7 @@ impl Cmd {
         match self {
             Self::CallModel { turn, .. }
             | Self::CompactConversation { turn, .. }
+            | Self::EvaluateGoal { turn, .. }
             | Self::ExecuteTool { turn, .. } => Some(*turn),
             // Everything below runs detached (or is handled inline by the
             // dispatcher) and must never populate a turn's scope.
@@ -646,6 +651,9 @@ impl Cmd {
                 request.trigger.as_str(),
                 request.chat.messages.len()
             ),
+            Self::EvaluateGoal { turn, request } => {
+                format!("evaluate_goal(turn={}, model={})", turn, request.model_id)
+            },
             Self::ExecuteTool {
                 turn,
                 call_id,

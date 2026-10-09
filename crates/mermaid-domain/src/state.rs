@@ -895,6 +895,13 @@ pub enum TurnState {
         /// would commit its remaining text unmarked.
         resume_continuation: bool,
     },
+    /// The run would have ended, and a `/goal` is active: a one-shot model
+    /// call checks whether the goal is met. "Not yet" starts the next goal
+    /// turn; "met", "impossible" or a failed check ends the run.
+    EvaluatingGoal {
+        id: TurnId,
+        started: SystemTime,
+    },
     /// `CancelTurn` was dispatched. The reducer has already emitted a
     /// `Cmd::CancelScope` — now we wait for the final `Cancelled` /
     /// `StreamDone` that the effect runner sends back when the scope's
@@ -916,6 +923,7 @@ impl TurnState {
             Self::Generating { id, .. }
             | Self::ExecutingTools { id, .. }
             | Self::Compacting { id, .. }
+            | Self::EvaluatingGoal { id, .. }
             | Self::Cancelling { id, .. } => Some(*id),
         }
     }
