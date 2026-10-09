@@ -18,6 +18,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tools. Esc closes the pane, Up/Down scrolls, Left/Right steps through
   earlier answers, `c` copies the answer, `x` clears the earlier ones, and a
   bare `/btw` reopens the newest answer.
+- **Mermaid reads Claude Code's files.** A user who moved from Claude Code
+  used to lose their instructions, skills, commands and agents, because
+  Mermaid read only `AGENTS.md`, `MERMAID.md` and `.mermaid/skills/`. Now
+  `CLAUDE.md` (or `.claude/CLAUDE.md`) loads when a directory has no
+  `AGENTS.md`, and Mermaid reads `skills/`, `commands/` and `agents/` from
+  `.mermaid/`, `.claude/` and `.agents/` in the project and from
+  `~/.config/mermaid/`, `~/.claude/` and `~/.agents/`; `.mermaid/` wins on a
+  same name. A `commands/*.md` file is a prompt command (`$ARGUMENTS`, `$1`,
+  `$2`, ...), so you can add your own commands without writing a plugin. An
+  `agents/*.md` file is an agent type: Claude Code tool names map to
+  Mermaid's, an agent that cannot write gets a `read_only` ceiling, and a
+  project file cannot redefine `general` or `explore`. The `agent` tool now
+  lists the configured types with their new `description`, so the model knows
+  they exist. See docs/plugins.md, "Files from other tools".
 - **Mermaid cleans up the config keys it no longer reads.** A config file
   written by an older `mermaid init` still carries sections a later release
   removed, such as `[plan]` (0.28.0) or `[computer_use]` and
@@ -82,6 +96,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `status_bar`, `user_message`, `assistant_message`, `system_message`,
   `mode_normal`, `mode_accept_edits` and `mode_bypass_all`. All three themes
   defined them and no widget read them.
+- **Code nothing called.** A sweep that let the compiler see past `pub`
+  found functions and fields with no caller left in the workspace:
+  `ActionRequest::cwd` and `resolve_dir` (only plan mode read them; the exec
+  tool still set the field), `ReasoningExtraction::parse_delta` and
+  `ChatMessage::extract_thinking` (the adapters parse inline),
+  `Cmd::is_turn_scoped` (the effect runner uses `scope_turn`),
+  `PromptConfig::render_system_prompt`, `StartupConfig`,
+  `EffectRunner::pair_with_bindings`, `TurnScope::join_next`,
+  `Engine::is_settled`, `EngineGone::into_message`, five `RuntimeClient`
+  wrappers the CLI never called, and the input widget's unread cursor
+  state. Comments and manifests that named moved or deleted files now name
+  the real ones. No behaviour changes.
 
 ## [0.29.0] - 2026-09-30
 

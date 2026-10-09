@@ -9,7 +9,7 @@ repository = "https://github.com/noahsabaj/mermaid-cli"
 homepage = "https://github.com/noahsabaj/mermaid-cli"
 authors = ["Noah Sabaj <noahsabaj@gmail.com>"]
 
-# Lint policy. DUPLICATED verbatim into all three manifests — `tests/lint_policy_drift.rs`
+# Lint policy. DUPLICATED verbatim into all four manifests — `tests/it/lint_policy_drift.rs`
 # guards the duplication. Inheritance via `[workspace.lints]` + `lints.workspace = true`
 # is NOT usable here: the `isolated-crate-build` CI job copies `crates/.` to a directory
 # with no workspace root above it, where `lints.workspace = true` is a hard manifest-parse

@@ -31,8 +31,8 @@ use mermaid_domain::{State, TurnState};
 use mermaid_model::models::{ReasoningCapability, ReasoningLevel, nearest_effort};
 
 use widgets::{
-    ChatState, ChatWidget, GenerationStatus, InputState, InputWidget, SlashPaletteWidget,
-    StatusWidget, build_status_lines,
+    ChatState, ChatWidget, GenerationStatus, InputWidget, SlashPaletteWidget, StatusWidget,
+    build_status_lines,
 };
 
 /// Transient render-layer state that lives across frames but isn't
@@ -528,15 +528,12 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             exit_armed: exit_armed(state),
             rewind_armed: rewind_armed(state),
         };
-        let mut input_widget_state = InputState {
-            cursor_position: state.ui.input_cursor.min(state.ui.input_buffer.len()),
-        };
-        frame.render_stateful_widget(input_widget, chunks[3], &mut input_widget_state);
+        frame.render_widget(input_widget, chunks[3]);
 
         // Cursor tracks the input caret.
         let input_area = chunks[3];
         let content_width = input_area.width.saturating_sub(4) as usize;
-        let (cursor_row, cursor_col) = InputState::calculate_cursor_position(
+        let (cursor_row, cursor_col) = widgets::input_cursor_position(
             &state.ui.input_buffer,
             state.ui.input_cursor.min(state.ui.input_buffer.len()),
             content_width,

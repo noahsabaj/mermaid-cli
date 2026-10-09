@@ -13,7 +13,7 @@ license = "MIT OR Apache-2.0"
 # path dependency. `release.yml` publishes runtime -> model -> domain -> cli, in
 # dependency order.
 
-# Lint policy. DUPLICATED verbatim into all manifests — `tests/lint_policy_drift.rs`
+# Lint policy. DUPLICATED verbatim into all four manifests — `tests/it/lint_policy_drift.rs`
 # guards the duplication. Inheritance via `[workspace.lints]` + `lints.workspace = true`
 # is NOT usable here: the `isolated-crate-build` CI job copies `crates/.` to a directory
 # with no workspace root above it, where `lints.workspace = true` is a hard manifest-parse

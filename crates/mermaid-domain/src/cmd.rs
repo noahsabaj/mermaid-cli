@@ -525,21 +525,10 @@ impl Cmd {
         }
     }
 
-    /// True iff this command needs to run inside a `TurnScope` so it
-    /// can be cancelled by `Cmd::CancelScope`. The effect runner uses
-    /// this to decide between "spawn into `JoinSet`" and "spawn detached".
-    ///
-    /// Defined as `scope_turn().is_some()` so the two can never disagree —
-    /// they are documented as the same set, and until this delegation that
-    /// was a convention held by hand across two separate matches.
-    #[must_use]
-    pub fn is_turn_scoped(&self) -> bool {
-        self.scope_turn().is_some()
-    }
-
     /// The `TurnId` of the scope this command would spawn fresh work
-    /// *into*. Only the scope-spawning variants return `Some` (the same
-    /// set as `is_turn_scoped`); the scope-control variants
+    /// *into*. Only the scope-spawning variants return `Some`: they run
+    /// inside a `TurnScope` so `Cmd::CancelScope` can cancel them, and
+    /// everything else spawns detached. The scope-control variants
     /// (`CancelScope` / `BackgroundScope`) act on an existing scope
     /// rather than populating one with new work, so they return `None`.
     ///
@@ -805,10 +794,11 @@ mod tests {
                 turn: TurnId(1),
                 request,
             }
-            .is_turn_scoped()
+            .scope_turn()
+            .is_some()
         );
         assert!(
-            !Cmd::SaveConversation {
+            Cmd::SaveConversation {
                 snapshot: ConversationHistory::new(
                     "/p".to_string(),
                     "m".to_string(),
@@ -816,9 +806,10 @@ mod tests {
                 ),
                 events: Vec::new(),
             }
-            .is_turn_scoped()
+            .scope_turn()
+            .is_none()
         );
-        assert!(!Cmd::Exit.is_turn_scoped());
+        assert!(Cmd::Exit.scope_turn().is_none());
     }
 
     #[test]
