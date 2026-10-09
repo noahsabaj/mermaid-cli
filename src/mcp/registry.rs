@@ -352,8 +352,11 @@ pub async fn validate_argv(
 /// Validate a Streamable HTTP MCP server config: connect, initialize, list
 /// tools, then end the session on every path. Sibling of [`validate_argv`]
 /// for url-shaped configs.
-pub async fn validate_http(config: &mermaid_domain::McpServerConfig) -> Result<Vec<String>> {
-    let transport = super::transport_http::HttpTransport::new(config)?;
+pub async fn validate_http(
+    name: &str,
+    config: &mermaid_domain::McpServerConfig,
+) -> Result<Vec<String>> {
+    let transport = super::transport_http::HttpTransport::new(name, config)?;
     let mut client = McpClient::new(transport.into());
 
     let result = tokio::time::timeout(Duration::from_secs(60), async {

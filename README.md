@@ -97,6 +97,8 @@ Every flag, structured output, headless session resume, and record/replay: [docs
 
 `mermaid add <name>` resolves the name through a registry of 16 popular MCP servers (context7, playwright, git, postgres, notion, slack, and more), prompts for required env vars, and validates by spawning the server.
 
+Remote MCP servers that sign in with OAuth (Linear, Notion, Sentry, Atlassian and others) work too: `mermaid add linear --url https://mcp.linear.app/mcp` opens the browser to sign in, and `mermaid mcp login <name>` signs in again later. Tokens go to the OS keyring and refresh on their own. See [docs/tools.md](docs/tools.md#remote-servers-and-sign-in).
+
 ## Keyboard shortcuts
 
 | Key | Action |

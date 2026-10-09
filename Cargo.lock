@@ -2390,6 +2390,7 @@ dependencies = [
  "tracing",
  "unicode-normalization",
  "unicode-width",
+ "url",
  "vt100",
  "which",
 ]

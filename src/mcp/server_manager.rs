@@ -177,7 +177,7 @@ impl McpServerManager {
                     .await?
                     .into()
             },
-            TransportKind::Http => HttpTransport::new(config)?.into(),
+            TransportKind::Http => HttpTransport::new(name, config)?.into(),
         };
         let mut client = McpClient::new(transport);
 

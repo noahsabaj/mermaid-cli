@@ -862,6 +862,36 @@ pub struct McpServerConfig {
     /// global setting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub defer: Option<bool>,
+    /// OAuth sign-in settings for a remote (`url`) server. Optional: with no
+    /// table, `mermaid mcp login` discovers everything from the server and
+    /// registers itself dynamically. Set it for a server whose authorization
+    /// server needs a client registered by hand.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth: Option<McpOAuthConfig>,
+}
+
+/// `[mcp_servers.<name>.oauth]`: a pre-registered OAuth client for a remote
+/// MCP server. The MCP authorization spec puts a pre-registered client ahead
+/// of dynamic registration, and some hosted servers (GitHub's among them)
+/// accept only one.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct McpOAuthConfig {
+    /// Client id of an OAuth app the user registered with the server's
+    /// authorization server. Unset = dynamic client registration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    /// Env var holding that app's client secret, read when a token is
+    /// requested, so the secret never lands in config.toml. Unset = a public
+    /// client (PKCE only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_secret_env: Option<String>,
+    /// Fixed port for the `http://127.0.0.1:<port>/callback` redirect, for an
+    /// app registered with one exact redirect URI. Unset = any free port.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub callback_port: Option<u16>,
+    /// Scopes to request, replacing the ones the server advertises.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scopes: Vec<String>,
 }
 
 /// Which transport an [`McpServerConfig`] selects: a spawned child process
@@ -964,6 +994,8 @@ impl std::fmt::Debug for McpServerConfig {
             // Tool allow/deny lists are plain tool names, not secrets.
             .field("enabled_tools", &self.enabled_tools)
             .field("disabled_tools", &self.disabled_tools)
+            // Ids, an env var NAME, a port and scopes: none is a secret.
+            .field("oauth", &self.oauth)
             .finish()
     }
 }
