@@ -378,7 +378,7 @@ mod tests {
         for (id, want) in [
             ("openai/gpt-4.1", Some(400_000)),
             ("openai/gpt-5-mini", Some(400_000)),
-            ("openai/gpt-5.6", Some(1_500_000)),
+            ("openai/gpt-5.6", Some(1_050_000)),
             (
                 "meta/muse-spark-1.1",
                 Some(mermaid_model::constants::META_MUSE_SPARK_CONTEXT_WINDOW),

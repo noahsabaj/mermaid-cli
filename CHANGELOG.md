@@ -42,6 +42,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Automatic compaction works on GPT-6 and GPT-5.6.** GPT-6 models
+  (`gpt-6-astra`, `gpt-6.1-sol`, ...) had no entry in the model catalog, and
+  OpenAI's models endpoint gives no limits, so their context window was
+  unknown and automatic compaction never ran. They now have the documented
+  1.05M window. GPT-5.6 was listed at 1.5M; OpenAI documents 1.05M, so its
+  85% trigger sat above the real window and compaction could never run before
+  the request failed. It is now 1.05M.
 - **The highlighted row in `/load` and the rewind picker can be read.** Its
   meta, `(14 msg · 2026-01-01 12:34)` or `(#1 back)`, was drawn in
   `text_disabled` on a `text_disabled` band, the same colour, so it vanished

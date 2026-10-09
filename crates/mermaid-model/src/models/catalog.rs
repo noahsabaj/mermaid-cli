@@ -297,20 +297,37 @@ pub const CATALOG: &[ModelCapEntry] = &[
         context_window: Some(crate::constants::META_MUSE_SPARK_CONTEXT_WINDOW),
         ..UNKNOWN_MODEL
     },
+    // GPT-6 (gpt-6-astra, gpt-6.1-sol, ...): the documented window is 1.05M
+    // (OpenAI's model comparison, read 2026-10-09). Without a row the window
+    // is unknown, since OpenAI's /v1/models exposes no limits, and automatic
+    // compaction (Mermaid's or OpenAI's) never triggers.
+    ModelCapEntry {
+        rule: Prefix("gpt-6"),
+        supports_temperature: false,
+        vision: true,
+        context_window: Some(1_050_000),
+        ..UNKNOWN_MODEL
+    },
+    ModelCapEntry {
+        rule: Substring("gpt-6"),
+        vision: true,
+        context_window: Some(1_050_000),
+        ..UNKNOWN_MODEL
+    },
     // gpt-5.6 rows must stay ABOVE the gpt-5 rows — they share the prefix
     // and first match wins. OpenAI's /v1/models exposes no limits, so these
-    // windows are static-but-documented (1.5M).
+    // windows are static-but-documented (1.05M, OpenAI's model comparison).
     ModelCapEntry {
         rule: Prefix("gpt-5.6"),
         supports_temperature: false,
         vision: true,
-        context_window: Some(1_500_000),
+        context_window: Some(1_050_000),
         ..UNKNOWN_MODEL
     },
     ModelCapEntry {
         rule: Substring("gpt-5.6"),
         vision: true,
-        context_window: Some(1_500_000),
+        context_window: Some(1_050_000),
         ..UNKNOWN_MODEL
     },
     ModelCapEntry {
@@ -559,17 +576,23 @@ mod tests {
     #[test]
     fn ordering_gpt56_before_gpt5() {
         // gpt-5.6 rows sit above the gpt-5 rows (shared prefix, first match
-        // wins): 1.5M window, temperature rejected on the bare-name prefix.
+        // wins): 1.05M window, temperature rejected on the bare-name prefix.
         let bare = lookup("gpt-5.6");
         assert!(!bare.supports_temperature);
         assert!(bare.vision);
-        assert_eq!(bare.context_window, Some(1_500_000));
+        assert_eq!(bare.context_window, Some(1_050_000));
         // A gateway id hits the Substring row: temperature kept, same window.
         let gateway = lookup("openai/some-gpt-5.6-variant");
         assert!(gateway.supports_temperature);
-        assert_eq!(gateway.context_window, Some(1_500_000));
+        assert_eq!(gateway.context_window, Some(1_050_000));
         // Plain gpt-5 still lands on the 400k rows.
         assert_eq!(lookup("gpt-5-mini").context_window, Some(400_000));
+        for gpt6 in ["gpt-6-astra", "openai/gpt-6.1-sol", "GPT-6-LUNA"] {
+            let row = lookup(gpt6);
+            assert_eq!(row.context_window, Some(1_050_000), "{gpt6}");
+            assert!(row.vision, "{gpt6}");
+            assert!(!row.supports_temperature, "{gpt6}");
+        }
     }
 
     #[test]
