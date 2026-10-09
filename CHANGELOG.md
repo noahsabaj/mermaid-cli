@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Gemini models get Gemini's own computer use tool.** With `[tools]
+  computer` and `provider_native` on, Gemini gets its `computer_use` tool for
+  the desktop in place of Mermaid's schema. Each call runs through Mermaid's
+  `computer` tool with the same approval and mouse-move stop, its
+  coordinates (out of 1000 across the screen) are scaled to the screen, and
+  the screenshot after it goes back in the function response. A call Gemini
+  asks to confirm is shown with that request; a call it blocks does not run.
+
 - **OpenAI models get OpenAI's own computer tool.** With `[tools] computer`
   and `provider_native` on, an OpenAI model on the Responses API gets the
   `computer` tool it is trained on in place of Mermaid's schema. Each call's

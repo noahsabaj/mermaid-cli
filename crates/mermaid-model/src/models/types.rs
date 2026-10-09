@@ -36,15 +36,29 @@ pub enum ProviderContinuation {
         model: String,
         output: Vec<ResponseItem>,
     },
-    /// Gemini's thought signatures on this turn's function calls. Gemini 3
-    /// refuses a function call of the current turn that comes back without
-    /// the signature it carried. `model` is the model that wrote them; they
-    /// go back only to that model.
+    /// Gemini's thought signatures on this turn's function calls, and the
+    /// calls it made through its own computer tool. Gemini 3 refuses a
+    /// function call of the current turn that comes back without the
+    /// signature it carried. `model` is the model that wrote them; they go
+    /// back only to that model.
     Gemini {
         model: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         signatures: Vec<GeminiSignature>,
+        /// Computer calls as the model wrote them. They are stored under
+        /// Mermaid's `computer` tool so every gate sees the tool it knows;
+        /// these say what to send back.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        native_calls: Vec<GeminiNativeCall>,
     },
+}
+
+/// One call Gemini made through its computer tool, as it wrote it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GeminiNativeCall {
+    pub call_id: String,
+    pub name: String,
+    pub args: serde_json::Value,
 }
 
 /// The thought signature Gemini attached to one function call.
@@ -169,7 +183,25 @@ impl ProviderContinuation {
             Self::Gemini {
                 model: wrote,
                 signatures,
+                ..
             } if wrote == model => Some(signatures),
+            Self::Anthropic { .. }
+            | Self::MetaResponses { .. }
+            | Self::OpenaiResponses { .. }
+            | Self::Gemini { .. } => None,
+        }
+    }
+
+    /// The computer call `id` as `model` wrote it, when `model` made it
+    /// through Gemini's computer tool.
+    #[must_use]
+    pub fn gemini_native_call(&self, model: &str, id: &str) -> Option<&GeminiNativeCall> {
+        match self {
+            Self::Gemini {
+                model: wrote,
+                native_calls,
+                ..
+            } if wrote == model => native_calls.iter().find(|call| call.call_id == id),
             Self::Anthropic { .. }
             | Self::MetaResponses { .. }
             | Self::OpenaiResponses { .. }
@@ -183,7 +215,14 @@ impl ProviderContinuation {
             Self::MetaResponses { output } | Self::OpenaiResponses { output, .. } => {
                 output.retain(|item| item.call_id().is_none_or(&mut keep));
             },
-            Self::Gemini { signatures, .. } => signatures.retain(|s| keep(&s.call_id)),
+            Self::Gemini {
+                signatures,
+                native_calls,
+                ..
+            } => {
+                signatures.retain(|s| keep(&s.call_id));
+                native_calls.retain(|c| keep(&c.call_id));
+            },
             Self::Anthropic { .. } => {},
         }
     }
@@ -765,6 +804,7 @@ mod tests {
                     signature: "c2lnLWI=".to_string(),
                 },
             ],
+            native_calls: Vec::new(),
         };
         let saved = serde_json::to_string(&continuation).unwrap();
         assert!(!saved.contains("c2lnLWE="), "stored as bytes: {saved}");

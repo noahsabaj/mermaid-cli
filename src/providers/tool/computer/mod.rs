@@ -179,16 +179,67 @@ enum Action {
         secs: f64,
     },
     /// Actions run in order, then a screenshot. One that does not parse
-    /// stops the batch where it stands.
-    Batch(Vec<Result<Action, String>>),
+    /// stops the batch where it stands. With `scale`, coordinates are
+    /// fractions of the screen out of `scale` (Gemini's 0 to 999) rather
+    /// than screenshot pixels.
+    Batch {
+        actions: Vec<Result<Action, String>>,
+        scale: Option<u32>,
+    },
 }
 
 impl Action {
+    /// The action with every point read as a fraction of the screen out of
+    /// `scale` and turned into pixels of a `sent` screenshot.
+    fn scaled(self, scale: u32, sent: (u32, u32)) -> Self {
+        let px = |(x, y): (i64, i64)| {
+            let of = |v: i64, size: u32| {
+                (v as f64 * f64::from(size) / f64::from(scale))
+                    .round()
+                    .clamp(0.0, f64::from(size.saturating_sub(1))) as i64
+            };
+            (of(x, sent.0), of(y, sent.1))
+        };
+        match self {
+            Self::Zoom([x0, y0, x1, y1]) => {
+                let (a, b) = px((x0, y0));
+                let (c, d) = px((x1, y1));
+                Self::Zoom([a, b, c, d])
+            },
+            Self::Click {
+                button,
+                count,
+                at,
+                hold,
+            } => Self::Click {
+                button,
+                count,
+                at: at.map(px),
+                hold,
+            },
+            Self::Drag { from, to, hold } => Self::Drag {
+                from: px(from),
+                to: px(to),
+                hold,
+            },
+            Self::Move(at) => Self::Move(px(at)),
+            Self::MouseDown(at) => Self::MouseDown(at.map(px)),
+            Self::MouseUp(at) => Self::MouseUp(at.map(px)),
+            Self::Scroll { at, dx, dy, hold } => Self::Scroll {
+                at: at.map(px),
+                dx,
+                dy,
+                hold,
+            },
+            other => other,
+        }
+    }
+
     /// Whether the action changes anything on the screen.
     fn is_input(&self) -> bool {
         match self {
             Self::Screenshot | Self::Zoom(_) | Self::CursorPosition | Self::Wait(_) => false,
-            Self::Batch(actions) => actions.iter().flatten().any(Self::is_input),
+            Self::Batch { actions, .. } => actions.iter().flatten().any(Self::is_input),
             _ => true,
         }
     }
@@ -308,17 +359,7 @@ fn parse(args: &Value) -> Result<Action, String> {
             chord: parse_chord(text(args, action)?)?,
             secs: secs(args, action)?,
         },
-        "batch" => Action::Batch(
-            args.get("actions")
-                .and_then(Value::as_array)
-                .ok_or("`batch` needs `actions`")?
-                .iter()
-                .map(|one| match one.get("action").and_then(Value::as_str) {
-                    Some("batch") => Err("a batch cannot hold a batch".to_string()),
-                    _ => parse(one),
-                })
-                .collect(),
-        ),
+        "batch" => batch(args)?,
         other => {
             return Err(format!(
                 "unknown action \"{other}\"; the actions are {}",
@@ -326,6 +367,32 @@ fn parse(args: &Value) -> Result<Action, String> {
             ));
         },
     })
+}
+
+/// A `batch`: its actions, or, when the provider refused the call
+/// (`refused`), only that refusal, which stops it before anything runs.
+fn batch(args: &Value) -> Result<Action, String> {
+    let actions = match args.get("refused").and_then(Value::as_str) {
+        Some(reason) => vec![Err(format!(
+            "Not executed: the model's provider blocked this action: {reason}"
+        ))],
+        None => args
+            .get("actions")
+            .and_then(Value::as_array)
+            .ok_or("`batch` needs `actions`")?
+            .iter()
+            .map(|one| match one.get("action").and_then(Value::as_str) {
+                Some("batch") => Err("a batch cannot hold a batch".to_string()),
+                _ => parse(one),
+            })
+            .collect(),
+    };
+    let scale = args
+        .get("scale")
+        .and_then(Value::as_u64)
+        .and_then(|n| u32::try_from(n).ok())
+        .filter(|&n| n > 0);
+    Ok(Action::Batch { actions, scale })
 }
 
 /// What a finished action returns: text, and a PNG for the looking actions
@@ -699,7 +766,7 @@ fn gate_summary(args: &Value, batch: &[Value]) -> String {
             None => vec![call],
         })
         .collect();
-    let summary = match actions.as_slice() {
+    let mut summary = match actions.as_slice() {
         [one] => describe(one),
         _ => {
             let described: Vec<String> = actions
@@ -713,6 +780,9 @@ fn gate_summary(args: &Value, batch: &[Value]) -> String {
             )
         },
     };
+    if calls.iter().any(|call| call.get("scale").is_some()) {
+        summary.push_str(" (coordinates in thousandths of the screen)");
+    }
     let warnings: Vec<&str> = calls
         .iter()
         .filter_map(|call| call.get("warnings").and_then(Value::as_array))
@@ -734,6 +804,7 @@ fn run_batch(
     state: &mut ToolState,
     run_key: &RunKey,
     actions: &[Result<Action, String>],
+    scale: Option<u32>,
 ) -> Done {
     let mut lines = Vec::new();
     let mut ran = 0;
@@ -741,6 +812,13 @@ fn run_batch(
     for action in actions {
         let done = action
             .clone()
+            .and_then(|action| match scale {
+                Some(scale) => {
+                    let s = current(desktop, &mut state.shot)?;
+                    Ok(action.scaled(scale, s.sent))
+                },
+                None => Ok(action),
+            })
             .and_then(|action| run_watched(desktop, state, run_key, &action));
         match done {
             Ok(done) => {
@@ -795,8 +873,8 @@ fn run_watched(
     run_key: &RunKey,
     action: &Action,
 ) -> Result<Done, String> {
-    if let Action::Batch(actions) = action {
-        return Ok(run_batch(desktop, state, run_key, actions));
+    if let Action::Batch { actions, scale } = action {
+        return Ok(run_batch(desktop, state, run_key, actions, *scale));
     }
     if !action.is_input() {
         let done = run(desktop, &mut state.shot, action);
@@ -919,7 +997,7 @@ impl ComputerTool {
             Err(e) => return ToolOutcome::error(e, None),
         };
         let input = action.is_input();
-        let batch = matches!(action, Action::Batch(_));
+        let batch = matches!(action, Action::Batch { .. });
         let run = RunKey::of(ctx);
         if input {
             let stopped = self

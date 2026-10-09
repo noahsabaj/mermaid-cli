@@ -520,7 +520,7 @@ fn a_batch_stops_at_the_first_failure_and_still_looks() {
         done.text
     );
     assert_eq!(desktop.events, [Event::Text("a".to_string())]);
-    let Action::Batch(actions) = batch else {
+    let Action::Batch { actions, .. } = batch else {
         unreachable!()
     };
     assert_eq!(actions[3], Err("a batch cannot hold a batch".to_string()));
@@ -568,4 +568,53 @@ fn a_batch_call_gates_as_its_actions_with_the_providers_warnings() {
     );
     let one = json!({"action": "batch", "actions": [{"action": "key", "text": "Return"}]});
     assert_eq!(gate_summary(&one, &[]), "computer key \"Return\"");
+}
+
+#[test]
+fn a_scaled_batch_reads_points_as_fractions_of_the_screen() {
+    let mut desktop = FakeDesktop::new((1920, 1080), (1920, 1080));
+    let mut state = ToolState::default();
+    let batch = parse(&json!({"action": "batch", "scale": 1000, "actions": [
+        {"action": "left_click", "coordinate": [500, 250]},
+        {"action": "left_click", "coordinate": [999, 999]},
+    ]}))
+    .unwrap();
+    let done = run_watched(&mut desktop, &mut state, &run_key(1), &batch).unwrap();
+    assert!(!done.failed, "{}", done.text);
+    // Through the 1429x804 screenshot onto the 1920x1080 screen: within a
+    // pixel of the exact fraction.
+    let moves: Vec<&Event> = desktop
+        .events
+        .iter()
+        .filter(|e| matches!(e, Event::Move(..)))
+        .collect();
+    assert_eq!(moves, [&Event::Move(961, 270), &Event::Move(1919, 1079)]);
+    assert!(
+        gate_summary(
+            &json!({"action": "batch", "scale": 1000, "actions": [
+                {"action": "left_click", "coordinate": [500, 250]}]}),
+            &[]
+        )
+        .ends_with("(coordinates in thousandths of the screen)")
+    );
+}
+
+#[test]
+fn a_refused_batch_runs_nothing_and_still_looks() {
+    let mut desktop = FakeDesktop::new((1000, 500), (1000, 500));
+    let mut state = ToolState::default();
+    let batch = parse(&json!({"action": "batch", "refused": "Buys something.",
+        "actions": [{"action": "left_click", "coordinate": [1, 1]}]}))
+    .unwrap();
+    assert!(!batch.is_input(), "nothing to gate");
+    let done = run_watched(&mut desktop, &mut state, &run_key(1), &batch).unwrap();
+    assert!(done.failed);
+    assert!(done.png.is_some());
+    assert!(
+        done.text
+            .contains("the model's provider blocked this action: Buys something."),
+        "{}",
+        done.text
+    );
+    assert!(desktop.events.is_empty());
 }

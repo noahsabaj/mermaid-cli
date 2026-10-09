@@ -19,6 +19,11 @@ pub mod computer_toolset;
 mod conformance;
 pub mod driver;
 pub mod gemini;
+/// Gemini end to end: thought signatures and the computer use tool.
+#[cfg(test)]
+mod gemini_calls;
+/// Gemini's computer use tool, mapped onto Mermaid's `computer` tool.
+mod gemini_computer;
 /// Capability discovery by rejection: send optimistically, learn from a 400.
 pub mod learning;
 pub mod meta;

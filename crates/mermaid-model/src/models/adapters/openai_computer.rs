@@ -107,13 +107,13 @@ fn to_mermaid(action: &Value) -> Vec<Value> {
 
 /// The mouse's back and forward buttons are the browser's history keys.
 #[cfg(target_os = "macos")]
-const BACK: &str = "cmd+bracketleft";
+pub(super) const BACK: &str = "cmd+bracketleft";
 #[cfg(target_os = "macos")]
-const FORWARD: &str = "cmd+bracketright";
+pub(super) const FORWARD: &str = "cmd+bracketright";
 #[cfg(not(target_os = "macos"))]
-const BACK: &str = "alt+Left";
+pub(super) const BACK: &str = "alt+Left";
 #[cfg(not(target_os = "macos"))]
-const FORWARD: &str = "alt+Right";
+pub(super) const FORWARD: &str = "alt+Right";
 
 fn key(chord: &str) -> Value {
     json!({"action": "key", "text": chord})
