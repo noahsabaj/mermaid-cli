@@ -640,7 +640,7 @@ impl ToolExecutor for SubagentTool {
         // config + cwd, with a fresh (or cache-restored) `State` and a tool
         // registry filtered by the agent type (never self-recursion or GUI).
         //
-        // F7: `ExecContext` now carries the parent's `Config` +
+        // `ExecContext` now carries the parent's `Config` +
         // `model_id`. Previously we built `Config::default()` here and
         // the child model id defaulted to `config.default_model.name`
         // (usually empty), which made subagents fail at provider
@@ -697,7 +697,7 @@ impl ToolExecutor for SubagentTool {
         // type's ceiling (`explore` pins read_only regardless of parent).
         // The child runs headless (no approval broker), so in `ask` its
         // mutations block/await rather than silently escalate;
-        // non-replayable tools fail closed (see #3).
+        // non-replayable tools fail closed.
         let child_safety = SafetyMode::least_permissive(ctx.safety_mode, agent_type.safety_ceiling);
 
         // Where the child writes. A continuation keeps the workspace it
@@ -820,7 +820,7 @@ impl ToolExecutor for SubagentTool {
 
         // Drive the child reducer loop to completion. The wall-clock
         // timeout lives inside `drive_child` so the child runner is always
-        // shut down — even on timeout — rather than dropped mid-flight (#76).
+        // shut down — even on timeout — rather than dropped mid-flight.
         let timeout_secs = match config.agents.timeout_secs {
             0 => DEFAULT_TIMEOUT_SECS,
             secs => secs,
@@ -1254,7 +1254,7 @@ async fn drive_child(
     // The deadline is a policy arm (not a `timeout()` wrapper) so the single
     // `runner.shutdown()` below always runs — on normal exit, cancel, OR
     // timeout — instead of the runner being dropped mid-flight and leaking its
-    // MCP children (#76).
+    // MCP children.
     //
     // `OnCancel::Abort` rather than the headless run's graceful unwind: a
     // cancelled child is being torn down by a parent turn that is itself
@@ -1850,7 +1850,7 @@ mod tests {
 
     #[test]
     fn child_state_inherits_live_safety_mode_over_config_default() {
-        // #2: a subagent must run at the parent's LIVE safety mode, not the
+        // A subagent must run at the parent's LIVE safety mode, not the
         // static config default `State::new` would otherwise apply — otherwise
         // a downgraded session is escapable by delegating to a subagent.
         use mermaid_runtime::SafetyMode;
@@ -1889,7 +1889,7 @@ mod tests {
         );
     }
 
-    /// F7: when `ExecContext::model_id` is empty (the test builder's
+    /// When `ExecContext::model_id` is empty (the test builder's
     /// default), the fallback walks `config.default_model.{provider,name}`.
     /// This pins the happy-path behavior.
     #[test]

@@ -61,7 +61,7 @@ pub struct ChatState {
     /// selection can be extracted by display-cell range. Indexed by content
     /// line (the same index the selection uses).
     last_rendered_rows: Vec<String>,
-    /// Memoized full-frame assembly (F31): the wrapped lines and image click
+    /// Memoized full-frame assembly: the wrapped lines and image click
     /// map produced by the per-message render loop, keyed by a fingerprint of
     /// every input that determines them (message set, theme, width, reasoning
     /// toggle, day). An unchanged scrollback reuses this across frames instead
@@ -77,8 +77,8 @@ pub struct ChatState {
 /// One memoized chat-frame assembly (see `ChatState::frame_memo`). Holds the
 /// lines *before* the per-frame selection highlight (which is selection-
 /// dependent and applied to a clone each frame) plus the image click map, so a
-/// frame whose inputs are unchanged skips the whole per-message render loop
-/// (F31). Cloning is `O(total lines)`, but it replaces the markdown parse +
+/// frame whose inputs are unchanged skips the whole per-message render loop.
+/// Cloning is `O(total lines)`, but it replaces the markdown parse +
 /// wrap + click-map rebuild the loop would otherwise redo every frame.
 #[derive(Debug, Clone)]
 struct FrameMemo {
@@ -340,7 +340,7 @@ fn slice_by_cells(s: &str, c0: usize, c1: usize) -> &str {
 
 /// Pad `s` on the right with spaces until it spans `cells` display columns,
 /// measured with `UnicodeWidthStr::width` (not chars/bytes) so a CJK/emoji row's
-/// background bar fills to the true visual edge instead of falling short (#101).
+/// background bar fills to the true visual edge instead of falling short.
 /// Never truncates — an already-too-wide `s` is returned unchanged.
 fn pad_to_cells(s: &str, cells: usize) -> String {
     let w = s.width();
@@ -362,7 +362,7 @@ fn line_plain_text(line: &Line) -> String {
 /// click-map coordinate. A scrollback longer than `u16::MAX` rows clamps to the
 /// last addressable row instead of wrapping the index modulo 65536 (which a
 /// plain `as u16` would do, corrupting both the scroll position and the image
-/// click-map on a very long session) (F32).
+/// click-map on a very long session).
 fn clamp_to_u16(n: usize) -> u16 {
     u16::try_from(n).unwrap_or(u16::MAX)
 }
@@ -412,7 +412,7 @@ pub struct ChatWidget<'a> {
     /// Shared render cache: `(content, theme, width)` hash → fully wrapped,
     /// role-prefixed assistant lines. Caching the WRAPPED output (not just the
     /// markdown parse) keeps a committed message from being re-parsed *and*
-    /// re-wrapped every frame — it's cloned from here instead (#134).
+    /// re-wrapped every frame — it's cloned from here instead.
     pub wrapped_line_cache: &'a mut FxHashMap<u64, Vec<Line<'static>>>,
     /// O(1) identity of `messages` for the frame memo — see
     /// `render::chat_content_key`. Passed in rather than derived here because
@@ -431,7 +431,7 @@ pub struct ChatWidget<'a> {
 ///
 /// Pure in its inputs — `(content, width, role prefix/color, theme)` — which is
 /// exactly what lets the result be cached per message and reused across frames
-/// without re-parsing or re-wrapping (#134). The cache key folds in content,
+/// without re-parsing or re-wrapping. The cache key folds in content,
 /// theme, and width; role prefix/color are constant on this (assistant-only)
 /// path, so they need not be keyed.
 fn wrap_assistant_content(
@@ -517,8 +517,8 @@ impl<H: Hasher> std::fmt::Write for HashWrite<'_, H> {
 /// timestamp, so a frame is a function of the transcript alone.
 ///
 /// Two frames with the same fingerprint assemble byte-identical lines, so the
-/// result can be memoized across frames (F31). Uses the same 64-bit-hash-keyed
-/// caching the per-message #134 cache already relies on; the complex non-`Hash`
+/// result can be memoized across frames. Uses the same 64-bit-hash-keyed
+/// caching the per-message cache already relies on; the complex non-`Hash`
 /// fields (`metadata`, `actions`) are folded in via their `Debug` form so no
 /// rendered field is silently missed.
 /// The frame-memo key. `content_key` identifies the transcript in O(1) (see
@@ -631,7 +631,7 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
 
         state.last_chat_area = Some((area.x, area.y, area.width, area.height));
 
-        // F31: skip the whole per-message assembly when nothing that affects it
+        // Skip the whole per-message assembly when nothing that affects it
         // changed. The fingerprint folds in every render input, so a reused
         // frame is byte-identical to a fresh one. Scrolling and drag-selection
         // don't touch these inputs, so the common case (a static scrollback)
@@ -827,7 +827,7 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                     // role-prefixed lines are a pure function of (content, theme,
                     // width) — exactly this key — so cache the WRAPPED output, not
                     // just the parse: a committed message is then cloned, never
-                    // re-parsed or re-wrapped, each frame (#134). Theme is folded in
+                    // re-parsed or re-wrapped, each frame. Theme is folded in
                     // so a theme switch can't serve stale-colored lines; width is in
                     // the key because tables wrap to the viewport.
                     let mut hasher = rustc_hash::FxHasher::default();
@@ -953,7 +953,7 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
                         // `lines.len()` is usize; clamp to the u16 click-map/scroll
                         // coordinate with a saturating cast at this boundary so a
                         // scrollback past u16::MAX rows clamps instead of wrapping a
-                        // stale line index into the map (F32).
+                        // stale line index into the map.
                         let content_line = lines.len();
                         let image_number =
                             msg.image_numbers.as_ref().and_then(|v| v.get(i)).copied();
@@ -992,10 +992,10 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
             // extraction (before the per-frame highlight, which changes only
             // styling, not text). Recomputed only on a miss: a memo hit means
             // unchanged content, so the rows from the miss that built the memo
-            // stay valid — this skips an O(total) re-collect every frame (F31).
+            // stay valid — this skips an O(total) re-collect every frame.
             state.last_rendered_rows = lines.iter().map(line_plain_text).collect();
 
-            // F31: memoize this assembly so an unchanged next frame reuses it
+            // Memoize this assembly so an unchanged next frame reuses it
             // instead of re-running the loop above. Store the lines *before* the
             // selection highlight (applied per-frame below), so the cache stays
             // selection-independent. No `lines.clone()` here either — the memo
@@ -1017,7 +1017,7 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
         // NOTE: `state.last_rendered_rows` (used by selection extraction) is
         // refreshed inside the memo-miss branch above, not here — a memo hit
         // keeps the rows from the miss that built it (content is unchanged on a
-        // hit), so they need not be re-collected every frame (F31).
+        // hit), so they need not be re-collected every frame.
 
         // NOTE: Wrapping is disabled because we handle it manually with hanging
         // indents, so ONE content line is exactly one terminal row. That is what
@@ -1027,7 +1027,7 @@ impl<'a> StatefulWidget for ChatWidget<'a> {
         //
         // `lines.len()` is usize; convert to the u16 ratatui scroll type with a
         // saturating cast so a scrollback longer than u16::MAX rows clamps the
-        // scroll position instead of wrapping it (F32).
+        // scroll position instead of wrapping it.
         let content_height = memo.lines.len();
         let viewport_height = area.height;
 
@@ -1956,7 +1956,7 @@ mod tests {
 
     #[test]
     fn wrapped_line_cache_hit_matches_cache_miss() {
-        // #134: caching the WRAPPED assistant lines must be byte-for-byte
+        // Caching the WRAPPED assistant lines must be byte-for-byte
         // identical to wrapping fresh. Render the same messages through a shared
         // cache — first call misses (populates), second hits — and assert the
         // two frame buffers are equal; then prove a cold cache renders the same
@@ -2090,7 +2090,7 @@ mod tests {
     #[test]
     fn pad_to_cells_fills_to_display_width() {
         assert_eq!(pad_to_cells("ab", 5), "ab   ");
-        // "你好" = 4 display cells; pad to 6 → exactly 2 trailing spaces (#101).
+        // "你好" = 4 display cells; pad to 6 → exactly 2 trailing spaces.
         assert_eq!(pad_to_cells("你好", 6), "你好  ");
         // Already wide enough → unchanged (never truncates).
         assert_eq!(pad_to_cells("你好", 3), "你好");
@@ -2250,7 +2250,7 @@ mod tests {
 
     #[test]
     fn clamp_to_u16_saturates_past_u16_max() {
-        // F32: line counters past u16::MAX must clamp to the last addressable
+        // Line counters past u16::MAX must clamp to the last addressable
         // row, never wrap modulo 65536 (which a plain `as u16` would do).
         assert_eq!(clamp_to_u16(0), 0);
         assert_eq!(clamp_to_u16(65_535), u16::MAX);
@@ -2260,7 +2260,7 @@ mod tests {
 
     #[test]
     fn frame_memo_hit_matches_miss() {
-        // F31: memoizing the assembled frame must be byte-for-byte identical to
+        // Memoizing the assembled frame must be byte-for-byte identical to
         // re-assembling it. Render the SAME state twice — the first render
         // populates the frame memo, the second reuses it — and assert the
         // buffers are equal. Assistant-only messages keep the frame free of the
@@ -2311,7 +2311,7 @@ mod tests {
         );
         // The rows used for selection extraction are only re-collected on a
         // miss; assert the hit path left them intact (not cleared/stale) so
-        // copy/selection still works on a reused frame (F31).
+        // copy/selection still works on a reused frame.
         assert!(
             !state.last_rendered_rows.is_empty(),
             "memo hit must preserve last_rendered_rows from the miss"

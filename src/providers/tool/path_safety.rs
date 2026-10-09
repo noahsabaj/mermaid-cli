@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 /// or no existing ancestor). Lets the caller decide what to do with an
 /// out-of-project path rather than rejecting it.
 ///
-/// Resolution rules (F10):
+/// Resolution rules:
 /// - Relative paths → joined onto `workdir`; `..` components are resolved then
 ///   containment-checked (not rejected outright).
 /// - Existing targets → canonicalized through symlinks.

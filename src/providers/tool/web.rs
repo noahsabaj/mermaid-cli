@@ -491,7 +491,7 @@ impl ToolExecutor for WebSearchTool {
 
         // Cap the aggregate output. Per-result content is already truncated to
         // WEB_CONTENT_MAX_CHARS, but many results across many queries can still
-        // bloat context (and memory) past what any single result's cap bounds (#28).
+        // bloat context (and memory) past what any single result's cap bounds.
         let truncated = combined.len() > mermaid_model::constants::WEB_SEARCH_AGGREGATE_MAX_BYTES;
         let combined = mermaid_model::utils::truncate_middle_bytes(
             &combined,
@@ -1565,7 +1565,7 @@ mod tests {
 
     #[test]
     fn format_fetch_caps_long_content() {
-        // F46: a huge page body must be truncated with a marker, not dumped whole.
+        // A huge page body must be truncated with a marker, not dumped whole.
         let big = "z".repeat(WEB_FETCH_MAX_BYTES * 2);
         let big_page = page(big);
         let out = format_fetch(&big_page, "web-1", None, 2, None, 200);
@@ -1868,7 +1868,7 @@ mod tests {
 
     #[test]
     fn parse_queries_rejects_excess_fan_out() {
-        // #90: a single call can't request unbounded fan-out.
+        // A single call can't request unbounded fan-out.
         let many: Vec<_> = (0..mermaid_model::constants::MAX_BATCH_TOOL_ITEMS + 1)
             .map(|i| serde_json::json!({"query": format!("q{i}")}))
             .collect();

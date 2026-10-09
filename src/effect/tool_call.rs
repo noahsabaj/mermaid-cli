@@ -123,7 +123,7 @@ pub(super) async fn start_runtime_tool_run(
 ) -> Option<String> {
     // Synchronous rusqlite write on the hot tool-execution path — offload it to
     // the blocking pool. The id is needed by `finish`, so we await the result
-    // (unlike `finish`, which is fire-and-forget) (#39).
+    // (unlike `finish`, which is fire-and-forget).
     let task_id = task_id.map(str::to_string);
     let tool_name = tool_name.to_string();
     let args_json = redacted_json_string(args);
@@ -165,7 +165,7 @@ pub(super) fn finish_runtime_tool_run(
         "duration_secs": outcome.duration_secs,
     }));
     // Fire-and-forget telemetry write on the blocking pool — don't stall the
-    // tool-finish path waiting on rusqlite (#39).
+    // tool-finish path waiting on rusqlite.
     tokio::task::spawn_blocking(move || {
         let _ = mermaid_runtime::with_shared_store(|store| {
             store
@@ -258,7 +258,7 @@ pub(super) async fn dispatch_pull_ollama_model(tx: MsgSender, model: String) {
 
     // Capture the reader's handle instead of orphaning it: the child's stdout
     // closes when it exits, so this task finishes right after `child.wait`
-    // below — we join it there so a panic is logged, not silently lost (#60).
+    // below — we join it there so a panic is logged, not silently lost.
     let reader_handle = child.stdout.take().map(|stdout| {
         let tx_inner = tx.clone();
         tokio::spawn(async move {
@@ -291,7 +291,7 @@ pub(super) async fn dispatch_pull_ollama_model(tx: MsgSender, model: String) {
     }
 
     // The child has exited; its stdout is closed, so the reader is finishing.
-    // Join it (logging a panic) so it isn't left orphaned (#60).
+    // Join it (logging a panic) so it isn't left orphaned.
     if let Some(handle) = reader_handle {
         join_logged(handle, "ollama_pull_reader").await;
     }

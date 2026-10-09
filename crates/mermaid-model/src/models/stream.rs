@@ -35,7 +35,7 @@ use super::types::{FinishReason, ProviderContinuation, TokenUsage};
 ///
 /// Adapters themselves never emit `Done` — the provider wrapper builds the
 /// authoritative one from the returned `ModelResponse`, which is where the
-/// usage and the provider continuation actually live (F3).
+/// usage and the provider continuation actually live.
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
     /// Plain assistant content. Append to the response buffer.
@@ -104,7 +104,7 @@ pub async fn emit(sink: Option<&StreamSink>, event: StreamEvent) -> Result<()> {
 /// events are produced into a `Vec` by synchronous wire parsing and drained
 /// here. The predecessor spent an unbounded staging channel, a spawned relay
 /// task and an abort guard per turn to get the same property back after a
-/// `tokio::spawn` per event had taken it away (F2).
+/// `tokio::spawn` per event had taken it away.
 ///
 /// # Errors
 ///
@@ -189,7 +189,7 @@ mod tests {
 
     #[tokio::test]
     async fn emit_all_preserves_order_and_applies_backpressure() {
-        // The whole F2 guarantee, in one loop: a batch produced by sync wire
+        // The whole guarantee, in one loop: a batch produced by sync wire
         // parsing arrives in the order it was produced. The capacity-1 sink
         // also pins the second half of the claim — `emit_all` cannot run
         // ahead of a slow consumer, so a late `Done` can never overtake a

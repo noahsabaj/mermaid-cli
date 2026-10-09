@@ -289,7 +289,7 @@ fn double_cancel_does_not_emit_a_second_cancel_scope() {
 }
 
 /// Full cancellation lifecycle: Idle → Generating → Cancelling →
-/// `TurnCancelled` → Idle. Before F1 the reducer had no arm for the
+/// `TurnCancelled` → Idle. Before this the reducer had no arm for the
 /// terminal event and the TUI stuck in `Cancelling` until an
 /// `UpstreamError` from the aborted provider happened to land — a
 /// side-effect that couldn't be relied on once providers started
@@ -541,7 +541,7 @@ fn compaction_finished_replaces_history_and_archives_head() {
 
 #[test]
 fn truncation_note_skipped_when_tool_calls_pending() {
-    // #72: a `Length` stop with buffered tool calls must NOT insert a "⚠
+    // A `Length` stop with buffered tool calls must NOT insert a "⚠
     // truncated" system message between the assistant's tool_calls and the tool
     // results — that ordering 400s Anthropic. The note is dropped; the turn
     // proceeds to ExecutingTools.
@@ -586,7 +586,7 @@ fn truncation_note_skipped_when_tool_calls_pending() {
 
 #[test]
 fn truncation_note_shown_when_no_tool_calls() {
-    // The mirror of #72: a `Length` stop with no tool calls still surfaces the
+    // The mirror of the test above: a `Length` stop with no tool calls still surfaces the
     // note (the turn ends, so ordering is safe).
     let (state, _) = user_submit(fresh(), "summarize");
     let id = state.current_turn_id().unwrap();
@@ -612,7 +612,7 @@ fn truncation_note_shown_when_no_tool_calls() {
 
 #[test]
 fn manual_compaction_finish_drains_queued_message() {
-    // #73: a message typed during `/compact` must auto-submit when compaction
+    // A message typed during `/compact` must auto-submit when compaction
     // finishes, not sit in the queue until some later turn happens to end.
     let mut state = fresh();
     state
@@ -855,7 +855,7 @@ fn tool_progress_artifact_routes_image_to_assistant_message() {
     assert_eq!(decoded, data);
 }
 
-/// F5: configured MCP servers must seed the state map so their
+/// Configured MCP servers must seed the state map so their
 /// `McpServerReady` events can land. Before this, `state.mcp.servers`
 /// started empty and `get_mut` silently dropped ready events —
 /// configured MCP tools never reached the outgoing `ChatRequest.tools`.

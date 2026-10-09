@@ -27,7 +27,7 @@ pub fn pairing_expiry_from_now(ttl_days: i64) -> Option<String> {
 /// never-expiring token by sending `ttl_days <= 0`: non-positive input becomes
 /// the default TTL, positive values pass through. The local `mermaid pair` CLI
 /// deliberately does **not** call this — its `--ttl-days 0` "never expires"
-/// opt-out is an owner-only choice with no privilege boundary (#65).
+/// opt-out is an owner-only choice with no privilege boundary.
 #[must_use]
 pub fn clamp_pairing_ttl_days(ttl_days: i64) -> i64 {
     if ttl_days <= 0 {
@@ -221,8 +221,8 @@ pub fn pipe_name_for_sid(sid: &str) -> String {
 /// SDDL for the daemon pipe's DACL: protected (`P`, no inherited ACEs),
 /// granting `GA` (generic all) to `SY` (`LocalSystem`) and to the owning user's
 /// SID — and to no one else, since a DACL denies anything it doesn't grant.
-/// This is the named-pipe analog of the 0600 unix socket + uid peer check
-/// (#66). Remote access is separately refused via
+/// This is the named-pipe analog of the 0600 unix socket + uid peer check.
+/// Remote access is separately refused via
 /// `PIPE_REJECT_REMOTE_CLIENTS` on the server, not the DACL.
 #[must_use]
 pub fn pipe_sddl(sid: &str) -> String {
@@ -432,7 +432,7 @@ mod tests {
         assert_eq!(clamp_pairing_ttl_days(0), DEFAULT_PAIRING_TTL_DAYS);
         assert_eq!(clamp_pairing_ttl_days(-5), DEFAULT_PAIRING_TTL_DAYS);
         assert_eq!(clamp_pairing_ttl_days(7), 7);
-        // The #65 property: a clamped non-positive ttl yields a NON-NULL expiry,
+        // A clamped non-positive ttl yields a NON-NULL expiry,
         // exactly as the daemon `pair` handler composes the two helpers.
         assert!(pairing_expiry_from_now(clamp_pairing_ttl_days(0)).is_some());
         assert!(pairing_expiry_from_now(clamp_pairing_ttl_days(-1)).is_some());
