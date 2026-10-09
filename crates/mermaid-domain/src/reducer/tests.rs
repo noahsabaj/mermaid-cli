@@ -6111,7 +6111,7 @@ fn plugin_cmd(name: &str, body: &str) -> crate::PluginCommand {
         name: name.to_string(),
         description: "does things".to_string(),
         body: body.to_string(),
-        plugin: "demo".to_string(),
+        origin: "plugin:demo".to_string(),
     }
 }
 
@@ -6204,7 +6204,7 @@ fn help_lists_plugin_commands() {
     state.plugin_commands = vec![plugin_cmd("deploy", "body")];
     let (state, _) = update(state, Msg::Slash(SlashCmd::Help));
     let last = state.session.messages().last().unwrap().content.clone();
-    assert!(last.contains("Plugin commands:"), "{last}");
+    assert!(last.contains("Prompt commands:"), "{last}");
     assert!(
         last.contains("/deploy - does things (plugin:demo)"),
         "{last}"
@@ -6219,6 +6219,22 @@ fn plugin_command_expand_cases() {
     let cmd = plugin_cmd("x", "Just do it.");
     assert_eq!(cmd.expand(""), "Just do it.");
     assert_eq!(cmd.expand("with args"), "Just do it.\n\nwith args");
+}
+
+#[test]
+fn prompt_command_expands_positional_arguments() {
+    let cmd = plugin_cmd("x", "Fix issue #$1 with priority $2. All: $ARGUMENTS");
+    assert_eq!(
+        cmd.expand("123 high"),
+        "Fix issue #123 with priority high. All: 123 high"
+    );
+    // A missing positional argument expands to nothing, and the args are not
+    // appended a second time.
+    let cmd = plugin_cmd("x", "Review $1$3 now.");
+    assert_eq!(cmd.expand("pr-7"), "Review pr-7 now.");
+    // `$` not followed by a positive number stays as written.
+    let cmd = plugin_cmd("x", "Keep $HOME and $0 and $");
+    assert_eq!(cmd.expand("a"), "Keep $HOME and $0 and $\n\na");
 }
 
 #[test]

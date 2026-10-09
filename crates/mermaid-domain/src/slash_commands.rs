@@ -511,9 +511,9 @@ impl PaletteEntry<'_> {
             PaletteEntry::Builtin(c) => c.description.to_string(),
             PaletteEntry::Plugin(p) => {
                 if p.description.is_empty() {
-                    format!("(plugin:{})", p.plugin)
+                    format!("({})", p.origin)
                 } else {
-                    format!("{} (plugin:{})", p.description, p.plugin)
+                    format!("{} ({})", p.description, p.origin)
                 }
             },
         }
