@@ -96,13 +96,25 @@ pub(crate) fn tool_dispatch(state: &State) -> crate::cmd::ToolDispatch {
         session_id: state.session.conversation.id.clone(),
         message_index: state.session.messages().len(),
         scratchpad: state.session.scratchpad.clone(),
+        computer_batch: Vec::new(),
     }
+}
+
+/// The arguments of the `computer` calls among `calls`, in order.
+pub(crate) fn computer_batch<'a>(
+    calls: impl IntoIterator<Item = &'a mermaid_model::models::ToolCall>,
+) -> Vec<serde_json::Value> {
+    calls
+        .into_iter()
+        .filter(|call| call.function.name == COMPUTER_TOOL)
+        .map(|call| call.function.arguments.clone())
+        .collect()
 }
 
 /// The next step for a turn's queued computer actions once one finishes:
 /// after a success the next action runs, after a failure it is not run.
 enum ComputerNext {
-    Run(crate::state::PendingToolCall),
+    Run(crate::state::PendingToolCall, Vec<serde_json::Value>),
     Halt(mermaid_model::ids::ToolCallId),
 }
 
@@ -126,7 +138,7 @@ fn next_computer_action(
         .find(|(c, o)| c.source.function.name == COMPUTER_TOOL && o.is_none())
         .map(|(c, _)| {
             if outcome.is_success() {
-                ComputerNext::Run(c.clone())
+                ComputerNext::Run(c.clone(), computer_batch(calls.iter().map(|c| &c.source)))
             } else {
                 ComputerNext::Halt(c.call_id)
             }
@@ -135,11 +147,14 @@ fn next_computer_action(
 
 fn run_computer_next(state: &mut State, cmds: &mut Vec<Cmd>, turn: TurnId, next: ComputerNext) {
     match next {
-        ComputerNext::Run(call) => cmds.push(Cmd::ExecuteTool {
+        ComputerNext::Run(call, batch) => cmds.push(Cmd::ExecuteTool {
             turn,
             call_id: call.call_id,
             source: call.source,
-            dispatch: tool_dispatch(state),
+            dispatch: crate::cmd::ToolDispatch {
+                computer_batch: batch,
+                ..tool_dispatch(state)
+            },
         }),
         // The halted action is a failure too, so it halts the one after it.
         ComputerNext::Halt(next) => handle_tool_finished(

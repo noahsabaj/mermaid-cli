@@ -58,7 +58,12 @@ other vision models call the tool directly. A screenshot is fitted to 1568 px on
 screen. Input actions wait 0.5 s before they return. Calls in one message run in order, and after
 one fails the rest return "Not executed: an earlier computer action in this turn failed." without
 running. Screenshots, `zoom`, `cursor_position` and `wait` run in every safety mode; the other
-actions are gated as external access, so `read_only` blocks them and `ask` asks for each one.
+actions are gated as external access, so `read_only` blocks them. The gate decides once for all
+the input actions of one model message: `ask` shows the whole batch in one prompt, and `auto`
+gives the safety check the batch and the last screenshot, so its model must accept pictures. A
+headless run in `ask` refuses input unless `--allow-untrusted-tools` is set. If the user moves the
+mouse while Mermaid works, the next input action returns "Not executed: the user moved the mouse"
+and input stays stopped until the user sends a message.
 Windows and macOS use xcap and enigo (macOS asks the terminal for Screen Recording and
 Accessibility). Linux needs an X11 session; Wayland is not supported yet.
 

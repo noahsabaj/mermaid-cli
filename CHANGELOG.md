@@ -82,7 +82,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   wait half a second for the screen to change. Actions in one message run in
   order, and after one fails the rest are not run. Screenshots, `zoom` and
   `cursor_position` run in every safety mode; mouse and keyboard actions are
-  gated as external access (`read_only` blocks them, `ask` asks for each).
+  gated as external access. `read_only` blocks them; `ask` asks once for all
+  the actions of one message; `auto` checks the batch once, with the last
+  screenshot. If you move the mouse while Mermaid works, Mermaid stops
+  sending input until your next message.
   Windows and macOS use xcap and enigo; Linux speaks X11 directly, so no C
   library is linked. Wayland is not supported yet. Off by default because
   every screenshot sends the screen to the model's provider.

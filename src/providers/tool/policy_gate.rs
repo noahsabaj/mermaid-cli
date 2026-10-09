@@ -63,7 +63,27 @@ pub async fn gate_external(
     summary: String,
     args: &serde_json::Value,
 ) -> Option<ToolOutcome> {
-    gate_external_inner(ctx, tool, category, summary, args, false).await
+    gate_external_inner(ctx, tool, category, summary, args, false, None).await
+}
+
+/// `computer` variant of [`gate_external`]: carries the screen the model last
+/// saw, so the Auto-mode check can judge what the input lands on.
+pub async fn gate_computer(
+    ctx: &ExecContext,
+    summary: String,
+    args: &serde_json::Value,
+    screen: Option<String>,
+) -> Option<ToolOutcome> {
+    gate_external_inner(
+        ctx,
+        "computer",
+        mermaid_runtime::ToolCategory::Computer,
+        summary,
+        args,
+        false,
+        screen,
+    )
+    .await
 }
 
 /// MCP variant of [`gate_external`]: carries the server-advertised
@@ -82,6 +102,7 @@ pub async fn gate_external_mcp(
         summary,
         args,
         read_only_hint,
+        None,
     )
     .await
 }
@@ -93,6 +114,7 @@ async fn gate_external_inner(
     summary: String,
     args: &serde_json::Value,
     mcp_read_only_hint: bool,
+    screen: Option<String>,
 ) -> Option<ToolOutcome> {
     if matches!(
         category,
@@ -116,6 +138,7 @@ async fn gate_external_inner(
     request.command = action_detail(tool, args);
     request.arguments = Some(args.clone());
     request.mcp_read_only_hint = mcp_read_only_hint;
+    request.screen = screen;
     let pending = serde_json::json!({ "tool": tool, "args": args });
     // `scratch_contained` is always false here: external actions (network,
     // desktop, MCP, subagents) act OUTSIDE the filesystem, so scratchpad
@@ -336,6 +359,7 @@ pub async fn gate(
                         path: request.path.clone(),
                         arguments: request.arguments.clone(),
                         goal: ctx.goal.clone(),
+                        screen: request.screen.clone(),
                         workdir: ctx.workdir.display().to_string(),
                         turn: ctx.turn,
                         token: ctx.token.clone(),

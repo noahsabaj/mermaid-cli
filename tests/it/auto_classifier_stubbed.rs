@@ -71,6 +71,7 @@ fn request(command: &str) -> VetRequest {
         path: None,
         arguments: None,
         goal: UserGoal::from_request("build the project"),
+        screen: None,
         workdir: "/repo".to_string(),
         turn: TurnId(1),
         token: CancellationToken::new(),
