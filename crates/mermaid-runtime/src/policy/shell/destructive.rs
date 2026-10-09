@@ -118,7 +118,7 @@ pub(crate) fn destructive_rule_with_depth(command: &str, depth: u8) -> Option<&'
     // `${IFS}`/`$IFS` is the shell's word-splitting variable; an attacker uses it
     // to glue `rm${IFS}-rf${IFS}/` into a single token whose basename isn't `rm`,
     // slipping the argv0 checks below. Expand it to a space before tokenizing so
-    // the hard-deny sees the real argv (#F2). Over-expansion is the safe direction.
+    // the hard-deny sees the real argv. Over-expansion is the safe direction.
     let lower = command
         .to_ascii_lowercase()
         .replace("${ifs}", " ")
@@ -160,8 +160,8 @@ fn argv_scan_units(lower: &str) -> Vec<String> {
 }
 
 /// Recurse into command/process substitutions — the shell executes them, so a
-/// destructive command hidden in `$(…)`/backticks must be hard-denied too
-/// (#F1), even in `full_access`. Bounded depth guards crafted nesting.
+/// destructive command hidden in `$(…)`/backticks must be hard-denied too,
+/// even in `full_access`. Bounded depth guards crafted nesting.
 fn substitution_rule(lower: &str, depth: u8) -> Option<&'static str> {
     let bodies = extract_substitutions(lower);
     if depth < 3 {
@@ -320,7 +320,7 @@ fn nested_script_rule(script: &str, depth: u8) -> Option<&'static str> {
 /// listener / reverse-shell primitive (`nc -l`, `socat …-listen:…`), or a remote
 /// download piped straight into a shell (`curl … | sh`). Tokenized and
 /// segment-aware — not a substring match — so spacing, case, quoting, flag
-/// bundling, and chaining can't trivially evade it (#114). Over-blocking is the
+/// bundling, and chaining can't trivially evade it. Over-blocking is the
 /// safe direction; the authoritative boundary is still deny-by-default + the
 /// policy engine, which this mirrors without changing its semantics.
 /// Every stretch of text `is_destructive_command` must scan as a command:

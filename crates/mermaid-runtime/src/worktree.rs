@@ -595,7 +595,7 @@ mod tests {
     /// They did. Identical tree, identical `init` message, identical author,
     /// and git stamps commits to the second, so anything seeded inside one
     /// second collided — measured `db33a16` three times running. This is the
-    /// property that made #319's flake stick to a retry instead of clearing,
+    /// property that made a hash-sensitive flake stick to a retry instead of clearing,
     /// and nothing pinned it, so nothing would notice it coming back.
     #[test]
     fn two_project_repos_do_not_share_a_base_commit() {
@@ -614,8 +614,7 @@ mod tests {
 
     /// The porcelain rule, enforced rather than merely written down.
     ///
-    /// `porcelain`'s doc comment has said "never the plain form" since #319,
-    /// and a call site four hundred lines below it stayed on the plain form
+    /// `porcelain`'s doc comment says "never the plain form", and a call site four hundred lines below it stayed on the plain form
     /// anyway. That one only counted lines, so it was harmless — but a
     /// comment is not a constraint, and the next person to tighten an
     /// assertion into a substring match re-earns the original bug.
@@ -671,7 +670,7 @@ mod tests {
     /// stamps commits to the second — three repos initialized back to back
     /// measured `db33a16` all three times.
     ///
-    /// That is what turned the `contains("a1")` bug (#319) from a 2.3% flake
+    /// That is what turned the `contains("a1")` bug from a 2.3% flake
     /// into a stuck one. A nextest retry lands in the same second, rebuilds
     /// the same commit, and fails identically, so the failure reads as a race
     /// in `destroy` rather than as a hash that happens to spell the needle.

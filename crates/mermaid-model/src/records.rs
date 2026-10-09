@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 /// are reset by the daemon's `reconcile_after_restart`; a `NULL` owner (an
 /// interactive CLI run, or any other creator) is left alone so a live
 /// `mermaid` session that shares the store isn't wrongly failed on daemon
-/// startup (F18/RC-E).
+/// startup.
 pub const OWNER_KIND_DAEMON: &str = "daemon";
 
 /// A stored enum label this build does not know.
@@ -254,7 +254,7 @@ pub struct NewTask {
     /// [`Self::daemon_owned`]) marks a task the daemon runs in-process, so the
     /// startup reconcile may fail it if a crash left it `Running`. `None` — the
     /// default, used by interactive CLI runs and any other creator — is left
-    /// untouched by reconcile so a live session isn't clobbered (F18/RC-E).
+    /// untouched by reconcile so a live session isn't clobbered.
     pub owner_kind: Option<String>,
     /// Full prompt for deferred execution by the daemon scheduler. Tasks
     /// without one are metadata-only and are never claimed.

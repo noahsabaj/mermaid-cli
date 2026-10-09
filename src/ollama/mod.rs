@@ -25,7 +25,7 @@ pub(crate) fn backend_config(
 ) -> mermaid_model::models::BackendConfig {
     mermaid_model::models::BackendConfig {
         // Scheme-less: `normalize_url` in the adapter picks http (loopback/LAN)
-        // vs https (public) by host class (#86).
+        // vs https (public) by host class.
         ollama_url: config.ollama.base_url(),
         max_idle_per_host: 10,
         timeout_secs: 10,

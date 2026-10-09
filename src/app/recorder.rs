@@ -22,7 +22,7 @@
 //!       bit-exactly; new `Msg` variants round-trip automatically.
 //!
 //! Two deliberate divergences from live state, both security-driven:
-//!   - Credential-shaped strings are redacted before hitting disk (#17), so
+//!   - Credential-shaped strings are redacted before hitting disk, so
 //!     a session where a secret crossed the reducer replays the *redacted*
 //!     transcript. Replay is deterministic with respect to the log — folding
 //!     the same log twice always produces identical state — and identical to
@@ -86,7 +86,7 @@ impl Recorder {
         // A recording stores the full conversation — prompts, model output, and
         // tool results (e.g. a `read_file` of a private doc) — in cleartext;
         // only credential-shaped strings are scrubbed. Create it owner-only so a
-        // shared temp/cwd doesn't leak it (#132).
+        // shared temp/cwd doesn't leak it.
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
@@ -164,7 +164,7 @@ impl Recorder {
         // Single redaction choke point: scrub credential-shaped strings out of
         // every recorded payload before it hits disk. A `read_file .env` result,
         // a pasted token, or an API error echoing a key would otherwise be
-        // persisted in cleartext in the `--record` log (#17).
+        // persisted in cleartext in the `--record` log.
         mermaid_model::utils::redact_json(&mut body);
         let entry = serde_json::json!({
             "ts": now,
@@ -390,7 +390,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn recording_file_is_owner_only() {
-        // #132: recordings hold cleartext prompts/output/file-contents, so they
+        // Recordings hold cleartext prompts/output/file-contents, so they
         // must be created 0600 rather than inheriting a world-readable umask.
         use std::os::unix::fs::PermissionsExt;
         let path = tmpfile("perms.jsonl");
@@ -464,7 +464,7 @@ mod tests {
     #[test]
     fn record_msg_redacts_secrets_in_body() {
         // A recorded payload carrying a credential (e.g. a `read_file .env`
-        // result or an API error echoing a key) must hit disk scrubbed (#17).
+        // result or an API error echoing a key) must hit disk scrubbed.
         let path = tmpfile("redact.jsonl");
         let _ = std::fs::remove_file(&path);
         {

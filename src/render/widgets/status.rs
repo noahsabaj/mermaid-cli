@@ -29,8 +29,7 @@ pub struct StatusWidget<'a> {
     /// User-requested level when it differs from `reasoning_level` (the snap
     /// case). `Some(requested)` shows `reasoning: high (max requested)`.
     pub requested_level: Option<ReasoningLevel>,
-    /// Live session safety mode. Never the spinner/status widget (#245
-    /// invariant) — this is the persistent mode line.
+    /// Live session safety mode. Never the spinner/status widget: this is the persistent mode line.
     pub safety_mode: SafetyMode,
 }
 

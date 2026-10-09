@@ -88,7 +88,7 @@ impl<'a> Widget for ConversationListWidget<'a> {
 fn short_timestamp(rfc3339: &str) -> String {
     // Extract the `YYYY-MM-DDTHH:MM` portion (16 ASCII bytes) and swap the
     // 'T' for a space. Clamp to a char boundary so a malformed value with a
-    // multi-byte sequence straddling byte 16 can't panic the slice (#102).
+    // multi-byte sequence straddling byte 16 can't panic the slice.
     if rfc3339.len() >= 16 {
         let cut = rfc3339.floor_char_boundary(16);
         let mut s = rfc3339[..cut].to_string();
@@ -162,7 +162,7 @@ mod tests {
     #[test]
     fn short_timestamp_does_not_panic_on_multibyte_boundary() {
         // "2026-04-21T14:3" is 15 bytes; then "好" (3 bytes) straddles byte 16.
-        // floor_char_boundary(16) backs up to byte 15 instead of panicking (#102).
+        // floor_char_boundary(16) backs up to byte 15 instead of panicking.
         assert_eq!(short_timestamp("2026-04-21T14:3好0:12"), "2026-04-21 14:3");
     }
 }

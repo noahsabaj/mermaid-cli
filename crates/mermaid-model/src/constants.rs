@@ -192,7 +192,7 @@ pub const MARKDOWN_CACHE_MAX_ENTRIES: usize = 200;
 /// the image was elided, so the model knows what was dropped from context.
 pub const MAX_RETAINED_TOOL_IMAGES: usize = 3;
 
-// Project instructions (Step 5h)
+// Project instructions
 /// Maximum bytes loaded from project instruction files before truncation. ~10k
 /// tokens at 4 chars/token. Files larger than this likely have
 /// repository-wide notes that don't all need to live in the system

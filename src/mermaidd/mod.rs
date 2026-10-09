@@ -250,7 +250,7 @@ mod tests {
             r#"{"command":"runtime_hygiene_archive"}"#,
             r#"{"command":"pair"}"#,
             r#"{"command":"logs","id":"p"}"#,
-            // #21: privileged reads gated behind the pairing token too.
+            // Privileged reads gated behind the pairing token too.
             r#"{"command":"session_messages","id":"s"}"#,
             r#"{"command":"snapshot"}"#,
             r#"{"command":"runtime_snapshot"}"#,

@@ -381,8 +381,8 @@ use super::model::{
     OpenAICompatProvider,
 };
 
-/// A lazily-built, shared provider. `OnceCell` gives single-flight construction
-/// (#84); the outer `Arc` lets `resolve` clone the cell out from under the cache
+/// A lazily-built, shared provider. `OnceCell` gives single-flight construction;
+/// the outer `Arc` lets `resolve` clone the cell out from under the cache
 /// lock and initialize it without holding the lock across the build.
 type ProviderCell = Arc<tokio::sync::OnceCell<Arc<dyn ModelProvider>>>;
 
@@ -391,7 +391,7 @@ type ProviderCell = Arc<tokio::sync::OnceCell<Arc<dyn ModelProvider>>>;
 /// runner asks for them lazily and reuses across turns.
 pub struct ProviderFactory {
     config: Arc<Config>,
-    /// Per-key cache of built providers, keyed by normalized model id (#83). The
+    /// Per-key cache of built providers, keyed by normalized model id. The
     /// `Mutex` is only held to get-or-insert a cell, never across the build.
     cache: Mutex<std::collections::HashMap<String, ProviderCell>>,
 }
@@ -449,7 +449,7 @@ impl ProviderFactory {
     pub async fn resolve(&self, model_id: &str) -> Result<Arc<dyn ModelProvider>> {
         let key = normalize_cache_key(model_id);
         // Get-or-insert the per-key cell under a brief lock, then initialize it
-        // exactly once outside the lock (#84). A failed build isn't cached, so a
+        // exactly once outside the lock. A failed build isn't cached, so a
         // transient error can be retried on the next call.
         let cell = {
             let mut cache = self.cache.lock().await;
@@ -481,7 +481,7 @@ async fn build_provider(config: &Config, model_id: &str) -> Result<Box<dyn Model
     let (provider, model_name) = parse_model_id(model_id);
     let provider_lc = provider.to_lowercase();
 
-    // 1. Ollama (and bare names). F11: pass Arc<Config> so the wrapper
+    // 1. Ollama (and bare names). Pass Arc<Config> so the wrapper
     // can forward Ollama hardware options to the adapter.
     if provider_lc == "ollama" {
         let backend = crate::ollama::backend_config(config);
@@ -576,7 +576,7 @@ async fn build_provider(config: &Config, model_id: &str) -> Result<Box<dyn Model
 
 /// Cache key for a model id: the provider segment lowercased (matching
 /// `build_provider`'s own normalization) so `Anthropic/x` and `anthropic/x`
-/// resolve to one cached provider instead of building two identical ones (#83).
+/// resolve to one cached provider instead of building two identical ones.
 fn normalize_cache_key(model_id: &str) -> String {
     let (provider, model) = parse_model_id(model_id);
     format!("{}/{}", provider.to_lowercase(), model)
@@ -622,7 +622,7 @@ static PROFILE_CACHE: std::sync::LazyLock<
 /// registry constants), so a custom provider needs a leaked, owned copy to
 /// participate without redesigning the profile type.
 ///
-/// The leak is memoized (F67). `build_provider` runs once per distinct *model
+/// The leak is memoized. `build_provider` runs once per distinct *model
 /// id*, so without a cache this leaked a fresh profile for every custom
 /// `provider/model` pair — a permanent, per-distinct-model_id growth, not the
 /// "0-3" the old comment claimed. The profile's content depends only on
@@ -758,7 +758,7 @@ fn validate_provider_base_url(url: &str) -> Result<()> {
 }
 
 /// Resolve a *built-in* provider's `base_url`, honoring a user override but
-/// hardening it (F66). Built-in providers (anthropic, gemini, and the
+/// hardening it. Built-in providers (anthropic, gemini, and the
 /// registry-backed OpenAI-compatible ones) ship a trusted default endpoint; a
 /// `[providers.<name>] base_url` override redirects that provider's API key to a
 /// host the user chose. The override lives in the user's own config, so we allow
@@ -788,7 +788,7 @@ fn resolve_overridable_base_url(
 }
 
 /// Hosts already warned about (per provider) for a built-in `base_url` override,
-/// so the F66 warning fires once per process rather than on every `resolve`.
+/// so the warning fires once per process rather than on every `resolve`.
 /// Keyed by `"<provider>@<host>"`.
 static WARNED_OVERRIDE_HOSTS: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashSet<String>>,
@@ -796,7 +796,7 @@ static WARNED_OVERRIDE_HOSTS: std::sync::LazyLock<
 
 /// Emit a one-time `tracing::warn!` (deduped per provider+host) naming the host a
 /// built-in provider's API key will be sent to because its trusted default
-/// `base_url` was overridden in config (F66).
+/// `base_url` was overridden in config.
 fn warn_overridden_provider_host(provider: &str, base_url: &str) {
     let host = provider_host(base_url);
     if should_warn_once(&format!("{provider}@{host}")) {
@@ -893,7 +893,7 @@ mod tests {
         assert!(validate_provider_base_url("http://localhost:11434/v1").is_ok());
         assert!(validate_provider_base_url("http://127.0.0.1:8000").is_ok());
         assert!(validate_provider_base_url("http://[::1]:8000").is_ok());
-        // #26: http to a non-loopback host (even a private LAN one) is refused —
+        // Http to a non-loopback host (even a private LAN one) is refused —
         // the API key would otherwise cross the wire in cleartext.
         assert!(validate_provider_base_url("http://192.168.1.5:8080").is_err());
         assert!(validate_provider_base_url("http://169.254.169.254").is_err());
@@ -1104,7 +1104,7 @@ mod tests {
 
     #[test]
     fn normalize_cache_key_lowercases_provider_only() {
-        // #83: provider segment is lowercased; the model segment is preserved.
+        // Provider segment is lowercased; the model segment is preserved.
         assert_eq!(
             normalize_cache_key("Anthropic/Claude-X"),
             "anthropic/Claude-X"
@@ -1121,7 +1121,7 @@ mod tests {
     async fn resolve_is_single_flight_and_cached() {
         // Ollama is keyless and builds no network connection, so this resolves
         // offline. Two concurrent resolves with different provider casing must
-        // return the same cached instance (#83 normalization + #84 single-flight).
+        // return the same cached instance (normalization + single-flight).
         let f = ProviderFactory::new(Config::default());
         let (a, b) = tokio::join!(
             f.resolve("ollama/test-model"),
@@ -1135,7 +1135,7 @@ mod tests {
         );
     }
 
-    // F66: a built-in provider's base_url override is hardened — validated for
+    // A built-in provider's base_url override is hardened — validated for
     // scheme and otherwise honored (the warning is a side effect we don't assert
     // here, but the dedup helper is tested separately below).
     #[test]
@@ -1157,7 +1157,7 @@ mod tests {
             "https://proxy.internal/v1"
         );
         // http override to a NON-loopback host is refused (would leak the key in
-        // cleartext) — the F66 https requirement.
+        // cleartext) — the https requirement.
         assert!(
             resolve_overridable_base_url(
                 "anthropic",
@@ -1189,7 +1189,7 @@ mod tests {
 
     #[test]
     fn override_host_warning_is_deduped() {
-        // The F66 warning must be one-time per key: first call fires, the rest
+        // The warning must be one-time per key: first call fires, the rest
         // are suppressed. Use a process-unique key so this test doesn't race the
         // shared warned-set with any other test.
         let key = unique_env("MERMAID_FACTORY_WARN_KEY");
@@ -1200,7 +1200,7 @@ mod tests {
         );
     }
 
-    // F67: identical custom-provider inputs must reuse one leaked &'static
+    // Identical custom-provider inputs must reuse one leaked &'static
     // profile, and distinct inputs must each leak exactly one — no per-model_id
     // growth.
     #[test]

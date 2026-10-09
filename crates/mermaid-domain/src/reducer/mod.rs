@@ -466,7 +466,7 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
         } => {
             // Drop approval requests for a turn that's already being cancelled:
             // its tool task is unwinding, so surfacing (and parking on) a modal
-            // would outlive the turn (#74). The stale-filter lets a same-id
+            // would outlive the turn. The stale-filter lets a same-id
             // `Cancelling` turn through, so guard the state explicitly here.
             if matches!(state.turn, TurnState::Cancelling { .. }) {
                 return (state, cmds);
@@ -498,7 +498,7 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             questions,
         } => {
             // Same cancellation guard as approvals: drop a question for a turn
-            // that's already unwinding (#74) so its modal can't outlive the turn.
+            // that's already unwinding so its modal can't outlive the turn.
             if matches!(state.turn, TurnState::Cancelling { .. }) {
                 return (state, cmds);
             }
@@ -519,7 +519,7 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
         },
 
         // ── MCP ─────────────────────────────────────────────────────
-        // F5: upsert semantics. State::new seeds entries for configured
+        // Upsert semantics. State::new seeds entries for configured
         // servers in `Starting` status, so these handlers normally find
         // an existing entry to update. But a server discovered at
         // runtime (hypothetical future path) should still land in the
@@ -647,7 +647,7 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             // reducer state depends on raw terminal dimensions.
         },
         Msg::MouseScroll { delta } => {
-            // F13: accumulate into a counter. Render layer diffs
+            // Accumulate into a counter. Render layer diffs
             // against its last-seen value and applies the resulting
             // delta to ChatState. `saturating_add` never overflows.
             state.ui.mouse_scroll_accum = state.ui.mouse_scroll_accum.saturating_add(delta as i32);
@@ -797,7 +797,7 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             // The selection itself lives in the render layer; the main loop
             // resolves it to text and hands it here so the clipboard write is an
             // `update()`-emitted Cmd (recorded for replay) rather than an
-            // out-of-band dispatch (#18).
+            // out-of-band dispatch.
             if !text.is_empty() {
                 cmds.push(Cmd::CopyToClipboard(text));
             }

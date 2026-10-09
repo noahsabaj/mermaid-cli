@@ -16,7 +16,7 @@ pub(super) async fn serve_unix() -> Result<()> {
     let data_dir = mermaid_runtime::data_dir()?;
     let socket_path = data_dir.join("mermaidd.sock");
 
-    // #66: the 0700 data dir is what makes the 0600 socket meaningful.
+    // The 0700 data dir is what makes the 0600 socket meaningful.
     // `open_default` warns but stays non-fatal on a chmod failure (a shared
     // CLI/test path); here, at the daemon's privilege boundary, refuse to serve
     // on a loose dir.
@@ -26,7 +26,7 @@ pub(super) async fn serve_unix() -> Result<()> {
             .with_context(|| format!("failed to lock data dir {} to 0700", data_dir.display()))?;
     }
 
-    // Singleton guard (#131): hold an advisory flock for the daemon's whole
+    // Singleton guard: hold an advisory flock for the daemon's whole
     // lifetime so two concurrent starts can't race the connect-probe → unlink →
     // bind dance below (one would unlink the other's fresh socket). flock
     // auto-releases on process exit/crash, so a dead daemon never wedges it.
@@ -42,7 +42,7 @@ pub(super) async fn serve_unix() -> Result<()> {
     };
 
     // Only the lock holder reaches here, so recovery/GC runs once per live
-    // daemon (#120, #118, #130).
+    // daemon.
     startup_recovery();
 
     // Drain queued tasks (including any left by a previous daemon) — spawned
@@ -86,7 +86,7 @@ pub(super) async fn serve_unix() -> Result<()> {
     maybe_spawn_tcp_listener().await;
 
     // The socket lives in the 0700 data dir we own, so its file-owner uid is our
-    // uid; reject any peer whose uid doesn't match (#66) — defense-in-depth
+    // uid; reject any peer whose uid doesn't match — defense-in-depth
     // behind the 0600 perms, via std `MetadataExt::uid` (no extra crate).
     use std::os::unix::fs::MetadataExt;
     let owner_uid = std::fs::metadata(&socket_path)
@@ -154,7 +154,7 @@ pub(super) async fn serve_windows() -> Result<()> {
     let mut security = mermaid_runtime::daemon::PipeSecurity::owner_only()?;
 
     // The first instance doubles as the singleton guard (the named-pipe analog
-    // of the unix flock, #131): while any mermaidd holds an instance of this
+    // of the unix flock): while any mermaidd holds an instance of this
     // name, a second daemon's first-instance create fails with
     // `PermissionDenied`. Unlike unix sockets there is no stale-file case —
     // the name vanishes with the last handle.
@@ -174,7 +174,7 @@ pub(super) async fn serve_windows() -> Result<()> {
     };
 
     // Only the first-instance holder reaches here, so recovery/GC runs once
-    // per live daemon (#120, #118, #130) — same guarantee the flock gives unix.
+    // per live daemon — same guarantee the flock gives unix.
     startup_recovery();
 
     // Drain queued tasks (including any left by a previous daemon) — spawned
@@ -225,7 +225,7 @@ pub(super) async fn maybe_spawn_tcp_listener() {
     // TCP control is OFF by default — it exposes the agent control plane to
     // every local UID and anything that can reach loopback. Opt in with
     // MERMAID_DAEMON_ENABLE_TCP=1. Unlike the Unix socket, a TcpStream carries no
-    // peer credentials (#66), so mandatory token auth is its only gate.
+    // peer credentials, so mandatory token auth is its only gate.
     if !std::env::var("MERMAID_DAEMON_ENABLE_TCP")
         .is_ok_and(|value| value == "1" || value == "true")
     {
@@ -311,7 +311,7 @@ where
     let timeout =
         std::time::Duration::from_secs(mermaid_model::constants::DAEMON_CONNECTION_TIMEOUT_SECS);
     // Bounded read: a pre-auth client (especially over TCP) must not be able to
-    // stream bytes without a newline and grow this buffer without bound (#22).
+    // stream bytes without a newline and grow this buffer without bound.
     // The read itself is inside the connection timeout too.
     let mut reader = BufReader::new(stream);
     let line = match tokio::time::timeout(
