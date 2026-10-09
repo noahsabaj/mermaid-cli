@@ -172,6 +172,12 @@ jobs:
         # Windows cancellation flake. `--workspace` covers the mermaid-runtime
         # crate (safety classifier, approvals store). No doctests exist, so
         # nextest skipping them loses nothing.
+        #
+        # Two tests per vCPU, as `just test` runs them (see the justfile): the
+        # suite mostly waits on child processes, ptys and deadlines. GitHub's
+        # Linux and Windows runners have 4 vCPUs and the macOS one has 3.
+        env:
+          NEXTEST_TEST_THREADS: ${{ matrix.os == 'macos-latest' && 6 || 8 }}
         run: cargo nextest run --workspace
 
       # The insta snapshot suite now runs on every matrix leg (#296), so a

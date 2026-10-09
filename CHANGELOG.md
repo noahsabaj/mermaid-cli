@@ -25,8 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **The test suite runs in about two thirds of the time.** `just test` on a
-  4-core Linux box went from about 27.5s to about 17s, with every test still
+- **The test suite runs in under half the time.** `just test` on a 4-core
+  Linux box went from about 27.5s to about 11.5s, with every test still
   checking what it checked. Most of the time was waiting, not work:
   - The pty tests answer the terminal's device-attributes query, as every
     real terminal does. Unanswered, crossterm's keyboard-protocol probe
@@ -43,8 +43,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `.config/nextest.toml` starts the integration and timeout tests first,
     so they overlap with the thousands of millisecond tests instead of
     trailing them.
+  - `just test`, `just check` and CI run two tests per CPU instead of one,
+    since most tests wait on a child process, a pty or a deadline.
+    `NEXTEST_TEST_THREADS` still picks another number.
 
 ### Fixed
+
+- **Isolated subagents started at the same moment no longer fail at random.**
+  `git worktree add` reads every existing entry under `.git/worktrees`, and an
+  entry another `add` had created but not yet filled in killed it with `fatal:
+  failed to read .git/worktrees/<id>/commondir`. Two children of one session
+  starting together could hit this, and under load two worktree tests failed
+  this way a few runs in ten. Mermaid now runs its worktree `add`, `remove`
+  and `prune` one at a time.
 
 - **The highlighted row in `/load` and the rewind picker can be read.** Its
   meta, `(14 msg · 2026-01-01 12:34)` or `(#1 back)`, was drawn in
