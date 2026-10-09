@@ -16,6 +16,7 @@ mermaid --model nvidia/z-ai/glm-5.2             # NVIDIA NIM (requires NVIDIA_AP
 mermaid --model cloudflare/@cf/zai-org/glm-5.2  # Cloudflare Workers AI (CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID)
 mermaid --reasoning high                        # Override default reasoning depth
 mermaid --path /path/to/project                  # Run against a specific project directory
+mermaid --add-dir ../shared-lib                  # Also work in another directory with the project's trust (repeatable)
 mermaid --record /tmp/session.jsonl              # Record reducer events for replay/debugging
 mermaid --replay /tmp/session.jsonl              # Reconstruct a recorded session (headless, deterministic)
 mermaid --append-system-prompt "Prefer small diffs" # Add one-off runtime instructions
@@ -59,6 +60,27 @@ mermaid mcp                                     # List configured MCP servers
 
 `mermaid tasks`, `mermaid processes`, `mermaid plugin`, and the other durable-runtime verbs are
 documented in [runtime.md](runtime.md).
+
+### Added working directories
+
+`--add-dir <dir>` (repeatable), `[workspace] additional_dirs` in your user config
+([configuration.md](configuration.md)) and `/add-dir <path>` mid-session give extra directories
+the same trust as the project directory:
+
+- The file tools treat paths inside them like project paths: no outside-the-project approval or
+  Auto-mode review, edits are checkpointed, and writes go through the same symlink-confined
+  helpers with the added directory as the root. A symlink inside one that points out of it does
+  not count as inside, and neither does a path outside that symlinks in.
+- `execute_command` with a `working_dir` inside one is not escalated.
+- `--confine-fs` / `--sandbox` let shell commands write there ([sandbox.md](sandbox.md)).
+- `read_only` mode still blocks writes everywhere; reads of an added directory are simply not
+  external reads.
+- Subagents get the same list, and `/doctor` and the model's session facts name them.
+
+Each path is canonicalized when it is added; one that does not exist is an error (at startup,
+the session does not start). Flag paths resolve against the shell's current directory, config
+and `/add-dir` paths against the project directory. A repository's `.mermaid/config.toml` cannot
+add one. Additions made with `/add-dir` last until the session exits and are not saved.
 
 ## Keyboard shortcuts
 
@@ -131,6 +153,7 @@ Everyday:
 - `/theme [dark|light]` — switch the color theme (persisted); `NO_COLOR` disables colors entirely
 - `/todos` — show or edit the task checklist the agent keeps for the current run
 - `/scratchpad` — show the session's scratch directory and what is in it
+- `/add-dir [path]` — add a working directory for the rest of the session (relative paths resolve against the project directory, `~` against your home), or list the added ones. See "Added working directories" below
 - `/editor` — compose the prompt in `$VISUAL`/`$EDITOR` (Ctrl+O keeps the current draft)
 - `/help` (`/h`), `/quit` (`/q`)
 

@@ -198,6 +198,12 @@ pub(crate) fn system_prompt_for_state(state: &State) -> String {
         state.cwd.display(),
         safety_line
     );
+    if !state.additional_dirs.is_empty() {
+        prompt.push_str(&format!(
+            "\nAdditional working directories: {}",
+            crate::reports::added_dirs_display(state)
+        ));
+    }
     // The concrete path (the static prompt only describes the mechanism);
     // absent before `Msg::ScratchpadReady` lands or when creation failed.
     if let Some(scratch) = &state.session.scratchpad {

@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`--add-dir <dir>` and `/add-dir <path>` let the agent work in more than
+  one directory.** Each added directory gets the project directory's trust:
+  the file tools and the policy gate treat paths inside it as project paths
+  (no outside-the-project approval or Auto-mode review, edits checkpointed,
+  writes confined beneath it), `execute_command` with a `working_dir` there
+  is not escalated, and `--confine-fs` / `--sandbox` let shell commands write
+  there. `read_only` still blocks writes everywhere. The flag repeats and adds
+  to a new user-config key, `[workspace] additional_dirs`; `/add-dir <path>`
+  adds one for the rest of the session and bare `/add-dir` lists them.
+  Paths are canonicalized when added, and a missing one is an error. Symlinks
+  get the project root's rules: a link inside an added directory that points
+  out of it is not inside it. Subagents inherit the list, and `/doctor` and
+  the model's session facts name it. A repository's `.mermaid/config.toml`
+  cannot set the key.
 - **Mermaid cleans up the config keys it no longer reads.** A config file
   written by an older `mermaid init` still carries sections a later release
   removed, such as `[plan]` (0.28.0) or `[computer_use]` and

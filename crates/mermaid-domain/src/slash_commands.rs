@@ -196,6 +196,14 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         group: SlashCommandGroup::Everyday,
     },
     SlashCommand {
+        name: "add-dir",
+        aliases: &[],
+        description: "Add a working directory for this session, or list the added ones",
+        arg_hint: Some("[path]"),
+        usage_note: None,
+        group: SlashCommandGroup::Everyday,
+    },
+    SlashCommand {
         name: "usage",
         aliases: &[],
         description: "Show provider token usage and session totals",
@@ -658,6 +666,7 @@ pub fn parse_slash_command(raw: &str) -> Option<crate::SlashCmd> {
         Some("usage") => SlashCmd::Usage,
         Some("todos") => SlashCmd::Todos(arg),
         Some("scratchpad") => SlashCmd::Scratchpad,
+        Some("add-dir") => SlashCmd::AddDir(arg.filter(|a| !a.is_empty())),
         Some("context") => {
             use crate::ContextCmd;
             let a = arg.as_deref().map(str::trim);

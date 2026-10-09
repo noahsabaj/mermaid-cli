@@ -739,6 +739,9 @@ impl ToolExecutor for SubagentTool {
         // may have appeared, or moved after a `/clear`, since the child was
         // first built).
         child_state.session.scratchpad = ctx.scratchpad.clone();
+        // The same for the added working roots: the parent's LIVE list, so a
+        // `/add-dir` since the child was built reaches continuations too.
+        child_state.additional_dirs = ctx.additional_dirs.clone();
         let (instructions, memory, skills) =
             crate::app::instructions::load_project_context(&cwd, &config.memory);
         child_state.instructions = instructions;
@@ -1815,6 +1818,22 @@ mod tests {
         assert_eq!(
             child_state.session.scratchpad.as_deref(),
             Some(std::path::Path::new("/data/tmp/scratchpad/-proj/s"))
+        );
+    }
+
+    #[test]
+    fn child_state_inherits_the_parent_added_dirs() {
+        // A subagent works with the parent's added working roots: the child
+        // State is built from the startup config, so without the refresh
+        // block a `/add-dir` made mid-session would not reach it.
+        let (mut ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), PathBuf::from("/tmp"));
+        ctx.additional_dirs = vec![PathBuf::from("/srv/shared")];
+        let mut child_state = test_state();
+        assert!(child_state.additional_dirs.is_empty());
+        child_state.additional_dirs = ctx.additional_dirs.clone();
+        assert_eq!(
+            child_state.additional_dirs,
+            vec![PathBuf::from("/srv/shared")]
         );
     }
 

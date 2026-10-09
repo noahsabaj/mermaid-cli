@@ -1746,6 +1746,94 @@ fn doctor_reports_the_scratchpad_path() {
 }
 
 #[test]
+fn slash_add_dir_lists_resolves_and_appends() {
+    // Bare: a listing, no effect.
+    let state = fresh_state();
+    let (state, cmds) = update(state, Msg::Slash(SlashCmd::AddDir(None)));
+    assert!(!cmds.iter().any(|c| matches!(c, Cmd::Query(_))));
+    let msg = &state.session.messages().last().expect("listing").content;
+    assert!(msg.contains("No added working directories"), "{msg}");
+
+    // With a path: canonicalizing is I/O, so the reducer only asks.
+    let (state, cmds) = update(
+        state,
+        Msg::Slash(SlashCmd::AddDir(Some("../lib".to_string()))),
+    );
+    assert!(
+        cmds.iter().any(|c| matches!(
+            c,
+            Cmd::Query(Query::ResolveAddedDir { raw }) if raw == "../lib"
+        )),
+        "{cmds:?}"
+    );
+    assert!(
+        state.additional_dirs.is_empty(),
+        "nothing added before the answer"
+    );
+
+    // The answer appends the canonical dir, once.
+    let resolved = || {
+        Msg::QueryResult(QueryResult::AddedDirResolved {
+            raw: "../lib".to_string(),
+            resolved: Ok(PathBuf::from("/tmp/lib")),
+        })
+    };
+    let (state, _) = update(state, resolved());
+    assert_eq!(state.additional_dirs, vec![PathBuf::from("/tmp/lib")]);
+    let (state, _) = update(state, resolved());
+    assert_eq!(state.additional_dirs.len(), 1, "a repeat is not appended");
+    let msg = &state.session.messages().last().expect("note").content;
+    assert!(msg.contains("already an added working directory"), "{msg}");
+
+    // A dir under the project root adds nothing; a failure reports why.
+    let (state, _) = update(
+        state,
+        Msg::QueryResult(QueryResult::AddedDirResolved {
+            raw: "src".to_string(),
+            resolved: Ok(PathBuf::from("/tmp/project/src")),
+        }),
+    );
+    assert_eq!(state.additional_dirs.len(), 1);
+    let (state, _) = update(
+        state,
+        Msg::QueryResult(QueryResult::AddedDirResolved {
+            raw: "nope".to_string(),
+            resolved: Err("cannot add directory 'nope': not found".to_string()),
+        }),
+    );
+    assert_eq!(state.additional_dirs.len(), 1);
+    let msg = &state.session.messages().last().expect("error").content;
+    assert!(msg.contains("cannot add directory 'nope'"), "{msg}");
+
+    // Bare again: now it lists the root, and so does /doctor.
+    let (state, _) = update(state, Msg::Slash(SlashCmd::AddDir(None)));
+    let msg = &state.session.messages().last().expect("listing").content;
+    assert!(msg.contains("Added working directories: /tmp/lib"), "{msg}");
+    let (state, _) = update(state, Msg::Slash(SlashCmd::Doctor));
+    let report = &state.session.messages().last().expect("report").content;
+    assert!(
+        report.contains("Additional working directories: /tmp/lib"),
+        "{report}"
+    );
+}
+
+#[test]
+fn added_dirs_seed_from_config_and_survive_clear() {
+    let mut config = Config::default();
+    config.workspace.additional_dirs = vec![PathBuf::from("/srv/shared")];
+    let state = State::new(
+        config,
+        PathBuf::from("/tmp/project"),
+        "ollama/test".to_string(),
+        chrono::Local::now(),
+        PathBuf::from("/tmp"),
+    );
+    assert_eq!(state.additional_dirs, vec![PathBuf::from("/srv/shared")]);
+    let (state, _) = update(state, Msg::Slash(SlashCmd::Clear));
+    assert_eq!(state.additional_dirs, vec![PathBuf::from("/srv/shared")]);
+}
+
+#[test]
 fn load_conversation_recomputes_the_scratchpad() {
     let mut state = fresh_state();
     state.session.scratchpad = Some(std::path::PathBuf::from("/data/tmp/scratchpad/-proj/old"));
@@ -6880,6 +6968,8 @@ fn execute_tool_cmd_carries_the_session_anchor() {
     let expected_session = state.session.conversation.id.clone();
     let expected_scratchpad = std::path::PathBuf::from("/data/tmp/scratchpad/-proj/s");
     state.session.scratchpad = Some(expected_scratchpad.clone());
+    let expected_added = vec![std::path::PathBuf::from("/srv/shared")];
+    state.additional_dirs = expected_added.clone();
     state.turn = TurnState::Generating {
         id: TurnId(9),
         started: std::time::SystemTime::now(),
@@ -6906,18 +6996,23 @@ fn execute_tool_cmd_carries_the_session_anchor() {
             stop_reason: None,
         },
     );
-    let (session_id, message_index, scratchpad) = cmds
+    let (session_id, message_index, scratchpad, added) = cmds
         .iter()
         .find_map(|c| match c {
             Cmd::ExecuteTool { dispatch, .. } => Some((
                 dispatch.session_id.clone(),
                 dispatch.message_index,
                 dispatch.scratchpad.clone(),
+                dispatch.additional_dirs.clone(),
             )),
             _ => None,
         })
         .expect("ExecuteTool dispatched");
     assert_eq!(session_id, expected_session);
+    assert_eq!(
+        added, expected_added,
+        "the added working roots ride on the dispatch"
+    );
     assert_eq!(
         scratchpad.as_deref(),
         Some(expected_scratchpad.as_path()),
@@ -7064,6 +7159,21 @@ fn system_prompt_names_the_scratchpad_path_once_ready() {
     assert!(
         prompt.contains("Scratchpad directory: /tmp/mermaid-1000/-proj/s/scratchpad"),
         "the session block names the concrete scratchpad: {prompt}"
+    );
+}
+
+#[test]
+fn system_prompt_states_the_added_working_roots() {
+    let mut state = fresh_state();
+    assert!(
+        !system_prompt_for_state(&state).contains("Additional working directories"),
+        "no line without added roots"
+    );
+    state.additional_dirs = vec![PathBuf::from("/srv/a"), PathBuf::from("/srv/b")];
+    let prompt = system_prompt_for_state(&state);
+    assert!(
+        prompt.contains("Additional working directories: /srv/a, /srv/b"),
+        "{prompt}"
     );
 }
 

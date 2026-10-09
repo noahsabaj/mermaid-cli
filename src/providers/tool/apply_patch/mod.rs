@@ -184,11 +184,11 @@ struct PatchPaths {
     containment: PathContainment,
 }
 
-/// Resolve each hunk's path(s) into root-relative ops (project workdir or
-/// session scratchpad), rejecting any escape, and collect the sorted,
+/// Resolve each hunk's path(s) into root-relative ops (project workdir, an
+/// added working root, or the session scratchpad), rejecting any escape, and collect the sorted,
 /// de-duplicated absolute paths.
 fn plan_ops(ctx: &ExecContext, hunks: &[Hunk]) -> Result<(Vec<PlannedOp>, PatchPaths), String> {
-    let roots = AllowedRoots::new(&ctx.workdir, ctx.scratchpad.as_deref());
+    let roots = AllowedRoots::of(ctx);
     let mut ops = Vec::new();
     let mut all: Vec<PathBuf> = Vec::new();
     let mut project: Vec<PathBuf> = Vec::new();

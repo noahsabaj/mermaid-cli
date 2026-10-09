@@ -111,10 +111,27 @@ pub(crate) fn output_style_display(state: &State) -> String {
     )
 }
 
+/// The added working roots, comma-separated, or `none`.
+pub(crate) fn added_dirs_display(state: &State) -> String {
+    if state.additional_dirs.is_empty() {
+        return "none".to_string();
+    }
+    state
+        .additional_dirs
+        .iter()
+        .map(|dir| dir.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 pub(crate) fn doctor_text(state: &State) -> String {
     let mut lines = Vec::new();
     lines.push("Mermaid Doctor".to_string());
     lines.push(format!("Project: {}", state.cwd.display()));
+    lines.push(format!(
+        "Additional working directories: {}",
+        added_dirs_display(state)
+    ));
     lines.push(format!("Active model: {}", state.session.model_id));
     lines.push(format!("Reasoning: {}", state.session.reasoning.as_str()));
     lines.push(format!(

@@ -23,6 +23,14 @@ pub struct Cli {
     #[arg(short, long)]
     pub path: Option<PathBuf>,
 
+    /// Add a working directory beside the project directory (repeatable).
+    /// Paths inside it get the project's trust: file tools and shell commands
+    /// work there without the outside-the-project escalation, and
+    /// `--confine-fs` lets commands write there. Adds to
+    /// `[workspace] additional_dirs`; `/add-dir` adds one mid-session.
+    #[arg(long = "add-dir", value_name = "DIR", global = true)]
+    pub add_dir: Vec<PathBuf>,
+
     /// Verbose output
     #[arg(short, long)]
     pub verbose: bool,
@@ -586,6 +594,19 @@ mod tests {
         // positional, and emptiness is enforced later by `resolve_run_prompt`.
         assert!(Cli::try_parse_from(["mermaid", "run"]).is_ok());
         assert!(Cli::try_parse_from(["mermaid", "run", "do a thing"]).is_ok());
+    }
+
+    #[test]
+    fn add_dir_is_repeatable_and_global() {
+        let cli = Cli::try_parse_from(["mermaid", "--add-dir", "../lib", "--add-dir", "/srv/docs"])
+            .unwrap();
+        assert_eq!(
+            cli.add_dir,
+            vec![PathBuf::from("../lib"), PathBuf::from("/srv/docs")]
+        );
+        // Global: it also parses after the `run` subcommand.
+        let cli = Cli::try_parse_from(["mermaid", "run", "hi", "--add-dir", "../lib"]).unwrap();
+        assert_eq!(cli.add_dir, vec![PathBuf::from("../lib")]);
     }
 
     #[test]

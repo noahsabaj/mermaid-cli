@@ -275,7 +275,40 @@ pub fn handle_query_result(state: &mut State, cmds: &mut Vec<Cmd>, result: Query
             };
             handle_output_style_loaded(state, cmds, &name, project, loaded);
         },
+        QueryResult::AddedDirResolved { raw, resolved: r } => on_added_dir(state, cmds, &raw, r),
     }
+}
+
+/// Answer `/add-dir <path>` once the effect layer has canonicalized it. A
+/// directory already covered (the project root or below it, or an existing
+/// added root) is reported rather than appended, so the list never holds a
+/// root twice.
+fn on_added_dir(
+    state: &mut State,
+    cmds: &mut Vec<Cmd>,
+    raw: &str,
+    resolved: Result<std::path::PathBuf, String>,
+) {
+    let text = match resolved {
+        Err(reason) => reason,
+        Ok(dir) if dir.starts_with(&state.cwd) => format!(
+            "{} is inside the project directory already; nothing to add.",
+            dir.display()
+        ),
+        Ok(dir) if state.additional_dirs.contains(&dir) => {
+            format!("{} is already an added working directory.", dir.display())
+        },
+        Ok(dir) => {
+            let text = format!(
+                "Added working directory for this session: {} (from '{raw}'). File tools and \
+                 shell commands treat it like the project directory.",
+                dir.display()
+            );
+            state.additional_dirs.push(dir);
+            text
+        },
+    };
+    push_system(state, cmds, text);
 }
 
 /// Append a runtime listing (or generic runtime text) to the transcript as a
@@ -405,6 +438,21 @@ pub fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
                 },
             }
         },
+        SlashCmd::AddDir(None) => {
+            let text = if state.additional_dirs.is_empty() {
+                format!(
+                    "No added working directories. Project: {}. /add-dir <path> adds one \
+                     for this session.",
+                    state.cwd.display()
+                )
+            } else {
+                format!("Added working directories: {}", added_dirs_display(state))
+            };
+            push_system(state, cmds, text);
+        },
+        // Canonicalizing touches the filesystem, so it runs as a query; the
+        // answer lands in `on_added_dir`.
+        SlashCmd::AddDir(Some(raw)) => cmds.push(Cmd::Query(Query::ResolveAddedDir { raw })),
         SlashCmd::Context(cmd) => {
             use crate::ContextCmd;
             let model_id = state.session.model_id.clone();

@@ -576,6 +576,10 @@ pub enum SlashCmd {
     /// Show the session scratch directory and a bounded listing of its
     /// contents (via `Cmd::ListScratchpad`).
     Scratchpad,
+    /// No arg → list the added working roots; `Some(path)` → add one for the
+    /// rest of the session (resolved by the effect layer via
+    /// `Query::ResolveAddedDir`).
+    AddDir(Option<String>),
     Context(ContextCmd),
     Compact(Option<String>),
     /// List saved durable memories.
