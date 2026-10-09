@@ -28,7 +28,7 @@
 //! - Ordering is structural. `on_frame` pushes into a `Vec`, the driver
 //!   drains it in order onto the bounded sink, and there is no way left to
 //!   express the reordering bug that cost a spawned relay task per turn to
-//!   prevent (F2).
+//!   prevent.
 //! - Backpressure reaches the socket, because the `await` between reads is
 //!   the bounded send.
 //! - Wire parsing is testable with no tokio, no HTTP and no mock server: it
@@ -93,7 +93,7 @@ pub enum Flow {
     Continue,
     /// This frame was terminal. Stop reading NOW rather than waiting for
     /// the body to close — a kept-alive or proxied connection can hold it
-    /// open long after the last content (#138).
+    /// open long after the last content.
     Stop,
 }
 
@@ -131,7 +131,7 @@ pub trait StreamProtocol {
     ///
     /// The provider's own: most importantly, a body that closed before any
     /// terminal frame is a stream error and NOT a clean empty `Ok`, which
-    /// would be indistinguishable from a real completion (F56).
+    /// would be indistinguishable from a real completion.
     fn finish(self, out: &mut Vec<StreamEvent>) -> Result<ModelResponse>;
 }
 
@@ -170,8 +170,7 @@ where
         // Bound reassembly: a server that streams bytes but never emits a
         // frame separator would otherwise grow `buf` without bound. At this
         // point `buf` holds only the un-terminated residue from the previous
-        // drain, so this never trips on legitimately buffered whole frames
-        // (#50).
+        // drain, so this never trips on legitimately buffered whole frames.
         if buf.len() > crate::constants::MAX_SSE_BUFFER_BYTES {
             return Err(ModelError::StreamError(P::FRAMING.cap_message().replace(
                 "{}",
@@ -357,7 +356,7 @@ mod tests {
 
     #[tokio::test]
     async fn stop_ends_the_read_without_waiting_for_the_body() {
-        // #138: a kept-alive body can stay open long after the terminal
+        // A kept-alive body can stay open long after the terminal
         // frame, so `Flow::Stop` has to leave the read loop, not just the
         // inner frame loop.
         let mut recorder = Recorder::new();

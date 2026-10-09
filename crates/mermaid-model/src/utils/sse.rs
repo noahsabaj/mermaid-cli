@@ -53,7 +53,7 @@ pub fn drain_sse_events(buf: &mut Vec<u8>) -> Vec<String> {
         let payload = data_lines.join("\n");
         // Skip empty `data:` keep-alive frames (a `data:\n\n` ping joins to "")
         // and the `[DONE]` sentinel: emitting either would make the downstream
-        // JSON parser choke and tear the stream down (#52). The caller learns
+        // JSON parser choke and tear the stream down. The caller learns
         // the stream is done when the underlying HTTP body closes.
         if payload.is_empty() || payload == "[DONE]" {
             continue;
@@ -148,7 +148,7 @@ mod tests {
 
     #[test]
     fn empty_data_frame_is_skipped() {
-        // #52: a `data:` keep-alive with no payload (with or without the
+        // A `data:` keep-alive with no payload (with or without the
         // single optional space) must not surface as an empty event — that
         // would break JSON parsing downstream and tear the stream down.
         let mut buf = b"data:\n\ndata: {\"x\":1}\n\ndata: \n\n".to_vec();
@@ -199,7 +199,7 @@ mod tests {
 
     #[test]
     fn done_sentinel_with_crlf_is_consumed_not_emitted() {
-        // #11 regression: with CRLF framing the `[DONE]` sentinel must match
+        // With CRLF framing the `[DONE]` sentinel must match
         // exactly (no trailing `\r`), so it's swallowed rather than surfaced as
         // a bogus event that would fail JSON parsing downstream.
         let mut buf = b"data: real\r\n\r\ndata: [DONE]\r\n\r\n".to_vec();

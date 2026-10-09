@@ -928,7 +928,7 @@ impl McpServerConfig {
 
 /// Mask a header/env map for `Debug`: keys are kept (so you can still see which
 /// vars are set) but values are never rendered — they hold secrets like API keys
-/// and `Authorization` tokens (#F12). A `BTreeMap` keeps the output deterministic.
+/// and `Authorization` tokens. A `BTreeMap` keeps the output deterministic.
 fn debug_masked_map(
     map: &HashMap<String, String>,
 ) -> std::collections::BTreeMap<&str, &'static str> {
@@ -938,7 +938,7 @@ fn debug_masked_map(
 // Manual `Debug` for the secret-bearing config structs so a `{:?}` (into
 // tracing, a panic, or an error) cannot dump provider keys / Authorization
 // headers / MCP env secrets. `Config` keeps its derived `Debug`, which now
-// recurses through these redacting impls (#F12).
+// recurses through these redacting impls.
 impl std::fmt::Debug for McpServerConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("McpServerConfig")

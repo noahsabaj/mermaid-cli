@@ -2023,7 +2023,7 @@ fn show_checkpoints(limit: usize) -> Result<()> {
 fn restore_checkpoint(id: &str, force: bool) -> Result<()> {
     // Restoring overwrites the working tree from the checkpoint. Confirm first
     // (default NO); `--force` is the scripted-use bypass, and a non-interactive
-    // session without it refuses rather than clobbering the tree unprompted (#113).
+    // session without it refuses rather than clobbering the tree unprompted.
     if !mermaid_model::utils::confirm_or_refuse(
         &format!("Restore checkpoint {id}? This overwrites the current working tree."),
         force,
@@ -2207,7 +2207,7 @@ fn handle_pair(command: &PairCommand) -> Result<()> {
 /// window-title/prompt rewrites, cursor moves used for spoofing. Keeps `\n` and
 /// `\t`; drops every ESC-introduced sequence (CSI / OSC / DCS / PM / APC / SOS
 /// and simple two-/three-byte forms) and all other C0/C1 control characters
-/// (incl. `\r` and DEL). See F49.
+/// (incl. `\r` and DEL).
 fn sanitize_terminal_text(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut chars = input.chars();
@@ -2432,7 +2432,7 @@ async fn run_update(check: bool, force: bool) -> Result<()> {
     // Confirm before fetching + running the install script — it executes
     // downloaded shell/PowerShell and replaces the running binary. `--force` is
     // the scripted-use bypass; a non-interactive session without it refuses
-    // rather than running fetched code unprompted (#110).
+    // rather than running fetched code unprompted.
     let script_url = if cfg!(target_os = "windows") {
         INSTALL_PS1_URL
     } else {
@@ -2478,7 +2478,7 @@ async fn run_install_script(client: &reqwest::Client, install_dir: &Path) -> Res
     // Stage the fetched script in the per-user 0700 private temp dir, created
     // exclusively (O_EXCL → never follows/opens a pre-planted symlink) so a local
     // attacker can neither redirect the write nor swap the file between write and
-    // exec (#F50). The previous world-readable, predictable
+    // exec. The previous world-readable, predictable
     // `temp_dir()/mermaid-update-<pid>.<ext>` allowed both a symlink redirect and
     // a write→exec TOCTOU.
     let dir = mermaid_model::utils::private_temp_dir()
@@ -2522,7 +2522,7 @@ async fn run_install_script(client: &reqwest::Client, install_dir: &Path) -> Res
 /// symlink pre-planted at the path is refused (`O_EXCL` never follows) and the
 /// staged code is owner-only (`0600` file inside the `0700` private dir). This
 /// closes the symlink-redirect and write→exec TOCTOU that the old predictable,
-/// world-readable temp path left open (#F50).
+/// world-readable temp path left open.
 fn stage_install_script(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     #[cfg(unix)]
@@ -2738,7 +2738,7 @@ async fn print_ollama_status(config: &Config, has_remote: bool) {
     }
 }
 
-/// Project instructions (Step 5h). Walks UP from cwd to git root or
+/// Project instructions. Walks UP from cwd to git root or
 /// $HOME to find the nearest supported instruction files.
 fn print_project_instructions_status() {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));

@@ -119,7 +119,7 @@ pub enum OpenIntent {
 /// Open `root`-relative `rel` for `intent` **without ever traversing out of
 /// `root`** — closing the check-then-write TOCTOU where an intermediate
 /// directory is swapped for a symlink after a lexical path check but before the
-/// operation (#77). The returned [`File`] is bound to the exact inode the
+/// operation. The returned [`File`] is bound to the exact inode the
 /// confinement resolved, so subsequent reads/writes can't be redirected.
 ///
 /// On Linux this is enforced atomically by the kernel via
@@ -152,7 +152,7 @@ pub fn open_beneath(root: &Path, rel: &Path, intent: OpenIntent) -> io::Result<F
 
 /// Confined `mkdir -p` for a `root`-relative directory path: creates each
 /// missing component beneath `root`, refusing to descend through a symlink that
-/// escapes (#77). On Linux: `mkdirat` + `openat2(RESOLVE_BENEATH)` per
+/// escapes. On Linux: `mkdirat` + `openat2(RESOLVE_BENEATH)` per
 /// component; otherwise the `contain_within_canonical` + `std::fs` fallback.
 ///
 /// # Errors
@@ -171,7 +171,7 @@ pub fn create_dir_all_beneath(root: &Path, rel: &Path) -> io::Result<()> {
     fallback::create_dir_all(root, rel)
 }
 
-/// Confined unlink of a `root`-relative file (#77): opens the parent under
+/// Confined unlink of a `root`-relative file: opens the parent under
 /// `RESOLVE_BENEATH` and `unlinkat`s the leaf, so a swapped-in symlink parent
 /// can't redirect the delete outside `root`.
 ///
@@ -194,7 +194,7 @@ pub fn remove_file_beneath(root: &Path, rel: &Path) -> io::Result<()> {
 /// of `root`. The temp file is created and `renameat`-swapped beneath the *same*
 /// confined directory fd as the destination (Linux `openat2(RESOLVE_BENEATH)`),
 /// so a parent dir swapped for an escaping symlink after a path check can't
-/// redirect the write (#77), AND a crash/kill/disk-full mid-write leaves the
+/// redirect the write, AND a crash/kill/disk-full mid-write leaves the
 /// previous file intact instead of a truncated one — `open_beneath` +
 /// `WriteTruncate` gives the first guarantee but not the second. Falls back to
 /// `contain_within_canonical` + by-path [`crate::write_atomic`] on non-Linux /
@@ -408,7 +408,7 @@ mod fallback {
     /// Warn once per process that the kernel-confined `openat2(RESOLVE_BENEATH)`
     /// path is unavailable (non-Linux target or pre-5.6 kernel), so confinement
     /// falls back to the lexical/canonical check plus a by-path operation — which
-    /// leaves the documented check-then-use symlink TOCTOU window (#142). This is
+    /// leaves the documented check-then-use symlink TOCTOU window. This is
     /// by design: closing it here would mean hand-rolled per-component symlink
     /// inspection, exactly the fragile logic `openat2` exists to replace. The warn
     /// makes the residual visible to operators on those platforms.
@@ -545,7 +545,7 @@ mod confined_tests {
         let root = unique_dir("escape_root");
         let outside = unique_dir("escape_outside");
         // Plant a symlink *inside* the root that redirects outside it — the
-        // exact TOCTOU shape #77 is about.
+        // exact TOCTOU shape this guards against.
         std::os::unix::fs::symlink(&outside, root.join("escape")).unwrap();
 
         let res = open_beneath(

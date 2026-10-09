@@ -1,24 +1,10 @@
-//! One repository type per table. Each is a thin `&Connection` wrapper; they
-//! share nothing else, which is what made this the most mechanical seam in the
-//! tree — and why `TasksRepo`'s declaration had drifted 100 lines from its own
-//! `impl`, with two unrelated repos in between.
+//! One repository type per table. Each is a thin `&Connection` wrapper.
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use super::*;
 
-// Bumped to 5 for the additive `tasks.prompt` column (the daemon scheduler
-// executes queued tasks later, so the full prompt must be persisted at enqueue
-// time — `title` is truncated at 80 chars). Additive, but the bump lets a DB
-// already at v4 re-run the migration once to pick it up. The bump is
-// load-bearing alongside the F17 early-return in `init_schema`: a DB at an
-// older version still runs the migration (the idempotent baseline plus any
-// per-version step dispatched by `migrate_within_txn`) exactly once, while an
-// already-current DB skips the write lock entirely.
-//
-// History: v2 added the additive `tasks.owner_kind` column (F18/RC-E); v3 added
-// the F75 covering indexes; v4 added the `outcomes` table.
 pub struct TasksRepo<'a> {
     pub(crate) conn: &'a Connection,
 }
@@ -214,7 +200,7 @@ impl TasksRepo<'_> {
              ORDER BY updated_at DESC
              LIMIT ?1",
         )?;
-        // F19 (RC-E): skip-and-warn a single undecodable row (e.g. a status enum
+        // Skip-and-warn a single undecodable row (e.g. a status enum
         // a different binary wrote) instead of `collect`ing a `Result` that would
         // blank the WHOLE tasks panel on one poison row.
         let rows = stmt.query_map([clamp_limit(limit)], task_from_row_opt)?;
@@ -352,7 +338,7 @@ impl TasksRepo<'_> {
              WHERE task_id = ?1
              ORDER BY id ASC",
         )?;
-        // F19 (RC-E): one undecodable event row must not blank the whole timeline.
+        // One undecodable event row must not blank the whole timeline.
         let rows = stmt.query_map([task_id], task_event_from_row_opt)?;
         collect_tolerant(rows)
     }
@@ -616,7 +602,7 @@ impl ApprovalsRepo<'_> {
         // `approval::approve_and_replay` runs the (un-rollback-able) replay
         // effect *before* calling `decide`, so the "approved" mark lands only
         // after the action ran: a crash mid-replay leaves the row undecided and
-        // safely re-runnable, never "approved but never applied" (#62). Mirrors
+        // safely re-runnable, never "approved but never applied". Mirrors
         // the `archive` `WHERE archived_at IS NULL` idempotency pattern below.
         let changed = self.conn.execute(
             "UPDATE approvals
@@ -631,7 +617,7 @@ impl ApprovalsRepo<'_> {
         Ok(())
     }
 
-    /// Atomically claim an undecided approval for replay (#118). Sets
+    /// Atomically claim an undecided approval for replay. Sets
     /// `user_decision='approving'` only when it is currently NULL and
     /// un-archived, and reports whether THIS caller won the claim. Two concurrent
     /// `approve <id>` calls race this single UPDATE; exactly one sees
@@ -848,7 +834,7 @@ impl ProcessesRepo<'_> {
              ORDER BY updated_at DESC
              LIMIT ?1",
         )?;
-        // F19 (RC-E): skip-and-warn an undecodable row (e.g. a status enum a
+        // Skip-and-warn an undecodable row (e.g. a status enum a
         // different binary wrote) rather than blanking the whole processes panel.
         let rows = stmt.query_map([clamp_limit(limit)], process_from_row_opt)?;
         collect_tolerant(rows)
@@ -920,7 +906,7 @@ impl CheckpointsRepo<'_> {
 
     /// Delete a checkpoint row outright. Returns whether a row was removed.
     ///
-    /// F23 (RC-F): coordinates the on-disk checkpoint-dir GC
+    /// Coordinates the on-disk checkpoint-dir GC
     /// ([`crate::checkpoint::gc_old_checkpoint_dirs`]) with the DB. The dir GC
     /// prunes by mtime regardless of archive state, while storage [`Self`] /
     /// `gc()` only removes ARCHIVED checkpoint rows — so a never-archived old

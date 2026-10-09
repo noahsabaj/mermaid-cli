@@ -482,10 +482,10 @@ pub fn prepare_compaction(
     }
     // The tail is forwarded verbatim into the next request; scrub any
     // pre-existing orphan `tool_use`/`tool_result` so an unpaired block can't
-    // 400 the provider (#71 forward, #F64 reverse). One exception: when the run
+    // 400 the provider. One exception: when the run
     // is resuming mid-tool (a context-limit retry or truncation recovery), a
     // genuinely-pending trailing `tool_use` is preserved so the model needn't
-    // re-derive the action from the summary (#F65). A user cancel produces the
+    // re-derive the action from the summary. A user cancel produces the
     // same trailing shape but ends the run, so only the resume triggers — where
     // the awaited `tool_result` really is forthcoming — opt into preserving it.
     let preserve_pending_tail = matches!(
@@ -620,7 +620,7 @@ pub fn build_replacement_messages(
 ) -> Vec<ChatMessage> {
     // The summary is model-generated from the full conversation and is persisted
     // (replacement message + conversation file). Scrub any credential it echoed
-    // back from the archived turns before it's written (#70).
+    // back from the archived turns before it's written.
     let summary = mermaid_model::utils::redact_secrets(summary);
     let summary = summary.as_str();
     let checkpoint = format!(
@@ -757,11 +757,11 @@ fn summary_prompt(prepared: &PreparedCompaction, focus: Option<&str>) -> String 
 /// a recent tail verbatim; if the split inherits a pre-existing orphan, both
 /// directions must be repaired symmetrically:
 ///
-///   * Forward (#71): an assistant `tool_use` whose `tool_result` never
+///   * Forward: an assistant `tool_use` whose `tool_result` never
 ///     committed — e.g. a turn cancelled after the model emitted calls. Drop
 ///     the orphaned calls (keeping the assistant's text) rather than fabricate
 ///     results. A call with no `id` can't be paired, so it's treated as orphaned.
-///   * Reverse (#F64): a `tool_result` (role=Tool) whose `tool_use` id is no
+///   * Reverse: a `tool_result` (role=Tool) whose `tool_use` id is no
 ///     longer present among the retained messages — e.g. the assistant turn was
 ///     archived while its result landed in the tail. Anthropic equally rejects a
 ///     `tool_result` with no preceding `tool_use`, so drop the orphaned result.
@@ -769,7 +769,7 @@ fn summary_prompt(prepared: &PreparedCompaction, focus: Option<&str>) -> String 
 /// When `preserve_pending_tail` is set (the run is resuming mid-tool after a
 /// context-limit retry / truncation recovery), a *trailing* assistant `tool_use`
 /// is genuinely pending execution rather than abandoned, so its calls are kept
-/// across the checkpoint and the resumed turn appends the awaited results (#F65).
+/// across the checkpoint and the resumed turn appends the awaited results.
 /// Only the final message qualifies: anything after an assistant `tool_use` (a
 /// tool result, a follow-up, a user cancel) means it is no longer pending. This
 /// is trigger-gated by the caller because a user cancel yields the same trailing
@@ -805,7 +805,7 @@ pub(crate) fn drop_orphan_tool_calls(messages: &mut Vec<ChatMessage>, preserve_p
         .filter_map(|m| m.tool_call_id.clone())
         .collect();
 
-    // Forward (#71): drop unanswered assistant `tool_use`, save a pending tail.
+    // Forward: drop unanswered assistant `tool_use`, save a pending tail.
     for (idx, m) in messages.iter_mut().enumerate() {
         if Some(idx) == pending_tail {
             continue;
@@ -828,7 +828,7 @@ pub(crate) fn drop_orphan_tool_calls(messages: &mut Vec<ChatMessage>, preserve_p
         }
     }
 
-    // Reverse (#F64): drop a `tool_result` whose `tool_use` id is no longer
+    // Reverse: drop a `tool_result` whose `tool_use` id is no longer
     // present among the assistant messages retained above (symmetric orphan).
     let emitted: std::collections::HashSet<String> = messages
         .iter()
@@ -1592,7 +1592,7 @@ mod tests {
     #[test]
     fn prepare_strips_orphan_tool_call_from_preserved_tail() {
         // A tail that inherits an assistant(tool_calls) with no matching result
-        // (e.g. a cancelled tool turn) must not forward the unpaired tool_use (#71).
+        // (e.g. a cancelled tool turn) must not forward the unpaired tool_use.
         let mut orphan = ChatMessage::assistant("calling a tool");
         orphan.tool_calls = Some(vec![tool_call("call_1", "do_thing")]);
         let messages = vec![
@@ -1748,7 +1748,7 @@ mod tests {
 
     #[test]
     fn prepare_drops_reverse_orphan_tool_result_from_tail() {
-        // The mirror of #71 (#F64): the assistant `tool_use` is archived (split
+        // The mirror of the forward case: the assistant `tool_use` is archived (split
         // out of the tail) while its `tool_result` lands in the preserved tail.
         // A lone `tool_result` with no preceding `tool_use` 400s Anthropic, so it
         // must be dropped symmetrically.
@@ -1777,7 +1777,7 @@ mod tests {
 
     #[test]
     fn prepare_keeps_pending_trailing_tool_use_on_retry() {
-        // #F65: a context-limit retry / truncation recovery compacts mid-tool.
+        // A context-limit retry / truncation recovery compacts mid-tool.
         // The trailing assistant tool_use is genuinely pending — the run resumes
         // and appends the result — so its calls must survive compaction.
         let mut pending = ChatMessage::assistant("calling a tool");
@@ -1812,7 +1812,7 @@ mod tests {
     fn prepare_drops_trailing_tool_use_on_manual_compaction() {
         // Same trailing shape, but a manual compaction is not a resume: the tool
         // is treated as abandoned/cancelled, so the unpaired call is still
-        // scrubbed (#71) — only the assistant's text is kept.
+        // scrubbed — only the assistant's text is kept.
         let mut pending = ChatMessage::assistant("calling a tool");
         pending.tool_calls = Some(vec![tool_call("call_9", "do_thing")]);
         let messages = vec![

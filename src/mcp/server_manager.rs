@@ -112,7 +112,7 @@ impl McpServerManager {
                 "Starting MCP server: {} ({} {})",
                 name,
                 config.command,
-                // Redact args — they can carry secrets (e.g. `--api-key=…`) (#93).
+                // Redact args — they can carry secrets (e.g. `--api-key=…`).
                 mermaid_model::utils::redact_secrets(&config.args.join(" "))
             ),
         }

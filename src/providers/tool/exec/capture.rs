@@ -105,7 +105,7 @@ pub(crate) fn is_secret_env_name(name: &str) -> bool {
 /// newline-less command can't exhaust memory. Bytes are accumulated raw and
 /// decoded once at the end (lossy) so a multibyte char split across reads is
 /// not corrupted by the cap. Returns `(text, truncated)`.
-/// On-disk cap for the per-stream tee log (#126). The in-memory buffer is
+/// On-disk cap for the per-stream tee log. The in-memory buffer is
 /// capped at `MAX_TOOL_OUTPUT_BYTES`; the log may grow larger (it stays
 /// tail-able for a backgrounded process) but must not be unbounded — a command
 /// spewing gigabytes would otherwise fill the temp dir.
@@ -186,8 +186,8 @@ pub(crate) async fn read_capped<R: AsyncRead + Unpin>(
             Ok(n) => {
                 // Tee raw bytes to the shared log file so a backgrounded
                 // (Ctrl+B) process stays tail-able via /logs — bounded at
-                // `TEE_LOG_CAP_BYTES` so a runaway command can't fill the disk
-                // (#126). Once capped we write a one-time marker and stop.
+                // `TEE_LOG_CAP_BYTES` so a runaway command can't fill the disk.
+                // Once capped we write a one-time marker and stop.
                 if let Some(file) = &log
                     && !log_capped
                 {
@@ -349,7 +349,7 @@ pub(crate) async fn run_command(
 
     // Tee combined output to a log file so that, if the user backgrounds the
     // command (Ctrl+B), it stays tail-able via /logs. Removed on normal exit.
-    // Lives in the 0700 private temp dir, created owner-only + O_EXCL (#F14/#F15).
+    // Lives in the 0700 private temp dir, created owner-only + O_EXCL.
     let log_path = background_log_path();
     let log =
         create_tee_log_blocking(&log_path).map(|f| std::sync::Arc::new(tokio::sync::Mutex::new(f)));

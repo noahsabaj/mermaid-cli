@@ -45,7 +45,7 @@ pub async fn add_server(
     println!("\nResolving '{name}'...");
 
     // Resolve the server package via A → B → C. A non-registry result requires
-    // explicit confirmation (or --yes) before it is returned (#10).
+    // explicit confirmation (or --yes) before it is returned.
     let resolved = registry::resolve(name, assume_yes).await?;
 
     // Prompt for required environment variables

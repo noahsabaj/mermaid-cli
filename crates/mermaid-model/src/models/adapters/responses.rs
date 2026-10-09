@@ -192,7 +192,7 @@ impl StreamProtocol for ResponsesStream {
     }
 
     fn finish(self, _out: &mut Vec<StreamEvent>) -> Result<ModelResponse> {
-        // F56, Responses spelling: the terminal event is explicit and carries
+        // Responses spelling: the terminal event is explicit and carries
         // everything that round-trips, so its absence means the connection
         // dropped, never a short success.
         let Some((response, event_type)) = self.terminal else {
