@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Mermaid speaks MCP 2026-07-28, the newest protocol revision.** Each
+  server gets a `server/discover` request first. A 2026-07-28 server then
+  gets stateless requests with the version, client info and capabilities in
+  `_meta`, with no `initialize` handshake or session. Over HTTP the requests
+  also carry `Mcp-Method`, `Mcp-Name` and the `Mcp-Param-*` headers a tool
+  asks for with `x-mcp-header`, and a tool with invalid annotations is left
+  out. A tool call that answers `input_required` with only a `requestState`
+  is sent again with it. Servers that speak only 2025-11-25 keep working:
+  an error, an HTTP `4xx` or a silent stdio server falls back to the
+  `initialize` handshake, and a stdio server that exits on the probe is
+  started again for it. `x-mcp-header` is removed from the schemas the
+  model sees.
+
 - **Mermaid reads Claude Code's files.** A user who moved from Claude Code
   used to lose their instructions, skills, commands and agents, because
   Mermaid read only `AGENTS.md`, `MERMAID.md` and `.mermaid/skills/`. Now

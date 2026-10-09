@@ -16,7 +16,7 @@ use anyhow::{Result, anyhow};
 use std::sync::Arc;
 use tracing::{info, warn};
 
-use super::client::{ContentBlock, McpClient, McpToolDef, McpToolResult};
+use super::client::{ContentBlock, McpClient, McpToolDef, McpToolResult, ProbeEndedServer};
 use super::sanitize;
 use super::transport::{StdioTransport, Transport};
 use super::transport_http::HttpTransport;
@@ -171,20 +171,31 @@ impl McpServerManager {
         name: &str,
         config: &McpServerConfig,
     ) -> Result<(McpClient, Vec<McpToolDef>)> {
-        let transport: Transport = match config.transport_kind()? {
-            TransportKind::Stdio => {
-                StdioTransport::spawn(&config.command, &config.args, &config.env)
-                    .await?
-                    .into()
-            },
-            TransportKind::Http => HttpTransport::new(name, config)?.into(),
+        let kind = config.transport_kind()?;
+        let spawn = || async {
+            let transport: Transport = match kind {
+                TransportKind::Stdio => {
+                    StdioTransport::spawn(&config.command, &config.args, &config.env)
+                        .await?
+                        .into()
+                },
+                TransportKind::Http => HttpTransport::new(name, config)?.into(),
+            };
+            Ok::<_, anyhow::Error>(McpClient::new(transport))
         };
-        let mut client = McpClient::new(transport);
+        let mut client = spawn().await?;
 
-        client
-            .initialize()
-            .await
-            .map_err(|e| anyhow!("MCP server '{name}' initialization failed: {e}"))?;
+        let started = match client.initialize().await {
+            // The probe ended a legacy stdio server: start it again for the
+            // handshake alone.
+            Err(e) if e.is::<ProbeEndedServer>() => {
+                client.shutdown().await;
+                client = spawn().await?;
+                client.initialize_legacy().await
+            },
+            other => other,
+        };
+        started.map_err(|e| anyhow!("MCP server '{name}' initialization failed: {e}"))?;
 
         let tools = client
             .list_tools()
@@ -484,12 +495,14 @@ mod tests {
         let tools_result =
             r#"{"tools":[{"name":"echo","description":"echoes","inputSchema":{"type":"object"}}]}"#;
         let fx = fixture(vec![
+            // A legacy server refuses the server/discover probe.
+            status_reply(400, "Bad Request"),
             json_reply(&format!(
-                r#"{{"jsonrpc":"2.0","id":1,"result":{init_result}}}"#
+                r#"{{"jsonrpc":"2.0","id":2,"result":{init_result}}}"#
             )),
             status_reply(202, "Accepted"),
             json_reply(&format!(
-                r#"{{"jsonrpc":"2.0","id":2,"result":{tools_result}}}"#
+                r#"{{"jsonrpc":"2.0","id":3,"result":{tools_result}}}"#
             )),
         ])
         .await;
