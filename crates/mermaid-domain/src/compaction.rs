@@ -132,7 +132,7 @@ impl CompactionPolicy {
     #[must_use]
     pub fn trigger_tokens(self, window: usize) -> usize {
         self.auto_threshold_tokens
-            .unwrap_or(window * usize::from(self.auto_threshold_percent) / 100)
+            .unwrap_or_else(|| window * usize::from(self.auto_threshold_percent) / 100)
     }
 
     /// The threshold as the user reads it: "250k tokens" or "85% of the window".
@@ -460,7 +460,7 @@ pub fn should_auto_compact(
         return Err(CompactionSkip::Suppressed);
     }
     // A token threshold needs no window to compare against; a percentage does.
-    if policy.auto_threshold_tokens.is_none() && !snapshot.max_tokens.is_some_and(|max| max > 0) {
+    if policy.auto_threshold_tokens.is_none() && snapshot.max_tokens.is_none_or(|max| max == 0) {
         return Err(CompactionSkip::NoKnownContextLimit);
     }
 
@@ -1130,7 +1130,7 @@ mod tests {
             output_schema: None,
             suppress_auto_compact: false,
             requested_compaction: None,
-            compaction: Default::default(),
+            compaction: crate::CompactionPolicy::default(),
             native_compaction: None,
             native_tools: mermaid_model::models::NativeTools::default(),
         }

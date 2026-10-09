@@ -825,7 +825,7 @@ mod tests {
             output_schema: None,
             suppress_auto_compact: false,
             requested_compaction: None,
-            compaction: Default::default(),
+            compaction: crate::CompactionPolicy::default(),
             native_compaction: None,
             native_tools: mermaid_model::models::NativeTools::default(),
         };
@@ -896,7 +896,7 @@ mod model_config_tests {
             output_schema: Some(serde_json::json!({"type": "object"})),
             suppress_auto_compact: false,
             requested_compaction: None,
-            compaction: Default::default(),
+            compaction: crate::CompactionPolicy::default(),
             native_compaction: None,
             native_tools: mermaid_model::models::NativeTools::default(),
         };

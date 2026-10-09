@@ -125,7 +125,7 @@ async fn effect_runner_cancels_scope_on_command() {
         output_schema: None,
         suppress_auto_compact: false,
         requested_compaction: None,
-        compaction: Default::default(),
+        compaction: mermaid_domain::CompactionPolicy::default(),
         native_compaction: None,
         native_tools: mermaid_model::models::NativeTools::default(),
     };
