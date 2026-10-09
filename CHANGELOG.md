@@ -22,8 +22,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and a key Mermaid does not know is never touched. Bare `mermaid` at a
   terminal lists the keys and asks `Delete them now? [y/N]` first; headless
   runs, pipes and scripts never ask and never edit.
+- **`read_file` shows pictures to the model.** A PNG, JPEG, GIF or WebP file
+  (known by its first bytes, not its name) comes back as an image beside a
+  one-line `[image/png, 48213 bytes]` result, so a vision model can look at a
+  screenshot, a chart or a mockup it was pointed at. A picture over 3.75 MiB,
+  whose base64 passes the 5 MiB a provider takes in one image, is refused with
+  its size. The text editor's `view` of a picture returns it the same way.
 
 ### Fixed
+
+- **Images a tool returns reach the model.** An MCP tool's screenshot was
+  drawn in the chat and never sent: tool results carried text only. Each
+  result now carries its images: inside the `tool_result` for Anthropic, and
+  for OpenAI-compatible, Ollama, Gemini and Meta, which take images only from
+  the user, right after the run of results, each labelled `Image returned by
+  tool call <id>:`. Only the newest three images in a conversation go out, as
+  before. Every adapter also sends an image's real media type (JPEG, GIF and
+  WebP were all labelled PNG).
 
 - **The highlighted row in `/load` and the rewind picker can be read.** Its
   meta, `(14 msg · 2026-01-01 12:34)` or `(#1 back)`, was drawn in

@@ -62,6 +62,7 @@ use serde_json::{Value, json};
 
 use super::accumulator::{CappedText, ended_without_terminal, error_body};
 use super::learning::{Learning, Optional, ParamMemory, Rejections};
+use super::tool_images::images_after_tool_run;
 use crate::models::ModelCapabilities;
 use crate::models::adapters::driver::{Flow, Framing, StreamProtocol, drive_stream};
 use crate::models::config::ModelConfig;
@@ -75,6 +76,7 @@ use crate::models::traits::Model;
 use crate::models::types::{
     ChatMessage, FinishReason, MessageAudience, MessageRole, ModelResponse, TokenUsage,
 };
+use crate::utils::base64_image_media_type;
 
 use super::ModelLimits;
 
@@ -323,16 +325,7 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<Value>, Vec<Value>) {
                 if !msg.content.is_empty() {
                     parts.push(json!({"text": msg.content}));
                 }
-                if let Some(ref images) = msg.images {
-                    for data in images {
-                        parts.push(json!({
-                            "inlineData": {
-                                "mimeType": "image/png",
-                                "data": data,
-                            }
-                        }));
-                    }
-                }
+                parts.extend(msg.images.iter().flatten().map(|data| inline_image(data)));
                 if parts.is_empty() {
                     parts.push(json!({"text": ""}));
                 }
@@ -394,12 +387,28 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<Value>, Vec<Value>) {
                     }));
                     i += 1;
                 }
+                // The images the run returned ride in the same user turn,
+                // after the responses, each labelled with its call.
+                for image in images_after_tool_run(messages, i - 1) {
+                    parts.push(json!({"text": image.label()}));
+                    parts.push(inline_image(image.data));
+                }
                 out.push(json!({"role": "user", "parts": parts}));
             },
         }
     }
 
     (system, coalesce_consecutive_roles(out))
+}
+
+/// One base64 image as a Gemini `inlineData` part.
+fn inline_image(data: &str) -> Value {
+    json!({
+        "inlineData": {
+            "mimeType": base64_image_media_type(data),
+            "data": data,
+        }
+    })
 }
 
 /// Google Gemini adapter.
@@ -1657,6 +1666,20 @@ mod tests {
         assert_eq!(parts[0]["text"], "look at this");
         assert_eq!(parts[1]["inlineData"]["mimeType"], "image/png");
         assert_eq!(parts[1]["inlineData"]["data"], "base64data");
+    }
+
+    #[test]
+    fn tool_images_follow_the_function_responses_in_their_turn() {
+        use super::super::tool_images::{JPEG_B64, tool_loop_with_image};
+        let (_, contents) = convert_messages(&tool_loop_with_image());
+        let parts = contents[2]["parts"].as_array().unwrap();
+        assert_eq!(contents[2]["role"], "user");
+        assert!(parts[0].get("functionResponse").is_some());
+        assert!(parts[1].get("functionResponse").is_some());
+        assert_eq!(parts[2]["text"], "Image returned by tool call c1:");
+        assert_eq!(parts[3]["inlineData"]["mimeType"], "image/jpeg");
+        assert_eq!(parts[3]["inlineData"]["data"], JPEG_B64);
+        assert_eq!(parts.len(), 4);
     }
 
     #[test]

@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use super::accumulator::{CappedText, error_body};
 use super::learning::{Learning, Optional, ParamMemory, Rejections};
+use super::tool_images::{ToolImage, images_after_tool_run};
 use crate::models::ModelCapabilities;
 use crate::models::adapters::driver::{
     Flow, Framing, StreamProtocol, drive_stream, plain_http_error,
@@ -187,6 +188,53 @@ fn sent_optionals(body: &serde_json::Value) -> Vec<Optional> {
         Some(serde_json::Value::Bool(_)) => vec![Optional::new("think:bool", "think", &["think"])],
         _ => Vec::new(),
     }
+}
+
+/// The transcript in Ollama's `/api/chat` shape. A tool message's images
+/// follow its run of results as a user turn, the role every Ollama vision
+/// template renders images on.
+fn wire_messages(messages: &[ChatMessage]) -> Vec<serde_json::Value> {
+    let mut json_messages = Vec::with_capacity(messages.len());
+    for (idx, msg) in messages.iter().enumerate() {
+        let role = match msg.role {
+            MessageRole::User => "user",
+            MessageRole::Assistant => "assistant",
+            MessageRole::System => "system",
+            MessageRole::Tool => "tool",
+        };
+        let mut json_msg = json!({
+            "role": role,
+            "content": msg.content
+        });
+        if msg.role == MessageRole::Assistant
+            && let Some(ref tool_calls) = msg.tool_calls
+        {
+            json_msg["tool_calls"] = json!(tool_calls);
+        }
+        if msg.role == MessageRole::Tool
+            && let Some(ref tool_name) = msg.tool_name
+        {
+            json_msg["tool_name"] = json!(tool_name);
+        }
+        if msg.role != MessageRole::Tool
+            && let Some(ref images) = msg.images
+            && !images.is_empty()
+        {
+            json_msg["images"] = json!(images);
+        }
+        json_messages.push(json_msg);
+        let tool_images = images_after_tool_run(messages, idx);
+        if !tool_images.is_empty() {
+            let labels: Vec<String> = tool_images.iter().map(ToolImage::label).collect();
+            let data: Vec<&str> = tool_images.iter().map(|image| image.data).collect();
+            json_messages.push(json!({
+                "role": "user",
+                "content": labels.join("\n"),
+                "images": data,
+            }));
+        }
+    }
+    json_messages
 }
 
 impl OllamaAdapter {
@@ -560,34 +608,7 @@ impl OllamaAdapter {
             }));
         }
 
-        for msg in messages {
-            let role = match msg.role {
-                MessageRole::User => "user",
-                MessageRole::Assistant => "assistant",
-                MessageRole::System => "system",
-                MessageRole::Tool => "tool",
-            };
-            let mut json_msg = json!({
-                "role": role,
-                "content": msg.content
-            });
-            if msg.role == MessageRole::Assistant
-                && let Some(ref tool_calls) = msg.tool_calls
-            {
-                json_msg["tool_calls"] = json!(tool_calls);
-            }
-            if msg.role == MessageRole::Tool
-                && let Some(ref tool_name) = msg.tool_name
-            {
-                json_msg["tool_name"] = json!(tool_name);
-            }
-            if let Some(ref images) = msg.images
-                && !images.is_empty()
-            {
-                json_msg["images"] = json!(images);
-            }
-            json_messages.push(json_msg);
-        }
+        json_messages.extend(wire_messages(messages));
 
         // Tools come from `config.tools` (populated by the provider wrapper
         // from `ChatRequest.tools`). The registry only registers a web tool
@@ -1411,6 +1432,35 @@ mod tests {
                 .unwrap()
                 .contains("the task checklist is stale"),
         );
+    }
+
+    #[tokio::test]
+    async fn ollama_tool_images_follow_the_results_as_a_user_turn() {
+        use super::super::tool_images::{JPEG_B64, tool_loop_with_image};
+        let adapter = make_adapter().await;
+        let body = adapter.build_request_body(
+            &tool_loop_with_image(),
+            &ModelConfig::default(),
+            false,
+            true,
+        );
+        let msgs: Vec<&serde_json::Value> = body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| m["role"] != "system")
+            .collect();
+        let roles: Vec<&str> = msgs.iter().map(|m| m["role"].as_str().unwrap()).collect();
+        assert_eq!(
+            roles,
+            ["user", "assistant", "tool", "tool", "user", "assistant"]
+        );
+        assert!(
+            msgs[2].get("images").is_none(),
+            "the tool message is text only"
+        );
+        assert_eq!(msgs[4]["content"], "Image returned by tool call c1:");
+        assert_eq!(msgs[4]["images"], serde_json::json!([JPEG_B64]));
     }
 
     #[tokio::test]

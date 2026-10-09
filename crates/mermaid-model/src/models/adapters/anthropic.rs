@@ -41,6 +41,7 @@ use crate::models::reasoning::{
 use crate::models::stream::{StreamEvent, StreamSink};
 use crate::models::tool_call::{FunctionCall, ToolCall};
 use crate::models::traits::Model;
+use crate::utils::base64_image_media_type;
 
 use super::ModelLimits;
 use super::learning::{Learning, Optional, ParamMemory, Rejections};
@@ -611,7 +612,7 @@ fn convert_messages(messages: &[ChatMessage], native: Advertised) -> (Option<Str
                     tool_blocks.push(json!({
                         "type": "tool_result",
                         "tool_use_id": tool_use_id,
-                        "content": t.content,
+                        "content": tool_result_content(t),
                     }));
                     i += 1;
                 }
@@ -634,21 +635,7 @@ fn user_content(msg: &ChatMessage) -> Value {
         }));
     }
     // Vision: convert each base64 image to an image block.
-    if let Some(ref images) = msg.images {
-        for data in images {
-            // Default media type is png — matches Mermaid's
-            // clipboard module output. Unsupported formats
-            // surface a clear 415 from the API.
-            content_blocks.push(json!({
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": "image/png",
-                    "data": data,
-                },
-            }));
-        }
-    }
+    content_blocks.extend(msg.images.iter().flatten().map(|data| image_block(data)));
     if content_blocks.len() == 1 && content_blocks[0]["type"] == "text" {
         // Optimization: a single text block can serialize as
         // a string (Anthropic accepts both shapes; string is
@@ -662,6 +649,33 @@ fn user_content(msg: &ChatMessage) -> Value {
     } else {
         json!(content_blocks)
     }
+}
+
+/// One base64 image as an Anthropic `image` block.
+fn image_block(data: &str) -> Value {
+    json!({
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": base64_image_media_type(data),
+            "data": data,
+        },
+    })
+}
+
+/// The `content` of a `tool_result`: the tool's text, followed by an image
+/// block for each image the tool returned (a `read_file` of a picture, an MCP
+/// tool's screenshot). Text alone stays a bare string.
+fn tool_result_content(msg: &ChatMessage) -> Value {
+    let Some(images) = msg.images.as_ref().filter(|images| !images.is_empty()) else {
+        return json!(msg.content);
+    };
+    let mut blocks = Vec::with_capacity(images.len() + 1);
+    if !msg.content.is_empty() {
+        blocks.push(json!({"type": "text", "text": msg.content}));
+    }
+    blocks.extend(images.iter().map(|data| image_block(data)));
+    json!(blocks)
 }
 
 /// The content blocks of an assistant turn, in Anthropic's required order:
@@ -2289,6 +2303,30 @@ mod tests {
         assert_eq!(content[1]["source"]["type"], "base64");
         assert_eq!(content[1]["source"]["media_type"], "image/png");
         assert_eq!(content[1]["source"]["data"], "BASE64DATA");
+    }
+
+    #[test]
+    fn a_tool_result_carries_the_images_its_tool_returned() {
+        use super::super::tool_images::{JPEG_B64, tool_loop_with_image};
+        let (_, msgs) = convert_messages(&tool_loop_with_image(), Advertised::default());
+        let results = msgs[2]["content"].as_array().expect("tool results");
+        let with_image = results[0]["content"].as_array().expect("text and image");
+        assert_eq!(
+            with_image[0],
+            json!({"type": "text", "text": "[image/jpeg, 14 bytes]"})
+        );
+        assert_eq!(with_image[1]["type"], "image");
+        assert_eq!(with_image[1]["source"]["media_type"], "image/jpeg");
+        assert_eq!(with_image[1]["source"]["data"], JPEG_B64);
+        assert_eq!(
+            results[1]["content"], "plain text",
+            "text alone stays a string"
+        );
+        assert_eq!(
+            msgs.len(),
+            4,
+            "no extra turn: the image rides in the result"
+        );
     }
 
     // --- Request body ---

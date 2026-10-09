@@ -49,6 +49,7 @@ use super::accumulator::{
     CappedText, ended_without_terminal, error_body, parse_tool_args, push_tool_arg,
 };
 use super::learning::{Learning, Optional, ParamMemory, Rejections};
+use super::tool_images::{ToolImage, images_after_tool_run};
 use crate::models::ModelCapabilities;
 use crate::models::adapters::driver::{
     Flow, Framing, StreamProtocol, drive_stream, plain_http_error,
@@ -65,6 +66,7 @@ use crate::models::stream::{StreamEvent, StreamSink};
 use crate::models::tool_call::{FunctionCall, ToolCall};
 use crate::models::traits::Model;
 use crate::models::types::{ChatMessage, FinishReason, MessageRole, ModelResponse, TokenUsage};
+use crate::utils::base64_image_media_type;
 
 /// Map OpenAI's `finish_reason` onto the normalized [`FinishReason`].
 fn map_openai_finish_reason(s: &str) -> FinishReason {
@@ -200,6 +202,29 @@ fn sent_optionals(body: &Value) -> Vec<Optional> {
     sent
 }
 
+/// One base64 image as an `image_url` content part.
+fn image_part(data: &str) -> Value {
+    let media_type = base64_image_media_type(data);
+    json!({
+        "type": "image_url",
+        "image_url": { "url": format!("data:{media_type};base64,{data}") },
+    })
+}
+
+/// The user turn that carries the images a run of tool results returned.
+fn tool_images_message(images: &[ToolImage<'_>]) -> Value {
+    let parts: Vec<Value> = images
+        .iter()
+        .flat_map(|image| {
+            [
+                json!({ "type": "text", "text": image.label() }),
+                image_part(image.data),
+            ]
+        })
+        .collect();
+    json!({ "role": "user", "content": parts })
+}
+
 /// One transcript message in OpenAI's `/chat/completions` wire shape.
 fn wire_message(msg: &ChatMessage) -> Value {
     let role = match msg.role {
@@ -214,22 +239,16 @@ fn wire_message(msg: &ChatMessage) -> Value {
     // base64 data URL). Previously images were dropped silently, so
     // vision models saw nothing. Non-user roles / no images use a plain
     // string content. Assistant-attached artifacts (screenshots) are not
-    // sent — OpenAI rejects images in assistant turns — matching the
-    // Anthropic adapter, which also only sends images on user messages.
+    // sent — OpenAI rejects images in assistant turns — and a tool
+    // message is text only, so its images follow as a user turn
+    // (`tool_images_message`).
     if msg.role == MessageRole::User && msg.images.as_ref().is_some_and(|images| !images.is_empty())
     {
         let mut parts: Vec<Value> = Vec::new();
         if !msg.content.is_empty() {
             parts.push(json!({ "type": "text", "text": msg.content }));
         }
-        for data in msg.images.iter().flatten() {
-            // Default media type png — matches Mermaid's clipboard output;
-            // an unsupported format surfaces a clear 4xx from the API.
-            parts.push(json!({
-                "type": "image_url",
-                "image_url": { "url": format!("data:image/png;base64,{data}") },
-            }));
-        }
+        parts.extend(msg.images.iter().flatten().map(|data| image_part(data)));
         json_msg["content"] = json!(parts);
     } else {
         json_msg["content"] = json!(msg.content);
@@ -370,8 +389,12 @@ impl OpenAICompatAdapter {
             }));
         }
 
-        for msg in messages {
+        for (idx, msg) in messages.iter().enumerate() {
             json_messages.push(wire_message(msg));
+            let images = images_after_tool_run(messages, idx);
+            if !images.is_empty() {
+                json_messages.push(tool_images_message(&images));
+            }
         }
 
         // Tool registration is the single capability boundary. If a tool
@@ -2184,6 +2207,30 @@ mod tests {
         assert_eq!(
             image["image_url"]["url"],
             "data:image/png;base64,BASE64DATA"
+        );
+    }
+
+    #[test]
+    fn tool_images_follow_the_tool_results_as_a_user_turn() {
+        // A tool message is text only, so the picture a tool returned comes
+        // right after the run of results, labelled with its call.
+        use super::super::tool_images::{JPEG_B64, tool_loop_with_image};
+        let adapter = test_adapter();
+        let body =
+            adapter.build_request_body(&tool_loop_with_image(), &ModelConfig::default(), false);
+        let msgs = body["messages"].as_array().unwrap();
+        let roles: Vec<&str> = msgs.iter().map(|m| m["role"].as_str().unwrap()).collect();
+        assert_eq!(
+            roles,
+            ["user", "assistant", "tool", "tool", "user", "assistant"]
+        );
+        assert_eq!(msgs[2]["content"], "[image/jpeg, 14 bytes]");
+        assert_eq!(
+            msgs[4]["content"],
+            json!([
+                {"type": "text", "text": "Image returned by tool call c1:"},
+                {"type": "image_url", "image_url": {"url": format!("data:image/jpeg;base64,{JPEG_B64}")}},
+            ])
         );
     }
 
