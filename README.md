@@ -127,6 +127,7 @@ The model calls these autonomously:
 | `delete_file` | Delete files (timestamped backup) |
 | `create_directory` | Create directories |
 | `execute_command` | Run shell commands; background mode tracks PID, log, and URL |
+| `background_process` | Read new output from, wait on, or stop a process `execute_command` left running |
 | `memory` | Durable cross-session memory (project, shared, or global scope) |
 | `web_search` | Search the web (managed local SearXNG by default) |
 | `web_fetch` | Fetch a URL into a bounded session snapshot (in-process, no key) |
