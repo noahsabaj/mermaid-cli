@@ -93,7 +93,7 @@ invent findings, sources, or citations.";
 /// surface (`mcp` covers every `mcp__server__tool` via the proxy). GUI tools
 /// and `agent` itself are structurally absent from children and can't be
 /// granted here.
-const CHILD_TOOL_NAMES: &[&str] = &[
+pub(crate) const CHILD_TOOL_NAMES: &[&str] = &[
     "read_file",
     "write_file",
     "edit_file",
@@ -382,11 +382,54 @@ impl SubagentSpawner {
 /// The `agent` tool the model sees.
 pub struct SubagentTool {
     spawner: Arc<SubagentSpawner>,
+    /// Configured agent types, listed in the tool description: `[agents.types]`
+    /// entries, agent files, and plugin types. Without the list the model
+    /// can't know a type exists.
+    custom_types: String,
 }
+
+/// Most configured types the tool description lists by name.
+const MAX_LISTED_TYPES: usize = 32;
 
 impl SubagentTool {
     pub fn new(spawner: Arc<SubagentSpawner>) -> Self {
-        Self { spawner }
+        Self {
+            spawner,
+            custom_types: String::new(),
+        }
+    }
+
+    /// List `types` (the merged `config.agents.types`) in the description.
+    #[must_use]
+    pub fn with_types(mut self, types: &HashMap<String, mermaid_domain::AgentTypeConfig>) -> Self {
+        let mut names: Vec<&String> = types.keys().collect();
+        names.sort();
+        let mut out = String::new();
+        for name in names.iter().take(MAX_LISTED_TYPES) {
+            let description = types[*name]
+                .description
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or("");
+            if description.is_empty() {
+                out.push_str(&format!("\n- '{name}'"));
+            } else {
+                out.push_str(&format!("\n- '{name}': {description}"));
+            }
+        }
+        if names.len() > MAX_LISTED_TYPES {
+            out.push_str(&format!("\n(+{} more)", names.len() - MAX_LISTED_TYPES));
+        }
+        self.custom_types = out;
+        self
+    }
+
+    fn custom_types_suffix(&self, description: String) -> String {
+        if self.custom_types.is_empty() {
+            description
+        } else {
+            format!("{description}\n\nConfigured types:{}", self.custom_types)
+        }
     }
 }
 
@@ -399,14 +442,14 @@ impl ToolExecutor for SubagentTool {
     fn schema(&self) -> ToolDefinition {
         ToolDefinition {
             name: "agent".to_string(),
-            description: format!(
+            description: self.custom_types_suffix(format!(
                 "Spawn a child agent with its own context and tool access to work on an \
                  independent sub-task. Useful for parallel fan-out (emit multiple `agent` \
                  calls in the same turn to run them concurrently) or for scoping a noisy \
                  sub-task (the child's tool output doesn't clutter the parent's turn). \
                  Types: 'general' (default — full tool access at your safety mode) and \
                  'explore' (read-only reconnaissance: locate files and extract facts, \
-                 cannot mutate), plus any defined in config [agents.types]. Every result \
+                 cannot mutate), plus the configured types listed below, if any. Every result \
                  ends with an [agent_id: …] trailer; pass that id back as `agent_id` to \
                  send a follow-up prompt to the same child with its context intact (the \
                  {MAX_CACHED_AGENTS} most recent children are kept). Breadth-capped at \
@@ -414,7 +457,7 @@ impl ToolExecutor for SubagentTool {
                  A child moved to the \
                  background (the user detaches one with Ctrl+B) can be cancelled with \
                  action: \"kill\" plus its agent_id.",
-            ),
+            )),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -433,7 +476,7 @@ impl ToolExecutor for SubagentTool {
                     },
                     "type": {
                         "type": "string",
-                        "description": "Agent type: 'general' (default), 'explore' (read-only recon), or a config-defined type. Ignored when continuing via agent_id — the child keeps the type it was built with."
+                        "description": "Agent type: 'general' (default), 'explore' (read-only recon), or a configured type. Ignored when continuing via agent_id — the child keeps the type it was built with."
                     },
                     "model": {
                         "type": "string",
@@ -1685,6 +1728,34 @@ mod tests {
         Arc::new(test_spawner())
     }
 
+    #[test]
+    fn schema_lists_configured_types_with_descriptions() {
+        let plain = SubagentTool::new(test_spawner_arc()).schema().description;
+        assert!(!plain.contains("Configured types:"), "{plain}");
+
+        let mut types = HashMap::new();
+        types.insert(
+            "reviewer".to_string(),
+            mermaid_domain::AgentTypeConfig {
+                description: Some("Reviews code for quality.".to_string()),
+                ..mermaid_domain::AgentTypeConfig::default()
+            },
+        );
+        types.insert(
+            "scout".to_string(),
+            mermaid_domain::AgentTypeConfig::default(),
+        );
+        let listed = SubagentTool::new(test_spawner_arc())
+            .with_types(&types)
+            .schema()
+            .description;
+        assert!(
+            listed
+                .ends_with("Configured types:\n- 'reviewer': Reviews code for quality.\n- 'scout'"),
+            "{listed}"
+        );
+    }
+
     fn stream_text(chunk: &str) -> Msg {
         Msg::StreamText {
             turn: TurnId(1),
@@ -1969,6 +2040,7 @@ mod tests {
                 preamble: Some("You are a scout.".to_string()),
                 model: Some("ollama/qwen3:8b".to_string()),
                 isolation: Some("worktree".to_string()),
+                description: None,
             },
         );
         let scout = resolve_agent_type(Some("scout"), &config).unwrap();

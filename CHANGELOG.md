@@ -26,6 +26,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `[providers.<name>]` entries, keep Chat Completions; a proxy that serves only
   Chat Completions can be set up as a custom provider. Meta's adapter shares
   the new Responses code.
+- **Mermaid reads Claude Code's files.** A user who moved from Claude Code
+  used to lose their instructions, skills, commands and agents, because
+  Mermaid read only `AGENTS.md`, `MERMAID.md` and `.mermaid/skills/`. Now
+  `CLAUDE.md` (or `.claude/CLAUDE.md`) loads when a directory has no
+  `AGENTS.md`, and Mermaid reads `skills/`, `commands/` and `agents/` from
+  `.mermaid/`, `.claude/` and `.agents/` in the project and from
+  `~/.config/mermaid/`, `~/.claude/` and `~/.agents/`; `.mermaid/` wins on a
+  same name. A `commands/*.md` file is a prompt command (`$ARGUMENTS`, `$1`,
+  `$2`, ...), so you can add your own commands without writing a plugin. An
+  `agents/*.md` file is an agent type: Claude Code tool names map to
+  Mermaid's, an agent that cannot write gets a `read_only` ceiling, and a
+  project file cannot redefine `general` or `explore`. The `agent` tool now
+  lists the configured types with their new `description`, so the model knows
+  they exist. See docs/plugins.md, "Files from other tools".
 - **Mermaid cleans up the config keys it no longer reads.** A config file
   written by an older `mermaid init` still carries sections a later release
   removed, such as `[plan]` (0.28.0) or `[computer_use]` and
@@ -39,6 +53,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and a key Mermaid does not know is never touched. Bare `mermaid` at a
   terminal lists the keys and asks `Delete them now? [y/N]` first; headless
   runs, pipes and scripts never ask and never edit.
+- **The model can follow the processes it starts in the background.** Before,
+  a command run with `mode="background"` returned a pid and log path, and only
+  the user could check it with `/logs` or end it with `/stop`; a foreground
+  command is killed after 300 seconds, so the model could not wait for a long
+  build or test run except by polling with `sleep`. The new
+  `background_process` tool takes the `bg-<pid>` id: `read` returns the output
+  written since the last read, `wait` blocks until the process exits, a text
+  appears in its output, or a timeout of up to an hour passes (Esc ends it),
+  `stop` ends the process tree, and `list` shows the session's processes. It
+  reaches only processes this session started, never a raw pid.
 
 ### Fixed
 
@@ -49,6 +73,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   1.05M window. GPT-5.6 was listed at 1.5M; OpenAI documents 1.05M, so its
   85% trigger sat above the real window and compaction could never run before
   the request failed. It is now 1.05M.
+- **A background command that exits at once is reported as exited on Linux.**
+  The liveness check used `kill -0`, which succeeds on a process that has
+  exited but has not been reaped yet. In a container whose pid 1 reaps late,
+  a command that failed during startup was reported as started and running.
+  The check now reads the process state from `/proc` first.
+
 - **The highlighted row in `/load` and the rewind picker can be read.** Its
   meta, `(14 msg · 2026-01-01 12:34)` or `(#1 back)`, was drawn in
   `text_disabled` on a `text_disabled` band, the same colour, so it vanished
