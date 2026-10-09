@@ -641,6 +641,18 @@ pub fn display_info_for_shell(
             )
         },
         "task_list" => ("Tasks".to_string(), "list".to_string()),
+        "background_process" => (
+            "Process".to_string(),
+            format!(
+                "{} {}",
+                string_arg("action").unwrap_or_default(),
+                args.get("id")
+                    .map(|id| id.as_str().map_or_else(|| id.to_string(), str::to_string))
+                    .unwrap_or_default()
+            )
+            .trim()
+            .to_string(),
+        ),
         "context_archive" => {
             let target = string_arg("query")
                 .map(|q| format!("\"{q}\""))
