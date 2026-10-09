@@ -122,7 +122,7 @@ The model calls these autonomously:
 
 | Tool | Description |
 |------|-------------|
-| `read_file` | Read files (text, PDF, images) |
+| `read_file` | Read files and directories; pictures come back as images |
 | `write_file` | Create or overwrite files (timestamped backup) |
 | `edit_file` | Single-location search-and-replace; refuses an ambiguous match |
 | `apply_patch` | Multi-hunk, context-anchored edits with a diff (fuzzy-tolerant) |

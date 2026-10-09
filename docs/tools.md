@@ -30,6 +30,12 @@ from then on; `[tools] provider_native = false` always sends Mermaid's. OpenAI's
 and `shell` tools exist only in the Responses API, which Mermaid does not use for OpenAI;
 Mermaid's own `apply_patch` already takes the same patch format.
 
+Pictures: `read_file` returns a PNG, JPEG, GIF or WebP file (known by its first bytes) as an
+image beside a one-line `[image/png, 48213 bytes]` result, up to 3.75 MiB. Any tool's images
+(an MCP tool's screenshot, too) travel with its result: inside the `tool_result` on Anthropic,
+and as a user turn right after the run of results on the providers that take images only from
+the user. Only the newest three images in a conversation are sent.
+
 Background processes: `execute_command` with `mode="background"` (or a foreground command the
 user moves to the background with Ctrl+B) returns an id such as `bg-1234`. `background_process`
 takes that id. `read` returns the output written since the last read, at most the newest 32 KiB,
