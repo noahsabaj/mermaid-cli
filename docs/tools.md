@@ -36,6 +36,12 @@ the call back as the model wrote it, answered as an `apply_patch_call_output`. O
 tool is not offered: it runs a list of commands and wants an exit outcome for each, which
 `execute_command` does not report.
 
+Pictures: `read_file` returns a PNG, JPEG, GIF or WebP file (known by its first bytes) as an
+image beside a one-line `[image/png, 48213 bytes]` result, up to 3.75 MiB. Any tool's images
+(an MCP tool's screenshot, too) travel with its result: inside the `tool_result` on Anthropic,
+and as a user turn right after the run of results on the providers that take images only from
+the user. Only the newest three images in a conversation are sent.
+
 Background processes: `execute_command` with `mode="background"` (or a foreground command the
 user moves to the background with Ctrl+B) returns an id such as `bg-1234`. `background_process`
 takes that id. `read` returns the output written since the last read, at most the newest 32 KiB,
@@ -72,6 +78,47 @@ MCP servers contribute additional tools under the `mcp__<server>__<tool>` prefix
 Servers start concurrently at launch, each bounded by a 60-second timeout, and report ready/errored individually.
 
 By default MCP tools are **deferred**: instead of advertising every server's tools on every request, the model gets one `tool_search` tool that searches deferred tool names/descriptions and promotes matches to direct advertisement for the rest of the session — deferred schemas don't count against `/context` until promoted. Opt out globally with `mcp_defer_tools = false` at the top level of config, or per server with `defer = false` on its `[mcp_servers.<name>]` entry.
+
+### Remote servers and sign-in
+
+A remote server is an `[mcp_servers.<name>]` entry with a `url` (Streamable HTTP). Add one with
+`mermaid add <name> --url <URL>`. If the server needs an OAuth sign-in, Mermaid opens the browser
+there and then; `mermaid mcp login <name>` signs in again later, and `mermaid mcp logout <name>`
+deletes the stored tokens. The flow follows the MCP authorization spec (2026-07-28):
+
+- Discovery from the server's `401` challenge or its `/.well-known/oauth-protected-resource`
+  metadata, then the authorization server's RFC 8414 or OpenID Connect metadata. The metadata
+  must name the issuer it was fetched for, and the server must support PKCE `S256`.
+- The client, in the spec's order: a client you registered yourself (`oauth.client_id`), then
+  Mermaid's Client ID Metadata Document
+  (`https://noahsabaj.github.io/mermaid-cli/oauth/client-metadata.json`), then Dynamic Client
+  Registration as a native app.
+- The browser redirects to `http://127.0.0.1:<port>/callback`. On a remote shell, sign in in any
+  browser and paste the address it ends on into the terminal. Mermaid checks `state` and the
+  `iss` of the response before it redeems the code.
+- Tokens are requested for the server's `resource` (RFC 8707) and stored in the OS keyring
+  (service `mermaid`, account `mcp-oauth:<name>`), bound to the server's `url`. They refresh
+  when they expire or when the server answers `401`. When a refresh fails, or the server answers
+  `403 insufficient_scope`, the server does not start and says to run `mermaid mcp login <name>`;
+  that sign-in asks for the new scopes as well as the old ones.
+
+A config that sends its own `Authorization` header (`headers` or `env_headers`) turns this off.
+For a server that does not let Mermaid register itself, register an OAuth app there and name it
+in config:
+
+```toml
+[mcp_servers.github]
+url = "https://api.githubcopilot.com/mcp/"
+
+[mcp_servers.github.oauth]
+client_id = "Iv1.0123456789abcdef"
+client_secret_env = "GITHUB_MCP_CLIENT_SECRET"  # only for a confidential app
+callback_port = 8765                            # the app's redirect: http://127.0.0.1:8765/callback
+# scopes = ["repo"]                             # replaces the scopes the server suggests
+```
+
+`mermaid add <name> --url <URL> --client-id <ID> --client-secret-env <VAR> --callback-port <PORT>`
+writes the same table.
 
 ## Web tools
 

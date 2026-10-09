@@ -45,6 +45,8 @@ pub(crate) mod responses;
 /// and learned when refused.
 #[cfg(test)]
 mod server_compaction;
+/// Tool-returned images for providers whose tool messages are text only.
+mod tool_images;
 /// Every adapter, end to end, against a model the catalog has never seen.
 #[cfg(test)]
 mod unknown_model;

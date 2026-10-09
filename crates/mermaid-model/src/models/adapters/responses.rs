@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 
 use super::accumulator::{CappedText, parse_tool_args, slot_in_bounds};
 use super::learning::{Optional, Rejections};
+use super::tool_images::images_after_tool_run;
 use crate::models::adapters::driver::{Flow, Framing, StreamProtocol};
 use crate::models::config::ModelConfig;
 use crate::models::error::{BackendError, ModelError, Result};
@@ -337,7 +338,10 @@ pub(crate) fn messages_to_input<'a>(
     // The output item type each natively-made call is answered with, by
     // `call_id`. Anything not here is a function call.
     let mut native_outputs: HashMap<&str, String> = HashMap::new();
-    for message in messages {
+    for (idx, message) in messages.iter().enumerate() {
+        // A call output is text; the images a run of them returned follow as
+        // one user message.
+        let tool_images = images_after_tool_run(messages, idx);
         if message.role == MessageRole::Assistant
             && let Some(output) = message.provider_continuation.as_ref().and_then(&replayed)
         {
@@ -367,6 +371,18 @@ pub(crate) fn messages_to_input<'a>(
                         "output": message.content,
                     }),
                 });
+                if !tool_images.is_empty() {
+                    let content: Vec<Value> = tool_images
+                        .iter()
+                        .flat_map(|image| {
+                            [
+                                json!({"type": "input_text", "text": image.label()}),
+                                input_image(image.data),
+                            ]
+                        })
+                        .collect();
+                    input.push(json!({"type": "message", "role": "user", "content": content}));
+                }
             },
             MessageRole::User => input.push(input_message(message, "user", "input_text")),
             MessageRole::System => input.push(input_message(message, "system", "input_text")),
@@ -436,14 +452,24 @@ fn input_message(message: &ChatMessage, role: &str, text_type: &str) -> Value {
         content.push(json!({"type": text_type, "text": message.content}));
     }
     if role == "user" {
-        for image in message.images.iter().flatten() {
-            content.push(json!({
-                "type": "input_image",
-                "image_url": format!("data:image/png;base64,{image}"),
-            }));
-        }
+        content.extend(
+            message
+                .images
+                .iter()
+                .flatten()
+                .map(|data| input_image(data)),
+        );
     }
     json!({"type": "message", "role": role, "content": content})
+}
+
+/// One base64 image as an `input_image` content part.
+fn input_image(data: &str) -> Value {
+    let media_type = crate::utils::base64_image_media_type(data);
+    json!({
+        "type": "input_image",
+        "image_url": format!("data:{media_type};base64,{data}"),
+    })
 }
 
 /// The static system prompt and the project's `MERMAID.md` suffix, joined the
@@ -631,6 +657,41 @@ mod tests {
         assert_eq!(input[1]["phase"], "commentary");
         assert_eq!(input[2]["call_id"], "call_1");
         assert_eq!(input[3]["type"], "function_call_output");
+    }
+
+    #[test]
+    fn tool_images_follow_the_function_outputs_as_a_user_message() {
+        use super::super::tool_images::{JPEG_B64, tool_loop_with_image};
+        let input = messages_to_input(
+            &tool_loop_with_image(),
+            |_| None,
+            Replay { strip_ids: false },
+        );
+        let kinds: Vec<&str> = input
+            .iter()
+            .map(|item| item["type"].as_str().unwrap_or_default())
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                "message",
+                "message",
+                "function_call",
+                "function_call",
+                "function_call_output",
+                "function_call_output",
+                "message",
+                "message",
+            ]
+        );
+        assert_eq!(input[6]["role"], "user");
+        assert_eq!(
+            input[6]["content"],
+            json!([
+                {"type": "input_text", "text": "Image returned by tool call c1:"},
+                {"type": "input_image", "image_url": format!("data:image/jpeg;base64,{JPEG_B64}")},
+            ])
+        );
     }
 
     #[test]
