@@ -188,6 +188,14 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         group: SlashCommandGroup::Everyday,
     },
     SlashCommand {
+        name: "goal",
+        aliases: &[],
+        description: "Keep working until a condition is met; no arg shows status",
+        arg_hint: Some("[condition|clear]"),
+        usage_note: None,
+        group: SlashCommandGroup::Everyday,
+    },
+    SlashCommand {
         name: "scratchpad",
         aliases: &[],
         description: "Show the session scratch directory and its contents",
@@ -657,6 +665,7 @@ pub fn parse_slash_command(raw: &str) -> Option<crate::SlashCmd> {
         Some("list") => SlashCmd::List,
         Some("usage") => SlashCmd::Usage,
         Some("todos") => SlashCmd::Todos(arg),
+        Some("goal") => SlashCmd::Goal(arg),
         Some("scratchpad") => SlashCmd::Scratchpad,
         Some("context") => {
             use crate::ContextCmd;

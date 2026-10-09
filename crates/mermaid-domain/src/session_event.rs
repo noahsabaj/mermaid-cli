@@ -153,6 +153,9 @@ pub struct SessionScalars {
     pub forked_from: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_session: Option<String>,
+    /// The active `/goal` condition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<String>,
 }
 
 impl SessionScalars {
@@ -174,6 +177,7 @@ impl SessionScalars {
             cli_version: snapshot.cli_version.clone(),
             forked_from: snapshot.forked_from.clone(),
             parent_session: snapshot.parent_session.clone(),
+            goal: snapshot.goal.clone(),
         }
     }
 
@@ -192,6 +196,7 @@ impl SessionScalars {
         conversation.cli_version.clone_from(&self.cli_version);
         conversation.forked_from.clone_from(&self.forked_from);
         conversation.parent_session.clone_from(&self.parent_session);
+        conversation.goal.clone_from(&self.goal);
     }
 }
 
@@ -362,6 +367,7 @@ mod tests {
             cli_version: None,
             forked_from: None,
             parent_session: None,
+            goal: None,
         };
         assert_eq!(
             serde_json::to_string(&SessionEvent::State(Box::new(scalars))).unwrap(),
