@@ -23,6 +23,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   terminal lists the keys and asks `Delete them now? [y/N]` first; headless
   runs, pipes and scripts never ask and never edit.
 
+### Changed
+
+- **The test suite runs in about two thirds of the time.** `just test` on a
+  4-core Linux box went from about 27.5s to about 17s, with every test still
+  checking what it checked. Most of the time was waiting, not work:
+  - The pty tests answer the terminal's device-attributes query, as every
+    real terminal does. Unanswered, crossterm's keyboard-protocol probe
+    waited out a 2s deadline on every unix launch of the TUI.
+  - The retry-backoff tests run on tokio's paused clock, so they check the
+    delay each retry asks for without sleeping through about 9s of backoff.
+  - The `last_used_model` test points its provider at a loopback server
+    that answers 400 instead of a dead port, whose refused connects were
+    retried with backoff (about 1.5s on Linux and 10s on Windows).
+  - The instructions-reload test sets the new mtime instead of sleeping a
+    second past the filesystem's timestamp granularity.
+  - The offline evals build their fixtures without incremental state or
+    debuginfo, about a third off each cold `cargo` build.
+  - `.config/nextest.toml` starts the integration and timeout tests first,
+    so they overlap with the thousands of millisecond tests instead of
+    trailing them.
+
 ### Fixed
 
 - **The highlighted row in `/load` and the rewind picker can be read.** Its

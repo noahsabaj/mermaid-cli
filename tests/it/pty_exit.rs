@@ -100,15 +100,33 @@ fn start_tui(sandbox_prefix: &str, model: &str, trailing_shell: &str) -> TuiPty 
         output_text(&output)
     );
 
-    TuiPty {
+    let mut tui = TuiPty {
         writer: pair.master.take_writer().expect("take pty writer"),
         child,
         output,
         reader_done: reader_done_rx,
-    }
+    };
+    tui.answer_device_attributes();
+    tui
 }
 
 impl TuiPty {
+    /// Answer the startup keyboard-protocol probe the way a legacy terminal
+    /// does. The probe is `ESC[?u` then a Primary Device Attributes query
+    /// (`ESC[c`), which every real terminal answers at once; a bare pty never
+    /// does, and crossterm then waits out a 2s deadline before the main loop
+    /// starts. `ESC[?62c` with no kitty reply reaches the same "unsupported"
+    /// verdict the deadline did, without the wait.
+    fn answer_device_attributes(&mut self) {
+        if wait_for_output(
+            &self.output,
+            |bytes| bytes.windows(3).any(|w| w == b"\x1b[c"),
+            Duration::from_secs(3),
+        ) {
+            self.send("device attributes reply", b"\x1b[?62c");
+        }
+    }
+
     fn send(&mut self, what: &str, bytes: &[u8]) {
         self.writer
             .write_all(bytes)
@@ -214,10 +232,17 @@ fn double_ctrl_c_from_empty_tui_exits_and_restores_terminal_modes() {
 fn ctrl_l_full_repaint_does_not_query_cursor_or_crash() {
     let mut tui = start_tui("mermaid-pty-repaint", "anthropic/pty-repaint-test", "");
 
-    // Let the startup kitty-protocol probe expire (2s, unanswered in a pty)
-    // so Ctrl+L is handled by the steady-state main loop, matching the
-    // real-world trigger timing.
-    std::thread::sleep(Duration::from_millis(2500));
+    // Wait for the first frame, so Ctrl+L is handled by the steady-state
+    // main loop, matching the real-world trigger timing.
+    assert!(
+        wait_for_output(
+            &tui.output,
+            |bytes| bytes.windows(7).any(|w| w == b"safety:"),
+            Duration::from_secs(10)
+        ),
+        "Mermaid never drew its footer. Output:\n{}",
+        output_text(&tui.output)
+    );
 
     tui.send("Ctrl+L", &[0x0C]);
 

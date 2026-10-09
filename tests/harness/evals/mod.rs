@@ -579,12 +579,8 @@ fn mermaid_command(
     if let Some(schema) = &task.spec.output_schema {
         cmd.arg("--output-schema").arg(task.dir.join(schema));
     }
-    cmd.arg(prompt)
-        .current_dir(project)
-        // Inside the project, where `--confine-fs` would allow it, and out of
-        // the snapshot. The model's own `cargo` runs and the checks share it.
-        .env("CARGO_TARGET_DIR", project.join("target"))
-        .env_remove("CARGO_BUILD_TARGET_DIR");
+    cmd.arg(prompt).current_dir(project);
+    cargo_env(&mut cmd, project);
     git_identity(&mut cmd);
     if let Target::Mock(mock) = target {
         isolate(&mut cmd, sandbox, mock);
@@ -718,11 +714,10 @@ fn score_command(
     let mut cmd = Command::new(program);
     cmd.args(args)
         .current_dir(project)
-        .env("CARGO_TARGET_DIR", project.join("target"))
-        .env_remove("CARGO_BUILD_TARGET_DIR")
         // A failing check's output lands in the report; a backtrace there
         // buries the name of the test that failed.
         .env("RUST_BACKTRACE", "0");
+    cargo_env(&mut cmd, project);
     let output = run_with_timeout(cmd, CHECK_TIMEOUT);
     let stdout = String::from_utf8_lossy(&output.stdout);
     let failure = if output.timed_out {
@@ -740,6 +735,23 @@ fn score_command(
             .map(|want| format!("stdout lacks {want:?}; got {:?}", stdout.trim()))
     };
     (label, failure)
+}
+
+/// How every `cargo` in a run builds: the model's own and the checks'.
+///
+/// The target dir is inside the project, where `--confine-fs` would allow it,
+/// and out of the snapshot; the model's runs and the checks share it. Each
+/// sandbox builds its fixture from cold, several times over a suite, so the
+/// build skips what only a second build or a debugger would use: incremental
+/// state and debuginfo. Together that is about a third off each cold build.
+/// Both sides must set the same knobs, or the checks would rebuild what the
+/// model's runs already built.
+fn cargo_env(cmd: &mut Command, project: &Path) {
+    cmd.env("CARGO_TARGET_DIR", project.join("target"))
+        .env_remove("CARGO_BUILD_TARGET_DIR")
+        .env("CARGO_INCREMENTAL", "0")
+        .env("CARGO_PROFILE_DEV_DEBUG", "0")
+        .env("CARGO_PROFILE_TEST_DEBUG", "0");
 }
 
 /// Point the binary at `mock` with a config of its own, so nothing reads or

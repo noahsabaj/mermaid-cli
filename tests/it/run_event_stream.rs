@@ -8,6 +8,8 @@
 //! `--resume <id>` run appends to. This guards the public SDK contract
 //! end-to-end through the real binary.
 
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -213,8 +215,9 @@ fn headless_resume_error_paths_are_clear() {
 /// a keyless loopback provider IS buildable, so the same code path must write
 /// the key — proving the gate discriminates rather than never persisting, and
 /// that `MERMAID_CONFIG_DIR` really is where the binary's config writes land.
-/// No network beyond one refused loopback connect: the provider endpoint
-/// resolves without contacting anything, and the chat then fails fast.
+/// No network beyond a loopback server that refuses every request: the
+/// provider endpoint resolves without contacting anything, and the chat then
+/// fails fast.
 #[test]
 fn cli_model_is_remembered_only_when_its_provider_is_buildable() {
     let home = sandbox_dir();
@@ -232,11 +235,12 @@ fn cli_model_is_remembered_only_when_its_provider_is_buildable() {
 
     // Positive: a keyless loopback endpoint is a real, buildable provider
     // (same rule as discovery), so the persist fires even though the chat
-    // then dies on the dead port.
+    // then fails on the server's 400.
+    let port = serve_bad_request();
     std::fs::create_dir_all(sandbox_config_dir(&home)).expect("create config dir");
     std::fs::write(
         &config_path,
-        "[providers.stub]\nbase_url = \"http://127.0.0.1:9/v1\"\n",
+        format!("[providers.stub]\nbase_url = \"http://127.0.0.1:{port}/v1\"\n"),
     )
     .expect("write sandbox config");
     let _ = run_sandboxed_with_model(&home, "stub/test-model", &["run", "x"]);
@@ -247,4 +251,46 @@ fn cli_model_is_remembered_only_when_its_provider_is_buildable() {
     );
 
     let _ = std::fs::remove_dir_all(&home);
+}
+
+/// A loopback server that answers every request with `400 Bad Request`, and
+/// returns its port. A 400 is not retried, so a chat against it fails at once.
+/// A dead port is no substitute: a refused connect is retried with backoff,
+/// which cost ~1.5s here and ~10s on Windows, where each refused loopback
+/// connect itself takes ~2s.
+///
+/// Each request is read to the end of its body before the reply goes out:
+/// closing a socket with unread input resets the connection, and a reset is
+/// retried like a refusal.
+fn serve_bad_request() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind stub server");
+    let port = listener.local_addr().expect("stub server address").port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { continue };
+            let mut reader = BufReader::new(stream);
+            let mut content_length = 0;
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) if line == "\r\n" => break,
+                    Ok(_) => {
+                        if let Some((name, value)) = line.split_once(':')
+                            && name.eq_ignore_ascii_case("content-length")
+                        {
+                            content_length = value.trim().parse().unwrap_or(0);
+                        }
+                    },
+                }
+            }
+            let mut body = vec![0; content_length];
+            let _ = reader.read_exact(&mut body);
+            let _ = reader.get_mut().write_all(
+                b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            );
+        }
+    });
+    port
 }

@@ -15,6 +15,13 @@
 //!   * **`ESC[6n` must be answered.** crossterm asks the terminal for the
 //!     cursor position and blocks on the reply. Nothing answers under a bare
 //!     pty, so mermaid hung at startup until the harness replied `ESC[1;1R`.
+//!   * **`ESC[c` should be answered.** At startup the app asks whether the
+//!     terminal speaks the kitty keyboard protocol, as `ESC[?u` followed by a
+//!     Primary Device Attributes query. Every real terminal answers the
+//!     latter at once. Unanswered, crossterm waits out a 2s deadline on every
+//!     unix launch; answered as a legacy terminal (`ESC[?62c`, no kitty
+//!     reply), the probe returns "unsupported" at once, which is the same
+//!     verdict the timeout reached.
 //!   * **Both pty ends must stay owned.** Dropping the master closes the ConPTY
 //!     on Windows, and the next keystroke comes back `BrokenPipe` — which reads
 //!     exactly like the app crashing.
@@ -73,6 +80,8 @@ pub struct Terminal {
     child: Box<dyn portable_pty::Child + Send + Sync>,
     /// How many `ESC[6n` queries have already been answered.
     answered: usize,
+    /// How many `ESC[c` queries have already been answered.
+    attributes_answered: usize,
     /// Both ends stay owned for the lifetime of the harness — see the module
     /// docs. The master additionally serves [`Terminal::resize`].
     master: Box<dyn portable_pty::MasterPty + Send>,
@@ -184,6 +193,7 @@ impl Terminal {
             writer,
             child,
             answered: 0,
+            attributes_answered: 0,
             master: pair.master,
             _slave: pair.slave,
             sandbox,
@@ -216,10 +226,11 @@ impl Terminal {
     /// drew for the new grid.
     pub fn resize(&mut self, rows: u16, cols: u16) {
         self.output.lock().expect("output lock").clear();
-        // The count restarts with the buffer: `answer_cursor_queries` counts
+        // The counts restart with the buffer: `answer_queries` counts
         // matches in the (now empty) stream. Only this thread touches
-        // `answered`, so it needs no place under the lock.
+        // them, so they need no place under the lock.
         self.answered = 0;
+        self.attributes_answered = 0;
         self.master
             .resize(PtySize {
                 rows,
@@ -305,7 +316,7 @@ impl Terminal {
             // be blocked on a reply, in which case the grid never changes until
             // we send one.
             let raw = self.raw();
-            self.answer_cursor_queries(&raw);
+            self.answer_queries(&raw);
             let frame = self.frame();
             stable = if frame == previous { stable + 1 } else { 0 };
             previous = frame;
@@ -340,7 +351,7 @@ impl Terminal {
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
             let raw = self.raw();
-            self.answer_cursor_queries(&raw);
+            self.answer_queries(&raw);
             if squash(&self.frame_text()).contains(&squashed_needle) {
                 return true;
             }
@@ -355,7 +366,7 @@ impl Terminal {
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
             let raw = self.raw();
-            self.answer_cursor_queries(&raw);
+            self.answer_queries(&raw);
             if !squash(&self.frame_text()).contains(&squashed_needle) {
                 return true;
             }
@@ -368,7 +379,7 @@ impl Terminal {
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
             let raw = self.raw();
-            self.answer_cursor_queries(&raw);
+            self.answer_queries(&raw);
             if pred(&raw) {
                 return true;
             }
@@ -382,12 +393,19 @@ impl Terminal {
         String::from_utf8_lossy(&bytes).into_owned()
     }
 
-    /// Answer `ESC[6n` (Device Status Report) — see the module docs.
-    fn answer_cursor_queries(&mut self, text: &str) {
+    /// Answer `ESC[6n` (Device Status Report) and `ESC[c` (Primary Device
+    /// Attributes) — see the module docs.
+    fn answer_queries(&mut self, text: &str) {
         let seen = text.matches("\x1b[6n").count();
         while self.answered < seen {
             self.answered += 1;
             let _ = self.writer.write_all(b"\x1b[1;1R");
+            let _ = self.writer.flush();
+        }
+        let seen = text.matches("\x1b[c").count();
+        while self.attributes_answered < seen {
+            self.attributes_answered += 1;
+            let _ = self.writer.write_all(b"\x1b[?62c");
             let _ = self.writer.flush();
         }
     }

@@ -14,3 +14,14 @@ slow-timeout = { period = "60s", terminate-after = 3 }
 [[profile.default.overrides]]
 filter = 'test(managed_searxng_end_to_end)'
 slow-timeout = { period = "60s", terminate-after = 10 }
+
+# Start the slow tests first. Most of the suite is thousands of tests that
+# take a few milliseconds each; the integration tests and the timeout tests
+# spawn real binaries, ptys, git or cargo, or wait out a deadline, and take
+# from a fraction of a second to several. In the default order the
+# integration binary only started about a third of the way into the run, so
+# with enough cores its slowest test decided when the run ended. Started
+# first, they overlap with the fast tests instead of trailing them.
+[[profile.default.overrides]]
+filter = 'binary_id(mermaid-cli::integration) or test(/timeout/)'
+priority = 10
