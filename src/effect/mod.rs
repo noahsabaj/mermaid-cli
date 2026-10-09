@@ -683,6 +683,10 @@ impl EffectRunner {
         match query {
             Query::LoadConversation { id } => self.query_load_conversation(id, tx),
             Query::ListConversations => self.query_list_conversations(tx),
+            Query::ListRecentPrompts {
+                max_sessions,
+                max_prompts,
+            } => self.dispatch_list_recent_prompts(max_sessions, max_prompts),
             Query::ListAvailableModels => {
                 let providers = self.providers.clone();
                 self.detached.spawn(async move {
@@ -704,6 +708,7 @@ impl EffectRunner {
             Query::LoadOutputStyle { name, project } => {
                 self.dispatch_load_output_style(name, project);
             },
+            Query::ResolveAddedDir { raw } => self.dispatch_resolve_added_dir(raw),
             Query::ListRuntimeTasks { limit } => self.send_blocking_query(move || {
                 QueryResult::RuntimeTasksListed(
                     crate::runtime_client::RuntimeClient::auto()
@@ -764,7 +769,56 @@ impl EffectRunner {
                         .unwrap_or_default(),
                 )
             }),
+            Query::GetMcpPrompt(request) => self.dispatch_get_mcp_prompt(request),
         }
+    }
+
+    /// `Query::ListRecentPrompts` — the prompts of the project's saved
+    /// sessions, for Ctrl+R.
+    fn dispatch_list_recent_prompts(&mut self, max_sessions: usize, max_prompts: usize) {
+        let workdir = self.workdir.clone();
+        self.send_blocking_query(move || {
+            QueryResult::RecentPromptsListed(
+                crate::session::ConversationManager::new(&workdir)
+                    .map(|mgr| mgr.recent_prompts(max_sessions, max_prompts))
+                    .unwrap_or_default(),
+            )
+        });
+    }
+
+    /// `Query::ResolveAddedDir` — check a `/add-dir` path on disk.
+    fn dispatch_resolve_added_dir(&mut self, raw: String) {
+        let workdir = self.workdir.clone();
+        self.send_blocking_query(move || {
+            let resolved = crate::app::added_dirs::resolve_added_dir(&workdir, &raw);
+            QueryResult::AddedDirResolved { raw, resolved }
+        });
+    }
+
+    /// `Query::GetMcpPrompt` — `prompts/get` on the server that advertised
+    /// the prompt. Always answers, so a failure reaches the transcript
+    /// instead of the command silently doing nothing.
+    fn dispatch_get_mcp_prompt(&mut self, request: mermaid_domain::query::McpPromptRequest) {
+        let tx = self.msg_tx.clone();
+        self.detached.spawn(async move {
+            let result = match crate::mcp::manager_ref::get() {
+                Some(manager) => manager
+                    .get_prompt(&request.server, &request.prompt, &request.arguments)
+                    .await
+                    // The reason lands in the persisted transcript.
+                    .map_err(|e| mermaid_model::utils::redact_secrets(&e.to_string())),
+                None => Err("MCP servers not initialized".to_string()),
+            };
+            let _ = tx
+                .send(Msg::QueryResult(QueryResult::McpPromptLoaded(
+                    mermaid_domain::query::McpPromptAnswer {
+                        command: request.command,
+                        attachment_ids: request.attachment_ids,
+                        result,
+                    },
+                )))
+                .await;
+        });
     }
 
     /// `Query::ListOutputStyles` — every selectable output style
@@ -1279,6 +1333,19 @@ impl EffectRunner {
                     .await
                     .unwrap_or_else(|e| format!("Couldn't list the scratchpad: {e}"));
                     let _ = tx.send(Msg::RuntimeText(text)).await;
+                });
+            },
+            Cmd::ResolveModelPrices {
+                models,
+                pricing,
+                fetch_catalog,
+            } => {
+                // `/usage` — prices may need the network, so off the runner.
+                let tx = self.msg_tx.clone();
+                self.detached.spawn(async move {
+                    let prices =
+                        pricing::resolve_model_prices(models, pricing, fetch_catalog).await;
+                    let _ = tx.send(Msg::ModelPricesResolved(prices)).await;
                 });
             },
             Cmd::UserTaskEdit(edit) => {
@@ -2087,6 +2154,7 @@ mod compaction;
 mod goal;
 mod memory;
 mod model_call;
+mod pricing;
 mod side_question;
 mod tool_call;
 
@@ -2453,6 +2521,7 @@ mod tests {
                 session_id: "sess-test".to_string(),
                 message_index: 0,
                 scratchpad: None,
+                additional_dirs: Vec::new(),
                 computer_batch: Vec::new(),
             },
         });
@@ -2544,6 +2613,7 @@ mod tests {
                 session_id: "sess-test".to_string(),
                 message_index: 0,
                 scratchpad: None,
+                additional_dirs: Vec::new(),
                 computer_batch: Vec::new(),
             },
         });

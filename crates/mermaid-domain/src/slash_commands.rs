@@ -99,6 +99,10 @@ pub const KEYBINDINGS: &[(&str, &str)] = &[
     ("Ctrl+J", "Insert a newline (multi-line input)"),
     ("Esc", "Interrupt the current turn"),
     ("Up / Down", "Browse input history"),
+    (
+        "Ctrl+R",
+        "Search earlier prompts, this session and saved ones",
+    ),
     ("PageUp / PageDown", "Scroll the transcript"),
     ("Shift+Up / Shift+Down", "Scroll the transcript one line"),
     ("End", "Jump to the newest message"),
@@ -216,9 +220,25 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         group: SlashCommandGroup::Everyday,
     },
     SlashCommand {
+        name: "init",
+        aliases: &[],
+        description: "Ask the agent to write or improve AGENTS.md for this project",
+        arg_hint: Some("[focus]"),
+        usage_note: None,
+        group: SlashCommandGroup::Everyday,
+    },
+    SlashCommand {
+        name: "add-dir",
+        aliases: &[],
+        description: "Add a working directory for this session, or list the added ones",
+        arg_hint: Some("[path]"),
+        usage_note: None,
+        group: SlashCommandGroup::Everyday,
+    },
+    SlashCommand {
         name: "usage",
         aliases: &[],
-        description: "Show provider token usage and session totals",
+        description: "Show token usage, session totals and estimated cost",
         arg_hint: None,
         usage_note: None,
         group: SlashCommandGroup::ModelContext,
@@ -513,14 +533,15 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
     },
 ];
 
-/// One row of the slash palette: a built-in registry command or a
-/// plugin-contributed prompt command. Unifying them in ONE list, produced
+/// One row of the slash palette: a built-in registry command or a prompt
+/// command (an enabled plugin's markdown prompt, or an MCP server's prompt).
+/// Unifying them in ONE list, produced
 /// by ONE function ([`filter_entries`]), keeps the palette widget, the
 /// row-count layout, and the reducer's cursor/Tab handling agreeing on
 /// indices.
 pub enum PaletteEntry<'a> {
     Builtin(&'static SlashCommand),
-    Plugin(&'a crate::PluginCommand),
+    Prompt(&'a crate::PromptCommand),
 }
 
 impl PaletteEntry<'_> {
@@ -528,20 +549,21 @@ impl PaletteEntry<'_> {
     pub fn name(&self) -> &str {
         match self {
             PaletteEntry::Builtin(c) => c.name,
-            PaletteEntry::Plugin(p) => &p.name,
+            PaletteEntry::Prompt(p) => &p.name,
         }
     }
 
-    /// Palette/hint description; plugin rows carry their origin.
+    /// Palette/hint description; prompt rows carry their origin
+    /// (`(plugin:<name>)` or `(mcp:<server>)`).
     #[must_use]
     pub fn description(&self) -> String {
         match self {
             PaletteEntry::Builtin(c) => c.description.to_string(),
-            PaletteEntry::Plugin(p) => {
+            PaletteEntry::Prompt(p) => {
                 if p.description.is_empty() {
-                    format!("({})", p.origin)
+                    format!("({})", p.origin())
                 } else {
-                    format!("{} ({})", p.description, p.origin)
+                    format!("{} ({})", p.description, p.origin())
                 }
             },
         }
@@ -551,18 +573,19 @@ impl PaletteEntry<'_> {
     pub fn arg_hint(&self) -> Option<&'static str> {
         match self {
             PaletteEntry::Builtin(c) => c.arg_hint,
-            PaletteEntry::Plugin(_) => Some("[args]"),
+            PaletteEntry::Prompt(_) => Some("[args]"),
         }
     }
 }
 
 /// The palette's single source of truth: built-ins (registry order) then
-/// plugin commands (already name-sorted by the loader), both prefix-filtered.
+/// prompt commands (plugin prompts, then MCP prompts, each name-sorted), all
+/// prefix-filtered.
 /// EVERY palette consumer (widget rows, layout row count, reducer cursor)
 /// must use this so their indices agree.
 pub fn filter_entries<'a>(
     typed: &str,
-    plugin: &'a [crate::PluginCommand],
+    prompts: &'a [crate::PromptCommand],
 ) -> Vec<PaletteEntry<'a>> {
     let needle = typed.to_lowercase();
     let mut entries: Vec<PaletteEntry<'a>> = filter_by_prefix(typed)
@@ -570,10 +593,10 @@ pub fn filter_entries<'a>(
         .map(PaletteEntry::Builtin)
         .collect();
     entries.extend(
-        plugin
+        prompts
             .iter()
             .filter(|p| needle.is_empty() || p.name.starts_with(&needle))
-            .map(PaletteEntry::Plugin),
+            .map(PaletteEntry::Prompt),
     );
     entries
 }
@@ -618,6 +641,31 @@ fn parse_output_style_arg(arg: Option<String>) -> crate::SlashCmd {
             project,
         },
         _ => crate::SlashCmd::MissingArg("Usage: /output-style [name] [--project]".to_string()),
+    }
+}
+
+/// `/context [auto|max|offload on|off|<tokens>]`. An unknown argument shows
+/// the report, which documents the forms.
+fn parse_context_arg(arg: Option<&str>) -> crate::ContextCmd {
+    use crate::ContextCmd;
+    match arg.map(str::trim) {
+        None | Some("") => ContextCmd::Show,
+        Some("auto") => ContextCmd::Auto,
+        Some("max") | Some("full") => ContextCmd::Max,
+        Some(s) => {
+            if let Some(rest) = s.strip_prefix("offload") {
+                match rest.trim() {
+                    "on" | "true" | "enable" | "yes" => ContextCmd::Offload(true),
+                    "off" | "false" | "disable" | "no" | "" => ContextCmd::Offload(false),
+                    // "offload garbage" → just show.
+                    _ => ContextCmd::Show,
+                }
+            } else if let Ok(n) = s.parse::<u32>() {
+                ContextCmd::Set(n)
+            } else {
+                ContextCmd::Show
+            }
+        },
     }
 }
 
@@ -684,34 +732,13 @@ pub fn parse_slash_command(raw: &str) -> Option<crate::SlashCmd> {
         Some("load") => SlashCmd::Load(arg),
         Some("list") => SlashCmd::List,
         Some("usage") => SlashCmd::Usage,
+        Some("init") => SlashCmd::Init(arg),
         Some("todos") => SlashCmd::Todos(arg),
         Some("btw") => SlashCmd::Btw(arg.filter(|a| !a.is_empty())),
         Some("goal") => SlashCmd::Goal(arg),
         Some("scratchpad") => SlashCmd::Scratchpad,
-        Some("context") => {
-            use crate::ContextCmd;
-            let a = arg.as_deref().map(str::trim);
-            SlashCmd::Context(match a {
-                None | Some("") => ContextCmd::Show,
-                Some("auto") => ContextCmd::Auto,
-                Some("max") | Some("full") => ContextCmd::Max,
-                Some(s) => {
-                    if let Some(rest) = s.strip_prefix("offload") {
-                        match rest.trim() {
-                            "on" | "true" | "enable" | "yes" => ContextCmd::Offload(true),
-                            "off" | "false" | "disable" | "no" | "" => ContextCmd::Offload(false),
-                            // "offload garbage" → just show.
-                            _ => ContextCmd::Show,
-                        }
-                    } else if let Ok(n) = s.parse::<u32>() {
-                        ContextCmd::Set(n)
-                    } else {
-                        // Unrecognized arg → show (self-documenting report).
-                        ContextCmd::Show
-                    }
-                },
-            })
-        },
+        Some("add-dir") => SlashCmd::AddDir(arg.filter(|a| !a.is_empty())),
+        Some("context") => SlashCmd::Context(parse_context_arg(arg.as_deref())),
         Some("compact") => SlashCmd::Compact(arg),
         Some("autocompact") => SlashCmd::AutoCompact(arg),
         Some("memory") => SlashCmd::Memory,

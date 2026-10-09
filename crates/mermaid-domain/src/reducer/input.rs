@@ -513,6 +513,22 @@ pub fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: K
         return;
     }
 
+    // Ctrl+R: search earlier prompts. Like Ctrl+O it only edits the draft,
+    // so it works while a turn is busy, but only from the plain composer; a
+    // second Ctrl+R inside the search steps to the next older match.
+    if mods.ctrl && code == KeyCode::Char('r') {
+        if matches!(state.ui.mode, UiMode::PromptSearch { .. }) {
+            prompt_search_next(state);
+        } else if matches!(state.ui.mode, UiMode::EditingInput)
+            && state.pending_approval.is_empty()
+            && state.pending_question.is_empty()
+            && state.confirm.is_none()
+        {
+            open_prompt_search(state, cmds);
+        }
+        return;
+    }
+
     // Transcript scrolling (keyboard): PageUp/PageDown by a page, Shift+Up/Down
     // by a line, End to jump back to the newest message. Reuses the pure
     // publish-then-diff scroll pipeline — the render layer applies the delta,
@@ -664,7 +680,7 @@ pub fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: K
     // Esc rather than as "wipe the line". Enter falls through to the normal
     // handler below so the command actually dispatches.
     if let Some(candidates) =
-        crate::input_kind::palette_rows(&state.ui.input_buffer, &state.plugin_commands)
+        crate::input_kind::palette_rows(&state.ui.input_buffer, &state.prompt_commands)
     {
         match code {
             KeyCode::Up => {
@@ -803,7 +819,7 @@ pub fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: K
                 // stays open with no row to offer.
                 state.ui.palette_cursor = crate::input_kind::palette_is_open(
                     &state.ui.input_buffer,
-                    &state.plugin_commands,
+                    &state.prompt_commands,
                 )
                 .then_some(0);
             },
@@ -827,7 +843,7 @@ pub fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: K
                 }
                 state.ui.palette_cursor = crate::input_kind::palette_is_open(
                     &state.ui.input_buffer,
-                    &state.plugin_commands,
+                    &state.prompt_commands,
                 )
                 .then_some(0);
             },
@@ -849,7 +865,7 @@ pub fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: K
                 }
                 state.ui.palette_cursor = crate::input_kind::palette_is_open(
                     &state.ui.input_buffer,
-                    &state.plugin_commands,
+                    &state.prompt_commands,
                 )
                 .then_some(0);
             },
@@ -967,6 +983,7 @@ pub fn handle_picker_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode) 
         UiMode::ModelPicker { .. } => handle_model_picker_key(state, cmds, code),
         UiMode::ConversationList { .. } => handle_conversation_list_key(state, cmds, code),
         UiMode::RewindPicker { .. } => handle_rewind_picker_key(state, cmds, code),
+        UiMode::PromptSearch { .. } => handle_prompt_search_key(state, code),
         UiMode::EditingInput | UiMode::ModelList => {},
     }
 }
@@ -1520,8 +1537,8 @@ pub fn submit_current_input(state: &mut State) {
     enum Submit {
         /// Dispatch a parsed command.
         Slash(crate::SlashCmd),
-        /// Send text: `Some` for a plugin expansion, `None` to take the
-        /// buffer verbatim.
+        /// Send text: `Some` for a plugin prompt's expansion, `None` to take
+        /// the buffer verbatim.
         Prompt(Option<String>),
     }
     // ONE classification, of the exact buffer the border cue and the palette
@@ -1529,18 +1546,21 @@ pub fn submit_current_input(state: &mut State) {
     // that is what stops `/home/you/pkg.deb can you...` from being eaten by
     // a command parser that never had a command to run.
     let submit =
-        match crate::input_kind::classify_input(&state.ui.input_buffer, &state.plugin_commands) {
+        match crate::input_kind::classify_input(&state.ui.input_buffer, &state.prompt_commands) {
             crate::input_kind::InputKind::Builtin { rest } => crate::parse_slash_command(rest)
             // Unreachable: the classifier reports `Builtin` only for a name
             // the registry knows, and `every_registry_command_parses` pins
             // that. Sending the line still beats swallowing it.
             .map_or(Submit::Prompt(None), Submit::Slash),
-            // Plugin prompt commands: an enabled plugin's `/name args` expands
-            // into a normal user prompt — the transcript shows the EXPANSION, so
-            // recordings replay without the plugin installed. Built-ins win, and
+            // Prompt commands: a plugin's `/name args` expands into a normal
+            // user prompt — the transcript shows the EXPANSION, so recordings
+            // replay without the plugin installed. An MCP prompt's text needs a
+            // `prompts/get` round-trip, so it becomes a slash command that
+            // fetches it (or prints its usage). Built-ins win, and
             // `classify_input` is where that order is enforced.
-            crate::input_kind::InputKind::Plugin { cmd, args } => {
-                Submit::Prompt(Some(cmd.expand(args)))
+            crate::input_kind::InputKind::Prompt { cmd, args } => match cmd.invoke(args) {
+                crate::PromptInvocation::Text(text) => Submit::Prompt(Some(text)),
+                crate::PromptInvocation::Slash(slash) => Submit::Slash(slash),
             },
             crate::input_kind::InputKind::Text => Submit::Prompt(None),
         };
@@ -1590,7 +1610,7 @@ pub fn insert_text_at_cursor(state: &mut State, cmds: &mut Vec<Cmd>, text: &str)
     state.ui.input_buffer.insert_str(pos, text);
     state.ui.input_cursor = clamp_cursor(&state.ui.input_buffer, pos + text.len());
     state.ui.palette_cursor =
-        crate::input_kind::palette_is_open(&state.ui.input_buffer, &state.plugin_commands)
+        crate::input_kind::palette_is_open(&state.ui.input_buffer, &state.prompt_commands)
             .then_some(0);
     refresh_file_picker(state, cmds);
 }

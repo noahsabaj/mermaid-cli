@@ -216,11 +216,19 @@ pub fn handle_goal_evaluated(
     if let Ok(reply) = &reply
         && let Some(usage) = &reply.usage
     {
+        // The check runs on `[goal] model` when set, else the session's.
+        let model = state
+            .settings
+            .goal
+            .model
+            .clone()
+            .unwrap_or_else(|| state.session.model_id.clone());
         fold_token_usage(
             &mut state.session,
             &mut state.runtime,
             usage,
             UsageFold::GoalCheck,
+            UsageAttribution::Model(&model),
         );
     }
     // `/goal clear` while the check ran: nothing left to judge.

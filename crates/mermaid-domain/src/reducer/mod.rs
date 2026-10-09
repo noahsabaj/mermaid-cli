@@ -30,6 +30,7 @@
 pub(crate) mod goal_loop;
 pub(crate) mod input;
 pub(crate) mod lifecycle;
+pub(crate) mod prompt_search;
 pub(crate) mod safety_mode;
 pub(crate) mod side_question;
 pub(crate) mod slash;
@@ -43,6 +44,7 @@ mod tests;
 pub use goal_loop::*;
 pub use input::*;
 pub use lifecycle::*;
+pub use prompt_search::*;
 pub use safety_mode::*;
 pub use side_question::*;
 pub use slash::*;
@@ -531,20 +533,28 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
         // an existing entry to update. But a server discovered at
         // runtime (hypothetical future path) should still land in the
         // map — insert rather than silently drop.
-        Msg::McpServerReady { name, tools } => {
+        Msg::McpServerReady {
+            name,
+            tools,
+            resources,
+            prompts,
+        } => {
             state
                 .mcp
                 .servers
-                .entry(name)
+                .entry(name.clone())
                 .and_modify(|e| {
                     e.status = McpServerStatus::Ready;
                     e.tools = tools.clone();
+                    e.resources = resources;
                 })
                 .or_insert_with(|| McpServerEntry {
                     config: crate::McpServerConfig::default(),
                     status: McpServerStatus::Ready,
                     tools,
+                    resources,
                 });
+            set_mcp_prompt_commands(&mut state, &name, prompts);
         },
         Msg::McpServerErrored { name, reason } => {
             let status = McpServerStatus::Errored {
@@ -559,7 +569,9 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
                     config: crate::McpServerConfig::default(),
                     status,
                     tools: Vec::new(),
+                    resources: false,
                 });
+            set_mcp_prompt_commands(&mut state, &name, Vec::new());
             push_system(
                 &mut state,
                 &mut cmds,
@@ -570,6 +582,7 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             if let Some(entry) = state.mcp.servers.get_mut(&name) {
                 entry.status = McpServerStatus::Stopped;
             }
+            set_mcp_prompt_commands(&mut state, &name, Vec::new());
         },
 
         // ── Persistence / misc ─────────────────────────────────────
@@ -611,6 +624,13 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
         },
         Msg::RuntimeText(text) => {
             append_runtime_note(&mut state, &mut cmds, text);
+        },
+        Msg::ModelPricesResolved(prices) => {
+            let text = crate::reports::usage_text(&state, Some(&prices));
+            state
+                .session
+                .append(mermaid_model::models::ChatMessage::system(text), state.now);
+            cmds.push(state.session.save_conversation_cmd());
         },
         Msg::SideQuestionText { id, chunk } => {
             state.side_questions.push_chunk(id, &chunk);
@@ -736,6 +756,7 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             success,
             cancelled,
             usage,
+            usage_by_model,
             tokens,
             duration_secs,
         } => {
@@ -747,11 +768,18 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             // as `handle_tool_finished` does for foreground agent calls.
             // Cancelled children fold too — that work was still billed.
             if let Some(usage) = usage.as_ref() {
+                let session_model = state.session.model_id.clone();
+                let attribution = if usage_by_model.is_empty() {
+                    UsageAttribution::Model(&session_model)
+                } else {
+                    UsageAttribution::Split(&usage_by_model)
+                };
                 fold_token_usage(
                     &mut state.session,
                     &mut state.runtime,
                     usage,
                     UsageFold::Detached,
+                    attribution,
                 );
             }
             if cancelled {
@@ -821,6 +849,27 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
     }
 
     (state, cmds)
+}
+
+/// Replace `server`'s MCP prompt commands with `prompts` (empty = drop them:
+/// the server errored or stopped, so `prompts/get` has nowhere to go).
+/// Keeps the palette order deterministic whatever order servers come up in:
+/// plugin prompts first, then MCP prompts, each by name. A name already
+/// taken keeps whichever server claimed it first — reachable only when two
+/// server names differ by nothing but case, since command names are
+/// lowercased.
+fn set_mcp_prompt_commands(state: &mut State, server: &str, prompts: Vec<crate::PromptCommand>) {
+    state
+        .prompt_commands
+        .retain(|cmd| cmd.mcp_server() != Some(server));
+    for prompt in prompts {
+        if !state.prompt_commands.iter().any(|c| c.name == prompt.name) {
+            state.prompt_commands.push(prompt);
+        }
+    }
+    state.prompt_commands.sort_by(|a, b| {
+        (a.mcp_server().is_some(), &a.name).cmp(&(b.mcp_server().is_some(), &b.name))
+    });
 }
 
 /// Emit `Cmd::SetTerminalTitle` iff the derived title changed since
