@@ -21,8 +21,6 @@
 //! purpose: `--replay` folds a recorded log with no tokio runtime in sight, and
 //! keeping the kernel callable from a plain `for` loop is what proves this
 //! abstraction did not smuggle a runtime into the fold.
-//!
-//! See `docs/design/engine-extraction.md`.
 
 mod handle;
 

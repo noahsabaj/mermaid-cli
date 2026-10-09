@@ -23,10 +23,8 @@ tests hold the detail; this is what's easy to get wrong.
   reducer that wants to `.await` cannot, because the runtime is not a
   dependency. `.github/scripts/check_layering.py` owns only what neither can
   express: `std::fs`, `std::process`, `std::net` and the wall clock, for
-  `mermaid-domain` and `src/render`. Its predecessor could see none of the
-  first two, which is how the "pure" core came to hold 34 upward edges, two of
-  them cycles. What debt remains is in `.github/baselines/layering.txt`, which
-  may only shrink.
+  `mermaid-domain` and `src/render`. What debt remains is in
+  `.github/baselines/layering.txt`, which may only shrink.
 - One `TurnId` = one model call + its tools; an agentic run spans many turns.
   Tool outcomes gate through `Vec<Option<ToolOutcome>>` plus a stale-turn drop —
   don't bypass it.
@@ -40,9 +38,7 @@ tests hold the detail; this is what's easy to get wrong.
   `.cargo/config.toml` points at `../mermaid-target`, and any custom
   `CARGO_TARGET_DIR` you set must also land outside the working tree.
   `.gitignore` is not protection here: `git stash -a` sweeps ignored files by
-  design, and one such sweep hashed 12,433 `.rlib` and binary blobs into the
-  object store — 2.5 GiB of unreachable objects that survived in a cruft pack
-  long after the stash was dropped. CI enforces it
+  design and hashes the whole build tree into the object store. CI enforces it
   (`.github/scripts/check_build_tree_out_of_repo.py`), and
   `scripts/git-health.sh` reports the debris if it ever happens again.
   For a second worktree use `just worktree NAME`: it branches off fresh
@@ -68,22 +64,19 @@ tests hold the detail; this is what's easy to get wrong.
   persisted or logged output; conversation and config files are `0600`.
 - Don't let `reducer.rs` grow unbounded — decompose into helpers. Clippy denies
   `too_many_lines` at 100 (`.clippy.toml` sets the threshold; every manifest's
-  `[lints.clippy]` enables the lint — for years only the first half was true).
+  `[lints.clippy]` enables the lint).
   Going over means adding `#[expect(clippy::too_many_lines, reason = "...")]`
   **and** raising a number in `.github/baselines/expect_budget.txt` — a visible
   act, against a budget that only shrinks. `#[expect]` over `#[allow]`
   throughout: it warns once the suppression stops being necessary, so
-  shortening a function tells you to delete its attribute. Converting the
-  existing `#[allow]`s found four that were suppressing nothing.
+  shortening a function tells you to delete its attribute.
 
   **A local clippy run only covers your own platform.** The integration
   suite is one binary (`tests/integration.rs`, modules under `tests/it/`);
   `tests/it/mod.rs` gates `pty_exit` and `daemon_integration` with
-  `#[cfg(unix)]` and `sandbox_fs`/`sandbox_network` with Linux+macOS+Windows,
-  and 99 items under `src/` and `crates/` are `#[cfg(unix)]`. On Windows those
-  compile to nothing, so clippy has nothing to lint and a green local run says
-  nothing about them — the two `too_many_lines` violations in `pty_exit.rs`
-  were found by CI, not by any local sweep. To check a gated module before
+  `#[cfg(unix)]`, and many items under `src/` and `crates/` are
+  `#[cfg(unix)]` too. On Windows those compile to nothing, so clippy has
+  nothing to lint and a green local run says nothing about them. To check a gated module before
   pushing, drop the `#[cfg(...)]` on its `mod` line in `tests/it/mod.rs` (and
   any `#![cfg(...)]` at the top of the file) and run
   `cargo clippy --test integration`; that reproduces the Linux verdict exactly.
@@ -114,19 +107,12 @@ false-positive rates — so the job runs off the PR critical path
 (`if: github.event_name != 'pull_request'`), because enabling them changes
 clippy's fingerprint and rebuilds the workspace. It gets its own recipes,
 `just clippy-debt` and `just clippy-debt-record`, so `just ratchet` stays
-instant. It also keys on the lint alone rather than `(lint, file)`: per-file
-keys measure 1,390 entries against 85, and every one of them churns when a file
-is split.
+instant. It also keys on the lint alone rather than `(lint, file)`, so
+splitting a file does not churn it.
 
-Its `clippy::unwrap_used` count measures **shipped code**, via
-`allow-unwrap-in-tests` in `.clippy.toml`. Counting the suite put it at 1,353,
-all but a handful of them tests — `unwrap()` in a test *is* the assertion, and
-the panic is the failure being reported. A number that large and that
-test-shaped tracks how many tests exist, not how much risk ships, and it had
-started charging new tests against a budget. Six remain. Five are `clap`
-`default_value_t` expansions under `src/cli/args.rs`, where the `unwrap()` is
-the derive macro's and not ours; the sixth is somewhere under `#[cfg(unix)]`,
-counted by the Linux job and not locatable from a Windows checkout.
+Its `clippy::unwrap_used` count measures **shipped code** only, via
+`allow-unwrap-in-tests` in `.clippy.toml`: `unwrap()` in a test *is* the
+assertion.
 
 ## Commands
 
