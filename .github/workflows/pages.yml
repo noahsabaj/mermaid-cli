@@ -4,6 +4,12 @@ name: Pages
 # users can `curl ... | sh` / `irm ... | iex` without cloning the repo. The
 # scripts stay canonical at the repo root; this only serves them at a pretty
 # URL (https://noahsabaj.github.io/mermaid-cli/install.{sh,ps1}).
+#
+# It also serves Mermaid's OAuth Client ID Metadata Document at
+# https://noahsabaj.github.io/mermaid-cli/oauth/client-metadata.json. That URL
+# is Mermaid's OAuth client id for remote MCP servers (`mermaid mcp login`):
+# the authorization server fetches this document, so it must stay at exactly
+# this URL. Source: packaging/pages/oauth/client-metadata.json.
 
 on:
   push:
@@ -11,6 +17,7 @@ on:
     paths:
       - install.sh
       - install.ps1
+      - packaging/pages/**
       - .github/workflows/pages.yml
   workflow_dispatch:
 
@@ -36,6 +43,7 @@ jobs:
         run: |
           mkdir -p _site
           cp install.sh install.ps1 _site/
+          cp -R packaging/pages/. _site/
           cat > _site/index.html <<'HTML'
           <!doctype html>
           <html lang="en">
