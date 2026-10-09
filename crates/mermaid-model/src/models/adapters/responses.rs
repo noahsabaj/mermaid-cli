@@ -232,8 +232,9 @@ impl StreamProtocol for ResponsesStream {
 
 /// A tool-call output item as the call Mermaid runs. OpenAI's own
 /// `apply_patch` tool arrives as an `apply_patch_call` and is rewritten onto
-/// Mermaid's `apply_patch` (see [`apply_patch_envelope`]), so every gate sees
-/// the tool it knows.
+/// Mermaid's `apply_patch` (see [`apply_patch_envelope`]), and its `computer`
+/// tool as a `computer_call`, rewritten onto Mermaid's `computer` (see
+/// `openai_computer`), so every gate sees the tool it knows.
 pub(crate) fn tool_call_from_item(item: &Value) -> Option<ToolCall> {
     let call_id = item.get("call_id")?.as_str()?.to_string();
     let function = match item.get("type").and_then(Value::as_str)? {
@@ -246,6 +247,7 @@ pub(crate) fn tool_call_from_item(item: &Value) -> Option<ToolCall> {
             let arguments = parse_tool_args(&name, raw_arguments.to_string());
             FunctionCall { name, arguments }
         },
+        super::openai_computer::CALL_TYPE => super::openai_computer::canonicalize(item),
         "apply_patch_call" => {
             let operation = item.get("operation").cloned().unwrap_or(Value::Null);
             // An operation with no envelope still runs, as a patch Mermaid's
@@ -320,7 +322,8 @@ pub(crate) fn function_tools(openai_tools: &[Value], skip: impl Fn(&str) -> bool
 /// How a provider's own output items go back on the wire.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Replay {
-    /// Drop the `id` of every item that carries no encrypted state. Under
+    /// Drop the `id` of every item that carries no encrypted state, except a
+    /// `computer_call`, whose `id` the API's schema requires. Under
     /// `store: false` the server keeps no item, so an id points at nothing;
     /// the `call_id` is what pairs a call with its output.
     pub(crate) strip_ids: bool,
@@ -335,13 +338,13 @@ pub(crate) fn messages_to_input<'a>(
     replay: Replay,
 ) -> Vec<Value> {
     let mut input = Vec::new();
-    // The output item type each natively-made call is answered with, by
-    // `call_id`. Anything not here is a function call.
-    let mut native_outputs: HashMap<&str, String> = HashMap::new();
+    // Each natively-made call, by `call_id`. Anything not here is a function
+    // call.
+    let mut native_calls: HashMap<&str, &ResponseItem> = HashMap::new();
+    // What the model reads after the current run of call outputs: the text of
+    // a computer result it cannot see in the screenshot.
+    let mut notes: Vec<Value> = Vec::new();
     for (idx, message) in messages.iter().enumerate() {
-        // A call output is text; the images a run of them returned follow as
-        // one user message.
-        let tool_images = images_after_tool_run(messages, idx);
         if message.role == MessageRole::Assistant
             && let Some(output) = message.provider_continuation.as_ref().and_then(&replayed)
         {
@@ -349,7 +352,7 @@ pub(crate) fn messages_to_input<'a>(
                 if let Some(call_id) = item.call_id()
                     && item.kind() != "function_call"
                 {
-                    native_outputs.insert(call_id, format!("{}_output", item.kind()));
+                    native_calls.insert(call_id, item);
                 }
             }
             input.extend(output_to_input(output, replay));
@@ -358,9 +361,20 @@ pub(crate) fn messages_to_input<'a>(
         match message.role {
             MessageRole::Tool => {
                 let call_id = message.tool_call_id.as_deref().unwrap_or_default();
-                input.push(match native_outputs.get(call_id) {
-                    Some(kind) => json!({
-                        "type": kind,
+                input.push(match native_calls.get(call_id) {
+                    Some(item) if item.kind() == super::openai_computer::CALL_TYPE => {
+                        let (output, note) =
+                            super::openai_computer::output(&item.to_wire(), message);
+                        if let Some(note) = note {
+                            notes.push(json!({
+                                "type": "input_text",
+                                "text": format!("Result of computer call {call_id}: {note}"),
+                            }));
+                        }
+                        output
+                    },
+                    Some(item) => json!({
+                        "type": format!("{}_output", item.kind()),
                         "call_id": call_id,
                         "status": "completed",
                         "output": message.content,
@@ -371,17 +385,34 @@ pub(crate) fn messages_to_input<'a>(
                         "output": message.content,
                     }),
                 });
-                if !tool_images.is_empty() {
-                    let content: Vec<Value> = tool_images
-                        .iter()
-                        .flat_map(|image| {
-                            [
-                                json!({"type": "input_text", "text": image.label()}),
-                                input_image(image.data),
-                            ]
-                        })
-                        .collect();
-                    input.push(json!({"type": "message", "role": "user", "content": content}));
+                // A call output is text; the images a run of them returned
+                // follow as one user message. A computer call's screenshot
+                // is its output, so it is not sent twice.
+                let images = images_after_tool_run(messages, idx);
+                let content: Vec<Value> = images
+                    .iter()
+                    .filter(|image| {
+                        native_calls
+                            .get(image.call_id)
+                            .is_none_or(|item| item.kind() != super::openai_computer::CALL_TYPE)
+                    })
+                    .flat_map(|image| {
+                        [
+                            json!({"type": "input_text", "text": image.label()}),
+                            input_image(image.data),
+                        ]
+                    })
+                    .collect();
+                notes.extend(content);
+                let run_ends = messages
+                    .get(idx + 1)
+                    .is_none_or(|next| next.role != MessageRole::Tool);
+                if run_ends && !notes.is_empty() {
+                    input.push(json!({
+                        "type": "message",
+                        "role": "user",
+                        "content": std::mem::take(&mut notes),
+                    }));
                 }
             },
             MessageRole::User => input.push(input_message(message, "user", "input_text")),
@@ -421,6 +452,7 @@ pub(crate) fn output_to_input(output: &[ResponseItem], replay: Replay) -> Vec<Va
             let mut wire = item.to_wire();
             if replay.strip_ids
                 && matches!(item, ResponseItem::Other { .. })
+                && item.kind() != super::openai_computer::CALL_TYPE
                 && let Some(object) = wire.as_object_mut()
             {
                 object.remove("id");

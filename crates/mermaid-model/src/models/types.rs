@@ -172,7 +172,7 @@ pub enum ResponseItem {
 
 /// The output item types that are tool calls, each answered by an item of
 /// the same name with `_output` appended.
-const CALL_ITEM_TYPES: [&str; 2] = ["function_call", "apply_patch_call"];
+const CALL_ITEM_TYPES: [&str; 3] = ["function_call", "apply_patch_call", "computer_call"];
 
 impl ResponseItem {
     pub fn from_wire(mut item: serde_json::Value) -> Self {
@@ -243,7 +243,8 @@ impl ResponseItem {
             .unwrap_or_default()
     }
 
-    /// The `call_id` of a tool-call item (`function_call`, `apply_patch_call`).
+    /// The `call_id` of a tool-call item (`function_call`, `apply_patch_call`,
+    /// `computer_call`).
     #[must_use]
     pub fn call_id(&self) -> Option<&str> {
         CALL_ITEM_TYPES

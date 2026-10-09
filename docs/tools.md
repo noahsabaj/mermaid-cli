@@ -57,9 +57,12 @@ the mouse and keyboard of the user's real screen. It is off by default because e
 goes to the model's provider. Its actions are those of Anthropic's computer toolset: `screenshot`,
 `zoom`, `cursor_position`, `left_click`, `right_click`, `middle_click`, `double_click`,
 `triple_click`, `left_click_drag`, `mouse_move`, `left_mouse_down`, `left_mouse_up`, `scroll`,
-`type`, `key`, `hold_key` and `wait`. On Anthropic, Claude gets the toolset itself
-(`computer_toolset_20260801`), rewritten onto the tool as it arrives, with `provider_native`;
-other vision models call the tool directly. A screenshot is fitted to 1568 px on its long edge and
+`type`, `key`, `hold_key` and `wait`. With `provider_native`, Claude gets Anthropic's toolset
+itself (`computer_toolset_20260801`) and OpenAI models get OpenAI's `computer` tool, each
+rewritten onto the tool as it arrives; other vision models call the tool directly. One OpenAI call
+carries several actions: they run in order, stop at the first that fails, and the call returns a
+screenshot of the screen after them. A warning OpenAI attaches to a call (its safety checks) is
+shown to the gate with the actions. A screenshot is fitted to 1568 px on its long edge and
 1.15 megapixels, and coordinates are pixels of the last screenshot, scaled back to the primary
 screen. Input actions wait 0.5 s before they return. Calls in one message run in order, and after
 one fails the rest return "Not executed: an earlier computer action in this turn failed." without

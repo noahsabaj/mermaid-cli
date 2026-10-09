@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **OpenAI models get OpenAI's own computer tool.** With `[tools] computer`
+  and `provider_native` on, an OpenAI model on the Responses API gets the
+  `computer` tool it is trained on in place of Mermaid's schema. Each call's
+  actions run in order through Mermaid's `computer` tool, with one approval
+  for the call and the same mouse-move stop, and the screenshot after them
+  goes back to the model. OpenAI's safety warnings on a call are shown with
+  the approval. A model that refuses the tool gets Mermaid's schema from
+  then on.
+
 - **Evals for computer use and pictures.** `settings-window` asks the model to
   change a value in a Settings window with the mouse and keyboard. The harness
   starts a private Xvfb display for the run, so it never touches your screen,
