@@ -29,8 +29,6 @@
 //! reply: it means the loop took a path the test did not describe, and that
 //! is a test result worth seeing.
 
-#![allow(dead_code)] // Each test binary uses a different slice of this.
-
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -129,7 +127,6 @@ impl Turn {
 
 /// A model that replays a fixed script.
 pub struct ScriptedModel {
-    name: String,
     capabilities: ModelCapabilities,
     script: Mutex<std::collections::VecDeque<Turn>>,
     /// Every request the loop made, in order. Lets a test assert on what the
@@ -146,7 +143,6 @@ impl ScriptedModel {
 
     fn build(script: impl IntoIterator<Item = Turn>) -> Self {
         Self {
-            name: "stub/scripted".to_string(),
             capabilities: ModelCapabilities {
                 supports_tools: true,
                 supports_vision: false,

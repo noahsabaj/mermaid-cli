@@ -260,11 +260,6 @@ pub struct PromptConfig {
     pub append_system_prompt: Vec<String>,
 }
 impl PromptConfig {
-    #[must_use]
-    pub fn render_system_prompt(&self, default_prompt: &str) -> String {
-        self.append_extras(self.base_prompt(default_prompt))
-    }
-
     /// The base prompt before any `append_system_prompt` extras: the user's
     /// override when set, else `default_prompt`.
     ///

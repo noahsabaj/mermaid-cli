@@ -37,7 +37,7 @@ pub use approval::ApprovalModalWidget;
 pub use chat::{ChatState, ChatWidget, ImageClickTarget};
 pub use conversation_list::ConversationListWidget;
 pub use file_picker::FilePickerWidget;
-pub use input::{InputState, InputWidget, rendered_row_count};
+pub use input::{InputWidget, input_cursor_position, rendered_row_count};
 pub use model_picker::{MODEL_PICKER_HEIGHT, ModelPickerWidget};
 pub use question::{QuestionModalWidget, question_modal_height};
 pub use rewind_picker::RewindPickerWidget;

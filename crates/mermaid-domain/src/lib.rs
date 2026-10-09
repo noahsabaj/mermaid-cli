@@ -87,9 +87,7 @@ pub use mermaid_model::question::{
 pub use mermaid_model::tool_run::{
     ManagedProcess, ToolArtifact, ToolMetadata, ToolRunMetadata, ToolStatus, WebSearchFailure,
 };
-pub use msg::{
-    ClipboardRead, ContextCmd, Key, KeyCode, KeyMods, Msg, MsgKind, Paste, SlashCmd, StartupConfig,
-};
+pub use msg::{ClipboardRead, ContextCmd, Key, KeyCode, KeyMods, Msg, MsgKind, Paste, SlashCmd};
 pub use picker::{PickerStep, picker_step};
 pub use progress::{ProgressEvent, SubagentPhase};
 pub use query::{Query, QueryResult};

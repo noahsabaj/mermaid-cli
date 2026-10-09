@@ -32,7 +32,7 @@ path = "src/main.rs"
 name = "mermaidd"
 path = "src/bin/mermaidd.rs"
 
-# Lint policy. DUPLICATED verbatim into all three manifests — `tests/lint_policy_drift.rs`
+# Lint policy. DUPLICATED verbatim into all four manifests — `tests/it/lint_policy_drift.rs`
 # guards the duplication. Inheritance via `[workspace.lints]` + `lints.workspace = true`
 # is NOT usable here: the `isolated-crate-build` CI job copies `crates/.` to a directory
 # with no workspace root above it, where `lints.workspace = true` is a hard manifest-parse
@@ -136,12 +136,6 @@ jsonschema = "0.49.3"
 # (`command_provably_in_scratch`): the command must be split exactly as
 # `sh -c` would. Same crate + version mermaid-runtime already uses.
 shell-words = "1.1"
-# `mermaid login` stores provider keys in the OS keyring, but the code that
-# does it (`mermaid_model::utils::credentials`) lives one crate down, and so do
-# `keyring` and its companion `dbus-secret-service`. This manifest declared
-# both and imported neither: `cargo build` was green because the workspace
-# unified the features, which is precisely the failure mode `isolated-crate-build`
-# exists to catch — read from the other side.
 # Pseudo-terminal for foreground execute_command ([exec] pty = true): the
 # child sees a real console — openpty on Unix, ConPTY on Windows. Same
 # crate the exit-regression test harness uses as a dev-dependency.
