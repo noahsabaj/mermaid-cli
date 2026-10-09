@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Evals for computer use and pictures.** `settings-window` asks the model to
+  change a value in a Settings window with the mouse and keyboard. The harness
+  starts a private Xvfb display for the run, so it never touches your screen,
+  and the window saves outside the project, so only the screen can pass it.
+  `chart-value` asks for a number that is only in a chart picture.
+  `MERMAID_EVAL_CONFIG` adds config overrides to live runs, for ablations such
+  as the native computer toolset against the plain tool. CI now runs the
+  `computer` tool's X11 tests and the screen eval on Xvfb.
+
 - **`/btw` asks a side question without touching the conversation.** Type
   `/btw what was that config file called?` at any time, also while the agent
   works. The model answers from the session so far in a pane under the

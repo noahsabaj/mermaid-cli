@@ -28,6 +28,8 @@
 
 pub mod mock_provider;
 pub mod report;
+#[cfg(target_os = "linux")]
+pub mod screen;
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -82,6 +84,11 @@ pub struct TaskSpec {
     /// the safety classifier, which then decides the outcome.
     #[serde(default = "default_safety")]
     pub safety: String,
+    /// A window to open on a private Xvfb display before the run, with the
+    /// `computer` tool turned on (only `settings` today). Such a task runs
+    /// only on Linux with Xvfb installed; elsewhere it is not scored.
+    #[serde(default)]
+    pub screen_app: Option<String>,
     #[serde(rename = "check")]
     pub checks: Vec<Check>,
 }
@@ -132,6 +139,58 @@ pub enum Check {
     /// Offline only: some request to the provider carried each of these
     /// top-level fields.
     RequestSent { fields: Vec<String> },
+    /// The task's screen app saved exactly this, ignoring surrounding
+    /// whitespace. It saves outside the project, so only the app can.
+    AppSaved { equals: String },
+}
+
+#[cfg(target_os = "linux")]
+use screen::Screen;
+
+/// No screen exists off Linux; this type has no values.
+#[cfg(not(target_os = "linux"))]
+enum Screen {}
+
+#[cfg(not(target_os = "linux"))]
+impl Screen {
+    fn display(&self) -> &str {
+        match *self {}
+    }
+    fn saved(&self) -> Option<String> {
+        match *self {}
+    }
+}
+
+/// Whether tasks with a `screen_app` can run here.
+#[must_use]
+pub fn screen_available() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        screen::available()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
+}
+
+/// Open `task`'s screen app, if it has one.
+fn open_screen(task: &Task, sandbox: &Path) -> Result<Option<Screen>, String> {
+    let Some(app) = &task.spec.screen_app else {
+        return Ok(None);
+    };
+    if !screen_available() {
+        return Err("needs a screen: Linux with Xvfb installed".to_string());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        Screen::start(app, &sandbox.join("screen")).map(Some)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (app, sandbox);
+        unreachable!("screen_available is false off Linux")
+    }
 }
 
 /// A known-good solution, from `reference.toml`.
@@ -424,8 +483,12 @@ pub fn run_task_with(task: &Task, target: &Target<'_>, guidance: Guidance) -> Ru
     init_git(&project);
     let before = snapshot(&project);
 
+    let screen = open_screen(task, &sandbox);
     let started = Instant::now();
-    let output = run_conversation(task, target, guidance, &project, &sandbox);
+    let output = match &screen {
+        Ok(screen) => run_conversation(task, target, guidance, &project, &sandbox, screen.as_ref()),
+        Err(_) => Output::default(),
+    };
     let seconds = started.elapsed().as_secs_f64();
     let _ = std::fs::write(sandbox.join("events.ndjson"), &output.stdout);
     let _ = std::fs::write(sandbox.join("stderr.txt"), &output.stderr);
@@ -446,7 +509,10 @@ pub fn run_task_with(task: &Task, target: &Target<'_>, guidance: Guidance) -> Ru
         pack,
         default_pack,
         checks: Vec::new(),
-        harness_error: output.timed_out.then(|| "timed out".to_string()),
+        harness_error: match &screen {
+            Err(e) => Some(e.clone()),
+            Ok(_) => output.timed_out.then(|| "timed out".to_string()),
+        },
         response: String::new(),
         errors: Vec::new(),
         turns: 0,
@@ -457,7 +523,42 @@ pub fn run_task_with(task: &Task, target: &Target<'_>, guidance: Guidance) -> Ru
         seconds,
         sandbox: sandbox.clone(),
     };
-    let result = read_events(&output.stdout, &mut run);
+    let result = read_result(&output, &mut run);
+
+    save_diff(&project, &sandbox);
+    let after = snapshot(&project);
+    let saved = screen.as_ref().ok().and_then(|s| s.as_ref()?.saved());
+    for check in &task.spec.checks {
+        if let Check::Command {
+            overlay, restore, ..
+        } = check
+        {
+            restore_paths(&project, &before, restore);
+            if let Some(overlay) = overlay {
+                copy_dir(&task.dir.join(overlay), &project);
+            }
+        }
+        let (label, failure) = score(
+            check,
+            &project,
+            (&before, &after),
+            &run,
+            result.as_ref(),
+            target,
+            saved.as_deref(),
+        );
+        run.checks.push(CheckResult {
+            check: label,
+            failure,
+        });
+    }
+    run
+}
+
+/// Tally `output` into `run` and return its `result` line, noting a run the
+/// model never answered so it is not scored as a zero.
+fn read_result(output: &Output, run: &mut Run) -> Option<Value> {
+    let result = read_events(&output.stdout, run);
     match &result {
         Some(result) => {
             run.response = result["response"].as_str().unwrap_or("").to_string();
@@ -487,34 +588,7 @@ pub fn run_task_with(task: &Task, target: &Target<'_>, guidance: Guidance) -> Ru
         },
         None => {},
     }
-
-    save_diff(&project, &sandbox);
-    let after = snapshot(&project);
-    for check in &task.spec.checks {
-        if let Check::Command {
-            overlay, restore, ..
-        } = check
-        {
-            restore_paths(&project, &before, restore);
-            if let Some(overlay) = overlay {
-                copy_dir(&task.dir.join(overlay), &project);
-            }
-        }
-        let (label, failure) = score(
-            check,
-            &project,
-            &before,
-            &after,
-            &run,
-            result.as_ref(),
-            target,
-        );
-        run.checks.push(CheckResult {
-            check: label,
-            failure,
-        });
-    }
-    run
+    result
 }
 
 /// Run the task's prompt, then each follow-up as a continuation of the same
@@ -526,6 +600,7 @@ fn run_conversation(
     guidance: Guidance,
     project: &Path,
     sandbox: &Path,
+    screen: Option<&Screen>,
 ) -> Output {
     let prompts: Vec<&String> = std::iter::once(&task.spec.prompt)
         .chain(&task.spec.followups)
@@ -538,7 +613,15 @@ fn run_conversation(
         timed_out: false,
     };
     for (i, prompt) in prompts.iter().enumerate() {
-        let cmd = mermaid_command(task, target, guidance, sandbox, project, prompt, i > 0);
+        let cmd = mermaid_command(
+            task,
+            target,
+            guidance,
+            (sandbox, project),
+            screen,
+            prompt,
+            i > 0,
+        );
         let remaining = run_timeout(target).saturating_sub(started.elapsed());
         let step = run_with_timeout(cmd, remaining);
         output.stdout.extend_from_slice(&step.stdout);
@@ -558,8 +641,8 @@ fn mermaid_command(
     task: &Task,
     target: &Target<'_>,
     guidance: Guidance,
-    sandbox: &Path,
-    project: &Path,
+    (sandbox, project): (&Path, &Path),
+    screen: Option<&Screen>,
     prompt: &str,
     resume: bool,
 ) -> Command {
@@ -574,6 +657,18 @@ fn mermaid_command(
         .args(["-c", "safety.checkpoint_on_mutation=false"]);
     if let Some(pin) = guidance.override_arg() {
         cmd.args(["-c", pin]);
+    }
+    if let Some(screen) = screen {
+        cmd.args(["-c", "tools.computer=true"])
+            .env("DISPLAY", screen.display())
+            .env_remove("WAYLAND_DISPLAY");
+    }
+    // An ablation: config overrides for every live run, such as
+    // `tools.provider_native=false`.
+    if let Target::Live(_) = target {
+        for pin in live_overrides() {
+            cmd.args(["-c", &pin]);
+        }
     }
     cmd.args(["run", "--format", "ndjson"]);
     if let Some(schema) = &task.spec.output_schema {
@@ -590,6 +685,17 @@ fn mermaid_command(
         isolate(&mut cmd, sandbox, mock);
     }
     cmd
+}
+
+/// `MERMAID_EVAL_CONFIG`: `;`-separated `-c` overrides for live runs.
+fn live_overrides() -> Vec<String> {
+    std::env::var("MERMAID_EVAL_CONFIG")
+        .unwrap_or_default()
+        .split(';')
+        .map(str::trim)
+        .filter(|pin| !pin.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 /// Tally the event stream into `run`, and return its `result` line.
@@ -623,11 +729,11 @@ fn read_events(stdout: &[u8], run: &mut Run) -> Option<Value> {
 fn score(
     check: &Check,
     project: &Path,
-    before: &BTreeMap<String, Vec<u8>>,
-    after: &BTreeMap<String, Vec<u8>>,
+    (before, after): (&Snapshot, &Snapshot),
     run: &Run,
     result: Option<&Value>,
     target: &Target<'_>,
+    saved: Option<&str>,
 ) -> (String, Option<String>) {
     match check {
         Check::Command {
@@ -698,6 +804,15 @@ fn score(
                 .filter(|field| !requests.iter().any(|r| r.get(field.as_str()).is_some()))
                 .collect();
             let failure = (!missing.is_empty()).then(|| format!("never sent: {missing:?}"));
+            (label, failure)
+        },
+        Check::AppSaved { equals } => {
+            let label = format!("the screen app saved {equals:?}");
+            let failure = match saved {
+                Some(text) if text.trim() == equals.trim() => None,
+                Some(text) => Some(format!("it saved {:?}", text.trim())),
+                None => Some("nothing was saved".to_string()),
+            };
             (label, failure)
         },
     }
@@ -771,6 +886,7 @@ fn isolate(cmd: &mut Command, sandbox: &Path, mock: &MockProvider) {
         .env("RUST_BACKTRACE", "0");
 }
 
+#[derive(Default)]
 struct Output {
     status: Option<i32>,
     stdout: Vec<u8>,
@@ -908,7 +1024,10 @@ fn save_diff(project: &Path, sandbox: &Path) {
 /// Every file in the project that a run could meaningfully change, keyed by
 /// `/`-separated relative path. Git's store, Mermaid's own session store and
 /// the build tree are not the project's content.
-fn snapshot(project: &Path) -> BTreeMap<String, Vec<u8>> {
+/// Every file in a project, by relative path.
+type Snapshot = BTreeMap<String, Vec<u8>>;
+
+fn snapshot(project: &Path) -> Snapshot {
     fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<String, Vec<u8>>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
