@@ -1,0 +1,17 @@
+# The window sits at (100, 100) on a 1280x800 screen, so screenshot pixels
+# are screen pixels: the port field is centred at (290, 177) and OK at
+# (450, 177).
+
+[[turn]]
+tool = "computer"
+args = { action = "screenshot" }
+
+[[turn]]
+calls = [
+    { tool = "computer", args = { action = "double_click", coordinate = [290, 177] } },
+    { tool = "computer", args = { action = "type", text = "9090" } },
+    { tool = "computer", args = { action = "left_click", coordinate = [450, 177] } },
+]
+
+[[turn]]
+say = "Changed the port to 9090 and pressed OK."

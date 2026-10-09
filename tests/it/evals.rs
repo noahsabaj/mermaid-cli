@@ -18,14 +18,16 @@ use crate::harness::evals::report::{
     HistoryEntry, Provenance, append_history, default_history_path, guidance_comparison,
     history_entries, history_section, read_history, report, verdict,
 };
-use crate::harness::evals::{Check, Guidance, Run, Target, run_task, run_task_with, tasks};
+use crate::harness::evals::{
+    Check, Guidance, Run, Target, run_task, run_task_with, screen_available, tasks,
+};
 
 /// Run every task at once, one thread each: most of a run is waiting on a
 /// child process, and serially the suite would take several times as long.
 fn run_all(
     script_for: impl Fn(&crate::harness::evals::Task) -> Vec<MockTurn> + Sync,
 ) -> Vec<(Run, MockProvider)> {
-    let tasks = tasks();
+    let tasks = runnable_tasks();
     std::thread::scope(|scope| {
         let handles: Vec<_> = tasks
             .iter()
@@ -43,6 +45,28 @@ fn run_all(
             .map(|h| h.join().expect("an eval run panicked"))
             .collect()
     })
+}
+
+/// Every task this machine can run. A screen task needs Xvfb; set
+/// `MERMAID_EVAL_REQUIRE_SCREEN` (as CI does) to fail instead of skipping.
+fn runnable_tasks() -> Vec<crate::harness::evals::Task> {
+    let screen = screen_available();
+    if !screen && std::env::var_os("MERMAID_EVAL_REQUIRE_SCREEN").is_some() {
+        panic!("MERMAID_EVAL_REQUIRE_SCREEN is set, but Xvfb is not on the PATH");
+    }
+    tasks()
+        .into_iter()
+        .filter(|task| screen || task.spec.screen_app.is_none())
+        .collect()
+}
+
+/// The window the screen tasks open. The harness runs this binary again with
+/// `MERMAID_EVAL_SCREEN_APP` set; without it, this returns at once.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "the screen evals start it on their own Xvfb display"]
+fn screen_app() {
+    crate::harness::evals::screen::serve_from_env();
 }
 
 #[test]
@@ -68,6 +92,21 @@ fn every_task_is_well_formed() {
         );
         if let Some(schema) = &task.spec.output_schema {
             assert!(task.dir.join(schema).is_file(), "{}: no {schema}", task.id);
+        }
+        if let Some(app) = &task.spec.screen_app {
+            assert_eq!(app, "settings", "{}: unknown screen app", task.id);
+        }
+        if task
+            .spec
+            .checks
+            .iter()
+            .any(|c| matches!(c, Check::AppSaved { .. }))
+        {
+            assert!(
+                task.spec.screen_app.is_some(),
+                "{}: an app_saved check needs a screen_app",
+                task.id
+            );
         }
         for check in &task.spec.checks {
             if let Check::Command {
