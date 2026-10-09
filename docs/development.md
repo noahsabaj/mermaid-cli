@@ -8,7 +8,10 @@ Tests run under [`cargo-nextest`](https://nexte.st) (`cargo install cargo-nextes
 which gives every test its own process and applies the retry policy in
 `.config/nextest.toml`. Plain `cargo test` shares one process across a binary's tests
 and is not a supported way to run the suite. There are no doctests, so nextest
-skipping them loses nothing.
+skipping them loses nothing. `just test` and `just check` run two tests per CPU
+(CI does the same), because most tests spend their time waiting on a child
+process, a pty or a deadline; a bare `cargo nextest run` runs one per CPU. Set
+`NEXTEST_TEST_THREADS` to choose another number.
 
 The gate runs the same suites on every platform, including the render
 snapshots. What is still `#[cfg(unix)]` is per-test and covers what Windows does

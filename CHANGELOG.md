@@ -182,6 +182,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `[compaction.auto_threshold_tokens_per_model]`. A change applies from the
   next turn, also on providers that compact server-side.
 
+### Changed
+
+- **The test suite runs in under half the time.** `just test` on a 4-core
+  Linux box went from about 27.5s to about 11.5s, with every test still
+  checking what it checked. Most of the time was waiting, not work:
+  - The pty tests answer the terminal's device-attributes query, as every
+    real terminal does. Unanswered, crossterm's keyboard-protocol probe
+    waited out a 2s deadline on every unix launch of the TUI.
+  - The retry-backoff tests run on tokio's paused clock, so they check the
+    delay each retry asks for without sleeping through about 9s of backoff.
+  - The `last_used_model` test points its provider at a loopback server
+    that answers 400 instead of a dead port, whose refused connects were
+    retried with backoff (about 1.5s on Linux and 10s on Windows).
+  - The instructions-reload test sets the new mtime instead of sleeping a
+    second past the filesystem's timestamp granularity.
+  - The offline evals build their fixtures without incremental state or
+    debuginfo, about a third off each cold `cargo` build.
+  - `.config/nextest.toml` starts the integration and timeout tests first,
+    so they overlap with the thousands of millisecond tests instead of
+    trailing them.
+  - `just test`, `just check` and CI run two tests per CPU instead of one,
+    since most tests wait on a child process, a pty or a deadline.
+    `NEXTEST_TEST_THREADS` still picks another number.
+
 ### Fixed
 
 - **Gemini 3 keeps working after its first tool call.** Gemini 3 attaches a
@@ -198,6 +222,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tool call <id>:`. Only the newest three images in a conversation go out, as
   before. Every adapter also sends an image's real media type (JPEG, GIF and
   WebP were all labelled PNG).
+
+- **Isolated subagents started at the same moment no longer fail at random.**
+  `git worktree add` reads every existing entry under `.git/worktrees`, and an
+  entry another `add` had created but not yet filled in killed it with `fatal:
+  failed to read .git/worktrees/<id>/commondir`. Two children of one session
+  starting together could hit this, and under load two worktree tests failed
+  this way a few runs in ten. Mermaid now runs its worktree `add`, `remove`
+  and `prune` one at a time.
 
 - **A background command that exits at once is reported as exited on Linux.**
   The liveness check used `kill -0`, which succeeds on a process that has

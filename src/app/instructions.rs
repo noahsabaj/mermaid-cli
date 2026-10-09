@@ -633,10 +633,16 @@ mod tests {
         let path = dir.join("MERMAID.md");
         fs::write(&path, "v1").unwrap();
         let prior = load_from_path(&path).unwrap();
-        // Sleep briefly to ensure mtime resolution registers a change.
-        // Most filesystems track mtime at second granularity or finer.
-        std::thread::sleep(std::time::Duration::from_millis(1100));
         fs::write(&path, "v2 longer content here").unwrap();
+        // Move the mtime on explicitly rather than sleeping past the
+        // filesystem's timestamp granularity (up to a second): an edit that
+        // lands inside the same tick would otherwise look unchanged.
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .expect("open MERMAID.md")
+            .set_modified(prior.mtime + std::time::Duration::from_secs(2))
+            .expect("move the mtime on");
         let (after, outcome) = refresh(Some(prior), &dir);
         assert!(matches!(outcome, ReloadOutcome::Reloaded { .. }));
         let content = after.unwrap().content;

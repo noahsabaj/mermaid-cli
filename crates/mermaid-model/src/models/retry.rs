@@ -440,7 +440,7 @@ mod tests {
         assert_eq!(parse_retry_after_ms(&HeaderMap::new()), None);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn honors_retry_after_on_503() {
         // A 503 carrying `Retry-After` must drive the wait, not the
         // (shorter) jittered exponential backoff. `Retry-After: 1` ⇒ the retry
@@ -448,7 +448,7 @@ mod tests {
         // [400,600]ms, so an elapsed ≥ 850ms proves the header was honored.
         let calls = Arc::new(AtomicUsize::new(0));
         let cc = Arc::clone(&calls);
-        let start = std::time::Instant::now();
+        let start = tokio::time::Instant::now();
         let result = retry_transient_http_with(
             RetryPolicy {
                 max_attempts: 2,
@@ -477,7 +477,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn retries_5xx_then_succeeds() {
         let calls = Arc::new(AtomicUsize::new(0));
         let cc = Arc::clone(&calls);
@@ -524,7 +524,7 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn retries_429_then_surfaces_rate_limit() {
         let calls = Arc::new(AtomicUsize::new(0));
         let cc = Arc::clone(&calls);
@@ -575,14 +575,14 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn rate_limit_backoff_is_slower_than_5xx_schedule() {
         // A 429 without Retry-After must wait on the RATE_LIMIT_DELAYS_MS
         // schedule (first delay jitter(2000) ≥ 1600ms), not the 5xx 500ms
         // one — retrying inside the same rate bucket always loses.
         let calls = Arc::new(AtomicUsize::new(0));
         let cc = Arc::clone(&calls);
-        let start = std::time::Instant::now();
+        let start = tokio::time::Instant::now();
         let result = retry_transient_http_with(
             RetryPolicy {
                 max_attempts: 2,
@@ -611,7 +611,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn retries_connection_failed_error() {
         let calls = Arc::new(AtomicUsize::new(0));
         let cc = Arc::clone(&calls);
@@ -676,7 +676,7 @@ mod tests {
 
     /// The opt-out is narrow: a server that IS running and returns 5xx may
     /// genuinely recover, so those still retry under the same policy.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn no_connect_retry_still_retries_5xx() {
         let calls = Arc::new(AtomicUsize::new(0));
         let cc = Arc::clone(&calls);

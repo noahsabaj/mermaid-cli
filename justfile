@@ -7,16 +7,23 @@ default:
 # `python3` is a Microsoft Store stub on Windows; `python` is the real one.
 python := if os() == "windows" { "python" } else { "python3" }
 
+# Two tests per CPU, unless NEXTEST_TEST_THREADS (or `-j`) says otherwise.
+# Most of the suite's time is spent waiting on a child process, a pty or a
+# deadline, not on the CPU: at nextest's default of one test per CPU a 4-core
+# run kept the cores about half busy. Doubling it took that run from about
+# 17s to about 11.5s, with no test failing in repeated runs.
+test_threads := "${NEXTEST_TEST_THREADS:-$((" + num_cpus() + " * 2))}"
+
 # One-command gate: format check, lint (deny warnings), source guards, tests.
 check:
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     just guards
-    cargo nextest run --workspace
+    NEXTEST_TEST_THREADS="{{test_threads}}" cargo nextest run --workspace
 
 # Run the test suite via nextest.
 test *ARGS:
-    cargo nextest run --workspace {{ARGS}}
+    NEXTEST_TEST_THREADS="{{test_threads}}" cargo nextest run --workspace {{ARGS}}
 
 # Behavioural evals against real models, scored by outcome (see evals/README.md).
 # Costs whatever the model calls cost. Example: `just eval anthropic/<model>`.

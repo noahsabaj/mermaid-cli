@@ -34,6 +34,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use anyhow::{Context, Result};
 
@@ -81,11 +82,27 @@ fn stage_child_work(top: &Path) -> Result<()> {
 /// counter makes the directory unique without giving up having the agent id
 /// in the path.
 ///
-/// Concurrent `worktree add` / `remove` / `prune` on one repo need no lock of
-/// ours once the names are distinct; git serializes its own bookkeeping.
-/// `concurrent_creates_on_one_repo_all_succeed` and
-/// `creating_and_destroying_at_once_does_not_corrupt_the_repo` hold that.
+/// Distinct names are not enough on their own: see [`BOOKKEEPING`].
 static WORKTREE_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Held around every `git worktree add`, `remove` and `prune` this process
+/// runs.
+///
+/// Git does not serialize its own worktree bookkeeping. `worktree add` reads
+/// every entry under `.git/worktrees` first, and an entry another `add` has
+/// just created but not yet filled in kills it with `fatal: failed to read
+/// .git/worktrees/<id>/commondir`. Under load that hit
+/// `creating_and_destroying_at_once_does_not_corrupt_the_repo` and
+/// `disjoint_children_all_land_concurrently` in a few runs out of ten. All
+/// three commands are quick (the add is `--no-checkout`), so one lock for
+/// every repo costs nothing worth keying it per repo. Two Mermaid processes
+/// can still race each other this way; parallel children of one session,
+/// the common case, cannot.
+static BOOKKEEPING: Mutex<()> = Mutex::new(());
+
+fn bookkeeping() -> MutexGuard<'static, ()> {
+    BOOKKEEPING.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 /// A subagent's private checkout.
 #[derive(Debug)]
@@ -169,12 +186,15 @@ impl AgentWorktree {
             std::fs::create_dir_all(parent)?;
         }
 
-        git(&project_top)
-            .args(["worktree", "add", "--detach", "--no-checkout"])
-            .arg(&top)
-            .arg("HEAD")
-            .run()
-            .context("could not create the isolated worktree")?;
+        {
+            let _bookkeeping = bookkeeping();
+            git(&project_top)
+                .args(["worktree", "add", "--detach", "--no-checkout"])
+                .arg(&top)
+                .arg("HEAD")
+                .run()
+                .context("could not create the isolated worktree")?;
+        }
         // `--no-checkout` then `checkout` keeps the add cheap on a big repo
         // and gives a clearer error if the checkout itself is what fails.
         git(&top)
@@ -441,6 +461,7 @@ fn rebase_path(path: &Path, from_root: &Path, to_root: &Path) -> Result<PathBuf>
 /// Tear a worktree down. Tries git's own bookkeeping first so the entry in
 /// `.git/worktrees` goes with it, then falls back to deleting the directory.
 fn remove_worktree(project_top: &Path, top: &Path) {
+    let _bookkeeping = bookkeeping();
     let _ = git(project_top)
         .args(["worktree", "remove", "--force"])
         .arg(top)
