@@ -250,6 +250,7 @@ mod tests {
             native_tools: NativeTools {
                 text_editor: true,
                 shell: true,
+                computer: false,
             },
             ..ModelConfig::default()
         }
