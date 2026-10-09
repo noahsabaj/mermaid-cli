@@ -138,6 +138,7 @@ Everyday:
 - `/todos` — show or edit the task checklist the agent keeps for the current run
 - `/goal [condition|clear]` — keep working until the condition is met (see Goals below); no argument shows the goal's status
 - `/scratchpad` — show the session's scratch directory and what is in it
+- `/btw <question>` — ask a side question while the agent works; see [Side questions](#side-questions)
 - `/editor` — compose the prompt in `$VISUAL`/`$EDITOR` (Ctrl+O keeps the current draft)
 - `/help` (`/h`), `/quit` (`/q`)
 
@@ -199,3 +200,28 @@ The check uses the session's model unless `[goal] model` names another (see
 `goal:` line to the run's errors. The 20-minute limit of a headless run still applies.
 
 Reasoning choices persist per-model: set `/reasoning high` on one model and `/reasoning low` on another, and each is remembered independently across sessions.
+
+### Side questions
+
+`/btw <question>` asks about the current work without adding to the conversation:
+
+```
+/btw what was the name of that config file again?
+```
+
+The model answers from what the session already holds: your messages, its replies, and the tool results it has gathered. It sees everything except the reply still being written. You can ask while the agent works; the side question runs as its own model call and does not interrupt the main turn. It has no tools, so it cannot read files, run commands, or search; if the model asks for a tool anyway, the answer says that nothing was run.
+
+The question and its answer never enter the conversation. They are not saved, not compacted, and not sent with later turns. A later side question does see your earlier ones (the newest 20), so you can ask a follow-up. The answer shows in a pane under the composer:
+
+| Key | Action |
+| --- | --- |
+| Esc, Enter, Space | Close the pane |
+| Up / Down | Scroll the answer |
+| Left / Right (or `[` / `]`, Tab / Shift+Tab) | Step to older / newer side questions |
+| `c` | Copy the answer as raw Markdown |
+| `f` | Fork: start a background agent that carries on from this answer with full tools |
+| `x` | Clear the earlier side questions, keeping the one on view |
+
+The five newest earlier questions show dimmed above the current one. Run `/btw` with no question to reopen the pane on the newest answer; if an answer arrives after you close the pane, a short note says it is ready. `/clear`, `/load`, and a rewind fork start a fresh side-question thread. Because the side question sends the same prompt as the main turn, a provider prompt cache that is still warm makes it cheap.
+
+The fork (`f`) is for an answer you want to act on. The agent starts from the whole conversation plus the side question and its answer, runs in the background like a Ctrl+B agent, and does not interrupt the main turn. `/agents` lists it, and its report is posted to the conversation when it finishes. Wait for the answer to finish before you fork it.

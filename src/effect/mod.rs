@@ -1526,6 +1526,66 @@ impl EffectRunner {
                     consolidate_memory(tx, providers, workdir, model_id).await;
                 });
             },
+            Cmd::AskSideQuestion { id, mut request } => {
+                // The built-in tools ride along exactly as on `CallModel`:
+                // the history holds calls to them, and the same tool list
+                // keeps the provider's prompt cache warm. The side answer
+                // never runs one.
+                if let Some(tools) = &self.tools {
+                    let mut enriched = tools.describe_all();
+                    enriched.append(&mut request.tools);
+                    request.tools = enriched;
+                }
+                let tx = self.msg_tx.clone();
+                let providers = self.providers.clone();
+                self.detached.spawn(async move {
+                    answer_side_question(tx, providers, id, request).await;
+                });
+            },
+            Cmd::ForkSideQuestion {
+                prompt,
+                description,
+                history,
+                dispatch,
+            } => {
+                let tx = self.msg_tx.clone();
+                let Some(spawner) = self.tools.as_ref().and_then(|t| t.subagent_spawner()) else {
+                    let _ = tx.try_send(Msg::TransientStatus {
+                        text: "The fork did not start: this session cannot run agents.".to_string(),
+                    });
+                    return;
+                };
+                let config = self
+                    .providers
+                    .as_ref()
+                    .map(|p| Arc::new(p.config().clone()))
+                    .unwrap_or_else(|| Arc::new(mermaid_domain::Config::default()));
+                let tool = crate::providers::tool::subagent::SubagentTool::new(spawner.clone())
+                    .with_types(&config.agents.types);
+                // The agent runs headless like any child: no approval broker,
+                // no question channel, and the spawn gate is skipped because
+                // the user asked for it.
+                let services = crate::providers::ctx::ToolServices {
+                    workdir: self.workdir.clone(),
+                    config,
+                    task_id: self.task_id.clone(),
+                    notify: Some(tx.clone()),
+                    classifier: None,
+                    approval: None,
+                    questions: None,
+                    tasks: Some(self.tasks.clone()),
+                };
+                let fork = SideFork {
+                    prompt,
+                    description,
+                    history,
+                    dispatch,
+                    services,
+                };
+                self.detached.spawn(async move {
+                    fork_side_question(tx, tool, fork).await;
+                });
+            },
             Cmd::Query(query) => self.dispatch_query(query),
             Cmd::ShowRuntimeProcessLogs { id } => {
                 let tx = self.msg_tx.clone();
@@ -2009,12 +2069,14 @@ mod compaction;
 mod goal;
 mod memory;
 mod model_call;
+mod side_question;
 mod tool_call;
 
 use compaction::*;
 use goal::*;
 use memory::*;
 use model_call::*;
+use side_question::*;
 use tool_call::*;
 
 #[cfg(test)]
@@ -2330,6 +2392,59 @@ mod tests {
         };
         r.dispatch(Cmd::CallModel { turn, request });
         assert_eq!(r.scope_count(), 1);
+    }
+
+    /// `/btw` runs detached: it opens no turn scope, so the main turn
+    /// neither waits on it nor cancels it. Without a provider it still
+    /// settles, with a failure the pane can show.
+    #[tokio::test]
+    async fn a_side_question_opens_no_scope_and_always_settles() {
+        let (mut r, mut rx) = runner();
+        let request = mermaid_domain::ChatRequest {
+            model_id: "test/m".to_string(),
+            ..mermaid_domain::ChatRequest::default()
+        };
+        r.dispatch(Cmd::AskSideQuestion { id: 4, request });
+        assert_eq!(r.scope_count(), 0);
+        let msg = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("the side question settled")
+            .expect("channel alive");
+        assert!(matches!(
+            msg,
+            Msg::SideQuestionFinished {
+                id: 4,
+                outcome: mermaid_domain::side_question::SideOutcome::Failed(_),
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_fork_without_agent_support_says_so() {
+        let (mut r, mut rx) = runner();
+        r.dispatch(Cmd::ForkSideQuestion {
+            prompt: "carry on".to_string(),
+            description: "btw: carry on".to_string(),
+            history: vec![],
+            dispatch: mermaid_domain::ToolDispatch {
+                model_id: "test/m".to_string(),
+                safety_mode: mermaid_runtime::SafetyMode::Ask,
+                goal: mermaid_domain::UserGoal::default(),
+                reasoning: mermaid_model::models::ReasoningLevel::default(),
+                session_id: "sess-test".to_string(),
+                message_index: 0,
+                scratchpad: None,
+            },
+        });
+        assert_eq!(r.scope_count(), 0);
+        let msg = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("the fork answered")
+            .expect("channel alive");
+        assert!(
+            matches!(&msg, Msg::TransientStatus { text } if text.contains("cannot run agents")),
+            "{msg:?}"
+        );
     }
 
     /// After a spawned task completes (here via the

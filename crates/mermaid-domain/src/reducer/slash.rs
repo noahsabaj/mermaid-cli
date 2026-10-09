@@ -140,6 +140,47 @@ pub fn push_task_notice(state: &mut State, text: String) {
 /// the reducer injects a staleness nudge (then re-arms for another window).
 pub const TASK_STALENESS_CALLS: u32 = 5;
 
+/// `/load` landed: swap in the loaded conversation and reset everything that
+/// belonged to the one being left.
+fn load_conversation(state: &mut State, cmds: &mut Vec<Cmd>, history: crate::ConversationHistory) {
+    // If a turn was in flight when the user loaded another conversation
+    // (`/load` mid-generation), cancel its scope first. Otherwise we
+    // overwrite `state.turn` to `Idle` below and lose the only handle —
+    // the turn's CancellationToken + JoinSet — that could stop the
+    // running model call and tool tasks, orphaning them uncancellable;
+    // their parked approval requests could never be answered either.
+    if let Some(id) = state.turn.id() {
+        cmds.push(Cmd::CancelScope(id));
+        // Drop the cancelled turn's parked approval/question modals and
+        // its stale running-tool indicators — the tasks behind them are
+        // being torn down.
+        clear_parked_tool_requests(state);
+        state.ui.live_tool_status.clear();
+    }
+    // Messages queued against the *previous* conversation must not
+    // auto-submit into the one being loaded — drop them (mirrors the
+    // clears above).
+    state.ui.queued_messages.clear();
+    state.session.replace_conversation(history);
+    state.turn = TurnState::Idle;
+    // A loaded goal (if any) restarts its counters.
+    state.runtime.goal = crate::goal::GoalProgress::default();
+    // The abandoned run's summary counters die with it: a leaked
+    // `run_started` would otherwise let a later `finish_run` (quit)
+    // stamp the OLD run's summary into the conversation loaded here.
+    reset_run_counters(state);
+    state.ui.mode = UiMode::EditingInput;
+    // The pause belonged to the previous conversation's failing
+    // compaction; the loaded one starts fresh.
+    state.runtime.auto_compact_suppressed = false;
+    // The loaded conversation has its own id — the previous session's
+    // scratch dir no longer applies. Recompute (same as `/clear`).
+    refresh_scratchpad(state, cmds);
+    // Side questions were about the conversation being left.
+    state.side_questions.reset();
+    emit_title_if_changed(state, cmds);
+}
+
 /// Route a completed `Cmd::Query` lookup into state — one arm per
 /// [`QueryResult`] variant, bodies moved verbatim from the former
 /// per-`Msg` arms. None of these are turn-scoped; each surface applies
@@ -147,42 +188,7 @@ pub const TASK_STALENESS_CALLS: u32 = 5;
 /// transcript listings always append).
 pub fn handle_query_result(state: &mut State, cmds: &mut Vec<Cmd>, result: QueryResult) {
     match result {
-        QueryResult::ConversationLoaded(history) => {
-            // If a turn was in flight when the user loaded another conversation
-            // (`/load` mid-generation), cancel its scope first. Otherwise we
-            // overwrite `state.turn` to `Idle` below and lose the only handle —
-            // the turn's CancellationToken + JoinSet — that could stop the
-            // running model call and tool tasks, orphaning them uncancellable;
-            // their parked approval requests could never be answered either.
-            if let Some(id) = state.turn.id() {
-                cmds.push(Cmd::CancelScope(id));
-                // Drop the cancelled turn's parked approval/question modals and
-                // its stale running-tool indicators — the tasks behind them are
-                // being torn down.
-                clear_parked_tool_requests(state);
-                state.ui.live_tool_status.clear();
-            }
-            // Messages queued against the *previous* conversation must not
-            // auto-submit into the one being loaded — drop them (mirrors the
-            // clears above).
-            state.ui.queued_messages.clear();
-            state.session.replace_conversation(*history);
-            state.turn = TurnState::Idle;
-            // A loaded goal (if any) restarts its counters.
-            state.runtime.goal = crate::goal::GoalProgress::default();
-            // The abandoned run's summary counters die with it: a leaked
-            // `run_started` would otherwise let a later `finish_run` (quit)
-            // stamp the OLD run's summary into the conversation loaded here.
-            reset_run_counters(state);
-            state.ui.mode = UiMode::EditingInput;
-            // The pause belonged to the previous conversation's failing
-            // compaction; the loaded one starts fresh.
-            state.runtime.auto_compact_suppressed = false;
-            // The loaded conversation has its own id — the previous session's
-            // scratch dir no longer applies. Recompute (same as `/clear`).
-            refresh_scratchpad(state, cmds);
-            emit_title_if_changed(state, cmds);
-        },
+        QueryResult::ConversationLoaded(history) => load_conversation(state, cmds, *history),
         QueryResult::AvailableModelsListed(candidates) => {
             // Only fill a picker that is still open — Esc before discovery
             // landed drops the event, exactly like `ConversationsListed`.
@@ -704,6 +710,7 @@ pub fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
         SlashCmd::OutputStyle { name, project } => {
             handle_output_style_command(state, cmds, name.as_deref(), project);
         },
+        SlashCmd::Btw(question) => handle_btw(state, cmds, question),
         SlashCmd::Editor => {
             // `/editor` opens on whatever draft remains after the command
             // itself was consumed (usually empty); Ctrl+O is the
@@ -1109,6 +1116,8 @@ pub fn handle_confirm_accepted(state: &mut State, cmds: &mut Vec<Cmd>) {
             // New conversation id -> new scratch dir. The old one stays on
             // disk until the sweep reaps it (its pid lock expires with us).
             refresh_scratchpad(state, cmds);
+            // Side questions were about the conversation being left.
+            state.side_questions.reset();
             emit_title_if_changed(state, cmds);
         },
     }

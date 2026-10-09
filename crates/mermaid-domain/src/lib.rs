@@ -49,6 +49,7 @@ pub mod request;
 pub mod run_event;
 pub mod runtime;
 pub mod session_event;
+pub mod side_question;
 pub mod slash_commands;
 pub mod state;
 pub mod tool_search;
