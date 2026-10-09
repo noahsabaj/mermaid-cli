@@ -36,6 +36,39 @@ pub enum ProviderContinuation {
         model: String,
         output: Vec<ResponseItem>,
     },
+    /// Gemini's thought signatures on this turn's function calls, and the
+    /// calls it made through its own computer tool. Gemini 3 refuses a
+    /// function call of the current turn that comes back without the
+    /// signature it carried. `model` is the model that wrote them; they go
+    /// back only to that model.
+    Gemini {
+        model: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        signatures: Vec<GeminiSignature>,
+        /// Computer calls as the model wrote them. They are stored under
+        /// Mermaid's `computer` tool so every gate sees the tool it knows;
+        /// these say what to send back.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        native_calls: Vec<GeminiNativeCall>,
+    },
+}
+
+/// One call Gemini made through its computer tool, as it wrote it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GeminiNativeCall {
+    pub call_id: String,
+    pub name: String,
+    pub args: serde_json::Value,
+}
+
+/// The thought signature Gemini attached to one function call.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GeminiSignature {
+    pub call_id: String,
+    /// Opaque, so stored as base64 bytes like the other encrypted state: the
+    /// persistence redaction must not mistake it for a credential.
+    #[serde(with = "crate::utils::serde_base64::string")]
+    pub signature: String,
 }
 
 impl ProviderContinuation {
@@ -53,7 +86,7 @@ impl ProviderContinuation {
     pub fn anthropic_signature(&self) -> Option<&str> {
         match self {
             Self::Anthropic { signature, .. } => Some(signature.as_str()).filter(|s| !s.is_empty()),
-            Self::MetaResponses { .. } | Self::OpenaiResponses { .. } => None,
+            Self::MetaResponses { .. } | Self::OpenaiResponses { .. } | Self::Gemini { .. } => None,
         }
     }
 
@@ -76,7 +109,7 @@ impl ProviderContinuation {
                 compaction: None,
                 native_tool_calls,
             }),
-            meta @ Self::MetaResponses { .. } => Some(meta),
+            kept @ (Self::MetaResponses { .. } | Self::Gemini { .. }) => Some(kept),
             Self::OpenaiResponses { model, mut output } => {
                 output.retain(|item| !item.is_compaction());
                 (!output.is_empty()).then_some(Self::OpenaiResponses { model, output })
@@ -89,7 +122,7 @@ impl ProviderContinuation {
     pub const fn anthropic_compaction(&self) -> Option<&serde_json::Value> {
         match self {
             Self::Anthropic { compaction, .. } => compaction.as_ref(),
-            Self::MetaResponses { .. } | Self::OpenaiResponses { .. } => None,
+            Self::MetaResponses { .. } | Self::OpenaiResponses { .. } | Self::Gemini { .. } => None,
         }
     }
 
@@ -99,7 +132,7 @@ impl ProviderContinuation {
     pub fn carries_server_compaction(&self) -> bool {
         match self {
             Self::Anthropic { compaction, .. } => compaction.is_some(),
-            Self::MetaResponses { .. } => false,
+            Self::MetaResponses { .. } | Self::Gemini { .. } => false,
             Self::OpenaiResponses { output, .. } => output.iter().any(ResponseItem::is_compaction),
         }
     }
@@ -112,7 +145,9 @@ impl ProviderContinuation {
             Self::Anthropic {
                 native_tool_calls, ..
             } => native_tool_calls.iter().any(|call| call == id),
-            Self::MetaResponses { .. } | Self::OpenaiResponses { .. } => false,
+            Self::MetaResponses { .. } | Self::OpenaiResponses { .. } | Self::Gemini { .. } => {
+                false
+            },
         }
     }
 
@@ -120,7 +155,7 @@ impl ProviderContinuation {
     pub fn meta_output(&self) -> Option<&[ResponseItem]> {
         match self {
             Self::MetaResponses { output } => Some(output),
-            Self::Anthropic { .. } | Self::OpenaiResponses { .. } => None,
+            Self::Anthropic { .. } | Self::OpenaiResponses { .. } | Self::Gemini { .. } => None,
         }
     }
 
@@ -133,16 +168,62 @@ impl ProviderContinuation {
                 model: wrote,
                 output,
             } if wrote == model => Some(output),
-            Self::Anthropic { .. } | Self::MetaResponses { .. } | Self::OpenaiResponses { .. } => {
-                None
-            },
+            Self::Anthropic { .. }
+            | Self::MetaResponses { .. }
+            | Self::OpenaiResponses { .. }
+            | Self::Gemini { .. } => None,
+        }
+    }
+
+    /// The Gemini signatures to send back to `model`: `None` for another
+    /// provider's state, or for state another model wrote.
+    #[must_use]
+    pub fn gemini_signatures(&self, model: &str) -> Option<&[GeminiSignature]> {
+        match self {
+            Self::Gemini {
+                model: wrote,
+                signatures,
+                ..
+            } if wrote == model => Some(signatures),
+            Self::Anthropic { .. }
+            | Self::MetaResponses { .. }
+            | Self::OpenaiResponses { .. }
+            | Self::Gemini { .. } => None,
+        }
+    }
+
+    /// The computer call `id` as `model` wrote it, when `model` made it
+    /// through Gemini's computer tool.
+    #[must_use]
+    pub fn gemini_native_call(&self, model: &str, id: &str) -> Option<&GeminiNativeCall> {
+        match self {
+            Self::Gemini {
+                model: wrote,
+                native_calls,
+                ..
+            } if wrote == model => native_calls.iter().find(|call| call.call_id == id),
+            Self::Anthropic { .. }
+            | Self::MetaResponses { .. }
+            | Self::OpenaiResponses { .. }
+            | Self::Gemini { .. } => None,
         }
     }
 
     /// Keep only the replayed tool calls whose id `keep` accepts.
     pub fn retain_tool_calls(&mut self, mut keep: impl FnMut(&str) -> bool) {
-        if let Self::MetaResponses { output } | Self::OpenaiResponses { output, .. } = self {
-            output.retain(|item| item.call_id().is_none_or(&mut keep));
+        match self {
+            Self::MetaResponses { output } | Self::OpenaiResponses { output, .. } => {
+                output.retain(|item| item.call_id().is_none_or(&mut keep));
+            },
+            Self::Gemini {
+                signatures,
+                native_calls,
+                ..
+            } => {
+                signatures.retain(|s| keep(&s.call_id));
+                native_calls.retain(|c| keep(&c.call_id));
+            },
+            Self::Anthropic { .. } => {},
         }
     }
 }
@@ -708,6 +789,37 @@ impl TokenUsage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gemini_signatures_persist_as_bytes_and_follow_kept_calls() {
+        let mut continuation = ProviderContinuation::Gemini {
+            model: "gemini-3-flash".to_string(),
+            signatures: vec![
+                GeminiSignature {
+                    call_id: "call_0".to_string(),
+                    signature: "c2lnLWE=".to_string(),
+                },
+                GeminiSignature {
+                    call_id: "call_1".to_string(),
+                    signature: "c2lnLWI=".to_string(),
+                },
+            ],
+            native_calls: Vec::new(),
+        };
+        let saved = serde_json::to_string(&continuation).unwrap();
+        assert!(!saved.contains("c2lnLWE="), "stored as bytes: {saved}");
+        let loaded: ProviderContinuation = serde_json::from_str(&saved).unwrap();
+        assert_eq!(loaded, continuation);
+
+        continuation.retain_tool_calls(|id| id == "call_1");
+        let kept = continuation.gemini_signatures("gemini-3-flash").unwrap();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].call_id, "call_1");
+        assert_eq!(
+            continuation.clone().without_compaction(),
+            Some(continuation)
+        );
+    }
 
     #[test]
     fn test_message_role_equality() {

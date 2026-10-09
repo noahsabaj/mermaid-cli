@@ -1,0 +1,2 @@
+data: {"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"click","args":{"x":500,"y":250,"intent":"Focus the port field","safety_decision":{"decision":"require_confirmation","explanation":"Changes a setting."}}},"thoughtSignature":"c2lnLWNsaWNr"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":40,"candidatesTokenCount":10,"totalTokenCount":50}}
+

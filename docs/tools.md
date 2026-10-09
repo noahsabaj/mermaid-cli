@@ -58,11 +58,14 @@ goes to the model's provider. Its actions are those of Anthropic's computer tool
 `zoom`, `cursor_position`, `left_click`, `right_click`, `middle_click`, `double_click`,
 `triple_click`, `left_click_drag`, `mouse_move`, `left_mouse_down`, `left_mouse_up`, `scroll`,
 `type`, `key`, `hold_key` and `wait`. With `provider_native`, Claude gets Anthropic's toolset
-itself (`computer_toolset_20260801`) and OpenAI models get OpenAI's `computer` tool, each
-rewritten onto the tool as it arrives; other vision models call the tool directly. One OpenAI call
-carries several actions: they run in order, stop at the first that fails, and the call returns a
-screenshot of the screen after them. A warning OpenAI attaches to a call (its safety checks) is
-shown to the gate with the actions. A screenshot is fitted to 1568 px on its long edge and
+itself (`computer_toolset_20260801`), OpenAI models get OpenAI's `computer` tool and Gemini models
+get Gemini's `computer_use` tool for the desktop, each rewritten onto the tool as it arrives;
+other vision models call the tool directly. One OpenAI call carries several actions: they run in
+order, stop at the first that fails, and the call returns a screenshot of the screen after them.
+Each Gemini call returns a screenshot too, and its coordinates are out of 1000 across the screen.
+Gemini's `navigate`, `key_down` and `key_up` are left out. A warning the provider attaches to a
+call (OpenAI's safety checks, Gemini's request for confirmation) is shown to the gate with the
+actions; a call Gemini blocks does not run. A screenshot is fitted to 1568 px on its long edge and
 1.15 megapixels, and coordinates are pixels of the last screenshot, scaled back to the primary
 screen. Input actions wait 0.5 s before they return. Calls in one message run in order, and after
 one fails the rest return "Not executed: an earlier computer action in this turn failed." without
