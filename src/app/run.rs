@@ -201,7 +201,7 @@ pub async fn run_interactive_with(
     let mut runner = runner
         .with_interactive_approvals()
         .with_interactive_questions();
-    // Keep instructions/memory fresh via the background config watcher (#45):
+    // Keep instructions/memory fresh via the background config watcher:
     // it emits Msg::InstructionsChanged/MemoryChanged on change, so the reducer
     // reads them as injected data and never does the refresh I/O inline.
     runner.spawn_config_watcher(cwd.clone(), config.memory.clone());
@@ -217,7 +217,7 @@ pub async fn run_interactive_with(
     let mut tick = interval(Duration::from_millis(16));
 
     // Boot effects: MCP server init (if configured). Instructions/memory are
-    // loaded by the config watcher started above (#45), not here.
+    // loaded by the config watcher started above, not here.
     for cmd in bootstrap_cmds(&config, &state.session.conversation.id) {
         runner.dispatch(cmd);
     }
@@ -309,7 +309,7 @@ pub async fn run_interactive_with(
             let selected = tokio::select! {
                 // Fair (unbiased) polling. With `biased;`, the hot `msg_rx`
                 // arm would always win under sustained streaming and starve
-                // terminal input + OS signals (#112). Fair selection still
+                // terminal input + OS signals. Fair selection still
                 // drains streaming promptly — it's almost always ready — while
                 // guaranteeing the input/signal/tick arms get serviced too.
                 //
@@ -334,7 +334,7 @@ pub async fn run_interactive_with(
                         use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind as MEK};
                         let ctrl = m.modifiers.contains(KeyModifiers::CONTROL);
                         match m.kind {
-                            // F13: Ctrl+Click a chat image tile opens it via
+                            // Ctrl+Click a chat image tile opens it via
                             // the system viewer. The screen→image mapping
                             // lives in ChatState (the render layer).
                             MEK::Down(MouseButton::Left) if ctrl => rstate
@@ -390,7 +390,7 @@ pub async fn run_interactive_with(
                             && k.modifiers.contains(crossterm::event::KeyModifiers::SHIFT)
                             && matches!(k.code, crossterm::event::KeyCode::Char(c) if c.eq_ignore_ascii_case(&'c'))
                         {
-                            // Route the copy through the reducer (#18): the
+                            // Route the copy through the reducer: the
                             // selection lives in the render layer, but emitting a
                             // Msg keeps the clipboard side effect recorded +
                             // replayable instead of dispatched out-of-band.
@@ -416,7 +416,7 @@ pub async fn run_interactive_with(
                             // (no deliberate trailing event) may just be the
                             // first chunk ConPTY delivered — bridge the gap so
                             // a chunk boundary right after an Enter never
-                            // submits half a paste (#351). The fold state
+                            // submits half a paste. The fold state
                             // crosses the seam with it, so a CRLF pair split
                             // at the gap stays one newline.
                             if trailing.is_empty()
@@ -498,9 +498,9 @@ pub async fn run_interactive_with(
 /// Commands dispatched on startup before the first iteration of the
 /// loop. Fires MCP init (if configured) and materializes the session's
 /// scratch directory. Instructions/memory are loaded by the config
-/// watcher (#45), not here.
+/// watcher, not here.
 fn bootstrap_cmds(config: &Config, session_id: &str) -> Vec<Cmd> {
-    // Instructions/memory load + stay fresh via the config watcher (#45),
+    // Instructions/memory load + stay fresh via the config watcher,
     // started in `run_interactive_with`.
     let mut cmds = Vec::new();
     if !config.mcp_servers.is_empty() {
@@ -622,7 +622,7 @@ mod tests {
 
     #[test]
     fn bootstrap_always_ensures_the_session_scratchpad() {
-        // Instructions/memory load via the config watcher (#45), not
+        // Instructions/memory load via the config watcher, not
         // bootstrap; with no MCP servers configured, only the scratchpad
         // ensure remains — keyed by the caller's session id.
         let cmds = bootstrap_cmds(&Config::default(), "sess-1");

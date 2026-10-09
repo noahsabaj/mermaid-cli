@@ -79,7 +79,7 @@ pub struct State {
     /// System temp dir, injected once at startup by the shell (which reads
     /// `std::env::temp_dir()`). Pasted-image attachments build their scratch
     /// path from it; holding it here keeps the reducer free of the env read it
-    /// used to do inline (#54), and injecting it keeps the read out of this
+    /// used to do inline, and injecting it keeps the read out of this
     /// crate entirely.
     pub temp_dir: PathBuf,
     pub ids: IdAllocatorBundle,
@@ -147,7 +147,7 @@ impl State {
         let project_path = cwd.display().to_string();
         let conversation = ConversationHistory::new(project_path, model_id.clone(), now);
         let initial_title = conversation.title.clone();
-        // F5: seed `mcp.servers` from the user's configured MCP
+        // Seed `mcp.servers` from the user's configured MCP
         // servers with `Starting` status. Previously the map started
         // empty, and `McpServerReady` handlers used `get_mut` —
         // configured servers never populated, so their tools never
@@ -166,7 +166,7 @@ impl State {
             }
             m
         };
-        // F11: honor the per-model reasoning preference (persisted via
+        // Honor the per-model reasoning preference (persisted via
         // `/reasoning high` while using a specific model). Falls back to
         // the global default when no entry exists.
         let reasoning = settings
@@ -1063,7 +1063,7 @@ impl ToolOutcome {
     /// so the renderer — `action_display_for`, which falls back to
     /// `error_message().unwrap_or("[cancelled]")` — surfaces the failure
     /// instead of mislabeling it as a cancellation. The MCP proxy uses this
-    /// for `isError: true` results (#91): the model still sees the server's
+    /// for `isError: true` results: the model still sees the server's
     /// content verbatim via `model_content`, but the outcome reads as an
     /// error rather than a success.
     #[must_use]
@@ -1284,7 +1284,7 @@ pub struct UiState {
     /// stepping past the newest history entry with Down restores
     /// the partial input unchanged. Cleared on any non-nav key.
     pub history_draft: String,
-    /// Running accumulator for mouse-wheel scroll events (F13). The
+    /// Running accumulator for mouse-wheel scroll events. The
     /// reducer adds the delta here on `Msg::MouseScroll`; the render
     /// layer compares against its last-seen snapshot and applies the
     /// diff to the chat pane's `ChatState`. This keeps the reducer
@@ -1548,7 +1548,7 @@ pub struct McpState {
     /// Deferred MCP tools promoted to direct advertisement by a
     /// `tool_search` call this session (sanitized full names). A
     /// `BTreeSet` keeps the advertised tool order byte-stable across
-    /// requests for prompt-cache warmth (#F68). Transient: cleared by
+    /// requests for prompt-cache warmth. Transient: cleared by
     /// conversation switch/`/clear` along with the rest of the session.
     pub promoted: std::collections::BTreeSet<String>,
 }

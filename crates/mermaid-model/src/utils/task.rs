@@ -6,7 +6,7 @@
 //! to await it, the task is aborted rather than leaked. The effect runner's
 //! streaming relays and the provider stream bridge both own their relay tasks
 //! this way, making the "every task is owned" invariant hold structurally rather
-//! than only behaviorally (#F39, #58, #60).
+//! than only behaviorally.
 
 /// Await a sibling relay task's handle, logging a panic (but not a normal
 /// post-cancellation abort). Awaiting the handle keeps a stray panic from

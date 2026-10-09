@@ -454,7 +454,7 @@ impl RuntimeClient {
     /// fails. A daemon that is simply not running is not an error: the client falls
     /// back.
     pub fn stop_process(&self, id: &str) -> Result<RuntimeOne<ProcessRecord>> {
-        // Non-idempotent: `terminate_tree` must not fire twice (RC-G/F25).
+        // Non-idempotent: `terminate_tree` must not fire twice.
         self.action_authed_non_idempotent(
             crate::runtime_client::DaemonRequest::StopProcess { id: id.to_string() }.to_wire(),
             |service| {
@@ -473,7 +473,7 @@ impl RuntimeClient {
     /// back.
     pub fn restart_process(&self, id: &str) -> Result<RuntimeOne<ProcessRecord>> {
         // Non-idempotent: kills then respawns — a duplicate run double-signals
-        // (possibly a since-reused PID) and can spawn two servers (RC-G/F25).
+        // (possibly a since-reused PID) and can spawn two servers.
         self.action_authed_non_idempotent(
             crate::runtime_client::DaemonRequest::RestartProcess { id: id.to_string() }.to_wire(),
             |service| {
@@ -518,7 +518,7 @@ impl RuntimeClient {
     /// back.
     pub fn approve(&self, id: &str) -> Result<RuntimeApprovalDecision> {
         // Non-idempotent: replays the approved action, so a duplicate run could
-        // execute that side effect twice (RC-G/F25).
+        // execute that side effect twice.
         self.action_authed_non_idempotent(
             crate::runtime_client::DaemonRequest::Approve { id: id.to_string() }.to_wire(),
             |_service| RuntimeService::approval_decision(approve_and_replay(id)?),
@@ -546,7 +546,7 @@ impl RuntimeClient {
     /// back.
     pub fn restore_checkpoint(&self, id: &str) -> Result<RuntimeCheckpointRestore> {
         // Non-idempotent: rewrites working-tree files from the snapshot — a
-        // duplicate run could clobber edits made between the two runs (RC-G/F25).
+        // duplicate run could clobber edits made between the two runs.
         self.action_authed_non_idempotent(
             crate::runtime_client::DaemonRequest::RestoreCheckpoint { id: id.to_string() }
                 .to_wire(),
@@ -615,7 +615,7 @@ impl RuntimeClient {
         T: DeserializeOwned,
         F: FnOnce(&RuntimeService) -> Result<T>,
     {
-        // #21: attach the pairing token when the client has one. Reads are now
+        // Attach the pairing token when the client has one. Reads are now
         // gated server-side (`command_requires_auth`), so a `daemon_with_token`
         // client must send its token to read off the socket; a tokenless
         // `auto()` client sends nothing and `PreferDaemon` falls back to a local
@@ -642,7 +642,7 @@ impl RuntimeClient {
     }
 
     /// Like [`Self::action_authed`], but for a NON-idempotent side effect
-    /// (`stop`/`restart`/`approve`/`restore`). RC-G/F25: under `PreferDaemon` a
+    /// (`stop`/`restart`/`approve`/`restore`). Under `PreferDaemon` a
     /// local fallback *re-runs* the action, which is only safe when the daemon
     /// never received the request (a pre-send connection failure). On a
     /// post-send or ambiguous failure the daemon MAY have already executed it,
@@ -701,7 +701,7 @@ impl RuntimeClient {
             RuntimeClientMode::PreferDaemon => match self.request_daemon(body, authed) {
                 Ok(value) => Ok(value),
                 Err(err) => {
-                    // RC-G/F25: an idempotent or read-only action falls back to
+                    // An idempotent or read-only action falls back to
                     // a local run freely. A non-idempotent one falls back ONLY
                     // when the failure is a pre-send connection failure (the
                     // request never reached the daemon); otherwise the daemon
@@ -733,7 +733,7 @@ impl RuntimeClient {
 }
 
 /// Upper bound on the transcript rows [`transcript_rows`] returns
-/// (F24/RC-F, carried over from the storage query it replaced). 5000 turns
+/// (carried over from the storage query it replaced). 5000 turns
 /// is far beyond any real interactive session yet bounds the worst case.
 const MAX_SESSION_MESSAGES: usize = 5_000;
 
@@ -750,7 +750,7 @@ const MAX_SESSION_MESSAGES: usize = 5_000;
 /// yields no rows rather than an error, matching the previous behavior of
 /// the (always-empty) query it replaces.
 ///
-/// Capped at [`MAX_SESSION_MESSAGES`], carrying forward F24/RC-F from the
+/// Capped at [`MAX_SESSION_MESSAGES`], carrying forward F from the
 /// query this replaces: the daemon loads a whole transcript into RAM to
 /// answer, so one pathological session must not be able to OOM it. The
 /// most recent messages are the ones a viewer wants, so the cap takes the
@@ -1171,7 +1171,7 @@ impl RuntimeService {
         // Seek to the tail rather than reading the whole file: a long-running
         // dev server can produce a multi-GB log, and we only ever return the
         // last `tail` bytes. `std::fs::read` would have pinned the whole file
-        // in RAM first (#41).
+        // in RAM first.
         use std::io::{Read, Seek, SeekFrom};
         let mut file =
             std::fs::File::open(&path).with_context(|| format!("failed to read {path}"))?;
@@ -1228,7 +1228,7 @@ impl RuntimeService {
             .processes()
             .get(id)?
             .with_context(|| format!("process not found: {id}"))?;
-        // #63: the command comes from a `processes` row; a tampered DB could swap
+        // The command comes from a `processes` row; a tampered DB could swap
         // in a destructive command. Refuse to respawn it (mirrors exec.rs's
         // execute_command pre-check) before killing or spawning anything.
         anyhow::ensure!(
@@ -1593,7 +1593,7 @@ fn is_runtime_hygiene_approval(
 /// Whether a daemon-request failure happened *before* the request reached the
 /// daemon — i.e. the Unix-socket `connect()` itself failed (daemon not running,
 /// socket missing, or connection refused), so the action was never delivered
-/// and is safe to re-run locally (RC-G/F25).
+/// and is safe to re-run locally.
 ///
 /// `request_daemon_text` wraps ONLY the `UnixStream::connect` error (with a
 /// "failed to connect to …" context) and propagates post-connect write/read I/O
@@ -1644,8 +1644,8 @@ fn pid_alive(pid: u32) -> bool {
     }
 }
 
-/// Validate a process "open" target before handing it to the OS opener (#63 —
-/// defense-in-depth for a tampered local `processes` row). The target is either
+/// Validate a process "open" target before handing it to the OS opener
+/// (defense-in-depth for a tampered local `processes` row). The target is either
 /// a detected URL (a local dev server) or a log-file path mermaid wrote.
 pub(crate) fn validate_open_target(target: &str) -> Result<()> {
     // Gate on the `://` authority so a bare path or Windows drive (`C:\…`, which
@@ -1743,7 +1743,7 @@ mod tests {
 
     #[test]
     fn a_huge_transcript_is_capped_at_the_tail() {
-        // F24/RC-F followed the read here: the daemon loads a whole
+        // F followed the read here: the daemon loads a whole
         // transcript into RAM to answer, so one pathological session must
         // not be able to OOM it.
         let path = temp_db("session_cap");
@@ -1796,7 +1796,7 @@ mod tests {
     fn pid_alive_detects_live_and_dead() {
         // Our own process is alive.
         assert!(pid_alive(std::process::id()));
-        // A reaped child is dead (#6 — the restart wait polls this).
+        // A reaped child is dead (the restart wait polls this).
         #[cfg(unix)]
         let mut child = Command::new("true").spawn().expect("spawn true");
         #[cfg(windows)]
@@ -1813,7 +1813,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn daemon_failure_pre_send_only_for_connect_kinds() {
-        // F25: distinguish "never reached the daemon" (safe to re-run locally)
+        // Distinguish "never reached the daemon" (safe to re-run locally)
         // from "may have already run" (must not re-run a non-idempotent action).
         use anyhow::Context as _;
         use std::io::{Error as IoError, ErrorKind};

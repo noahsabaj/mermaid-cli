@@ -10,7 +10,7 @@
 /// Apply ±20% jitter to `delay_ms` using real entropy so concurrent clients —
 /// and processes restarting at the same time — don't retry in lockstep (a
 /// thundering herd). `pub(crate)` so the effect-layer retry middleware shares
-/// this single impl rather than duplicating a weaker clock-based one (#87).
+/// this single impl rather than duplicating a weaker clock-based one.
 #[must_use]
 pub fn jitter(delay_ms: u64) -> u64 {
     let span = delay_ms / 5;

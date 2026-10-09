@@ -2,7 +2,7 @@ use anyhow::Result;
 
 /// Whether the Ollama Cloud key is configured — i.e. the `OLLAMA_API_KEY`
 /// environment variable is set to a non-empty value. The key is never read from
-/// or written to `config.toml` (#88).
+/// or written to `config.toml`.
 #[must_use]
 pub fn is_cloud_configured() -> bool {
     get_cloud_api_key().is_some()
@@ -10,7 +10,7 @@ pub fn is_cloud_configured() -> bool {
 
 /// Interactive Ollama Cloud setup. Mermaid resolves the cloud key from the
 /// `OLLAMA_API_KEY` environment variable only — it is never written to
-/// `config.toml` (#88), matching how every other provider key is handled. So
+/// `config.toml`, matching how every other provider key is handled. So
 /// this explains how to set the variable rather than prompting for and saving a
 /// secret to disk. Returns whether the key is currently configured.
 ///
@@ -43,7 +43,7 @@ pub fn setup_cloud_interactive() -> Result<bool> {
 /// Get the Ollama Cloud API key: the `OLLAMA_API_KEY` environment variable,
 /// falling back to the OS keyring (`mermaid login ollama`).
 ///
-/// Never persisted to config files (#88); the keyring is the only at-rest
+/// Never persisted to config files; the keyring is the only at-rest
 /// store and it is the OS's. Empty values are treated as unset.
 #[must_use]
 pub fn get_cloud_api_key() -> Option<String> {
@@ -93,7 +93,7 @@ mod tests {
 
     #[test]
     fn get_cloud_api_key_resolves_from_env_only() {
-        // #88: the key comes from the environment, never from config on disk.
+        // The key comes from the environment, never from config on disk.
         temp_env::with_vars([("OLLAMA_API_KEY", Some("sk-test"))], || {
             assert_eq!(get_cloud_api_key().as_deref(), Some("sk-test"));
             assert!(is_cloud_configured());

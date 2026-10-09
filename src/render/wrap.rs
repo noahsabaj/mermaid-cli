@@ -13,7 +13,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 /// Hard-break a single over-long token into the plain-text line accumulator,
 /// splitting at char boundaries (UTF-8-safe, display-cell aware) so a giant
 /// unbroken token (e.g. a 5000-char URL) wraps across lines instead of
-/// overflowing the viewport and being clipped (F33).
+/// overflowing the viewport and being clipped.
 ///
 /// Mirrors the accumulation `wrap_text_with_indent` does for normal words:
 /// `current_line`/`current_length` carry the in-progress line (its indent
@@ -116,8 +116,7 @@ pub(crate) fn wrap_text_with_indent(
                 } else {
                     // A single token wider than the whole line (e.g. a long
                     // URL): hard-break it at width boundaries so it wraps
-                    // instead of overflowing the viewport and being clipped
-                    // (F33).
+                    // instead of overflowing the viewport and being clipped.
                     hard_break_plain_token(
                         word,
                         &mut wrapped_lines,
@@ -143,7 +142,7 @@ pub(crate) fn wrap_text_with_indent(
                 current_length = word_width;
             } else {
                 // Over-long token mid-paragraph: flush the current line, then
-                // hard-break the token across continuation lines (F33).
+                // hard-break the token across continuation lines.
                 hard_break_plain_token(
                     word,
                     &mut wrapped_lines,
@@ -169,7 +168,7 @@ pub(crate) fn wrap_text_with_indent(
 /// splitting at char boundaries (UTF-8-safe, display-cell aware) and keeping
 /// each fragment's own style on every produced piece, so a giant unbroken
 /// token (e.g. a long URL) wraps across rows instead of overflowing the
-/// viewport and being clipped (F33). The styled counterpart of
+/// viewport and being clipped. The styled counterpart of
 /// `hard_break_plain_token`. The word arrives as styled fragments (see the
 /// flattening pass in `wrap_styled_line`) because a token can change style
 /// mid-word (`**bold**suffix`); the break must not flatten that to one style.
@@ -357,7 +356,7 @@ pub(crate) fn wrap_styled_line(
             } else {
                 // A single token wider than the line (e.g. a long URL):
                 // hard-break it at width boundaries so it wraps instead of
-                // being clipped by the viewport (F33). The first row may use
+                // being clipped by the viewport. The first row may use
                 // the full `width` (its indent is already counted above);
                 // continuation rows fall back to `available_width`.
                 hard_break_styled_word(
@@ -394,7 +393,7 @@ pub(crate) fn wrap_styled_line(
             emit_word(&mut current_line_spans, word);
         } else {
             // Over-long token mid-line: finish the current line, then
-            // hard-break the token across continuation rows (F33), keeping
+            // hard-break the token across continuation rows, keeping
             // each fragment's style on every produced piece.
             result_lines.push(Line::from(std::mem::take(&mut current_line_spans)));
             current_line_spans.push(Span::raw(" ".repeat(continuation_indent)));
@@ -621,7 +620,7 @@ mod tests {
 
     #[test]
     fn wrap_text_with_indent_hard_breaks_overlong_token() {
-        // F33: a single unbroken token far wider than the viewport must
+        // A single unbroken token far wider than the viewport must
         // hard-break at width boundaries instead of overflowing and being
         // clipped. No internal spaces, so word-wrapping alone can't split it.
         let token = "x".repeat(100);
@@ -650,7 +649,7 @@ mod tests {
 
     #[test]
     fn wrap_styled_line_hard_breaks_overlong_token() {
-        // F33 (styled path): the same hard-break, preserving each piece's style.
+        // Styled path: the same hard-break, preserving each piece's style.
         let token = "y".repeat(90);
         let style = Style::new().fg(ratatui::style::Color::Red);
         let line = Line::from(vec![Span::raw("  "), Span::styled(token.clone(), style)]);

@@ -35,7 +35,7 @@ pub struct OllamaProvider {
     rejections: RejectionCache,
     /// Shared app `Config` so `build_model_config` can read Ollama
     /// hardware options (`num_ctx`, `num_gpu`, `num_thread`, `numa`) at
-    /// call time. Before F11 these were silently dropped because the
+    /// call time. Before this they were silently dropped because the
     /// wrapper built `ModelConfig` only from `ChatRequest` fields.
     config: Arc<mermaid_domain::Config>,
     /// Cached `/api/show` probe (context window + dims + weight). Filled once per
@@ -301,7 +301,7 @@ impl ModelProvider for OllamaProvider {
             },
         };
 
-        // F3: the wrapper's `Done` is the sole terminal event — the adapter
+        // The wrapper's `Done` is the sole terminal event — the adapter
         // never emits one. Carrying `provider_continuation` out of
         // `ModelResponse` here is what lets multi-turn extended thinking
         // round-trip. It goes on the same sink the adapter just finished
@@ -363,7 +363,7 @@ fn build_model_config(
         );
     }
 
-    // F11: forward Ollama hardware options from the user's app config (num_ctx is
+    // Forward Ollama hardware options from the user's app config (num_ctx is
     // now handled above via the resolver).
     if let Some(v) = app_config.ollama.num_gpu {
         mc.set_backend_option("ollama".into(), "num_gpu".into(), v.to_string());
@@ -470,7 +470,7 @@ mod tests {
         );
     }
 
-    /// F11 regression guard: Ollama hardware options in the user's app config
+    /// Regression guard: Ollama hardware options in the user's app config
     /// must land in the `ModelConfig`'s `backend_options` so the adapter's
     /// `build_request_body` emits them under `options`. `num_ctx` now arrives via
     /// the resolver param (not a direct config forward), and `num_predict` is

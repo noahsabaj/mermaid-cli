@@ -105,7 +105,7 @@ if ([System.Windows.Forms.Clipboard]::ContainsImage()) {{ throw 'expected a PNG-
 /// ConPTY delivers a terminal paste as several key-event chunks (crossterm
 /// emits no `Event::Paste` on the Windows console), and a chunk gap landing
 /// right after an Enter made that Enter a lone key — a submit. Pasting a
-/// three-line prompt fired two half-prompts at the model (issue #351). On
+/// three-line prompt fired two half-prompts at the model. On
 /// unix the same bytes parse as a real bracketed paste, so this claim holds
 /// trivially there and guards the chunk bridge on Windows.
 #[test]
@@ -124,7 +124,7 @@ fn a_multiline_paste_never_submits() {
     std::thread::sleep(Duration::from_millis(300));
     let screen = term.frame_text();
     assert!(
-        !screen.contains("Auth error") && !screen.contains("Worked for"),
+        !screen.contains("Authentication failed") && !screen.contains("Worked for"),
         "a pasted line was submitted as a message. Screen:\n{screen}",
     );
     assert!(

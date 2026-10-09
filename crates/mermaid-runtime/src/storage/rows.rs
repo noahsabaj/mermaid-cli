@@ -10,17 +10,6 @@ use rusqlite::types::Type;
 
 use super::*;
 
-// Bumped to 5 for the additive `tasks.prompt` column (the daemon scheduler
-// executes queued tasks later, so the full prompt must be persisted at enqueue
-// time — `title` is truncated at 80 chars). Additive, but the bump lets a DB
-// already at v4 re-run the migration once to pick it up. The bump is
-// load-bearing alongside the F17 early-return in `init_schema`: a DB at an
-// older version still runs the migration (the idempotent baseline plus any
-// per-version step dispatched by `migrate_within_txn`) exactly once, while an
-// already-current DB skips the write lock entirely.
-//
-// History: v2 added the additive `tasks.owner_kind` column (F18/RC-E); v3 added
-// the F75 covering indexes; v4 added the `outcomes` table.
 /// Add `column` to `table` if it is missing. Returns `true` iff the column was
 /// just created (so the caller can run a one-time backfill).
 ///
@@ -248,7 +237,7 @@ pub(crate) fn task_event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<T
 /// wrote that this build can't parse: an unknown enum
 /// ([`rusqlite::Error::FromSqlConversionFailure`], how `task_from_row` /
 /// `process_from_row` surface an unknown status) or a column type mismatch
-/// ([`rusqlite::Error::InvalidColumnType`]). F19 (RC-E): the list/events paths
+/// ([`rusqlite::Error::InvalidColumnType`]). The list/events paths
 /// skip-and-warn on these so one poison row can't blank an entire panel, while a
 /// genuine infrastructure error (a locked DB, a dropped column) still propagates.
 pub(crate) fn is_row_decode_error(err: &rusqlite::Error) -> bool {
@@ -355,7 +344,7 @@ pub(crate) fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 /// opt-out. A present-but-unparseable value fails closed (treated as expired).
 /// Expiry is compared as a parsed instant rather than via a SQL `expires_at > ?`
 /// string compare, which only orders correctly while every stored value is the
-/// canonical `now_rfc3339()` shape (#64).
+/// canonical `now_rfc3339()` shape.
 pub(crate) fn is_expired(expires_at: Option<&str>, now: chrono::DateTime<chrono::Utc>) -> bool {
     match expires_at {
         None => false,
@@ -369,7 +358,7 @@ pub(crate) fn is_expired(expires_at: Option<&str>, now: chrono::DateTime<chrono:
 /// Upper bound on any `LIMIT` we bind. A caller-supplied `limit` (e.g. a daemon
 /// request body's `limit`) can be a huge `u64` that, cast straight to `i64`,
 /// wraps negative — and SQLite reads a negative `LIMIT` as *unbounded*, so the
-/// query returns every row (#128). Clamp at the `usize` level before the cast.
+/// query returns every row. Clamp at the `usize` level before the cast.
 pub(crate) const MAX_QUERY_LIMIT: usize = 10_000;
 
 pub(crate) fn clamp_limit(limit: usize) -> i64 {
@@ -380,7 +369,7 @@ pub(crate) fn fresh_id(prefix: &str) -> String {
     // In-process monotonic counter: two ids minted in the same nanosecond (a
     // coarse clock, or a clock stepping backward) can never be equal, so the
     // `ON CONFLICT(id) DO UPDATE` upserts can't silently overwrite an unrelated
-    // row (#61). A per-process random salt removes the clock dependence so ids
+    // row. A per-process random salt removes the clock dependence so ids
     // minted across a daemon restart don't collide either (getrandom is already
     // a dependency — see `daemon.rs`).
     static SEQ: AtomicU64 = AtomicU64::new(0);
@@ -401,7 +390,7 @@ pub(crate) fn fresh_id(prefix: &str) -> String {
 }
 
 /// Acquire an exclusive, auto-released advisory lock on `path` — a process
-/// singleton guard for the daemon (#131). Returns the held `File` on success
+/// singleton guard for the daemon. Returns the held `File` on success
 /// (keep it alive to hold the lock), or `None` if another process already holds
 /// it. `flock` releases automatically when the file is dropped OR the process
 /// exits/crashes, so a dead holder never wedges the lock the way an `O_EXCL`

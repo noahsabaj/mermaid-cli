@@ -195,8 +195,8 @@ pub fn load_project_scoped_config(cwd: &std::path::Path) -> Config {
 }
 
 /// Like [`load_config`] (user scope, no session flags) but never fails: on a
-/// malformed config, warn on stderr (secret-redacted, #F13) and fall back to
-/// defaults (#111). For standalone subcommands that only read user settings.
+/// malformed config, warn on stderr (secret-redacted) and fall back to
+/// defaults. For standalone subcommands that only read user settings.
 #[must_use]
 pub fn load_config_or_warn() -> Config {
     load_config().unwrap_or_else(|e| {
@@ -416,7 +416,7 @@ pub(crate) fn deep_remove_segments(table: &mut toml::Table, path: &[&str]) -> bo
 
 /// Like [`load_layered_config`] but never fails — the startup entry point.
 /// On success, prints notices and layer-attributed warnings to stderr. On a
-/// malformed layer, warns (secret-redacted, #F13) and degrades: the session
+/// malformed layer, warns (secret-redacted) and degrades: the session
 /// flags are re-applied over bare defaults so `--no-network`/`-c` survive a
 /// corrupt user file rather than being silently dropped with it.
 #[must_use]
@@ -434,7 +434,7 @@ pub fn load_layered_config_or_warn(cwd: Option<&std::path::Path>, flags: &Sessio
         Err(e) => {
             // A TOML parse error renders the offending source line, which can be
             // a secret-bearing one (`extra_headers`/`env`/`api_key_env`); scrub
-            // credential-shaped content before it reaches stderr (#F13).
+            // credential-shaped content before it reaches stderr.
             eprintln!(
                 "mermaid: {}",
                 mermaid_model::utils::redact_secrets(&format!("{e:#}"))
@@ -573,7 +573,7 @@ pub(super) fn with_persist_lock<T>(f: impl FnOnce() -> T) -> T {
 /// only its own keys: unknown keys survive, defaults are not frozen in, and
 /// project-layer or session-flag values can never leak into the user file.
 /// A malformed file propagates the parse error rather than being overwritten
-/// with defaults (#111).
+/// with defaults.
 fn update_user_config_table(mutate: impl FnOnce(&mut toml::Table) -> Result<()>) -> Result<()> {
     update_user_config_table_at(&get_config_path()?, mutate)
 }
@@ -1621,7 +1621,7 @@ mod tests {
         assert!(!blob.contains("url"), "{blob}");
     }
 
-    /// Configs persisted before Step 4 don't have a `reasoning` field on
+    /// Older configs don't have a `reasoning` field on
     /// `[default_model]`. Loading them must succeed and yield the
     /// `Medium` default — otherwise existing user configs break on
     /// upgrade.
@@ -1814,7 +1814,7 @@ port = 11434
         assert!(cfg.ollama.auto_start);
     }
 
-    /// Configs from before Step 5b don't have a `reasoning_per_model`
+    /// Older configs don't have a `reasoning_per_model`
     /// section. Loading them must succeed with an empty map — otherwise
     /// upgrade breaks every existing user.
     #[test]

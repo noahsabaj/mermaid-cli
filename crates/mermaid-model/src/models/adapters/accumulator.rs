@@ -110,7 +110,7 @@ pub(super) fn push_capped(buf: &mut String, chunk: &str, truncated: &mut bool, c
 /// fragments and grow this buffer without limit (the daemon is long-lived).
 /// Past the cap we stop appending at a char boundary; the now-truncated JSON
 /// simply fails to parse and falls back to a raw string -- bounded, not an
-/// OOM (#14).
+/// OOM.
 pub(super) fn push_tool_arg(buf: &mut String, frag: &str) {
     let cap = MAX_TOOL_ARG_BYTES;
     if buf.len() >= cap {
@@ -154,8 +154,8 @@ pub(super) fn parse_tool_args(tool: &str, raw: String) -> serde_json::Value {
 }
 
 /// A stream that ended without its terminal frame closed abnormally: the
-/// connection dropped, a proxy cut it, or the server crashed mid-response
-/// (F56). Every provider marks the end with a finish reason, so "none seen"
+/// connection dropped, a proxy cut it, or the server crashed mid-response.
+/// Every provider marks the end with a finish reason, so "none seen"
 /// is the signal. `Length` is a finish reason too -- a real truncation is a
 /// completed stream, not a dropped one.
 pub(super) fn ended_without_terminal(finish_reason: Option<&FinishReason>) -> bool {

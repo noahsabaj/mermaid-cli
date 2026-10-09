@@ -46,7 +46,7 @@ pub fn event_to_msg(event: CtEvent) -> Option<Msg> {
             }
         },
         CtEvent::Mouse(mouse) => match mouse.kind {
-            // F13: wire mouse wheel scroll. `UI_MOUSE_SCROLL_LINES`
+            // Wire mouse wheel scroll. `UI_MOUSE_SCROLL_LINES`
             // sets the delta per wheel tick to match the READMEs
             // "mouse wheel scrolls the chat" contract.
             CtMouseKind::ScrollUp => Some(Msg::MouseScroll {
@@ -172,8 +172,8 @@ const PASTE_CHUNK_BRIDGE: std::time::Duration = std::time::Duration::from_millis
 /// This is the second half of [`coalesce_key_burst`]: its drain sees only
 /// *immediately available* events, so a chunk gap ends the burst — and a
 /// pasted newline arriving just past the gap lands as a lone Enter, which is
-/// a submit. Pasting a three-line prompt fired two half-prompts at the model
-/// (#351). Inside the bridge window an Enter — Ctrl+Enter included — is
+/// a submit. Pasting a three-line prompt fired two half-prompts at the model.
+/// Inside the bridge window an Enter — Ctrl+Enter included — is
 /// paste content, never a submit; a deliberate submit after a paste arrives
 /// on a human timescale, not within milliseconds of the last chunk.
 ///
@@ -270,7 +270,7 @@ fn push_burst_char(buf: &mut String, last_was_cr: &mut bool, ch: BurstChar) {
 ///
 /// Unmodified `Char`, `Enter`, and `Tab` presses qualify — and so does
 /// **Enter with Control**, because that is how ConPTY delivers a pasted LF
-/// byte (issue #351: treating it as deliberate input broke the burst, and
+/// byte (treating it as deliberate input broke the burst, and
 /// the reducer's Enter arm then submitted half the paste). A LONE
 /// Ctrl+Enter still submits: the caller's single-keystroke rule returns it
 /// as a normal key when no burst formed around it. Every other modifier
@@ -603,7 +603,7 @@ mod tests {
 
     /// ConPTY delivers a pasted LF byte as Enter+CONTROL. Inside a burst it
     /// is a newline, not deliberate input — treating it as deliberate broke
-    /// the burst and the reducer's Enter arm submitted half the paste (#351).
+    /// the burst and the reducer's Enter arm submitted half the paste.
     #[test]
     fn ctrl_enter_in_a_burst_folds_as_a_newline() {
         let mut rest = vec![
@@ -701,7 +701,7 @@ mod tests {
         )
     }
 
-    /// The #351 shape: a chunk gap, then the rest of the paste. The newline
+    /// A chunk gap, then the rest of the paste. The newline
     /// and following text must fold into the paste, not submit it.
     #[tokio::test(start_paused = true)]
     async fn bridge_folds_a_chunk_gap_newline_into_the_paste() {

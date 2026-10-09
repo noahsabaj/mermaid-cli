@@ -123,7 +123,7 @@ pub(super) async fn start_runtime_tool_run(
 ) -> Option<String> {
     // Synchronous rusqlite write on the hot tool-execution path — offload it to
     // the blocking pool. The id is needed by `finish`, so we await the result
-    // (unlike `finish`, which is fire-and-forget) (#39).
+    // (unlike `finish`, which is fire-and-forget).
     let task_id = task_id.map(str::to_string);
     let tool_name = tool_name.to_string();
     let args_json = redacted_json_string(args);
@@ -165,7 +165,7 @@ pub(super) fn finish_runtime_tool_run(
         "duration_secs": outcome.duration_secs,
     }));
     // Fire-and-forget telemetry write on the blocking pool — don't stall the
-    // tool-finish path waiting on rusqlite (#39).
+    // tool-finish path waiting on rusqlite.
     tokio::task::spawn_blocking(move || {
         let _ = mermaid_runtime::with_shared_store(|store| {
             store
@@ -258,7 +258,7 @@ pub(super) async fn dispatch_pull_ollama_model(tx: MsgSender, model: String) {
 
     // Capture the reader's handle instead of orphaning it: the child's stdout
     // closes when it exits, so this task finishes right after `child.wait`
-    // below — we join it there so a panic is logged, not silently lost (#60).
+    // below — we join it there so a panic is logged, not silently lost.
     let reader_handle = child.stdout.take().map(|stdout| {
         let tx_inner = tx.clone();
         tokio::spawn(async move {
@@ -291,7 +291,7 @@ pub(super) async fn dispatch_pull_ollama_model(tx: MsgSender, model: String) {
     }
 
     // The child has exited; its stdout is closed, so the reader is finishing.
-    // Join it (logging a panic) so it isn't left orphaned (#60).
+    // Join it (logging a panic) so it isn't left orphaned.
     if let Some(handle) = reader_handle {
         join_logged(handle, "ollama_pull_reader").await;
     }
@@ -507,59 +507,6 @@ pub(super) async fn dispatch_copy_to_clipboard(text: String, tx: MsgSender) {
         },
     };
     let _ = tx.send(msg).await;
-}
-
-pub(super) fn classify_error_for_ui(
-    e: &mermaid_model::models::ModelError,
-) -> mermaid_model::models::UserFacingError {
-    use mermaid_model::models::{ErrorCategory, ModelError, UserFacingError};
-    match e {
-        ModelError::Backend(b) => UserFacingError {
-            summary: "Backend error".to_string(),
-            message: b.to_string(),
-            suggestion: "Check the provider endpoint / API key.".to_string(),
-            category: ErrorCategory::Connection,
-            recoverable: true,
-        },
-        ModelError::Authentication(msg) => UserFacingError {
-            summary: "Auth error".to_string(),
-            message: msg.clone(),
-            suggestion: "Set the env var the provider expects.".to_string(),
-            category: ErrorCategory::Auth,
-            recoverable: false,
-        },
-        ModelError::RateLimit {
-            retry_after,
-            message,
-        } => UserFacingError {
-            summary: "Rate limited".to_string(),
-            // The provider's own reason distinguishes "slow down" from
-            // "daily quota exhausted" — show it when the 429 body had one.
-            message: message.clone().unwrap_or_else(|| {
-                "The provider rejected the request with 429 (too many requests).".to_string()
-            }),
-            suggestion: match retry_after {
-                Some(secs) => format!("The provider asked to retry after {secs}s."),
-                None => "Retry shortly; if it persists, check your plan's quota.".to_string(),
-            },
-            category: ErrorCategory::Temporary,
-            recoverable: true,
-        },
-        ModelError::StreamError(msg) => UserFacingError {
-            summary: "Stream error".to_string(),
-            message: msg.clone(),
-            suggestion: "Retry the request.".to_string(),
-            category: ErrorCategory::Connection,
-            recoverable: true,
-        },
-        other => UserFacingError {
-            summary: "Model error".to_string(),
-            message: other.to_string(),
-            suggestion: String::new(),
-            category: ErrorCategory::Internal,
-            recoverable: false,
-        },
-    }
 }
 
 /// Report a tool call's outcome to the reducer.

@@ -992,7 +992,7 @@ pub fn handle_approval_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode
         use crate::ApprovalChoice;
         // Content-bearing external tools are non-allowlistable: the gate signals
         // this with an empty allowlist scope, and the modal then omits the
-        // middle "approve always" option (#6, #31). Layout:
+        // middle "approve always" option. Layout:
         //   allowlistable:     0 = Yes, 1 = Yes-always, 2 = No
         //   non-allowlistable: 0 = Yes,                 1 = No
         let allowlistable = state
@@ -1763,7 +1763,7 @@ pub fn handle_submit_prompt(
     // only on actual change.
     emit_title_if_changed(state, cmds);
 
-    // Instructions/memory are kept fresh by the background config watcher (#45),
+    // Instructions/memory are kept fresh by the background config watcher,
     // which stamps `state.instructions`/`state.memory` via
     // `Msg::InstructionsChanged`/`MemoryChanged`. The reducer reads them here as
     // injected data — no inline I/O — so `update()` stays pure and a recorded
@@ -1789,7 +1789,7 @@ pub fn handle_submit_prompt(
 
 /// Handle `Msg::OpenImageAt`. Resolves the base64 payload from the committed
 /// message history, writes it to a temp file, and dispatches
-/// `Cmd::OpenInSystem` so the user's default image viewer opens it. F13.
+/// `Cmd::OpenInSystem` so the user's default image viewer opens it.
 ///
 /// Resolution prefers the stable global image number: the click map indexes
 /// the DISPLAY transcript, which the continuation stitch can shift away from

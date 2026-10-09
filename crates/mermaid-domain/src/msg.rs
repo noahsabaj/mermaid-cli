@@ -400,7 +400,7 @@ pub enum Msg {
         duration_secs: u64,
     },
 
-    // ── Mouse (F13) ─────────────────────────────────────────────────
+    // ── Mouse ─────────────────────────────────────────────────
     /// Mouse-wheel scroll in the chat pane. Positive delta = scroll
     /// toward older messages (up), negative = toward newer (down). The
     /// reducer accumulates into `ui.mouse_scroll_accum`; the render layer
@@ -435,7 +435,7 @@ pub enum Msg {
     /// Copy the current chat text selection to the system clipboard. The main
     /// loop reads the selected text from the render layer (`rstate.chat`) and
     /// emits this, so the side effect flows through `update()` — and is recorded
-    /// for replay — instead of being dispatched out-of-band (#18).
+    /// for replay — instead of being dispatched out-of-band.
     CopySelection(String),
 }
 

@@ -27,7 +27,7 @@ pub struct ModelConfig {
     pub system_prompt: Option<String>,
 
     /// Project-specific instructions appended to the system prompt
-    /// (Step 5h: MERMAID.md content). Runtime-only — never persisted.
+    /// (MERMAID.md content). Runtime-only — never persisted.
     /// On Anthropic, this gets its own `cache_control` block so the
     /// static base stays cached even when the dynamic suffix changes.
     /// On other adapters, it's concatenated onto the system prompt

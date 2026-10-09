@@ -213,7 +213,7 @@ pub fn handle_compaction_finished(
         CompactionOutcome::Manual => {
             state.turn = TurnState::Idle;
             // Drain one queued message on the way out, same as the no-tool-calls
-            // tail of `handle_stream_done` / `handle_turn_cancelled` (#73). A
+            // tail of `handle_stream_done` / `handle_turn_cancelled`. A
             // message the user typed during `/compact` would otherwise sit in the
             // FIFO until some later turn happened to end.
             drain_next_queued_message(state);
@@ -467,7 +467,7 @@ pub fn handle_stream_done(
             continuation,
         ),
         other => {
-            // #F40: a StreamDone can arrive for a turn that is already Cancelling
+            // A StreamDone can arrive for a turn that is already Cancelling
             // (the provider completed a moment before the user's cancel was
             // processed). Honor the cancel — the turn is NOT committed — but still
             // fold the already-billed token usage into the running totals so the
@@ -580,7 +580,7 @@ pub fn handle_stream_done(
     // upstream in the adapter; here we only see reasons that still produced
     // output.) Skip it when tool calls are pending: a system message inserted
     // between the assistant's `tool_calls` and their results breaks provider
-    // pairing → 400 (#72). A Length/ContentFilter stop *with* tool calls is
+    // pairing → 400. A Length/ContentFilter stop *with* tool calls is
     // contradictory anyway, so dropping the note in that case is safe.
     if tool_calls.is_empty() && !auto_retry_empty {
         match stop_reason {
@@ -975,7 +975,7 @@ pub fn handle_upstream_error(
     turn: TurnId,
     error: mermaid_model::models::UserFacingError,
 ) {
-    // Defense in depth (F4): even though the stale-filter at the top of
+    // Defense in depth: even though the stale-filter at the top of
     // `update_step` gates on `turn_id()`, re-check here so a future
     // refactor that weakens the filter can't silently wipe the active
     // turn with an error message that belongs to a superseded one.
@@ -983,11 +983,11 @@ pub fn handle_upstream_error(
         return;
     }
 
-    // F35: if the turn is already being cancelled (the user hit Ctrl+C / Esc),
+    // If the turn is already being cancelled (the user hit Ctrl+C / Esc),
     // a late `UpstreamError` from the cancelled provider call is the cancel's
     // own side-channel, not a real failure. The stale-filter lets a same-id
     // `Cancelling` turn through, so guard the state explicitly here — mirroring
-    // the `ApprovalRequested` guard (#74). Painting a spurious error line for
+    // the `ApprovalRequested` guard. Painting a spurious error line for
     // the user's own cancel and draining a queued message here would race the
     // terminal `TurnCancelled` that `drop_scope` emits.
     if matches!(state.turn, TurnState::Cancelling { .. }) {

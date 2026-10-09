@@ -3,18 +3,6 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use rusqlite::{Connection, params};
 
-// Bumped to 5 for the additive `tasks.prompt` column (the daemon scheduler
-// executes queued tasks later, so the full prompt must be persisted at enqueue
-// time — `title` is truncated at 80 chars). Additive, but the bump lets a DB
-// already at v4 re-run the migration once to pick it up. The bump is
-// load-bearing alongside the F17 early-return in `init_schema`: a DB at an
-// older version still runs the migration (the idempotent baseline plus any
-// per-version step dispatched by `migrate_within_txn`) exactly once, while an
-// already-current DB skips the write lock entirely.
-//
-// History: v2 added the additive `tasks.owner_kind` column (F18/RC-E); v3 added
-// the F75 covering indexes; v4 added the `outcomes` table.
-
 use std::sync::{Mutex, PoisonError};
 
 /// The one store handle this process shares. Before this existed every call
@@ -80,17 +68,10 @@ pub use mermaid_model::records::*;
 pub use repos::*;
 pub use rows::*;
 
-// Bumped to 5 for the additive `tasks.prompt` column (the daemon scheduler
-// executes queued tasks later, so the full prompt must be persisted at enqueue
-// time — `title` is truncated at 80 chars). Additive, but the bump lets a DB
-// already at v4 re-run the migration once to pick it up. The bump is
-// load-bearing alongside the F17 early-return in `init_schema`: a DB at an
-// older version still runs the migration (the idempotent baseline plus any
-// per-version step dispatched by `migrate_within_txn`) exactly once, while an
-// already-current DB skips the write lock entirely.
-//
-// History: v2 added the additive `tasks.owner_kind` column (F18/RC-E); v3 added
-// the F75 covering indexes; v4 added the `outcomes` table.
+/// Bump with every schema change. `init_schema` returns early for a DB
+/// already at this version, so a DB at an older one runs the migration (the
+/// idempotent baseline plus any per-version step `migrate_within_txn`
+/// dispatches) exactly once, and a current one skips the write lock.
 pub(crate) const SCHEMA_VERSION: i32 = 8;
 
 /// Windows ACL hardening for the data directory, and the repair path for
@@ -564,14 +545,14 @@ impl RuntimeStore {
             .map_err(Into::into)
     }
 
-    /// Recover state stranded by a previous daemon's crash/stop (#120, #118).
+    /// Recover state stranded by a previous daemon's crash/stop.
     /// A `Running` task's worker died with the daemon, so it can never finish —
     /// mark it `failed` with an event. An approval left in the transient
-    /// `approving` claim state (a replay that crashed mid-effect, #118) is reset
+    /// `approving` claim state (a replay that crashed mid-effect) is reset
     /// to undecided so it reappears as pending and stays re-runnable. Call once
     /// on daemon startup, before serving. Returns `(tasks_reset, claims_released)`.
     ///
-    /// F18 (RC-E): only **daemon-owned** running tasks are reset. The store is
+    /// Only **daemon-owned** running tasks are reset. The store is
     /// shared with interactive `mermaid` CLI runs; their tasks are created with a
     /// `NULL` `owner_kind` and are LEFT RUNNING here, so a live CLI session isn't
     /// wrongly flipped to `failed` (with a spurious "interrupted" event) just
@@ -592,7 +573,7 @@ impl RuntimeStore {
         // UPDATE: SQLite fails a read→write lock upgrade with SQLITE_BUSY
         // *immediately* (busy_timeout does not retry upgrades), so a CLI holding
         // the write lock at daemon startup would abort recovery. IMMEDIATE instead
-        // waits on busy_timeout for the lock (#F21). Mirrors `init_schema`.
+        // waits on busy_timeout for the lock. Mirrors `init_schema`.
         self.conn.execute_batch("BEGIN IMMEDIATE;")?;
         let result = (|| -> Result<(usize, usize)> {
             let running: Vec<String> = {
@@ -636,7 +617,7 @@ impl RuntimeStore {
         }
     }
 
-    /// Best-effort retention GC (#130, F22/RC-F): prune archived
+    /// Best-effort retention GC: prune archived
     /// approvals/checkpoints, the events of long-finished tasks, terminal tasks,
     /// and the high-churn / old rows of the remaining tables, all older than
     /// `retention_days`. The append-only `outcomes` reward table — the
@@ -674,7 +655,7 @@ impl RuntimeStore {
                )",
             params![cutoff],
         )? as u64;
-        // F22 (RC-F): the high-churn growers. `tool_runs` is the fastest — one row
+        // The high-churn growers. `tool_runs` is the fastest — one row
         // per tool call — so prune FINISHED runs past the window (a still-running
         // run has a NULL `finished_at` and is kept).
         removed += tx.execute(
@@ -711,7 +692,7 @@ impl RuntimeStore {
             "DELETE FROM outcomes WHERE created_at < ?1",
             params![outcomes_cutoff],
         )? as u64;
-        // Terminal tasks past the window — the #148 durable queue would otherwise
+        // Terminal tasks past the window — the durable queue would otherwise
         // keep every finished task (with its full `prompt`) forever. `task_events`
         // is `ON DELETE CASCADE`, so a pruned task's events go with it (the
         // explicit task_events prune above already cleared most). A queued /
@@ -739,7 +720,7 @@ impl RuntimeStore {
             "runtime DB schema version {current} is newer than this build supports ({SCHEMA_VERSION}); upgrade mermaid"
         );
 
-        // F17 (RC-E): the overwhelmingly common case is an already-current DB.
+        // The overwhelmingly common case is an already-current DB.
         // The daemon opens a fresh store per request, and the old code ran
         // `BEGIN IMMEDIATE` (the write lock) + the full migration + an
         // unconditional `PRAGMA user_version` write on EVERY open — so even
@@ -801,7 +782,7 @@ impl RuntimeStore {
             "CREATE INDEX IF NOT EXISTS idx_checkpoints_session
                  ON checkpoints(session_id, message_index);",
         )?;
-        // F18 (RC-E): task ownership. Nullable + no backfill — existing rows stay
+        // Task ownership. Nullable + no backfill — existing rows stay
         // `NULL` (treated as un-owned, so reconcile leaves them alone), and only
         // tasks the daemon explicitly marks `daemon` are reset on restart.
         ensure_column(&self.conn, "tasks", "owner_kind", "TEXT")?;
@@ -809,7 +790,7 @@ impl RuntimeStore {
         // enqueued for deferred daemon execution set it; the claim query treats
         // a NULL prompt as "metadata-only task, never claim".
         ensure_column(&self.conn, "tasks", "prompt", "TEXT")?;
-        // F75: `reconcile_after_restart` filters `status = 'running' AND
+        // `reconcile_after_restart` filters `status = 'running' AND
         // owner_kind = ?`, which the (project_path, ...) index cannot serve
         // (wrong leading column). This covering index does.
         //
@@ -840,7 +821,7 @@ impl RuntimeStore {
             )?;
         }
 
-        // F76: structured per-version migration dispatch. Everything above is the
+        // Structured per-version migration dispatch. Everything above is the
         // idempotent ADDITIVE baseline (`CREATE ... IF NOT EXISTS` + `ensure_column`),
         // always safe to re-run. This loop is the home for FUTURE NON-ADDITIVE
         // steps — dropping/renaming/transforming a column, rebuilding a table —
@@ -853,7 +834,7 @@ impl RuntimeStore {
             match target {
                 // v2 added `tasks.owner_kind` — additive, applied by the baseline.
                 2 => {},
-                // v3: F75 covering indexes — additive, created by the baseline
+                // v3: covering indexes — additive, created by the baseline
                 // above; this call is the concrete template for the first real
                 // non-additive change.
                 3 => self.migrate_to_v3()?,
@@ -1549,7 +1530,7 @@ mod tests {
 
     #[test]
     pub(crate) fn pending_and_reconcile_scans_use_indexes() {
-        // F75: the pending-approval scan and the reconcile scan must hit their
+        // The pending-approval scan and the reconcile scan must hit their
         // covering indexes rather than full-table scans.
         let path = temp_db("scan_indexes");
         let store = RuntimeStore::open(&path).expect("open");
@@ -1592,8 +1573,8 @@ mod tests {
 
     #[test]
     pub(crate) fn upgrades_from_v2_to_current_and_adds_indexes() {
-        // F75/F76: a DB stamped at the previous schema version must migrate forward
-        // on the next open — re-run the idempotent baseline, pick up the F75
+        // A DB stamped at the previous schema version must migrate forward
+        // on the next open — re-run the idempotent baseline, pick up the
         // indexes, and stamp the current version — exercising the per-version
         // dispatch (`from_version = 2` runs the v3 step).
         let path = temp_db("upgrade_v2");
@@ -1683,7 +1664,7 @@ mod tests {
 
     /// Every version `init_schema` claims to accept must actually upgrade.
     ///
-    /// A v1 database could not. The F75 covering index was created in the
+    /// A v1 database could not. The covering index was created in the
     /// idempotent baseline, which runs before the `ensure_column` that adds
     /// the column it indexes — so the migration threw "no such column:
     /// `owner_kind`", rolled back inside its own transaction, left
@@ -2115,7 +2096,7 @@ mod tests {
 
         // A future expiry rendered with a non-UTC offset still verifies, even
         // though its RFC3339 string sorts lexically *before* `now_rfc3339()` —
-        // this would wrongly read as expired under the old SQL string compare (#64).
+        // this would wrongly read as expired under the old SQL string compare.
         let skewed = (chrono::Utc::now() + chrono::Duration::hours(1))
             .with_timezone(&chrono::FixedOffset::west_opt(3 * 3600).unwrap())
             .to_rfc3339();
@@ -2161,7 +2142,7 @@ mod tests {
 
     #[test]
     pub(crate) fn fresh_id_is_collision_free_in_tight_loop() {
-        // The #61 stress: ids minted back-to-back (same nanosecond on a coarse
+        // Stress: ids minted back-to-back (same nanosecond on a coarse
         // clock) must all be distinct and keep the `prefix-` shape.
         let mut seen = std::collections::HashSet::new();
         for _ in 0..10_000 {
@@ -2249,7 +2230,7 @@ mod tests {
 
     #[test]
     pub(crate) fn clamp_limit_never_binds_negative() {
-        // #128: a huge `limit` must clamp, not wrap to a negative i64 (which
+        // A huge `limit` must clamp, not wrap to a negative i64 (which
         // SQLite reads as unbounded).
         assert_eq!(clamp_limit(10), 10);
         assert_eq!(clamp_limit(usize::MAX), MAX_QUERY_LIMIT as i64);
@@ -2273,7 +2254,7 @@ mod tests {
 
     #[test]
     pub(crate) fn approval_claim_is_single_winner_releasable_and_finalizable() {
-        // #118: exactly one concurrent claim wins; a released claim re-claims; a
+        // Exactly one concurrent claim wins; a released claim re-claims; a
         // finalized one is decided and unclaimable.
         let path = temp_db("approval_claim");
         let store = RuntimeStore::open(&path).expect("open store");
@@ -2314,7 +2295,7 @@ mod tests {
 
     #[test]
     pub(crate) fn reconcile_after_restart_recovers_running_tasks_and_claims() {
-        // #120/#118: a daemon-owned Running task and an 'approving' claim left by a
+        // A daemon-owned Running task and an 'approving' claim left by a
         // crashed daemon are recovered on the next startup.
         let path = temp_db("reconcile");
         let store = RuntimeStore::open(&path).expect("open store");
@@ -2350,7 +2331,7 @@ mod tests {
 
     #[test]
     pub(crate) fn reconcile_after_restart_spares_non_daemon_running_tasks() {
-        // F18 (RC-E): a Running task NOT owned by the daemon (an interactive CLI
+        // A Running task NOT owned by the daemon (an interactive CLI
         // run sharing the store, owner_kind = NULL) must survive a daemon restart
         // — not be flipped to Failed with a spurious "interrupted" event.
         let path = temp_db("reconcile_spare_cli");
@@ -2400,7 +2381,7 @@ mod tests {
 
     #[test]
     pub(crate) fn gc_prunes_old_archived_but_keeps_active() {
-        // #130: GC removes archived rows past the retention window, never active
+        // GC removes archived rows past the retention window, never active
         // ones.
         let path = temp_db("gc");
         let store = RuntimeStore::open(&path).expect("open store");
@@ -2544,7 +2525,7 @@ mod tests {
          would separate what gc saw from what the assertions expect"
     )]
     pub(crate) fn gc_prunes_high_churn_and_old_terminal_rows_but_keeps_active() {
-        // F22 (RC-F): GC prunes finished tool_runs, exited processes, old
+        // GC prunes finished tool_runs, exited processes, old
         // compactions, and stale sessions/messages past the window — never active
         // data (a running tool_run, a live process, a fresh session).
         let path = temp_db("gc_high_churn");
@@ -2712,7 +2693,7 @@ mod tests {
 
     #[test]
     pub(crate) fn task_list_skips_undecodable_status_row() {
-        // F19 (RC-E): a task row whose status enum this build can't decode (a
+        // A task row whose status enum this build can't decode (a
         // different binary wrote it) is skipped, not allowed to blank the list.
         let path = temp_db("poison_task");
         let store = RuntimeStore::open(&path).expect("open store");
@@ -2743,7 +2724,7 @@ mod tests {
 
     #[test]
     pub(crate) fn checkpoint_delete_removes_row() {
-        // F23 (RC-F): the on-disk dir GC drops a checkpoint's DB row so list()
+        // The on-disk dir GC drops a checkpoint's DB row so list()
         // and the on-disk dirs stay in agreement.
         let path = temp_db("ckpt_delete");
         let store = RuntimeStore::open(&path).expect("open store");

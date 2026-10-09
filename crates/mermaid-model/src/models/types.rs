@@ -350,7 +350,7 @@ pub enum MessageRole {
     Tool,
 }
 
-// F74: version-skew-tolerant deserialize. A conversation written by a NEWER build
+// Version-skew-tolerant deserialize. A conversation written by a NEWER build
 // may carry a `role` string this build doesn't model; the derived `Deserialize`
 // would hard-fail the WHOLE `ConversationHistory` parse, so `--continue` silently
 // skipped the newest session. We instead accept any string and map an unknown
@@ -415,7 +415,7 @@ pub enum ChatMessageKind {
     /// read it; unlike a nudge it stays visible and is never swept, because
     /// the transcript should show why the run kept going.
     GoalCheck,
-    /// F74: a kind written by a NEWER build that this one doesn't model. Mapped
+    /// A kind written by a NEWER build that this one doesn't model. Mapped
     /// here by `#[serde(other)]` instead of failing the whole conversation parse;
     /// it's neither a checkpoint nor a run summary, so every `matches!` site
     /// treats it like a normal message. (`ChatMessageKind` is never matched
@@ -693,7 +693,7 @@ mod tests {
 
     #[test]
     fn provider_continuation_defaults_to_none() {
-        // Backward compat: messages saved before Step 3 won't have the
+        // Backward compat: older saved messages don't have the
         // field. Serde default kicks in — None — and deserialize
         // succeeds without errors.
         let pre_step3_json = r#"{
@@ -731,7 +731,7 @@ mod tests {
 
     #[test]
     fn unknown_message_role_deserializes_to_system() {
-        // F74: a role string from a newer build must not fail the parse — it maps
+        // A role string from a newer build must not fail the parse — it maps
         // to the neutral System role so the conversation still loads (`--continue`
         // no longer skips the newest session).
         let role: MessageRole = serde_json::from_str("\"Developer\"").expect("tolerant");
@@ -745,7 +745,7 @@ mod tests {
 
     #[test]
     fn unknown_message_kind_deserializes_to_unknown() {
-        // F74: an unknown ChatMessageKind maps to Unknown via #[serde(other)]
+        // An unknown ChatMessageKind maps to Unknown via #[serde(other)]
         // rather than failing the parse; it's treated like a normal message.
         let kind: ChatMessageKind = serde_json::from_str("\"some_future_kind\"").expect("tolerant");
         assert_eq!(kind, ChatMessageKind::Unknown);

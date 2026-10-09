@@ -48,7 +48,7 @@ use mermaid_model::tool_run::ManagedProcess;
 pub struct ToolDispatch {
     /// The active session's model id at the moment this call was emitted,
     /// so tools like `SubagentTool` spawn children against the same
-    /// provider the parent is using (F7).
+    /// provider the parent is using.
     pub model_id: String,
     /// Live safety mode at the moment this call was emitted
     /// (`state.session.safety_mode`). The runner builds the policy gate /
@@ -531,8 +531,8 @@ impl Cmd {
     /// The effect runner uses this to refuse spawning fresh work for a
     /// turn it has already cancelled (tombstoned) — a stray post-cancel
     /// `CallModel`/`ExecuteTool`/`CompactConversation` would otherwise
-    /// resurrect an un-cancelled scope via `scope_mut`'s `or_insert_with`
-    /// (F38). `CancelScope` must keep working on a tombstoned turn, which
+    /// resurrect an un-cancelled scope via `scope_mut`'s `or_insert_with`.
+    /// `CancelScope` must keep working on a tombstoned turn, which
     /// is exactly why it is excluded here.
     ///
     /// Exhaustive on purpose, with the same two lints `update_step` denies:

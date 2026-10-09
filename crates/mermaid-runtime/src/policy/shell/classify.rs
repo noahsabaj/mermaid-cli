@@ -327,7 +327,7 @@ pub(crate) fn classify_shell_command_depth(command: &str, depth: u8) -> RiskClas
         worst = shell_max(worst, classify_segment(&tokenize(segment)));
         // Descend into any command/process substitution the segment hides, so a
         // mutation wrapped in `$(…)`/backticks can't classify as the benign head
-        // that precedes it (#F1). Worst segment — outer or inner — wins.
+        // that precedes it. Worst segment — outer or inner — wins.
         if depth < MAX_SUBST_DEPTH {
             for body in extract_substitutions(segment) {
                 worst = shell_max(worst, classify_shell_command_depth(&body, depth + 1));
@@ -444,10 +444,10 @@ pub(crate) fn is_dangerous_root(arg: &str) -> bool {
     let a = a.strip_suffix("/.").unwrap_or(a);
     let a = a.strip_suffix('/').unwrap_or(a);
     let normalized = a.replace("${", "$").replace('}', "");
-    // Collapse interior `..` so `/etc/../etc` can't disguise `/etc` (#F3).
+    // Collapse interior `..` so `/etc/../etc` can't disguise `/etc`.
     let collapsed = collapse_parent_refs(&normalized);
     // Strip a trailing slash so a path that collapses to bare `/` via interior
-    // `..` (e.g. `/etc/..` → `/`) reduces to "" and trips the root check (#F3).
+    // `..` (e.g. `/etc/..` → `/`) reduces to "" and trips the root check.
     let a = collapsed.strip_suffix('/').unwrap_or(&collapsed);
     if a.is_empty() {
         // Was `/`, `/*`, `/.`, or collapsed to the filesystem root.

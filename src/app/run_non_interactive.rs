@@ -125,7 +125,7 @@ pub async fn run_non_interactive_with(
         eprintln!("mermaid: {warning}");
     }
     let providers = std::sync::Arc::new(crate::providers::ProviderFactory::new(config.clone()));
-    // F6 `--no-execute`: build an empty tool registry so the model can
+    // `--no-execute`: build an empty tool registry so the model can
     // plan but never act. MCP init below is also skipped to match.
     let tools = if opts.no_execute {
         std::sync::Arc::new(ToolRegistry::new())
@@ -384,8 +384,7 @@ impl StepObserver for RunStream {
 /// The deadline is a drive-policy arm rather than a `timeout()` wrapper
 /// precisely so this path can exist: the wrapper returned `Err` through `?`
 /// while the runner was still owned by the caller's stack frame, and dropping a
-/// runner mid-flight leaks its MCP children (#76 — fixed in `drive_child` at
-/// the time, and only there).
+/// runner mid-flight leaks its MCP children.
 /// Takes the runner rather than the engine: this future is live at two await
 /// points inside the driver's own, and moving the engine in would put a
 /// `State`-sized slot in both — which is how `run_non_interactive_with`'s
