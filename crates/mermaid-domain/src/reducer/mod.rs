@@ -676,6 +676,9 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             // is worth reading after the fact.
             push_system(&mut state, &mut cmds, text);
         },
+        Msg::AutoCompactSaved { path, compaction } => {
+            slash::apply_saved_auto_compact(&mut state, &mut cmds, &path, compaction);
+        },
         Msg::Toast { text } => {
             // Feedback on a keystroke the user just made. It expires on its own
             // against `state.now`; the 60 Hz tick redraws it away. Never a

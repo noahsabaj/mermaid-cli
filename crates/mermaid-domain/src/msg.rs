@@ -362,6 +362,14 @@ pub enum Msg {
         text: String,
     },
 
+    /// An `/autocompact` change was written to `path`. `compaction` is the
+    /// user and project config merged again, so the session follows the same
+    /// priority a new session would.
+    AutoCompactSaved {
+        path: String,
+        compaction: crate::config::CompactionConfig,
+    },
+
     /// Ephemeral confirmation of a manual action (clipboard copy), shown just
     /// above the input for [`crate::state::TOAST_TTL`] and then gone. The
     /// sibling of `TransientStatus` for feedback that must NOT become a
@@ -647,6 +655,9 @@ pub enum SlashCmd {
     /// `/goal`: no arg → status; a clear word → clear; anything else sets
     /// the condition and starts working toward it.
     Goal(Option<String>),
+    /// `/autocompact`: the raw argument, parsed by the reducer, which knows
+    /// the model a bare scope means.
+    AutoCompact(Option<String>),
     /// Compose the input draft in `$VISUAL`/`$EDITOR` (also Ctrl+O).
     Editor,
     Help,
@@ -734,6 +745,7 @@ impl Msg {
             | Self::Tick
             | Self::Resize { .. }
             | Self::TransientStatus { .. }
+            | Self::AutoCompactSaved { .. }
             | Self::Toast { .. }
             | Self::EditorReturned { .. }
             | Self::BackgroundAgentStarted { .. }
@@ -803,6 +815,7 @@ impl Msg {
             Self::FocusChanged(_) => MsgKind::FocusChanged,
             Self::OpenImageAt { .. } => MsgKind::OpenImageAt,
             Self::TransientStatus { .. } => MsgKind::TransientStatus,
+            Self::AutoCompactSaved { .. } => MsgKind::AutoCompactSaved,
             Self::Toast { .. } => MsgKind::Toast,
             Self::EditorReturned { .. } => MsgKind::EditorReturned,
             Self::BackgroundAgentStarted { .. }
@@ -865,6 +878,7 @@ pub enum MsgKind {
     BackgroundAgent,
     OpenImageAt,
     TransientStatus,
+    AutoCompactSaved,
     Toast,
     EditorReturned,
     CopySelection,

@@ -597,11 +597,8 @@ pub fn handle_stream_done(
                     .as_ref()
                     .and_then(|s| s.max_tokens)
                     .or(state.runtime.provider_capabilities.max_context_tokens);
-                let reserve = state
-                    .settings
-                    .compaction
-                    .policy()
-                    .response_reserve(&build_chat_request(state));
+                let request = build_chat_request(state);
+                let reserve = request.compaction.response_reserve(&request);
                 match crate::compaction::classify_length_stop(usage.as_ref(), window, reserve) {
                     crate::compaction::LengthCause::OutputCapped => {
                         // Never compact for an output-cap stop — the input
@@ -788,11 +785,11 @@ pub fn handle_stream_done(
         };
         cmds.push(Cmd::CompactConversation {
             turn: comp_turn,
-            request: CompactionRequest::auto(
-                build_chat_request(state),
-                CompactionTrigger::TruncationRecovery,
-                state.settings.compaction.policy(),
-            ),
+            request: {
+                let request = build_chat_request(state);
+                let policy = request.compaction;
+                CompactionRequest::auto(request, CompactionTrigger::TruncationRecovery, policy)
+            },
         });
         return;
     }

@@ -707,6 +707,9 @@ pub fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
                 ),
             );
         },
+        SlashCmd::AutoCompact(arg) => {
+            handle_auto_compact_command(state, cmds, arg.as_deref().unwrap_or(""));
+        },
         SlashCmd::OutputStyle { name, project } => {
             handle_output_style_command(state, cmds, name.as_deref(), project);
         },
@@ -733,6 +736,59 @@ pub fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
             push_system(state, cmds, usage);
         },
     }
+}
+
+/// `/autocompact`: bare shows the threshold for the current model; a change
+/// goes to the effect layer, which writes it and answers with
+/// [`Msg::AutoCompactSaved`].
+fn handle_auto_compact_command(state: &mut State, cmds: &mut Vec<Cmd>, arg: &str) {
+    match crate::autocompact::parse(arg, &state.session.model_id) {
+        Ok(None) => {
+            let status = crate::autocompact::status(
+                &state.settings.compaction,
+                &state.session.model_id,
+                known_context_window(state),
+            );
+            push_system(
+                state,
+                cmds,
+                format!("{status}\n{}", crate::autocompact::USAGE),
+            );
+        },
+        Ok(Some(change)) => cmds.push(Cmd::PersistAutoCompact(change)),
+        Err(message) => push_system(state, cmds, message),
+    }
+}
+
+/// Take the automatic compaction settings the effect layer read back after
+/// an `/autocompact` change, and show what now applies.
+pub(super) fn apply_saved_auto_compact(
+    state: &mut State,
+    cmds: &mut Vec<Cmd>,
+    path: &str,
+    saved: crate::config::CompactionConfig,
+) {
+    let live = &mut state.settings.compaction;
+    live.auto_enabled = saved.auto_enabled;
+    live.auto_threshold_tokens = saved.auto_threshold_tokens;
+    live.auto_threshold_tokens_per_model = saved.auto_threshold_tokens_per_model;
+    let status = crate::autocompact::status(
+        &state.settings.compaction,
+        &state.session.model_id,
+        known_context_window(state),
+    );
+    push_system(state, cmds, format!("Saved to {path}.\n{status}"));
+}
+
+/// The current model's context window, when a response or the provider has
+/// told us.
+fn known_context_window(state: &State) -> Option<usize> {
+    state
+        .session
+        .context_usage
+        .as_ref()
+        .and_then(|s| s.max_tokens)
+        .or(state.runtime.provider_capabilities.max_context_tokens)
 }
 
 /// `/output-style`: bare lists every selectable style; a name switches for
@@ -1047,11 +1103,11 @@ pub fn handle_manual_compact(state: &mut State, cmds: &mut Vec<Cmd>, instruction
     state.runtime.auto_compact_suppressed = false;
     cmds.push(Cmd::CompactConversation {
         turn,
-        request: CompactionRequest::manual(
-            build_chat_request(state),
-            instructions,
-            state.settings.compaction.policy(),
-        ),
+        request: {
+            let request = build_chat_request(state);
+            let policy = request.compaction;
+            CompactionRequest::manual(request, instructions, policy)
+        },
     });
 }
 

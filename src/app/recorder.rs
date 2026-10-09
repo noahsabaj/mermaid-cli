@@ -734,6 +734,7 @@ mod tests {
                 | MsgKind::FocusChanged
                 | MsgKind::OpenImageAt
                 | MsgKind::TransientStatus
+                | MsgKind::AutoCompactSaved
                 | MsgKind::Toast
                 | MsgKind::EditorReturned
                 | MsgKind::BackgroundAgent
@@ -1041,6 +1042,13 @@ mod tests {
             },
             Msg::TransientStatus {
                 text: "saved".to_string(),
+            },
+            Msg::AutoCompactSaved {
+                path: "/home/u/.config/mermaid/config.toml".to_string(),
+                compaction: mermaid_domain::config::CompactionConfig {
+                    auto_threshold_tokens: Some(250_000),
+                    ..Default::default()
+                },
             },
             Msg::MouseScroll { delta: -3 },
             Msg::FocusChanged(false),

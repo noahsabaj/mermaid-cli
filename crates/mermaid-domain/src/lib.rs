@@ -28,6 +28,7 @@
 //! await something cannot, because the runtime is not on the dependency list.
 
 pub mod action_display;
+pub mod autocompact;
 pub mod checklist;
 pub mod cmd;
 pub mod compaction;
@@ -64,9 +65,10 @@ pub use checklist::{
 pub use cmd::{ChatRequest, Cmd, ToolDefinition, ToolDispatch};
 pub use compaction::{
     CompactionBoundary, CompactionEvent, CompactionPolicy, CompactionRequest, CompactionResult,
-    CompactionTrigger, PreparedCompaction, RequestedCompaction, build_replacement_messages,
-    build_summary_request, compaction_receipt, context_exceeds_hard_limit, format_compact_count,
-    normalize_summary, prepare_compaction, should_auto_compact,
+    CompactionTrigger, MIN_AUTO_THRESHOLD_TOKENS, PreparedCompaction, RequestedCompaction,
+    build_replacement_messages, build_summary_request, compaction_receipt,
+    context_exceeds_hard_limit, format_compact_count, normalize_summary, prepare_compaction,
+    should_auto_compact,
 };
 pub use config::{
     ActiveStyle, AgentTypeConfig, AgentsConfig, CompactionConfig, Config, ConfigLayer, ExecConfig,

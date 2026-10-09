@@ -198,6 +198,7 @@ pub fn check_request(
         output_schema: None,
         suppress_auto_compact: false,
         requested_compaction: None,
+        compaction: base.compaction,
         native_compaction: None,
         native_tools: mermaid_model::models::NativeTools::default(),
     }
@@ -428,6 +429,7 @@ mod tests {
             output_schema: None,
             suppress_auto_compact: false,
             requested_compaction: None,
+            compaction: crate::CompactionPolicy::default(),
             native_compaction: None,
             native_tools: mermaid_model::models::NativeTools::default(),
         };

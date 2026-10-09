@@ -148,6 +148,7 @@ Model and context:
 - `/reasoning <level>` — set reasoning: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`
 - `/visible-reasoning [on|off|toggle]` — show or hide reasoning blocks in the transcript
 - `/usage`, `/context`, `/compact [instructions]`
+- `/autocompact [tokens|off|on|reset] [global|project] [current-model|all-models]` — show or set when automatic compaction starts. `/autocompact 250000` compacts the current model at 250k tokens. The value goes to your user config, or to the project config with `project`; `all-models` sets it for every model. A value for one model overrides the one for all models. `off` and `on` apply to all models. `reset all-models` removes every auto-compact value from that file
 - `/model-info <model>`
 - `/output-style [name] [--project]` — show or set the output style (voice/format preset: `default`, `proactive`, `concise`, `explanatory`, `learning`, or a custom style file). Persists to your user config, or to the project config with `--project`; applies to the next message, subagents keep the stock prompt
 

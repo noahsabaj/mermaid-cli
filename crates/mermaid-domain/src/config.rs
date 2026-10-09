@@ -658,6 +658,28 @@ pub struct CompactionConfig {
     /// reserve no longer fits".
     pub auto_threshold_percent: u8,
 
+    /// Context size, in tokens, at which auto-compaction triggers for every
+    /// model. Replaces `auto_threshold_percent` when set. Raised to at least
+    /// [`crate::MIN_AUTO_THRESHOLD_TOKENS`].
+    ///
+    /// Example:
+    /// ```toml
+    /// [compaction]
+    /// auto_threshold_tokens = 250000
+    /// ```
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_threshold_tokens: Option<usize>,
+
+    /// Token thresholds for single models, keyed by model ID. One here
+    /// overrides `auto_threshold_tokens` for that model.
+    ///
+    /// Example:
+    /// ```toml
+    /// [compaction.auto_threshold_tokens_per_model]
+    /// "openai/gpt-5.6" = 400000
+    /// ```
+    pub auto_threshold_tokens_per_model: HashMap<String, usize>,
+
     /// How many trailing user turns survive compaction verbatim. Clamped to at
     /// least 1 — a compaction that preserved no turn would hand the model a
     /// summary with no live thread to continue.
@@ -699,6 +721,8 @@ impl Default for CompactionConfig {
             auto_enabled: policy.auto_enabled,
             provider_native: true,
             auto_threshold_percent: policy.auto_threshold_percent,
+            auto_threshold_tokens: None,
+            auto_threshold_tokens_per_model: HashMap::new(),
             tail_turns: policy.tail_turns,
             tail_token_budget: policy.tail_token_budget,
             summary_max_tokens: policy.summary_max_tokens,
@@ -721,12 +745,35 @@ impl CompactionConfig {
     /// smaller *maximum* and quietly under-reserve on every turn.
     #[must_use]
     pub fn policy(&self) -> crate::CompactionPolicy {
+        self.policy_with_tokens(self.auto_threshold_tokens)
+    }
+
+    /// [`Self::policy`] for `model_id`, whose own token threshold, if it has
+    /// one, overrides the one for every model.
+    #[must_use]
+    pub fn policy_for(&self, model_id: &str) -> crate::CompactionPolicy {
+        self.policy_with_tokens(self.model_threshold_tokens(model_id))
+    }
+
+    /// The token threshold that applies to `model_id`, from its own entry or
+    /// the one for every model.
+    #[must_use]
+    pub fn model_threshold_tokens(&self, model_id: &str) -> Option<usize> {
+        self.auto_threshold_tokens_per_model
+            .get(model_id)
+            .copied()
+            .or(self.auto_threshold_tokens)
+    }
+
+    fn policy_with_tokens(&self, tokens: Option<usize>) -> crate::CompactionPolicy {
         let defaults = crate::CompactionPolicy::default();
         let min_reserve = self.min_response_reserve_tokens;
         let max_reserve = self.max_response_reserve_tokens;
         crate::CompactionPolicy {
             auto_enabled: self.auto_enabled,
             auto_threshold_percent: self.auto_threshold_percent.clamp(1, 100),
+            // Below this, every turn would compact.
+            auto_threshold_tokens: tokens.map(|t| t.max(crate::MIN_AUTO_THRESHOLD_TOKENS)),
             tail_turns: self.tail_turns.max(1),
             // A zero budget would drop the whole tail; fall back to the default
             // rather than produce a checkpoint with nothing after it.

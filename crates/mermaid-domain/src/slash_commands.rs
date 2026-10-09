@@ -240,6 +240,14 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         group: SlashCommandGroup::ModelContext,
     },
     SlashCommand {
+        name: "autocompact",
+        aliases: &[],
+        description: "Show or set when automatic compaction starts",
+        arg_hint: Some("[tokens|off|on|reset] [global|project] [current-model|all-models]"),
+        usage_note: None,
+        group: SlashCommandGroup::ModelContext,
+    },
+    SlashCommand {
         name: "memory",
         aliases: &["memories"],
         description: "List durable memories saved across sessions",
@@ -705,6 +713,7 @@ pub fn parse_slash_command(raw: &str) -> Option<crate::SlashCmd> {
             })
         },
         Some("compact") => SlashCmd::Compact(arg),
+        Some("autocompact") => SlashCmd::AutoCompact(arg),
         Some("memory") => SlashCmd::Memory,
         Some("remember") => SlashCmd::Remember(required(arg)),
         Some("forget") => SlashCmd::Forget(required(arg)),

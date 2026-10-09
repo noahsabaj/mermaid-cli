@@ -240,6 +240,9 @@ pub enum Cmd {
     },
     /// Persist the Ollama RAM-offload toggle (`/context offload on|off`).
     PersistOllamaOffload(bool),
+    /// Write an `/autocompact` change to its config file, then report the
+    /// settings that now apply with [`Msg::AutoCompactSaved`].
+    PersistAutoCompact(crate::autocompact::AutoCompactChange),
     /// Persist the `/theme` choice as `ui.theme` in the user config file.
     PersistUiTheme(crate::ThemeChoice),
     /// Persist the `/output-style` choice as `output.style` in the user
@@ -418,6 +421,9 @@ pub struct ChatRequest {
     /// dispatch: compact before sending this request, whatever the fill.
     /// Rides on the request for the same reason `suppress_auto_compact` does.
     pub requested_compaction: Option<crate::RequestedCompaction>,
+    /// The automatic compaction policy for this request's model, from the live
+    /// settings, so a change made during the session applies next turn.
+    pub compaction: crate::CompactionPolicy,
     /// Let the provider compact this turn itself. Set by the effect layer,
     /// never the reducer, when `[compaction] provider_native` is on and the
     /// provider has not refused it; the automatic threshold is then skipped.
@@ -513,6 +519,7 @@ impl Cmd {
             Self::PersistOllamaOffload(_) => "persist_ollama_offload",
             Self::PersistUiTheme(_) => "persist_ui_theme",
             Self::PersistOutputStyle { .. } => "persist_output_style",
+            Self::PersistAutoCompact(_) => "persist_auto_compact",
             Self::PersistProjectOutputStyle { .. } => "persist_project_output_style",
             Self::ListMemory => "list_memory",
             Self::RememberMemory { .. } => "remember_memory",
@@ -598,6 +605,7 @@ impl Cmd {
             | Self::PersistUiTheme(_)
             | Self::PersistOutputStyle { .. }
             | Self::PersistProjectOutputStyle { .. }
+            | Self::PersistAutoCompact(_)
             | Self::ListMemory
             | Self::RememberMemory { .. }
             | Self::ForgetMemory { .. }
@@ -728,6 +736,7 @@ impl Cmd {
             },
             Self::PersistUiTheme(theme) => format!("persist_ui_theme({})", theme.as_str()),
             Self::PersistOutputStyle { style } => format!("persist_output_style({style})"),
+            Self::PersistAutoCompact(change) => format!("persist_auto_compact({change:?})"),
             Self::PersistProjectOutputStyle { style } => {
                 format!("persist_project_output_style({style})")
             },
@@ -816,6 +825,7 @@ mod tests {
             output_schema: None,
             suppress_auto_compact: false,
             requested_compaction: None,
+            compaction: crate::CompactionPolicy::default(),
             native_compaction: None,
             native_tools: mermaid_model::models::NativeTools::default(),
         };
@@ -886,6 +896,7 @@ mod model_config_tests {
             output_schema: Some(serde_json::json!({"type": "object"})),
             suppress_auto_compact: false,
             requested_compaction: None,
+            compaction: crate::CompactionPolicy::default(),
             native_compaction: None,
             native_tools: mermaid_model::models::NativeTools::default(),
         };

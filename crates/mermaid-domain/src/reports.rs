@@ -300,7 +300,7 @@ pub(crate) fn context_text(state: &State) -> String {
         lines.push(String::new());
     }
 
-    push_fullness_lines(&mut lines, state, &request, &next_snapshot);
+    push_fullness_lines(&mut lines, &request, &next_snapshot);
 
     if let Some(context) = &state.session.context_usage {
         let source = if context.is_estimate() {
@@ -339,14 +339,13 @@ pub(crate) fn context_text(state: &State) -> String {
 /// fire before the next call.
 fn push_fullness_lines(
     lines: &mut Vec<String>,
-    state: &State,
     request: &ChatRequest,
     next_snapshot: &super::state::ContextUsageSnapshot,
 ) {
-    let policy = state.settings.compaction.policy();
+    let policy = request.compaction;
     let response_reserve = policy.response_reserve(request);
     let usage_summary = match (next_snapshot.used_percent, next_snapshot.max_tokens) {
-        (Some(percent), Some(_)) if percent >= policy.auto_threshold_percent => {
+        (Some(percent), Some(_)) if policy.over_threshold(next_snapshot) == Some(true) => {
             format!("high ({percent}% used)")
         },
         (Some(percent), Some(_)) if percent >= 70 => format!("getting full ({percent}% used)"),
@@ -374,8 +373,8 @@ fn push_fullness_lines(
         format_compact_count(response_reserve)
     ));
     lines.push(format!(
-        "Auto compact threshold: {}%",
-        policy.auto_threshold_percent
+        "Auto compact threshold: {}",
+        policy.threshold_label()
     ));
     let auto_skip = should_auto_compact(next_snapshot, request, policy);
     let auto_status = match &auto_skip {

@@ -72,10 +72,19 @@ pub struct RequestedCompaction {
     pub focus: Option<String>,
 }
 
+/// The smallest token threshold auto-compaction accepts. Below it, the system
+/// prompt, tools, summary and kept tail alone can reach the threshold, so
+/// every turn would compact. It is also the smallest trigger Anthropic's
+/// server-side compaction accepts.
+pub const MIN_AUTO_THRESHOLD_TOKENS: usize = 50_000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompactionPolicy {
     pub auto_enabled: bool,
     pub auto_threshold_percent: u8,
+    /// Context size at which auto-compaction triggers. Replaces
+    /// `auto_threshold_percent` when set.
+    pub auto_threshold_tokens: Option<usize>,
     pub tail_turns: usize,
     pub tail_token_budget: usize,
     pub summary_max_tokens: usize,
@@ -90,6 +99,7 @@ impl Default for CompactionPolicy {
         Self {
             auto_enabled: true,
             auto_threshold_percent: COMPACTION_AUTO_THRESHOLD_PERCENT,
+            auto_threshold_tokens: None,
             tail_turns: COMPACTION_TAIL_TURNS,
             tail_token_budget: COMPACTION_TAIL_TOKEN_BUDGET,
             summary_max_tokens: COMPACTION_SUMMARY_MAX_TOKENS,
@@ -116,6 +126,36 @@ const SUMMARY_OUTPUT_WINDOW_SHARE: usize = 4;
 const SUMMARY_OUTPUT_FLOOR_TOKENS: usize = 512;
 
 impl CompactionPolicy {
+    /// The context size, in tokens, at which auto-compaction triggers for a
+    /// model whose window is `window`: the token threshold when one is set,
+    /// else the percentage of the window.
+    #[must_use]
+    pub fn trigger_tokens(self, window: usize) -> usize {
+        self.auto_threshold_tokens
+            .unwrap_or_else(|| window * usize::from(self.auto_threshold_percent) / 100)
+    }
+
+    /// The threshold as the user reads it: "250k tokens" or "85% of the window".
+    #[must_use]
+    pub fn threshold_label(self) -> String {
+        match self.auto_threshold_tokens {
+            Some(tokens) => format!("{} tokens", format_compact_count(tokens)),
+            None => format!("{}% of the window", self.auto_threshold_percent),
+        }
+    }
+
+    /// Whether `snapshot` is at or past the threshold. `None` when the window
+    /// is unknown and the threshold is a percentage of it.
+    #[must_use]
+    pub fn over_threshold(self, snapshot: &ContextUsageSnapshot) -> Option<bool> {
+        match self.auto_threshold_tokens {
+            Some(tokens) => Some(snapshot.used_tokens >= tokens),
+            None => snapshot
+                .used_percent
+                .map(|percent| percent >= self.auto_threshold_percent),
+        }
+    }
+
     /// The summarizer's output cap for a model whose window is `window`.
     ///
     /// Unknown window keeps the flat `summary_max_tokens` (the remote-provider
@@ -406,8 +446,8 @@ impl std::fmt::Display for CompactionSkip {
 /// The `Err` is a [`CompactionSkip`] reason, not a failure: it says why this
 /// turn does not need compacting. `AutoDisabled` and `Suppressed` come from
 /// policy and the request; `NoKnownContextLimit` means the snapshot carries no
-/// usable `max_tokens`, so there is no threshold to be over; `BelowThreshold`
-/// means usage is under both the percentage trigger and the response reserve.
+/// usable `max_tokens` and the threshold is a percentage of it; `BelowThreshold`
+/// means usage is under both the threshold and the response reserve.
 pub fn should_auto_compact(
     snapshot: &ContextUsageSnapshot,
     request: &ChatRequest,
@@ -419,21 +459,17 @@ pub fn should_auto_compact(
     if request.suppress_auto_compact {
         return Err(CompactionSkip::Suppressed);
     }
-    let Some(max_tokens) = snapshot.max_tokens else {
-        return Err(CompactionSkip::NoKnownContextLimit);
-    };
-    if max_tokens == 0 {
+    // A token threshold needs no window to compare against; a percentage does.
+    if policy.auto_threshold_tokens.is_none() && snapshot.max_tokens.is_none_or(|max| max == 0) {
         return Err(CompactionSkip::NoKnownContextLimit);
     }
 
     let reserve = policy.response_reserve(request);
-    let over_percent = snapshot
-        .used_percent
-        .is_some_and(|p| p >= policy.auto_threshold_percent);
+    let over = policy.over_threshold(snapshot).unwrap_or(false);
     let low_remaining = snapshot
         .remaining_tokens
         .is_some_and(|remaining| remaining <= reserve);
-    if over_percent || low_remaining {
+    if over || low_remaining {
         Ok(())
     } else {
         Err(CompactionSkip::BelowThreshold)
@@ -607,6 +643,7 @@ pub fn build_summary_request(
         output_schema: None,
         suppress_auto_compact: false,
         requested_compaction: None,
+        compaction: policy,
         native_compaction: None,
         native_tools: mermaid_model::models::NativeTools::default(),
     }
@@ -1093,6 +1130,7 @@ mod tests {
             output_schema: None,
             suppress_auto_compact: false,
             requested_compaction: None,
+            compaction: crate::CompactionPolicy::default(),
             native_compaction: None,
             native_tools: mermaid_model::models::NativeTools::default(),
         }
@@ -1200,6 +1238,68 @@ mod tests {
         );
         let req = request_with(vec![ChatMessage::user("hello")]);
         assert!(should_auto_compact(&snapshot, &req, CompactionPolicy::default()).is_ok());
+    }
+
+    fn snapshot_of(message_tokens: usize, window: Option<usize>) -> ContextUsageSnapshot {
+        ContextUsageSnapshot::from_estimate(
+            super::super::state::PromptTokenBreakdown {
+                system_tokens: 0,
+                instructions_tokens: 0,
+                message_tokens,
+                tool_schema_tokens: 0,
+                image_count: 0,
+                message_count: 2,
+                tool_count: 0,
+            },
+            window,
+        )
+    }
+
+    #[test]
+    fn a_token_threshold_replaces_the_percentage() {
+        let req = request_with(vec![ChatMessage::user("hello")]);
+        let policy = CompactionPolicy {
+            auto_threshold_tokens: Some(250_000),
+            ..CompactionPolicy::default()
+        };
+        // 24% of a 1.05M window: far under 85%, but past 250k.
+        let window = Some(1_050_000);
+        assert!(should_auto_compact(&snapshot_of(260_000, window), &req, policy).is_ok());
+        assert_eq!(
+            should_auto_compact(&snapshot_of(240_000, window), &req, policy),
+            Err(CompactionSkip::BelowThreshold)
+        );
+        // 90% of the window: past 85%, but under the token threshold.
+        let tokens_above_window = CompactionPolicy {
+            auto_threshold_tokens: Some(2_000_000),
+            ..policy
+        };
+        assert_eq!(
+            should_auto_compact(&snapshot_of(945_000, window), &req, tokens_above_window),
+            Err(CompactionSkip::BelowThreshold)
+        );
+        // A threshold past the window still compacts once the reply no longer fits.
+        assert!(
+            should_auto_compact(&snapshot_of(1_049_000, window), &req, tokens_above_window).is_ok()
+        );
+    }
+
+    #[test]
+    fn a_token_threshold_needs_no_known_window() {
+        let req = request_with(vec![ChatMessage::user("hello")]);
+        let policy = CompactionPolicy {
+            auto_threshold_tokens: Some(100_000),
+            ..CompactionPolicy::default()
+        };
+        assert!(should_auto_compact(&snapshot_of(120_000, None), &req, policy).is_ok());
+        assert_eq!(
+            should_auto_compact(
+                &snapshot_of(120_000, None),
+                &req,
+                CompactionPolicy::default()
+            ),
+            Err(CompactionSkip::NoKnownContextLimit)
+        );
     }
 
     #[test]
