@@ -38,6 +38,7 @@ pub mod cost;
 pub mod file_mention;
 pub mod image_token;
 pub mod input_kind;
+pub mod mcp_resources;
 pub mod msg;
 pub mod picker;
 pub mod progress;
@@ -109,10 +110,11 @@ pub use slash_commands::{
 };
 pub use state::{
     AdvertisedContext, ApprovalChoice, ApprovalKind, Attachment, Confirmation, ConfirmationTarget,
-    ContextUsageSnapshot, ConversationSummary, Focus, GenPhase, LiveToolStatus, McpServerEntry,
-    McpServerStatus, McpState, McpToolSpec, ModelChoice, PendingApproval, PendingToolCall,
-    PluginCommand, PromptTokenBreakdown, QueuedMessage, RewindCandidate, Session, State,
-    StatusKind, TokenUsageTotals, ToolOutcome, TurnState, UiMode, UiState, UsageByModel,
+    ContextUsageSnapshot, ConversationSummary, Focus, GenPhase, LiveToolStatus, McpPrompt,
+    McpPromptArg, McpServerEntry, McpServerStatus, McpState, McpToolSpec, ModelChoice,
+    PendingApproval, PendingToolCall, PromptCommand, PromptInvocation, PromptSource,
+    PromptTokenBreakdown, QueuedMessage, RewindCandidate, Session, State, StatusKind,
+    TokenUsageTotals, ToolOutcome, TurnState, UiMode, UiState, UsageByModel,
     estimate_context_usage_for_request, estimate_tool_schema_tokens,
 };
 pub use transition::{

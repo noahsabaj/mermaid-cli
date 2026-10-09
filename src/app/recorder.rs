@@ -960,6 +960,8 @@ mod tests {
                     input_schema: serde_json::json!({"type": "object"}),
                     read_only_hint: false,
                 }],
+                resources: false,
+                prompts: vec![],
             },
             Msg::McpServerErrored {
                 name: "srv".to_string(),

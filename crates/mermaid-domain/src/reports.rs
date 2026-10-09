@@ -38,7 +38,7 @@ use mermaid_model::ids::TurnId;
 use super::reducer::*;
 use super::request::*;
 
-pub(crate) fn help_text(plugin_commands: &[crate::PluginCommand]) -> String {
+pub(crate) fn help_text(prompt_commands: &[crate::PromptCommand]) -> String {
     let mut lines = Vec::with_capacity(COMMAND_REGISTRY.len() + COMMAND_GROUPS.len() + 2);
     lines.push("Mermaid commands".to_string());
     lines.push(
@@ -69,19 +69,19 @@ pub(crate) fn help_text(plugin_commands: &[crate::PluginCommand]) -> String {
             ));
         }
     }
-    if !plugin_commands.is_empty() {
+    if !prompt_commands.is_empty() {
         lines.push(String::new());
-        lines.push("Plugin commands:".to_string());
-        for cmd in plugin_commands {
+        lines.push("Prompt commands:".to_string());
+        for cmd in prompt_commands {
             lines.push(format!(
-                "  /{} - {} (plugin:{})",
+                "  /{} - {} ({})",
                 cmd.name,
                 if cmd.description.is_empty() {
                     "prompt"
                 } else {
                     &cmd.description
                 },
-                cmd.plugin
+                cmd.origin()
             ));
         }
     }
@@ -208,10 +208,37 @@ pub(crate) fn doctor_text(state: &State) -> String {
             .filter(|entry| matches!(entry.status, crate::McpServerStatus::Ready))
             .count()
     ));
+    lines.extend(mcp_server_lines(state));
     lines.push(
         "Useful next commands: /help, /context, /model-info <model>, /compact [focus]".to_string(),
     );
     lines.join("\n")
+}
+
+/// One `/doctor` line per ready MCP server, by name: what it contributes.
+fn mcp_server_lines(state: &State) -> Vec<String> {
+    let mut ready: Vec<(&String, &crate::McpServerEntry)> = state
+        .mcp
+        .servers
+        .iter()
+        .filter(|(_, entry)| matches!(entry.status, crate::McpServerStatus::Ready))
+        .collect();
+    ready.sort_by(|a, b| a.0.cmp(b.0));
+    ready
+        .into_iter()
+        .map(|(name, entry)| {
+            let prompts = state
+                .prompt_commands
+                .iter()
+                .filter(|cmd| cmd.mcp_server() == Some(name.as_str()))
+                .count();
+            format!(
+                "  {name}: {} tools, {prompts} prompts, resources {}",
+                entry.tools.len(),
+                if entry.resources { "yes" } else { "no" }
+            )
+        })
+        .collect()
 }
 
 /// The `/usage` report. `prices` adds the cost block; `None` when the

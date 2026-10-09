@@ -22,6 +22,7 @@ pub mod context;
 pub mod exec;
 pub mod filesystem;
 pub mod mcp;
+pub mod mcp_resources;
 pub mod memory;
 pub mod path_lock;
 pub mod path_safety;
@@ -225,6 +226,10 @@ impl ToolRegistry {
         r.register(Arc::new(context::ContextArchiveTool));
         r.register(Arc::new(context::CompactContextTool));
         r.register(Arc::new(mcp::McpToolProxy));
+        // Internal like the proxy: the reducer advertises them only while a
+        // ready server serves resources (`mermaid_domain::mcp_resources`).
+        r.register(Arc::new(mcp_resources::ListMcpResourcesTool));
+        r.register(Arc::new(mcp_resources::ReadMcpResourceTool));
 
         // `safety.network = "deny"` is a global egress kill-switch, not only
         // a shell sandbox flag. Omit web capabilities entirely so adapters and
@@ -333,6 +338,18 @@ mod tests {
         let proxy = r.get("mcp_proxy").expect("mcp_proxy registered");
         assert!(proxy.is_internal());
         assert!(!r.describe_all().iter().any(|s| s.name == "mcp_proxy"));
+    }
+
+    #[test]
+    fn mcp_resource_tools_are_registered_but_internal() {
+        // Registered so a call dispatches, but the reducer — not the registry
+        // — decides whether they are advertised: no resources-capable server
+        // means they never reach a request (see `mcp_resources` tests).
+        let r = headless_registry();
+        for name in ["list_mcp_resources", "read_mcp_resource"] {
+            assert!(r.get(name).expect(name).is_internal());
+            assert!(!r.describe_all().iter().any(|s| s.name == name));
+        }
     }
 
     #[test]

@@ -42,6 +42,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   out of it is not inside it. Subagents inherit the list, and `/doctor` and
   the model's session facts name it. A repository's `.mermaid/config.toml`
   cannot set the key.
+- **MCP resources and prompts.** A server that declares the `resources`
+  capability gives the model two built-in tools, `list_mcp_resources`
+  (optionally filtered by `server`; each resource's uri, name, description
+  and mimeType) and `read_mcp_resource` (`server`, `uri`; text verbatim,
+  images attached, other binary content summarized by type and size, output
+  capped at 100,000 characters). They are advertised only while such a server
+  is ready, are never deferred behind `tool_search`, and pass the same policy
+  gate as MCP tool calls, so `read_only` blocks them as it blocks MCP tools. A
+  server that declares `prompts` puts each prompt in the `/` palette as
+  `/mcp__<server>__<prompt>`, tagged `(mcp:<server>)`: running it maps the
+  typed words onto the prompt's declared arguments in order (quotes group
+  words; the last argument takes the rest), prints a usage line when a
+  required one is missing, and otherwise fetches the prompt and sends its
+  text as your message. `/doctor` lists each ready server's tool, prompt and
+  resource support.
+
 - **Mermaid cleans up the config keys it no longer reads.** A config file
   written by an older `mermaid init` still carries sections a later release
   removed, such as `[plan]` (0.28.0) or `[computer_use]` and

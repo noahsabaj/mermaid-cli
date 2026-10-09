@@ -113,12 +113,14 @@ pub struct State {
     /// Quit flag. When set, the main loop drains pending effects and
     /// exits. The reducer never panics on its own; it sets this instead.
     pub should_exit: bool,
-    /// Prompt-backed slash commands contributed by enabled plugins
-    /// (`manifest.prompts`). Loaded once at startup by the run loop (like
-    /// `skills`); the reducer expands `/name args` into a normal
-    /// `Msg::SubmitPrompt`, so recordings replay without the plugin
-    /// installed. Sorted by name.
-    pub plugin_commands: Vec<PluginCommand>,
+    /// Prompt-backed slash commands: enabled plugins' prompts
+    /// (`manifest.prompts`, loaded once at startup by the run loop like
+    /// `skills`) followed by ready MCP servers' prompts (merged in on
+    /// `Msg::McpServerReady`, dropped when the server errors or stops). Either
+    /// kind ends as a normal `Msg::SubmitPrompt` carrying the expanded text,
+    /// so recordings replay without the plugin or server. Plugin entries
+    /// first, then MCP entries, each sorted by name.
+    pub prompt_commands: Vec<PromptCommand>,
     /// `mermaid run --output-schema`: set by the headless driver before the
     /// dedicated formatting turn; `build_chat_request` copies it onto the
     /// request (dropping all tools for that turn). Never set interactively.
@@ -169,6 +171,7 @@ impl State {
                         config: cfg.clone(),
                         status: McpServerStatus::Starting,
                         tools: Vec::new(),
+                        resources: false,
                     },
                 );
             }
@@ -227,7 +230,7 @@ impl State {
             runtime,
             should_exit: false,
             output_schema: None,
-            plugin_commands: Vec::new(),
+            prompt_commands: Vec::new(),
             // Seed the injected clock from the caller (live: startup wall
             // clock; replay: the recorded header's ts). The driver overwrites
             // this on every iteration (Cause 3); the reducer never reads the
@@ -1144,38 +1147,195 @@ pub struct LiveToolStatus {
     pub tokens: usize,
 }
 
-/// One plugin-contributed slash command (a markdown prompt from an enabled
-/// plugin's `manifest.prompts`). Plain data — parsing/IO happens in
-/// `app::plugin_assets`; the reducer only expands and submits.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PluginCommand {
-    /// Command name without the leading `/` (validated `[a-z0-9-]+`).
+/// One prompt-backed slash command: an enabled plugin's markdown prompt
+/// (`manifest.prompts`) or a prompt advertised by a ready MCP server
+/// (`prompts/list`). Plain data — parsing/IO happens in
+/// `app::plugin_assets` and `mcp`; the reducer only expands and submits.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PromptCommand {
+    /// Command name without the leading `/`, lowercase: `[a-z0-9-]+` for a
+    /// plugin prompt, `mcp__<server>__<prompt>` (sanitized) for an MCP one.
     pub name: String,
     /// One-line description for the palette and `/help`.
     pub description: String,
-    /// The prompt body. `$ARGUMENTS` is replaced with the typed args;
-    /// without the token, non-empty args append as a final paragraph.
-    pub body: String,
-    /// Owning plugin name, shown as `(plugin:<name>)` in the palette.
-    pub plugin: String,
+    pub source: PromptSource,
 }
 
-impl PluginCommand {
-    /// Expand the body with typed arguments: replace-all of `$ARGUMENTS`
-    /// when the token is present, else append the args as a new paragraph
-    /// when non-empty. Pure.
+/// Where a [`PromptCommand`]'s text comes from.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum PromptSource {
+    /// A plugin's markdown prompt. `$ARGUMENTS` in `body` is replaced with
+    /// the typed args; without the token, non-empty args append as a final
+    /// paragraph. Expanded purely, in the reducer.
+    Plugin { plugin: String, body: String },
+    /// An MCP server prompt. Its text is only known after a `prompts/get`
+    /// round-trip, so running it is a `Query`, not a pure expansion.
+    Mcp(McpPrompt),
+}
+
+/// An MCP prompt as `prompts/list` advertised it, keyed by RAW names (the
+/// command name is the sanitized form).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct McpPrompt {
+    /// Raw config name of the server that advertised it.
+    pub server: String,
+    /// The prompt's name exactly as the server advertised it.
+    pub prompt: String,
+    /// Declared arguments, in declaration order: the typed positional
+    /// arguments map onto these one-for-one.
+    pub arguments: Vec<McpPromptArg>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct McpPromptArg {
+    pub name: String,
+    pub description: String,
+    pub required: bool,
+}
+
+impl PromptCommand {
+    /// Origin tag shown after the description: `plugin:<name>` or
+    /// `mcp:<server>`.
     #[must_use]
-    pub fn expand(&self, args: &str) -> String {
-        let args = args.trim();
-        if self.body.contains("$ARGUMENTS") {
-            return self.body.replace("$ARGUMENTS", args);
-        }
-        if args.is_empty() {
-            self.body.clone()
-        } else {
-            format!("{}\n\n{}", self.body, args)
+    pub fn origin(&self) -> String {
+        match &self.source {
+            PromptSource::Plugin { plugin, .. } => format!("plugin:{plugin}"),
+            PromptSource::Mcp(prompt) => format!("mcp:{}", prompt.server),
         }
     }
+
+    /// The MCP server this command came from, if any.
+    #[must_use]
+    pub fn mcp_server(&self) -> Option<&str> {
+        match &self.source {
+            PromptSource::Mcp(prompt) => Some(&prompt.server),
+            PromptSource::Plugin { .. } => None,
+        }
+    }
+
+    /// What `/name args` turns into: the expanded prompt text for a plugin
+    /// prompt, or the slash command that fetches an MCP prompt (a usage line
+    /// when a required argument is missing). Pure.
+    #[must_use]
+    pub fn invoke(&self, args: &str) -> PromptInvocation {
+        match &self.source {
+            PromptSource::Plugin { body, .. } => PromptInvocation::Text(expand_body(body, args)),
+            PromptSource::Mcp(prompt) => {
+                PromptInvocation::Slash(prompt.invocation(&self.name, args))
+            },
+        }
+    }
+}
+
+/// Result of [`PromptCommand::invoke`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PromptInvocation {
+    /// Submit this text as a normal user prompt.
+    Text(String),
+    /// Dispatch this slash command (an MCP prompt fetch, or a usage line).
+    Slash(crate::SlashCmd),
+}
+
+/// Plugin-body expansion: replace-all of `$ARGUMENTS` when the token is
+/// present, else append the args as a new paragraph when non-empty.
+fn expand_body(body: &str, args: &str) -> String {
+    let args = args.trim();
+    if body.contains("$ARGUMENTS") {
+        return body.replace("$ARGUMENTS", args);
+    }
+    if args.is_empty() {
+        body.to_string()
+    } else {
+        format!("{body}\n\n{args}")
+    }
+}
+
+impl McpPrompt {
+    /// Map typed positional arguments onto the declared ones, in declaration
+    /// order. Double quotes group a value containing spaces; surplus words
+    /// join the LAST declared argument, so free text needs no quoting. A
+    /// prompt that declares no arguments ignores anything typed. A missing
+    /// required argument yields the usage line instead of a fetch.
+    #[must_use]
+    pub fn invocation(&self, command: &str, args: &str) -> crate::SlashCmd {
+        let mut words = split_prompt_args(args);
+        if let Some(last) = self.arguments.len().checked_sub(1)
+            && words.len() > self.arguments.len()
+        {
+            let surplus = words.split_off(last).join(" ");
+            words.push(surplus);
+        }
+        let missing = self
+            .arguments
+            .iter()
+            .skip(words.len())
+            .any(|arg| arg.required);
+        if missing {
+            return crate::SlashCmd::MissingArg(self.usage(command));
+        }
+        let arguments = self
+            .arguments
+            .iter()
+            .zip(words)
+            .map(|(arg, value)| (arg.name.clone(), value))
+            .collect();
+        crate::SlashCmd::McpPrompt {
+            command: command.to_string(),
+            server: self.server.clone(),
+            prompt: self.prompt.clone(),
+            arguments,
+        }
+    }
+
+    /// `Usage: /cmd <required> [optional]`, then one line per described
+    /// argument.
+    #[must_use]
+    pub fn usage(&self, command: &str) -> String {
+        let mut line = format!("Usage: /{command}");
+        for arg in &self.arguments {
+            if arg.required {
+                line.push_str(&format!(" <{}>", arg.name));
+            } else {
+                line.push_str(&format!(" [{}]", arg.name));
+            }
+        }
+        for arg in self.arguments.iter().filter(|a| !a.description.is_empty()) {
+            line.push_str(&format!("\n  {} - {}", arg.name, arg.description));
+        }
+        line
+    }
+}
+
+/// Split typed prompt arguments on whitespace, honoring double quotes so a
+/// quoted value keeps its spaces (`"two words"`). An unterminated quote runs
+/// to the end of the line.
+fn split_prompt_args(args: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    let mut started = false;
+    for ch in args.chars() {
+        match ch {
+            '"' => {
+                in_quotes = !in_quotes;
+                started = true;
+            },
+            c if c.is_whitespace() && !in_quotes => {
+                if started {
+                    words.push(std::mem::take(&mut current));
+                    started = false;
+                }
+            },
+            c => {
+                current.push(c);
+                started = true;
+            },
+        }
+    }
+    if started {
+        words.push(current);
+    }
+    words
 }
 
 /// All UI-only state. Things in `UiState` never affect what gets sent
@@ -1350,7 +1510,7 @@ impl State {
     #[must_use]
     pub fn active_file_token(&self) -> Option<crate::file_mention::AtToken> {
         if self.ui.file_picker_dismissed
-            || crate::input_kind::palette_is_open(&self.ui.input_buffer, &self.plugin_commands)
+            || crate::input_kind::palette_is_open(&self.ui.input_buffer, &self.prompt_commands)
         {
             return None;
         }
@@ -1554,6 +1714,9 @@ pub struct McpServerEntry {
     /// `McpServerReady` event; reducer exposes these to the model
     /// when building the tool list for the next request.
     pub tools: Vec<McpToolSpec>,
+    /// The server advertised the `resources` capability. Any ready server
+    /// with it puts `list_mcp_resources`/`read_mcp_resource` on the request.
+    pub resources: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

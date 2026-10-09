@@ -508,7 +508,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             input: state.ui.input_buffer.as_str(),
             showing_command_hints: mermaid_domain::input_kind::palette_is_open(
                 &state.ui.input_buffer,
-                &state.plugin_commands,
+                &state.prompt_commands,
             ),
             theme: &rstate.theme,
             reasoning_active: state.session.reasoning != ReasoningLevel::None,
@@ -770,7 +770,7 @@ fn bottom_pane(state: &mermaid_domain::State) -> BottomPane<'_> {
                 BottomPane::FilePicker
             } else if let Some(rows) = mermaid_domain::input_kind::palette_rows(
                 &state.ui.input_buffer,
-                &state.plugin_commands,
+                &state.prompt_commands,
             ) {
                 BottomPane::Palette(rows)
             } else {
@@ -793,7 +793,7 @@ fn bottom_pane(state: &mermaid_domain::State) -> BottomPane<'_> {
 /// that used to render an empty palette over the status band now says what
 /// it means and leaves every key alone.
 fn unmatched_command_hint(state: &State) -> Option<String> {
-    if mermaid_domain::input_kind::palette_is_open(&state.ui.input_buffer, &state.plugin_commands) {
+    if mermaid_domain::input_kind::palette_is_open(&state.ui.input_buffer, &state.prompt_commands) {
         return None;
     }
     let word = mermaid_domain::input_kind::unmatched_command_word(&state.ui.input_buffer)?;

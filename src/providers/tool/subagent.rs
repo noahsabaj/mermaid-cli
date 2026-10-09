@@ -1913,6 +1913,7 @@ mod tests {
             config: mermaid_domain::McpServerConfig::default(),
             status: McpServerStatus::Starting,
             tools: Vec::new(),
+            resources: false,
         };
         let mut servers = std::collections::HashMap::new();
         servers.insert("slack".to_string(), entry());

@@ -169,7 +169,7 @@ pub async fn run_interactive_with(
     // watcher below keeps only instructions/memory fresh.
     state.skills = crate::app::skills::load(&cwd);
     // Plugin prompt commands: same restart-to-refresh policy as skills.
-    state.plugin_commands = plugin_assets.commands;
+    state.prompt_commands = plugin_assets.commands;
     for warning in plugin_warnings {
         state
             .ui

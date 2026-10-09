@@ -505,14 +505,15 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
     },
 ];
 
-/// One row of the slash palette: a built-in registry command or a
-/// plugin-contributed prompt command. Unifying them in ONE list, produced
+/// One row of the slash palette: a built-in registry command or a prompt
+/// command (an enabled plugin's markdown prompt, or an MCP server's prompt).
+/// Unifying them in ONE list, produced
 /// by ONE function ([`filter_entries`]), keeps the palette widget, the
 /// row-count layout, and the reducer's cursor/Tab handling agreeing on
 /// indices.
 pub enum PaletteEntry<'a> {
     Builtin(&'static SlashCommand),
-    Plugin(&'a crate::PluginCommand),
+    Prompt(&'a crate::PromptCommand),
 }
 
 impl PaletteEntry<'_> {
@@ -520,20 +521,21 @@ impl PaletteEntry<'_> {
     pub fn name(&self) -> &str {
         match self {
             PaletteEntry::Builtin(c) => c.name,
-            PaletteEntry::Plugin(p) => &p.name,
+            PaletteEntry::Prompt(p) => &p.name,
         }
     }
 
-    /// Palette/hint description; plugin rows carry their origin.
+    /// Palette/hint description; prompt rows carry their origin
+    /// (`(plugin:<name>)` or `(mcp:<server>)`).
     #[must_use]
     pub fn description(&self) -> String {
         match self {
             PaletteEntry::Builtin(c) => c.description.to_string(),
-            PaletteEntry::Plugin(p) => {
+            PaletteEntry::Prompt(p) => {
                 if p.description.is_empty() {
-                    format!("(plugin:{})", p.plugin)
+                    format!("({})", p.origin())
                 } else {
-                    format!("{} (plugin:{})", p.description, p.plugin)
+                    format!("{} ({})", p.description, p.origin())
                 }
             },
         }
@@ -543,18 +545,19 @@ impl PaletteEntry<'_> {
     pub fn arg_hint(&self) -> Option<&'static str> {
         match self {
             PaletteEntry::Builtin(c) => c.arg_hint,
-            PaletteEntry::Plugin(_) => Some("[args]"),
+            PaletteEntry::Prompt(_) => Some("[args]"),
         }
     }
 }
 
 /// The palette's single source of truth: built-ins (registry order) then
-/// plugin commands (already name-sorted by the loader), both prefix-filtered.
+/// prompt commands (plugin prompts, then MCP prompts, each name-sorted), all
+/// prefix-filtered.
 /// EVERY palette consumer (widget rows, layout row count, reducer cursor)
 /// must use this so their indices agree.
 pub fn filter_entries<'a>(
     typed: &str,
-    plugin: &'a [crate::PluginCommand],
+    prompts: &'a [crate::PromptCommand],
 ) -> Vec<PaletteEntry<'a>> {
     let needle = typed.to_lowercase();
     let mut entries: Vec<PaletteEntry<'a>> = filter_by_prefix(typed)
@@ -562,10 +565,10 @@ pub fn filter_entries<'a>(
         .map(PaletteEntry::Builtin)
         .collect();
     entries.extend(
-        plugin
+        prompts
             .iter()
             .filter(|p| needle.is_empty() || p.name.starts_with(&needle))
-            .map(PaletteEntry::Plugin),
+            .map(PaletteEntry::Prompt),
     );
     entries
 }

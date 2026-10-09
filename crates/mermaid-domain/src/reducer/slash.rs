@@ -140,6 +140,47 @@ pub fn push_task_notice(state: &mut State, text: String) {
 /// the reducer injects a staleness nudge (then re-arms for another window).
 pub const TASK_STALENESS_CALLS: u32 = 5;
 
+/// `/load` landed: swap the loaded conversation in and drop everything that
+/// belonged to the previous one.
+fn apply_loaded_conversation(
+    state: &mut State,
+    cmds: &mut Vec<Cmd>,
+    history: crate::ConversationHistory,
+) {
+    // If a turn was in flight when the user loaded another conversation
+    // (`/load` mid-generation), cancel its scope first. Otherwise we
+    // overwrite `state.turn` to `Idle` below and lose the only handle —
+    // the turn's CancellationToken + JoinSet — that could stop the
+    // running model call and tool tasks, orphaning them uncancellable;
+    // their parked approval requests could never be answered either (#2).
+    if let Some(id) = state.turn.id() {
+        cmds.push(Cmd::CancelScope(id));
+        // Drop the cancelled turn's parked approval/question modals and
+        // its stale running-tool indicators — the tasks behind them are
+        // being torn down.
+        clear_parked_tool_requests(state);
+        state.ui.live_tool_status.clear();
+    }
+    // Messages queued against the *previous* conversation must not
+    // auto-submit into the one being loaded — drop them (mirrors the
+    // clears above).
+    state.ui.queued_messages.clear();
+    state.session.replace_conversation(history);
+    state.turn = TurnState::Idle;
+    // The abandoned run's summary counters die with it: a leaked
+    // `run_started` would otherwise let a later `finish_run` (quit)
+    // stamp the OLD run's summary into the conversation loaded here.
+    reset_run_counters(state);
+    state.ui.mode = UiMode::EditingInput;
+    // The pause belonged to the previous conversation's failing
+    // compaction; the loaded one starts fresh.
+    state.runtime.auto_compact_suppressed = false;
+    // The loaded conversation has its own id — the previous session's
+    // scratch dir no longer applies. Recompute (same as `/clear`).
+    refresh_scratchpad(state, cmds);
+    emit_title_if_changed(state, cmds);
+}
+
 /// Route a completed `Cmd::Query` lookup into state — one arm per
 /// [`QueryResult`] variant, bodies moved verbatim from the former
 /// per-`Msg` arms. None of these are turn-scoped; each surface applies
@@ -148,38 +189,7 @@ pub const TASK_STALENESS_CALLS: u32 = 5;
 pub fn handle_query_result(state: &mut State, cmds: &mut Vec<Cmd>, result: QueryResult) {
     match result {
         QueryResult::ConversationLoaded(history) => {
-            // If a turn was in flight when the user loaded another conversation
-            // (`/load` mid-generation), cancel its scope first. Otherwise we
-            // overwrite `state.turn` to `Idle` below and lose the only handle —
-            // the turn's CancellationToken + JoinSet — that could stop the
-            // running model call and tool tasks, orphaning them uncancellable;
-            // their parked approval requests could never be answered either (#2).
-            if let Some(id) = state.turn.id() {
-                cmds.push(Cmd::CancelScope(id));
-                // Drop the cancelled turn's parked approval/question modals and
-                // its stale running-tool indicators — the tasks behind them are
-                // being torn down.
-                clear_parked_tool_requests(state);
-                state.ui.live_tool_status.clear();
-            }
-            // Messages queued against the *previous* conversation must not
-            // auto-submit into the one being loaded — drop them (mirrors the
-            // clears above).
-            state.ui.queued_messages.clear();
-            state.session.replace_conversation(*history);
-            state.turn = TurnState::Idle;
-            // The abandoned run's summary counters die with it: a leaked
-            // `run_started` would otherwise let a later `finish_run` (quit)
-            // stamp the OLD run's summary into the conversation loaded here.
-            reset_run_counters(state);
-            state.ui.mode = UiMode::EditingInput;
-            // The pause belonged to the previous conversation's failing
-            // compaction; the loaded one starts fresh.
-            state.runtime.auto_compact_suppressed = false;
-            // The loaded conversation has its own id — the previous session's
-            // scratch dir no longer applies. Recompute (same as `/clear`).
-            refresh_scratchpad(state, cmds);
-            emit_title_if_changed(state, cmds);
+            apply_loaded_conversation(state, cmds, *history)
         },
         QueryResult::AvailableModelsListed(candidates) => {
             // Only fill a picker that is still open — Esc before discovery
@@ -277,6 +287,7 @@ pub fn handle_query_result(state: &mut State, cmds: &mut Vec<Cmd>, result: Query
             handle_output_style_loaded(state, cmds, &name, project, loaded);
         },
         QueryResult::AddedDirResolved { raw, resolved: r } => on_added_dir(state, cmds, &raw, r),
+        QueryResult::McpPromptLoaded(answer) => handle_mcp_prompt_loaded(state, cmds, answer),
     }
 }
 
@@ -310,6 +321,55 @@ fn on_added_dir(
         },
     };
     push_system(state, cmds, text);
+}
+
+/// Submit a fetched MCP prompt as a normal user prompt — the transcript
+/// shows the prompt's TEXT, so a recording replays without the server.
+/// Re-enters through `Msg::SubmitPrompt`, which queues it behind a busy turn
+/// like anything else typed.
+fn handle_mcp_prompt_loaded(
+    state: &mut State,
+    cmds: &mut Vec<Cmd>,
+    answer: crate::query::McpPromptAnswer,
+) {
+    let crate::query::McpPromptAnswer {
+        command,
+        attachment_ids,
+        result,
+    } = answer;
+    let loaded = match result {
+        Ok(loaded) if !loaded.text.trim().is_empty() => loaded,
+        Ok(_) => {
+            push_system(
+                state,
+                cmds,
+                format!("MCP prompt /{command} returned no text content."),
+            );
+            return;
+        },
+        Err(reason) => {
+            push_system(
+                state,
+                cmds,
+                format!("MCP prompt /{command} failed: {reason}"),
+            );
+            return;
+        },
+    };
+    if loaded.skipped > 0 {
+        push_system(
+            state,
+            cmds,
+            format!(
+                "MCP prompt /{command}: skipped {} non-text part(s).",
+                loaded.skipped
+            ),
+        );
+    }
+    state.ui.pending_msgs.push_back(crate::Msg::SubmitPrompt {
+        text: loaded.text,
+        attachment_ids,
+    });
 }
 
 /// Append a runtime listing (or generic runtime text) to the transcript as a
@@ -784,7 +844,7 @@ pub fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
         },
         SlashCmd::Help => {
             state.session.append(
-                ChatMessage::system(help_text(&state.plugin_commands)),
+                ChatMessage::system(help_text(&state.prompt_commands)),
                 state.now,
             );
             cmds.push(state.session.save_conversation_cmd());
@@ -794,6 +854,26 @@ pub fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
         },
         SlashCmd::MissingArg(usage) => {
             push_system(state, cmds, usage);
+        },
+        SlashCmd::McpPrompt {
+            command,
+            server,
+            prompt,
+            arguments,
+        } => {
+            // Capture the staged images NOW, as the plugin path does at
+            // submit: they belong to this command, not to whatever is staged
+            // when the server answers.
+            let attachment_ids = state.ui.attachments.iter().map(|a| a.id).collect();
+            cmds.push(Cmd::Query(Query::GetMcpPrompt(
+                crate::query::McpPromptRequest {
+                    command,
+                    server,
+                    prompt,
+                    arguments,
+                    attachment_ids,
+                },
+            )));
         },
     }
 }

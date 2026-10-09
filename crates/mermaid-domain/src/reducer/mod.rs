@@ -526,20 +526,28 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
         // an existing entry to update. But a server discovered at
         // runtime (hypothetical future path) should still land in the
         // map — insert rather than silently drop.
-        Msg::McpServerReady { name, tools } => {
+        Msg::McpServerReady {
+            name,
+            tools,
+            resources,
+            prompts,
+        } => {
             state
                 .mcp
                 .servers
-                .entry(name)
+                .entry(name.clone())
                 .and_modify(|e| {
                     e.status = McpServerStatus::Ready;
                     e.tools = tools.clone();
+                    e.resources = resources;
                 })
                 .or_insert_with(|| McpServerEntry {
                     config: crate::McpServerConfig::default(),
                     status: McpServerStatus::Ready,
                     tools,
+                    resources,
                 });
+            set_mcp_prompt_commands(&mut state, &name, prompts);
         },
         Msg::McpServerErrored { name, reason } => {
             let status = McpServerStatus::Errored {
@@ -554,7 +562,9 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
                     config: crate::McpServerConfig::default(),
                     status,
                     tools: Vec::new(),
+                    resources: false,
                 });
+            set_mcp_prompt_commands(&mut state, &name, Vec::new());
             push_system(
                 &mut state,
                 &mut cmds,
@@ -565,6 +575,7 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             if let Some(entry) = state.mcp.servers.get_mut(&name) {
                 entry.status = McpServerStatus::Stopped;
             }
+            set_mcp_prompt_commands(&mut state, &name, Vec::new());
         },
 
         // ── Persistence / misc ─────────────────────────────────────
@@ -822,6 +833,27 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
     }
 
     (state, cmds)
+}
+
+/// Replace `server`'s MCP prompt commands with `prompts` (empty = drop them:
+/// the server errored or stopped, so `prompts/get` has nowhere to go).
+/// Keeps the palette order deterministic whatever order servers come up in:
+/// plugin prompts first, then MCP prompts, each by name. A name already
+/// taken keeps whichever server claimed it first — reachable only when two
+/// server names differ by nothing but case, since command names are
+/// lowercased.
+fn set_mcp_prompt_commands(state: &mut State, server: &str, prompts: Vec<crate::PromptCommand>) {
+    state
+        .prompt_commands
+        .retain(|cmd| cmd.mcp_server() != Some(server));
+    for prompt in prompts {
+        if !state.prompt_commands.iter().any(|c| c.name == prompt.name) {
+            state.prompt_commands.push(prompt);
+        }
+    }
+    state.prompt_commands.sort_by(|a, b| {
+        (a.mcp_server().is_some(), &a.name).cmp(&(b.mcp_server().is_some(), &b.name))
+    });
 }
 
 /// Emit `Cmd::SetTerminalTitle` iff the derived title changed since

@@ -265,9 +265,16 @@ pub enum Msg {
 
     // ── MCP (from effect::mcp) ──────────────────────────────────────
     /// `initialize` succeeded; server is ready to dispatch tools.
+    /// `resources` is the server's advertised `resources` capability (it
+    /// gates the `list_mcp_resources`/`read_mcp_resource` tools); `prompts`
+    /// are its `prompts/list` entries as ready-made slash commands.
     McpServerReady {
         name: String,
         tools: Vec<McpToolSpec>,
+        #[serde(default)]
+        resources: bool,
+        #[serde(default)]
+        prompts: Vec<crate::PromptCommand>,
     },
     /// Server startup failed OR the child exited with non-zero.
     McpServerErrored {
@@ -644,6 +651,16 @@ pub enum SlashCmd {
     /// the reducer's arm is a plain print and a recording replays exactly
     /// what the user saw. Arity itself lives in the registry, not here.
     MissingArg(String),
+    /// An MCP prompt command (`/mcp__<server>__<prompt> args`), its typed
+    /// positional arguments already mapped onto the prompt's declared ones.
+    /// Never parsed from the registry: `PromptCommand::invoke` builds it.
+    /// Runs as `Query::GetMcpPrompt`; the answer submits as a user prompt.
+    McpPrompt {
+        command: String,
+        server: String,
+        prompt: String,
+        arguments: std::collections::BTreeMap<String, String>,
+    },
 }
 
 impl Msg {
@@ -886,6 +903,8 @@ mod tests {
         let m = Msg::McpServerReady {
             name: "s".to_string(),
             tools: vec![],
+            resources: false,
+            prompts: vec![],
         };
         assert_eq!(m.turn_id(), None);
     }

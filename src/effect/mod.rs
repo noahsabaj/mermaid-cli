@@ -698,16 +698,7 @@ impl EffectRunner {
             Query::ListRecentPrompts {
                 max_sessions,
                 max_prompts,
-            } => {
-                let workdir = self.workdir.clone();
-                self.send_blocking_query(move || {
-                    QueryResult::RecentPromptsListed(
-                        crate::session::ConversationManager::new(&workdir)
-                            .map(|mgr| mgr.recent_prompts(max_sessions, max_prompts))
-                            .unwrap_or_default(),
-                    )
-                });
-            },
+            } => self.dispatch_list_recent_prompts(max_sessions, max_prompts),
             Query::ListAvailableModels => {
                 let providers = self.providers.clone();
                 self.detached.spawn(async move {
@@ -729,13 +720,7 @@ impl EffectRunner {
             Query::LoadOutputStyle { name, project } => {
                 self.dispatch_load_output_style(name, project);
             },
-            Query::ResolveAddedDir { raw } => {
-                let workdir = self.workdir.clone();
-                self.send_blocking_query(move || {
-                    let resolved = crate::app::added_dirs::resolve_added_dir(&workdir, &raw);
-                    QueryResult::AddedDirResolved { raw, resolved }
-                });
-            },
+            Query::ResolveAddedDir { raw } => self.dispatch_resolve_added_dir(raw),
             Query::ListRuntimeTasks { limit } => self.send_blocking_query(move || {
                 QueryResult::RuntimeTasksListed(
                     crate::runtime_client::RuntimeClient::auto()
@@ -796,7 +781,56 @@ impl EffectRunner {
                         .unwrap_or_default(),
                 )
             }),
+            Query::GetMcpPrompt(request) => self.dispatch_get_mcp_prompt(request),
         }
+    }
+
+    /// `Query::ListRecentPrompts` — the prompts of the project's saved
+    /// sessions, for Ctrl+R.
+    fn dispatch_list_recent_prompts(&mut self, max_sessions: usize, max_prompts: usize) {
+        let workdir = self.workdir.clone();
+        self.send_blocking_query(move || {
+            QueryResult::RecentPromptsListed(
+                crate::session::ConversationManager::new(&workdir)
+                    .map(|mgr| mgr.recent_prompts(max_sessions, max_prompts))
+                    .unwrap_or_default(),
+            )
+        });
+    }
+
+    /// `Query::ResolveAddedDir` — check a `/add-dir` path on disk.
+    fn dispatch_resolve_added_dir(&mut self, raw: String) {
+        let workdir = self.workdir.clone();
+        self.send_blocking_query(move || {
+            let resolved = crate::app::added_dirs::resolve_added_dir(&workdir, &raw);
+            QueryResult::AddedDirResolved { raw, resolved }
+        });
+    }
+
+    /// `Query::GetMcpPrompt` — `prompts/get` on the server that advertised
+    /// the prompt. Always answers, so a failure reaches the transcript
+    /// instead of the command silently doing nothing.
+    fn dispatch_get_mcp_prompt(&mut self, request: mermaid_domain::query::McpPromptRequest) {
+        let tx = self.msg_tx.clone();
+        self.detached.spawn(async move {
+            let result = match crate::mcp::manager_ref::get() {
+                Some(manager) => manager
+                    .get_prompt(&request.server, &request.prompt, &request.arguments)
+                    .await
+                    // The reason lands in the persisted transcript.
+                    .map_err(|e| mermaid_model::utils::redact_secrets(&e.to_string())),
+                None => Err("MCP servers not initialized".to_string()),
+            };
+            let _ = tx
+                .send(Msg::QueryResult(QueryResult::McpPromptLoaded(
+                    mermaid_domain::query::McpPromptAnswer {
+                        command: request.command,
+                        attachment_ids: request.attachment_ids,
+                        result,
+                    },
+                )))
+                .await;
+        });
     }
 
     /// `Query::ListOutputStyles` — every selectable output style
