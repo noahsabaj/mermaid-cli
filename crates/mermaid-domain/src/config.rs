@@ -135,6 +135,10 @@ pub struct Config {
     #[serde(default)]
     pub exec: ExecConfig,
 
+    /// Extra working roots beside the project directory (`[workspace]`).
+    #[serde(default)]
+    pub workspace: WorkspaceConfig,
+
     /// How the built-in tools are offered to the model (`[tools]` table).
     #[serde(default)]
     pub tools: ToolsConfig,
@@ -202,6 +206,21 @@ impl ExecConfig {
     pub fn pty_enabled(&self) -> bool {
         self.pty.unwrap_or(true)
     }
+}
+
+/// Directories the agent works in beside the project root (`[workspace]`
+/// table). User-scope only: the project config's allowlist omits the table,
+/// so a cloned repository can never widen where the agent may write.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WorkspaceConfig {
+    /// Extra roots with the project root's trust: paths inside them resolve
+    /// for the file tools and the policy gate like project paths, and
+    /// `--confine-fs` lets shell commands write there. `--add-dir` adds to
+    /// this list. The shell canonicalizes every entry at startup (a missing
+    /// directory is an error), so once a session starts this holds real,
+    /// absolute paths.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_dirs: Vec<std::path::PathBuf>,
 }
 
 /// How the built-in tools reach the model (`[tools]` table).

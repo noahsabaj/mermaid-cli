@@ -76,6 +76,14 @@ pub struct State {
     /// receive it via `ExecContext::workdir` and spawned subprocesses
     /// inherit it. Centralized here so tests can inject a fake cwd.
     pub cwd: PathBuf,
+    /// Extra working roots with the project root's trust (`--add-dir`,
+    /// `[workspace] additional_dirs`, `/add-dir`). Seeded from
+    /// `settings.workspace.additional_dirs`, which the shell canonicalized at
+    /// startup; `/add-dir` appends a path the effect layer canonicalized.
+    /// Stamped onto every `Cmd::ExecuteTool` so the tools, the policy gate
+    /// and the shell sandbox see the live list. Session-scoped: never
+    /// persisted, and it survives `/clear` and `/load`.
+    pub additional_dirs: Vec<PathBuf>,
     /// System temp dir, injected once at startup by the shell (which reads
     /// `std::env::temp_dir()`). Pasted-image attachments build their scratch
     /// path from it; holding it here keeps the reducer free of the env read it
@@ -175,6 +183,7 @@ impl State {
             .copied()
             .unwrap_or(settings.default_model.reasoning);
         let runtime = RuntimeState::new(&model_id);
+        let additional_dirs = settings.workspace.additional_dirs.clone();
         Self {
             session: Session {
                 conversation,
@@ -208,6 +217,7 @@ impl State {
             skills: None,
             pending_hook_context: Vec::new(),
             pending_task_notices: Vec::new(),
+            additional_dirs,
             cwd,
             temp_dir,
             ids: IdAllocatorBundle::default(),

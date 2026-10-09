@@ -91,6 +91,11 @@ pub enum Query {
     /// [`QueryResult::OutputStyleLoaded`]. `project` is only the persist
     /// target the reducer will use — lookup always spans both scopes.
     LoadOutputStyle { name: String, project: bool },
+    /// `/add-dir <path>` — canonicalize one added working root (relative
+    /// paths against the project directory, `~` against home) and check it
+    /// is a directory. Read-only: the reducer decides what to do with the
+    /// answer. Answered by [`QueryResult::AddedDirResolved`].
+    ResolveAddedDir { raw: String },
 }
 
 impl Query {
@@ -113,6 +118,7 @@ impl Query {
             Self::ListRuntimePlugins => "list_runtime_plugins",
             Self::ListOutputStyles => "list_output_styles",
             Self::LoadOutputStyle { .. } => "load_output_style",
+            Self::ResolveAddedDir { .. } => "resolve_added_dir",
         }
     }
 
@@ -140,6 +146,7 @@ impl Query {
                 max_sessions,
                 max_prompts,
             } => format!("list_recent_prompts(sessions={max_sessions}, prompts={max_prompts})"),
+            Self::ResolveAddedDir { raw } => format!("resolve_added_dir({raw})"),
             Self::ListOutputStyles
             | Self::ListConversations
             | Self::ListAvailableModels
@@ -204,6 +211,12 @@ pub enum QueryResult {
         keep_coding_instructions: bool,
         custom: bool,
         source: String,
+    },
+    /// Response to `/add-dir <path>`: the canonical directory, or why it
+    /// could not be added. `raw` echoes the request for the message.
+    AddedDirResolved {
+        raw: String,
+        resolved: Result<std::path::PathBuf, String>,
     },
 }
 

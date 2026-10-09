@@ -216,6 +216,12 @@ pub struct ExecContext {
     /// construction on the live path — `None` in tests and before the
     /// directory is confirmed on disk.
     pub scratchpad: Option<PathBuf>,
+    /// Extra working roots (`--add-dir`, `[workspace] additional_dirs`,
+    /// `/add-dir`), canonical, stamped by the reducer like `scratchpad`.
+    /// Paths inside one resolve like project paths (`AllowedRoots`), a
+    /// `working_dir` inside one is not escalated, and `--confine-fs` lets
+    /// shell commands write there.
+    pub additional_dirs: Vec<PathBuf>,
     /// Live safety mode for this call (from the session, not the static
     /// config). The policy gate builds its `PolicyEngine` from this.
     pub safety_mode: SafetyMode,
@@ -257,6 +263,7 @@ impl std::fmt::Debug for ExecContext {
             .field("session_id", &self.session_id)
             .field("message_index", &self.message_index)
             .field("scratchpad", &self.scratchpad)
+            .field("additional_dirs", &self.additional_dirs)
             .field("safety_mode", &self.safety_mode)
             .field("goal", &self.goal)
             .field(
@@ -309,6 +316,7 @@ impl ExecContext {
             message_index: session_id.as_ref().map(|_| dispatch.message_index as i64),
             session_id,
             scratchpad: dispatch.scratchpad,
+            additional_dirs: dispatch.additional_dirs,
             safety_mode: dispatch.safety_mode,
             goal: dispatch.goal,
             classifier: services.classifier,
@@ -416,6 +424,7 @@ pub fn test_exec_context_with_config(
                 session_id: String::new(),
                 message_index: 0,
                 scratchpad: None,
+                additional_dirs: Vec::new(),
             },
             ToolServices {
                 workdir,

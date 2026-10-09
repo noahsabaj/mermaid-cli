@@ -729,6 +729,13 @@ impl EffectRunner {
             Query::LoadOutputStyle { name, project } => {
                 self.dispatch_load_output_style(name, project);
             },
+            Query::ResolveAddedDir { raw } => {
+                let workdir = self.workdir.clone();
+                self.send_blocking_query(move || {
+                    let resolved = crate::app::added_dirs::resolve_added_dir(&workdir, &raw);
+                    QueryResult::AddedDirResolved { raw, resolved }
+                });
+            },
             Query::ListRuntimeTasks { limit } => self.send_blocking_query(move || {
                 QueryResult::RuntimeTasksListed(
                     crate::runtime_client::RuntimeClient::auto()
@@ -2418,6 +2425,7 @@ mod tests {
                 session_id: "sess-test".to_string(),
                 message_index: 0,
                 scratchpad: None,
+                additional_dirs: Vec::new(),
             },
         });
         let first = tokio::time::timeout(Duration::from_millis(200), rx.recv())

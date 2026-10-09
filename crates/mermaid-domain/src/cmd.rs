@@ -71,6 +71,9 @@ pub struct ToolDispatch {
     /// `None` until `Msg::ScratchpadReady` lands — tools fall back to
     /// workdir-relative temp space.
     pub scratchpad: Option<PathBuf>,
+    /// Extra working roots (`State::additional_dirs`) at dispatch, so a
+    /// `/add-dir` takes effect from the next tool call on.
+    pub additional_dirs: Vec<PathBuf>,
 }
 
 /// A single side-effect request. Most variants are one-shot; `CallModel`

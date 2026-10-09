@@ -83,6 +83,7 @@ mermaid --resume                           # Pick a past session from a searchab
 mermaid --model anthropic/<model>          # Pick a model (see Remote providers below)
 mermaid --reasoning high                   # Override default reasoning depth
 mermaid --path /path/to/project            # Run against a specific project directory
+mermaid --add-dir ../shared-lib            # Also work in another directory (or /add-dir mid-session)
 mermaid list                               # List available models across providers
 mermaid doctor                             # First-run readiness check
 mermaid init                               # Create default config file
@@ -144,7 +145,7 @@ MCP servers contribute tools under the `mcp__<server>__<tool>` prefix, **deferre
 Approval policy and OS confinement are independent. The policy (`read_only`, `ask`, `auto`, `full_access`) decides what needs your say-so; the sandbox decides what the kernel permits regardless:
 
 - `--no-network` — blocks web tools everywhere, and stops model-run commands from reaching the network
-- `--confine-fs` — write-class filesystem access only beneath the project root, cwd, and temp
+- `--confine-fs` — write-class filesystem access only beneath the project root, any `--add-dir` directories, cwd, and temp
 - `--sandbox` — both at once
 
 Enforcement is seccomp-BPF plus Landlock on Linux, Seatbelt on macOS, AppContainer plus Job Objects on Windows. It fails closed: unappliable confinement exits 126 rather than running unconfined. On macOS and on Linux 6.12 and later, `read_only` mode runs every shell command inside a kernel-enforced read-only sandbox (no writes, sockets, IPC, outward signals or privileges), so any command that only reads works; Windows and older Linux kernels keep the read-only allowlists. See [docs/sandbox.md](docs/sandbox.md).

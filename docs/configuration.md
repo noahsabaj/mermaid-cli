@@ -47,7 +47,8 @@ structural:
   `reasoning_per_model`, `ollama`, `ollama_num_ctx_per_model`, `compaction`,
   `memory`, `output`, `ui`, and a `safety` subset. Anything else —
   including `web` (selects egress routing), `mcp_servers` (spawns commands), `providers`
-  (redirects traffic/credentials), `agents`, and `daemon` — is ignored with a warning.
+  (redirects traffic/credentials), `workspace` (adds working directories), `agents`, and
+  `daemon` — is ignored with a warning.
   `ollama.host`/`port` are also denied inside the otherwise-allowed `ollama` table.
 - `safety.mode`, `safety.network`, and `safety.filesystem` are clamped tighten-only against
   your user config: a project can turn the sandbox on or drop to `read_only`, but can never
@@ -127,6 +128,18 @@ checkpoint_on_mutation = true
 # session's level clamped to low..high. It waits 30s at low, 60s at medium and
 # 120s at high; a timeout or error escalates to you, never allows.
 # auto_classifier_model = "<provider>/<small-fast-model>"
+
+[workspace]
+# Extra working directories with the project directory's trust: the file
+# tools and execute_command work there without the outside-the-project
+# escalation, edits are checkpointed, and --confine-fs lets shell commands
+# write there. `--add-dir <dir>` (repeatable) adds to this list for one run;
+# `/add-dir <path>` adds one mid-session. `~` expands to your home directory
+# and relative paths resolve against the project directory. Every entry is
+# canonicalized at startup, and one that does not exist stops the session
+# with an error. User config, profiles and -c only: a project config cannot
+# set it.
+# additional_dirs = ["~/src/shared-lib"]
 
 [exec]
 # Foreground commands run on a pseudo-terminal by default (openpty on Unix,

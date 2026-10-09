@@ -95,6 +95,11 @@ async fn async_main(hardening: mermaid_runtime::hardening::Hardening) -> Result<
         return Ok(());
     }
 
+    // Sessions only: canonicalize the added working roots (config + every
+    // `--add-dir`). A missing one fails here, before any model work, rather
+    // than leaving a session without a root the user asked for.
+    mermaid_cli::app::added_dirs::apply_added_dirs(&mut config, &cwd, &cli.add_dir)?;
+
     // Otherwise: Commands::Run → headless driver; else interactive.
     // `--max-tokens` / `--allow-untrusted-tools` are already folded into the
     // config via the session-flags layer above.

@@ -175,7 +175,7 @@ impl ToolExecutor for ReadFileTool {
         };
 
         let start = std::time::Instant::now();
-        let roots = AllowedRoots::new(&ctx.workdir, ctx.scratchpad.as_deref());
+        let roots = AllowedRoots::of(&ctx);
         let mut combined = String::new();
         let mut any_truncated = false;
 
@@ -314,7 +314,7 @@ impl ToolExecutor for DeleteFileTool {
             return err("delete_file requires 'path'", 0.0);
         };
         let start = std::time::Instant::now();
-        let roots = AllowedRoots::new(&ctx.workdir, ctx.scratchpad.as_deref());
+        let roots = AllowedRoots::of(&ctx);
         let ResolvedInRoot {
             abs,
             rel,
@@ -425,7 +425,7 @@ impl ToolExecutor for CreateDirectoryTool {
             return err("create_directory requires 'path'", 0.0);
         };
         let start = std::time::Instant::now();
-        let roots = AllowedRoots::new(&ctx.workdir, ctx.scratchpad.as_deref());
+        let roots = AllowedRoots::of(&ctx);
         let ResolvedInRoot {
             abs,
             rel,
@@ -540,7 +540,7 @@ impl ToolExecutor for WriteFileTool {
         };
 
         let start = std::time::Instant::now();
-        let roots = AllowedRoots::new(&ctx.workdir, ctx.scratchpad.as_deref());
+        let roots = AllowedRoots::of(&ctx);
         // `rel` is the root-relative name for the confined fd write (the actual
         // byte path).
         let ResolvedInRoot {
@@ -695,7 +695,7 @@ impl ToolExecutor for EditFileTool {
             Err(e) => return ToolOutcome::error(e, None),
         };
 
-        let roots = AllowedRoots::new(&ctx.workdir, ctx.scratchpad.as_deref());
+        let roots = AllowedRoots::of(&ctx);
         let ResolvedInRoot {
             abs: abs_path,
             rel,
@@ -883,7 +883,7 @@ struct ReadTarget {
 }
 
 /// Resolve a read target through the canonical containment resolver, and
-/// answer its three-way verdict: project and scratchpad reads are ungated;
+/// answer its verdict: project, added-root and scratchpad reads are ungated;
 /// durable-memory reads are ungated too (memory is agent-owned by design and
 /// lives outside the project); anything else outside the roots is external and
 /// carries its absolute path for the gate.
@@ -898,11 +898,13 @@ fn resolve_read_target(roots: &AllowedRoots<'_>, raw: &str) -> std::io::Result<R
             root,
             containment,
         }) => match containment {
-            PathContainment::Project | PathContainment::Scratchpad => Ok(ReadTarget {
-                root,
-                rel,
-                external: None,
-            }),
+            PathContainment::Project | PathContainment::AddedDir | PathContainment::Scratchpad => {
+                Ok(ReadTarget {
+                    root,
+                    rel,
+                    external: None,
+                })
+            },
             PathContainment::External => Ok(resolve_in_memory_roots(roots.workdir, raw).map_or(
                 ReadTarget {
                     root,
@@ -1287,7 +1289,8 @@ pub(super) enum MutationGate {
 ///
 /// `containment` is the resolver's verdict for the path, matched here so that
 /// every mutating tool answers the three-way question in one place:
-/// - `Project`: an ordinary edit (`ToolCategory::Edit`).
+/// - `Project` / `AddedDir`: an ordinary edit (`ToolCategory::Edit`); an added
+///   working root carries the project root's trust.
 /// - `Scratchpad`: the gate downgrades an `Ask`/`Classify` to proceed — scratch
 ///   files are session-private and ephemeral — while read-only mode and `Deny`
 ///   overrides still block it.
@@ -1306,7 +1309,7 @@ pub(super) async fn mutation_policy_outcome(
     containment: PathContainment,
 ) -> MutationGate {
     let category = match containment {
-        PathContainment::Project | PathContainment::Scratchpad => {
+        PathContainment::Project | PathContainment::AddedDir | PathContainment::Scratchpad => {
             mermaid_runtime::ToolCategory::Edit
         },
         PathContainment::External => mermaid_runtime::ToolCategory::ExternalDirectory,
@@ -2207,6 +2210,107 @@ mod tests {
             "expected approval block, got: {error}"
         );
         assert!(!outside.exists());
+        let _ = fs::remove_dir_all(project.parent().unwrap());
+    }
+
+    /// Project + added-root + outside fixture, all canonical (added roots are
+    /// stored canonical; see `resolve_in_roots`).
+    fn added_root_fixture(name: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let base =
+            std::env::temp_dir().join(format!("mermaid_fs_added_{}_{}", name, std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        for dir in ["project", "added", "outside"] {
+            fs::create_dir_all(base.join(dir)).unwrap();
+        }
+        let base = fs::canonicalize(&base).unwrap();
+        (
+            base.join("project"),
+            base.join("added"),
+            base.join("outside"),
+        )
+    }
+
+    /// A write inside an added root is an ordinary edit for the policy gate:
+    /// `auto` allows it without the classifier (none is bound here), and it
+    /// is still checkpointed. The same write outside every root escalates to
+    /// `ExternalDirectory` and, with no classifier, is held for approval.
+    #[tokio::test]
+    async fn added_root_write_is_not_escalated_and_is_checkpointed() {
+        let (project, added, outside) = added_root_fixture("write");
+        let file = added.join("lib.rs");
+        fs::write(&file, "old\n").unwrap();
+        let ctx = || {
+            let (mut ctx, rx) =
+                scratch_ctx(mermaid_runtime::SafetyMode::Auto, project.clone(), None);
+            ctx.additional_dirs = vec![added.clone()];
+            (ctx, rx)
+        };
+        let args =
+            |path: &Path| serde_json::json!({ "path": path.to_str().unwrap(), "content": "new\n" });
+
+        let (c, _rx) = ctx();
+        let outcome = WriteFileTool.execute(args(&file), c).await;
+        assert!(outcome.is_success(), "added-root write: {outcome:?}");
+        assert_eq!(fs::read_to_string(&file).unwrap(), "new\n");
+        assert!(
+            any_checkpoint_mentions(&file.display().to_string()),
+            "a write in an added root must be checkpointed"
+        );
+
+        let elsewhere = outside.join("out.txt");
+        let (c, _rx) = ctx();
+        let outcome = WriteFileTool.execute(args(&elsewhere), c).await;
+        assert!(
+            !outcome.is_success(),
+            "a write outside every root must still escalate: {outcome:?}"
+        );
+        assert!(!elsewhere.exists());
+        let _ = fs::remove_dir_all(project.parent().unwrap());
+    }
+
+    /// `read_only`: reading an added root is not an external read (which the
+    /// mode denies), but writing there is still blocked like everywhere else.
+    #[tokio::test]
+    async fn added_root_reads_pass_read_only_and_writes_do_not() {
+        let (project, added, outside) = added_root_fixture("readonly");
+        fs::write(added.join("notes.md"), "shared").unwrap();
+        fs::write(outside.join("notes.md"), "private").unwrap();
+        let ctx = || {
+            let (mut ctx, rx) =
+                scratch_ctx(mermaid_runtime::SafetyMode::ReadOnly, project.clone(), None);
+            ctx.additional_dirs = vec![added.clone()];
+            (ctx, rx)
+        };
+
+        let (c, _rx) = ctx();
+        let path = added.join("notes.md");
+        let outcome = ReadFileTool
+            .execute(serde_json::json!({"path": path.to_str().unwrap()}), c)
+            .await;
+        assert!(outcome.is_success(), "added-root read: {outcome:?}");
+        assert_eq!(outcome.output(), "shared");
+
+        let (c, _rx) = ctx();
+        let path = outside.join("notes.md");
+        let outcome = ReadFileTool
+            .execute(serde_json::json!({"path": path.to_str().unwrap()}), c)
+            .await;
+        assert!(
+            !outcome.is_success(),
+            "external read in read_only: {outcome:?}"
+        );
+
+        let (c, _rx) = ctx();
+        let path = added.join("new.md");
+        let outcome = WriteFileTool
+            .execute(
+                serde_json::json!({"path": path.to_str().unwrap(), "content": "x"}),
+                c,
+            )
+            .await;
+        let error = outcome.error_message().expect("read_only blocks the write");
+        assert!(error.contains("blocked by policy"), "{error}");
+        assert!(!path.exists());
         let _ = fs::remove_dir_all(project.parent().unwrap());
     }
 
