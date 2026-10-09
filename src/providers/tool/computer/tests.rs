@@ -324,7 +324,7 @@ fn a_batch_gate_lists_every_action() {
     let click = json!({"action": "left_click", "coordinate": [10, 20]});
     let typing = json!({"action": "type", "text": "hello"});
     assert_eq!(
-        gate_summary(&click, &[click.clone()]),
+        gate_summary(&click, std::slice::from_ref(&click)),
         "computer left_click (10, 20)"
     );
     assert_eq!(
