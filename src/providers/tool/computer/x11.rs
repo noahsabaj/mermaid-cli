@@ -226,7 +226,7 @@ impl Desktop for X11 {
         }
         let lsb = setup.image_byte_order == ImageOrder::LSB_FIRST;
         let mut rgba = Vec::with_capacity(reply.data.len());
-        for px in reply.data.chunks_exact(4) {
+        for px in reply.data.as_chunks::<4>().0 {
             let (r, g, b) = if lsb {
                 (px[2], px[1], px[0])
             } else {

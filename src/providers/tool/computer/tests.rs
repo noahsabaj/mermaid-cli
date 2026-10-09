@@ -1,6 +1,5 @@
 use std::path::PathBuf;
 
-use base64::Engine as _;
 use mermaid_model::ids::{ToolCallId, TurnId};
 use mermaid_runtime::SafetyMode;
 use serde_json::json;
