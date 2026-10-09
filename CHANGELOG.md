@@ -17,7 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   later side questions see the newest 20 earlier ones. The side call has no
   tools. Esc closes the pane, Up/Down scrolls, Left/Right steps through
   earlier answers, `c` copies the answer, `x` clears the earlier ones, and a
-  bare `/btw` reopens the newest answer.
+  bare `/btw` reopens the newest answer. `f` forks the answer into a
+  background agent that carries on from it with full tools; `/agents` lists
+  it and its report is posted to the conversation.
 - **Mermaid reads Claude Code's files.** A user who moved from Claude Code
   used to lose their instructions, skills, commands and agents, because
   Mermaid read only `AGENTS.md`, `MERMAID.md` and `.mermaid/skills/`. Now

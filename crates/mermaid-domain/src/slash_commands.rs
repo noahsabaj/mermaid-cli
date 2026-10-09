@@ -106,7 +106,7 @@ pub const KEYBINDINGS: &[(&str, &str)] = &[
     ("Ctrl+O", "Compose the prompt in $VISUAL/$EDITOR"),
     (
         "In the /btw pane",
-        "Esc close · Up/Down scroll · Left/Right older/newer · c copy · x clear earlier",
+        "Esc close · Up/Down scroll · Left/Right older/newer · c copy · f fork · x clear earlier",
     ),
     ("Ctrl+B", "Background a running command"),
     ("Ctrl+T", "Expand or collapse the task checklist"),

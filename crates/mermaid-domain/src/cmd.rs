@@ -99,6 +99,18 @@ pub enum Cmd {
     /// streams back `Msg::SideQuestionText`, then one
     /// `Msg::SideQuestionFinished`.
     AskSideQuestion { id: u64, request: ChatRequest },
+    /// `/btw` pane, `f`: start a background subagent that inherits the
+    /// conversation (`history`) and continues from one side question and its
+    /// answer with full tool access. The user asked for it, so the runner
+    /// skips the spawn gate; the child's own tool calls stay gated at the
+    /// live safety mode. It runs detached from the start and reports like
+    /// any Ctrl+B-backgrounded agent.
+    ForkSideQuestion {
+        prompt: String,
+        description: String,
+        history: Vec<ChatMessage>,
+        dispatch: ToolDispatch,
+    },
     /// Run one tool in parallel with any other tools in the same turn.
     /// The runner wires the exec context's cancellation token to the turn's
     /// scope so `Cmd::CancelScope` aborts them all at once. Everything the
@@ -498,6 +510,7 @@ impl Cmd {
             Self::ForgetMemory { .. } => "forget_memory",
             Self::ConsolidateMemory { .. } => "consolidate_memory",
             Self::AskSideQuestion { .. } => "ask_side_question",
+            Self::ForkSideQuestion { .. } => "fork_side_question",
             Self::Query(query) => query.tag(),
             Self::ShowRuntimeProcessLogs { .. } => "show_runtime_process_logs",
             Self::StopRuntimeProcess { .. } => "stop_runtime_process",
@@ -580,6 +593,7 @@ impl Cmd {
             | Self::ForgetMemory { .. }
             | Self::ConsolidateMemory { .. }
             | Self::AskSideQuestion { .. }
+            | Self::ForkSideQuestion { .. }
             | Self::Query(_)
             | Self::ShowRuntimeProcessLogs { .. }
             | Self::StopRuntimeProcess { .. }
@@ -708,6 +722,9 @@ impl Cmd {
             Self::RememberMemory { .. } => "remember_memory".to_string(),
             Self::ForgetMemory { .. } => "forget_memory".to_string(),
             Self::ConsolidateMemory { .. } => "consolidate_memory".to_string(),
+            Self::ForkSideQuestion { history, .. } => {
+                format!("fork_side_question(msgs={})", history.len())
+            },
             Self::AskSideQuestion { id, request } => format!(
                 "ask_side_question(id={id}, model={}, msgs={})",
                 request.model_id,

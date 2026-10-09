@@ -76,3 +76,58 @@ async fn stream_answer(
         },
     }
 }
+
+/// `f` in the `/btw` pane: start a background agent that carries on from the
+/// side answer with full tools. The agent detaches at once (its background
+/// token is already fired), so it reports the way a Ctrl+B agent does:
+/// `Msg::BackgroundAgentStarted` now, `Msg::BackgroundAgentFinished` later.
+pub(super) async fn fork_side_question(
+    tx: MsgSender,
+    tool: crate::providers::tool::subagent::SubagentTool,
+    fork: SideFork,
+) {
+    let SideFork {
+        prompt,
+        description,
+        history,
+        dispatch,
+        services,
+    } = fork;
+    // Nobody reads the turn progress of a detached agent; the receiver can go.
+    let (progress_tx, _) = mpsc::channel(1);
+    let background = tokio_util::sync::CancellationToken::new();
+    background.cancel();
+    let signals = crate::providers::ctx::TurnSignals {
+        token: tokio_util::sync::CancellationToken::new(),
+        background,
+        web_bytes: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+    };
+    let ctx = ExecContext::assemble(
+        TurnId(0),
+        mermaid_domain::ToolCallId(0),
+        progress_tx,
+        signals,
+        dispatch,
+        services,
+    );
+    let args = serde_json::json!({ "prompt": prompt, "description": description });
+    let outcome = tool.run(args, ctx, Some(history)).await;
+    // A detach notifies on its own. Anything else stopped before the agent
+    // started (no free slot, a bad agent type): say why.
+    if !outcome.is_success() {
+        let _ = tx
+            .send(Msg::TransientStatus {
+                text: format!("The fork did not start: {}", outcome.summary),
+            })
+            .await;
+    }
+}
+
+/// What `fork_side_question` needs besides the tool.
+pub(super) struct SideFork {
+    pub prompt: String,
+    pub description: String,
+    pub history: Vec<mermaid_model::models::ChatMessage>,
+    pub dispatch: mermaid_domain::ToolDispatch,
+    pub services: crate::providers::ctx::ToolServices,
+}

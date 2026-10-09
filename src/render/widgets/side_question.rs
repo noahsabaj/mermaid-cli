@@ -109,11 +109,11 @@ impl Widget for SideQuestionWidget<'_> {
         let count = self.side.exchanges.len();
         let footer = if count > 1 {
             format!(
-                " Esc close · ↑↓ scroll · ←→ {} of {count} · c copy · x clear earlier ",
+                " Esc close · ↑↓ scroll · ←→ {} of {count} · c copy · f fork · x clear earlier ",
                 view.index + 1
             )
         } else {
-            " Esc close · ↑↓ scroll · c copy ".to_string()
+            " Esc close · ↑↓ scroll · c copy · f fork ".to_string()
         };
         let block = Block::default()
             .borders(Borders::ALL)

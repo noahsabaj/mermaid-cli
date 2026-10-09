@@ -167,6 +167,8 @@ Advanced runtime:
 - `/agents` — list background subagents, or kill one
 - `/processes`, `/logs <id>`, `/stop <id>`, `/restart <id>`, `/open <target>`, `/ports`
 
+Reasoning choices persist per-model: set `/reasoning high` on one model and `/reasoning low` on another, and each is remembered independently across sessions.
+
 ### Side questions
 
 `/btw <question>` asks about the current work without adding to the conversation:
@@ -185,8 +187,9 @@ The question and its answer never enter the conversation. They are not saved, no
 | Up / Down | Scroll the answer |
 | Left / Right (or `[` / `]`, Tab / Shift+Tab) | Step to older / newer side questions |
 | `c` | Copy the answer as raw Markdown |
+| `f` | Fork: start a background agent that carries on from this answer with full tools |
 | `x` | Clear the earlier side questions, keeping the one on view |
 
 The five newest earlier questions show dimmed above the current one. Run `/btw` with no question to reopen the pane on the newest answer; if an answer arrives after you close the pane, a short note says it is ready. `/clear`, `/load`, and a rewind fork start a fresh side-question thread. Because the side question sends the same prompt as the main turn, a provider prompt cache that is still warm makes it cheap.
 
-Reasoning choices persist per-model: set `/reasoning high` on one model and `/reasoning low` on another, and each is remembered independently across sessions.
+The fork (`f`) is for an answer you want to act on. The agent starts from the whole conversation plus the side question and its answer, runs in the background like a Ctrl+B agent, and does not interrupt the main turn. `/agents` lists it, and its report is posted to the conversation when it finishes. Wait for the answer to finish before you fork it.

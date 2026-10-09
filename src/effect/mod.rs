@@ -1514,6 +1514,50 @@ impl EffectRunner {
                     answer_side_question(tx, providers, id, request).await;
                 });
             },
+            Cmd::ForkSideQuestion {
+                prompt,
+                description,
+                history,
+                dispatch,
+            } => {
+                let tx = self.msg_tx.clone();
+                let Some(spawner) = self.tools.as_ref().and_then(|t| t.subagent_spawner()) else {
+                    let _ = tx.try_send(Msg::TransientStatus {
+                        text: "The fork did not start: this session cannot run agents.".to_string(),
+                    });
+                    return;
+                };
+                let config = self
+                    .providers
+                    .as_ref()
+                    .map(|p| Arc::new(p.config().clone()))
+                    .unwrap_or_else(|| Arc::new(mermaid_domain::Config::default()));
+                let tool = crate::providers::tool::subagent::SubagentTool::new(spawner.clone())
+                    .with_types(&config.agents.types);
+                // The agent runs headless like any child: no approval broker,
+                // no question channel, and the spawn gate is skipped because
+                // the user asked for it.
+                let services = crate::providers::ctx::ToolServices {
+                    workdir: self.workdir.clone(),
+                    config,
+                    task_id: self.task_id.clone(),
+                    notify: Some(tx.clone()),
+                    classifier: None,
+                    approval: None,
+                    questions: None,
+                    tasks: Some(self.tasks.clone()),
+                };
+                let fork = SideFork {
+                    prompt,
+                    description,
+                    history,
+                    dispatch,
+                    services,
+                };
+                self.detached.spawn(async move {
+                    fork_side_question(tx, tool, fork).await;
+                });
+            },
             Cmd::Query(query) => self.dispatch_query(query),
             Cmd::ShowRuntimeProcessLogs { id } => {
                 let tx = self.msg_tx.clone();
@@ -2343,6 +2387,34 @@ mod tests {
                 outcome: mermaid_domain::side_question::SideOutcome::Failed(_),
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn a_fork_without_agent_support_says_so() {
+        let (mut r, mut rx) = runner();
+        r.dispatch(Cmd::ForkSideQuestion {
+            prompt: "carry on".to_string(),
+            description: "btw: carry on".to_string(),
+            history: vec![],
+            dispatch: mermaid_domain::ToolDispatch {
+                model_id: "test/m".to_string(),
+                safety_mode: mermaid_runtime::SafetyMode::Ask,
+                goal: mermaid_domain::UserGoal::default(),
+                reasoning: mermaid_model::models::ReasoningLevel::default(),
+                session_id: "sess-test".to_string(),
+                message_index: 0,
+                scratchpad: None,
+            },
+        });
+        assert_eq!(r.scope_count(), 0);
+        let msg = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("the fork answered")
+            .expect("channel alive");
+        assert!(
+            matches!(&msg, Msg::TransientStatus { text } if text.contains("cannot run agents")),
+            "{msg:?}"
+        );
     }
 
     /// After a spawned task completes (here via the

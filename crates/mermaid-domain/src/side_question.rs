@@ -239,6 +239,19 @@ fn side_question_prompt(question: &str) -> String {
     )
 }
 
+/// The task a forked side question starts with. The child already holds the
+/// conversation; this hands it the side exchange and says what to do with it.
+#[must_use]
+pub fn fork_prompt(question: &str, answer: &str) -> String {
+    format!(
+        "During this session the user asked a side question, and it was answered \
+         without tools. Continue from that exchange with full tool access: do the work \
+         it points to (check, investigate, or fix), then report what you found or changed.\n\n\
+         Side question: {question}\n\n\
+         Answer given: {answer}"
+    )
+}
+
 /// The request for a side question: the main turn's request as it stands now
 /// (same system prompt, instructions, tools and history, so a warm prompt
 /// cache still applies), then the earlier side exchanges, then the question.

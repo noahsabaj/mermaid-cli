@@ -5,7 +5,7 @@
 
 use crate::cmd::Cmd;
 use crate::msg::{KeyCode, KeyMods};
-use crate::side_question::{SideOutcome, side_question_request};
+use crate::side_question::{SideOutcome, SideStatus, fork_prompt, side_question_request};
 use crate::state::State;
 
 /// `/btw <question>` asks; a bare `/btw` reopens the pane on the newest
@@ -65,8 +65,46 @@ pub fn handle_side_question_key(
             }
         },
         KeyCode::Char('x') if !mods.ctrl => side.clear_earlier(),
+        KeyCode::Char('f') if !mods.ctrl => fork_viewed(state, cmds),
         _ => {},
     }
+}
+
+/// `f`: hand the side exchange on view to a background subagent that keeps
+/// the conversation and has tools. Only a finished answer forks; the pane
+/// closes so the user is back at the composer while the child works.
+fn fork_viewed(state: &mut State, cmds: &mut Vec<Cmd>) {
+    let Some(ex) = state.side_questions.viewed() else {
+        return;
+    };
+    if ex.status != SideStatus::Done {
+        state.ui.toast = Some((
+            "Wait for the answer before you fork it.".to_string(),
+            state.now + crate::state::TOAST_TTL,
+        ));
+        return;
+    }
+    let first_line = ex.question.lines().next().unwrap_or_default();
+    let label: String = first_line.chars().take(40).collect();
+    cmds.push(Cmd::ForkSideQuestion {
+        prompt: fork_prompt(&ex.question, &ex.answer),
+        description: format!("btw: {label}"),
+        history: state.session.messages().to_vec(),
+        dispatch: crate::cmd::ToolDispatch {
+            model_id: state.session.model_id.clone(),
+            safety_mode: state.session.safety_mode,
+            goal: crate::user_goal::user_goal(&state.session),
+            reasoning: state.session.reasoning,
+            session_id: state.session.conversation.id.clone(),
+            message_index: state.session.messages().len(),
+            scratchpad: state.session.scratchpad.clone(),
+        },
+    });
+    state.side_questions.dismiss();
+    state.ui.toast = Some((
+        "Forked into a background agent. /agents lists it.".to_string(),
+        state.now + crate::state::TOAST_TTL,
+    ));
 }
 
 #[cfg(test)]
@@ -246,6 +284,42 @@ mod tests {
         // Typed letters belong to the pane, not the composer.
         let (state, _) = update(state, key(KeyCode::Char('q')));
         assert!(state.ui.input_buffer.is_empty());
+    }
+
+    #[test]
+    fn f_forks_a_finished_answer_with_the_conversation() {
+        let mut state = fresh_state();
+        state
+            .session
+            .append(ChatMessage::user("refactor the parser"), state.now);
+        let (state, cmds) = ask(state, "why did the test fail?");
+        let (id, _) = side_request(&cmds);
+
+        // Not yet answered: nothing forks.
+        let (state, cmds) = update(state, key(KeyCode::Char('f')));
+        assert!(cmds.is_empty());
+        assert_eq!(state.focus(), Focus::SideQuestion);
+
+        let state = answer(state, id, "A stale fixture.");
+        let (state, cmds) = update(state, key(KeyCode::Char('f')));
+        let [
+            Cmd::ForkSideQuestion {
+                prompt,
+                history,
+                description,
+                ..
+            },
+        ] = &cmds[..]
+        else {
+            panic!("expected one fork: {cmds:?}");
+        };
+        assert!(prompt.contains("why did the test fail?"));
+        assert!(prompt.contains("A stale fixture."));
+        assert_eq!(description, "btw: why did the test fail?");
+        assert_eq!(history.len(), 1, "the conversation, not the side thread");
+        assert_eq!(history[0].content, "refactor the parser");
+        assert_eq!(state.focus(), Focus::Composer, "the pane closes");
+        assert_eq!(state.session.messages().len(), 1, "history untouched");
     }
 
     #[test]
