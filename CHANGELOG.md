@@ -176,6 +176,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Gemini 3 keeps working after its first tool call.** Gemini 3 attaches a
+  thought signature to its function calls and refuses the next request with
+  a 400 when a call of the current turn comes back without it. Mermaid now
+  saves the signatures with the turn and sends them back to the model that
+  wrote them. A call another model made gets Google's documented stand-in.
+
 - **Images a tool returns reach the model.** An MCP tool's screenshot was
   drawn in the chat and never sent: tool results carried text only. Each
   result now carries its images: inside the `tool_result` for Anthropic, and

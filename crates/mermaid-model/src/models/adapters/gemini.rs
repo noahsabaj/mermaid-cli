@@ -24,9 +24,12 @@
 //! - Reasoning is gated by `generationConfig.thinkingConfig.thinkingBudget`
 //!   (int) + `includeThoughts: bool`. Thoughts come back as parts with
 //!   `thought: true`.
-//! - **No signature round-trip.** Gemini has no encrypted server state
-//!   for thinking blocks — multi-turn reasoning is stateless on the
-//!   client side. This is significantly simpler than Anthropic.
+//! - **Thought signatures ride on function calls.** Gemini 3 attaches an
+//!   opaque `thoughtSignature` to the first function call of a response and
+//!   refuses the next request with a 400 if a call of the current turn comes
+//!   back without it. The signatures are saved on the turn's continuation
+//!   and sent back to the model that wrote them. Thought text itself is
+//!   replayed as plain `thought: true` parts.
 //! - Tool call IDs are synthesized (`call_<n>`) since Gemini doesn't
 //!   supply them; tool results match by **name** on the wire. The protocol has
 //!   no call-id field on `functionCall`/`functionResponse`, so two parallel
@@ -74,7 +77,8 @@ use crate::models::stream::{StreamEvent, StreamSink};
 use crate::models::tool_call::{FunctionCall, ToolCall};
 use crate::models::traits::Model;
 use crate::models::types::{
-    ChatMessage, FinishReason, MessageAudience, MessageRole, ModelResponse, TokenUsage,
+    ChatMessage, FinishReason, GeminiSignature, MessageAudience, MessageRole, ModelResponse,
+    ProviderContinuation, TokenUsage,
 };
 use crate::utils::base64_image_media_type;
 
@@ -288,11 +292,12 @@ fn coalesce_consecutive_roles(msgs: Vec<Value>) -> Vec<Value> {
 /// - `MessageRole::Assistant` → `{role: "model", parts: [text + functionCall]}`.
 ///   Note the role rename: Mermaid's `Assistant` serializes as Gemini's
 ///   `model`. Thinking content (`msg.thinking`) re-emits as a `thought:
-///   true` text part — stateless, no signature.
+///   true` text part. Each function call carries the thought signature it
+///   came with, when `model` wrote it.
 /// - `MessageRole::Tool` → user-role message with one `functionResponse`
 ///   part per tool result. Consecutive Tool messages merge into one
 ///   user-role message (same idea as Anthropic).
-fn convert_messages(messages: &[ChatMessage]) -> (Option<Value>, Vec<Value>) {
+fn convert_messages(messages: &[ChatMessage], model: &str) -> (Option<Value>, Vec<Value>) {
     let mut system: Option<Value> = None;
     let mut out: Vec<Value> = Vec::new();
 
@@ -348,13 +353,28 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<Value>, Vec<Value>) {
                     parts.push(json!({"text": msg.content}));
                 }
                 if let Some(ref tool_calls) = msg.tool_calls {
-                    for tc in tool_calls {
-                        parts.push(json!({
+                    let signatures = msg
+                        .provider_continuation
+                        .as_ref()
+                        .and_then(|c| c.gemini_signatures(model));
+                    for (n, tc) in tool_calls.iter().enumerate() {
+                        let mut part = json!({
                             "functionCall": {
                                 "name": tc.function.name,
                                 "args": tc.function.arguments,
                             }
-                        }));
+                        });
+                        let signature = match signatures {
+                            Some(signed) => signed
+                                .iter()
+                                .find(|s| tc.id.as_deref() == Some(s.call_id.as_str()))
+                                .map(|s| s.signature.as_str()),
+                            None => (n == 0).then_some(UNSIGNED),
+                        };
+                        if let Some(signature) = signature {
+                            part["thoughtSignature"] = json!(signature);
+                        }
+                        parts.push(part);
                     }
                 }
                 if parts.is_empty() {
@@ -501,7 +521,7 @@ impl GeminiAdapter {
         config: &ModelConfig,
         rejected: &Rejections,
     ) -> Value {
-        let (system_from_msgs, gemini_contents) = convert_messages(messages);
+        let (system_from_msgs, gemini_contents) = convert_messages(messages, &self.model_name);
         // ModelConfig.system_prompt (+ optional MERMAID.md suffix) overrides
         // any system message in the history (matches Anthropic / OpenAI-compat
         // behavior). Gemini doesn't expose per-block cache markers in this
@@ -708,6 +728,7 @@ impl GeminiAdapter {
         let mut text_acc = String::new();
         let mut thinking_acc = String::new();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
+        let mut signatures: Vec<GeminiSignature> = Vec::new();
         let mut stop_reason: Option<FinishReason> = None;
 
         if let Some(candidate) = json.candidates.into_iter().next() {
@@ -726,6 +747,12 @@ impl GeminiAdapter {
                             }
                         } else if let Some(fc) = part.function_call {
                             let id = format!("call_{}", tool_calls.len());
+                            if let Some(signature) = part.thought_signature {
+                                signatures.push(GeminiSignature {
+                                    call_id: id.clone(),
+                                    signature,
+                                });
+                            }
                             tool_calls.push(ToolCall {
                                 id: Some(id),
                                 function: FunctionCall {
@@ -775,13 +802,12 @@ impl GeminiAdapter {
             } else {
                 Some(thinking_acc)
             },
+            provider_continuation: continuation(&self.model_name, &tool_calls, signatures),
             tool_calls: if tool_calls.is_empty() {
                 None
             } else {
                 Some(tool_calls)
             },
-            // Gemini has no signature round-trip — leave None.
-            provider_continuation: None,
         })
     }
 
@@ -853,6 +879,11 @@ impl StreamProtocol for GeminiStream {
         // The wrapper emits the authoritative `Done`. See
         // adapters/anthropic.rs for rationale.
         let usage = self.state.usage();
+        let provider_continuation = continuation(
+            &self.model_name,
+            &self.state.tool_calls_done,
+            self.state.signatures,
+        );
 
         Ok(ModelResponse {
             content: self.state.text_acc.into_string(),
@@ -869,7 +900,7 @@ impl StreamProtocol for GeminiStream {
             } else {
                 Some(self.state.tool_calls_done)
             },
-            provider_continuation: None,
+            provider_continuation,
         })
     }
 }
@@ -882,6 +913,8 @@ struct StreamState {
     text_acc: CappedText,
     thinking_acc: CappedText,
     tool_calls_done: Vec<ToolCall>,
+    /// The thought signatures on those calls.
+    signatures: Vec<GeminiSignature>,
     prompt_tokens: usize,
     completion_tokens: usize,
     cached_input_tokens: usize,
@@ -1022,6 +1055,33 @@ fn record_usage(state: &mut StreamState, usage: &Value) {
     }
 }
 
+/// A part's thought signature, in either spelling the API uses.
+fn signature_of(part: &Value) -> Option<&str> {
+    part.get("thoughtSignature")
+        .or_else(|| part.get("thought_signature"))
+        .and_then(Value::as_str)
+}
+
+/// The continuation a response leaves: its signatures, kept for the model
+/// that wrote them. A response with function calls always leaves one, even
+/// with no signature, so that replay can tell a call this model made unsigned
+/// from a call another model made.
+fn continuation(
+    model: &str,
+    calls: &[ToolCall],
+    signatures: Vec<GeminiSignature>,
+) -> Option<ProviderContinuation> {
+    (!calls.is_empty()).then(|| ProviderContinuation::Gemini {
+        model: model.to_string(),
+        signatures,
+    })
+}
+
+/// The documented stand-in for a signature on a function call Gemini did
+/// not write: a call made by another model, or saved before signatures were
+/// kept. Without one, Gemini 3 refuses the request.
+const UNSIGNED: &str = "skip_thought_signature_validator";
+
 /// Handle one part of a chunk: a function call is emitted whole, a text part
 /// goes to the answer or (with `thought: true`) the reasoning buffer, and
 /// anything else is skipped.
@@ -1039,6 +1099,12 @@ fn process_part(part: &Value, state: &mut StreamState, out: &mut Vec<StreamEvent
             return;
         }
         let id = format!("call_{}", state.tool_calls_done.len());
+        if let Some(signature) = signature_of(part) {
+            state.signatures.push(GeminiSignature {
+                call_id: id.clone(),
+                signature: signature.to_string(),
+            });
+        }
         let tc = ToolCall {
             id: Some(id),
             function: FunctionCall {
@@ -1203,6 +1269,8 @@ struct ResponsePart {
     thought: Option<bool>,
     #[serde(default, rename = "functionCall")]
     function_call: Option<FunctionCallOut>,
+    #[serde(default, rename = "thoughtSignature", alias = "thought_signature")]
+    thought_signature: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1375,6 +1443,10 @@ mod tests {
         assert_eq!(state.text_acc.as_str(), "hello");
     }
 
+    fn convert_messages_for_test(messages: &[ChatMessage]) -> (Option<Value>, Vec<Value>) {
+        convert_messages(messages, "gemini-test")
+    }
+
     fn test_adapter() -> GeminiAdapter {
         GeminiAdapter::new(
             "test-key".to_string(),
@@ -1461,7 +1533,7 @@ mod tests {
             ChatMessage::user("hi"),
             ChatMessage::system("ignored second system"),
         ];
-        let (system, contents) = convert_messages(&messages);
+        let (system, contents) = convert_messages_for_test(&messages);
         let sys = system.expect("system extracted");
         assert_eq!(sys["parts"][0]["text"], "You are helpful.");
         // Conversation-audience system messages are NOT included in contents.
@@ -1479,7 +1551,7 @@ mod tests {
         nudge.kind = ChatMessageKind::RecoveryNudge;
         let messages = vec![ChatMessage::user("ok"), nudge];
 
-        let (_system, contents) = convert_messages(&messages);
+        let (_system, contents) = convert_messages_for_test(&messages);
         assert_eq!(contents.len(), 1, "merged into the adjacent user turn");
         let parts = contents[0]["parts"].as_array().expect("parts array");
         assert_eq!(parts.len(), 2);
@@ -1556,7 +1628,7 @@ mod tests {
         ];
 
         for (name, messages) in shapes {
-            let (_system, contents) = convert_messages(&messages);
+            let (_system, contents) = convert_messages_for_test(&messages);
             assert!(!contents.is_empty(), "{name}: the history must not vanish");
             for pair in contents.windows(2) {
                 assert_ne!(
@@ -1573,7 +1645,7 @@ mod tests {
     #[test]
     fn coalescing_two_user_turns_keeps_both_texts() {
         let messages = vec![ChatMessage::user("first"), ChatMessage::user("second")];
-        let (_system, contents) = convert_messages(&messages);
+        let (_system, contents) = convert_messages_for_test(&messages);
         assert_eq!(contents.len(), 1);
         let parts = contents[0]["parts"].as_array().expect("parts array");
         assert_eq!(parts.len(), 2, "both texts survive: {parts:#?}");
@@ -1584,7 +1656,7 @@ mod tests {
     #[test]
     fn convert_messages_renames_assistant_to_model() {
         let messages = vec![ChatMessage::user("hi"), ChatMessage::assistant("hello")];
-        let (_system, contents) = convert_messages(&messages);
+        let (_system, contents) = convert_messages_for_test(&messages);
         assert_eq!(contents[0]["role"], "user");
         assert_eq!(contents[1]["role"], "model");
         assert_eq!(contents[1]["parts"][0]["text"], "hello");
@@ -1619,7 +1691,7 @@ mod tests {
             ChatMessage::tool("call_0", "read_file", "contents of A"),
             ChatMessage::tool("call_1", "read_file", "contents of B"),
         ];
-        let (_, contents) = convert_messages(&messages);
+        let (_, contents) = convert_messages_for_test(&messages);
         // user → model(functionCall) → user(both functionResponses)
         assert_eq!(contents.len(), 3);
         assert_eq!(contents[1]["role"], "model");
@@ -1648,7 +1720,7 @@ mod tests {
             },
         }]);
         let messages = vec![ChatMessage::user("read it"), msg];
-        let (_, contents) = convert_messages(&messages);
+        let (_, contents) = convert_messages_for_test(&messages);
         assert_eq!(contents[1]["role"], "model");
         let parts = contents[1]["parts"].as_array().unwrap();
         assert_eq!(parts.len(), 1);
@@ -1660,7 +1732,7 @@ mod tests {
     #[test]
     fn convert_messages_emits_inline_data_for_user_images() {
         let msg = ChatMessage::user("look at this").with_images(vec!["base64data".to_string()]);
-        let (_, contents) = convert_messages(&[msg]);
+        let (_, contents) = convert_messages_for_test(&[msg]);
         let parts = contents[0]["parts"].as_array().unwrap();
         assert_eq!(parts.len(), 2);
         assert_eq!(parts[0]["text"], "look at this");
@@ -1671,7 +1743,7 @@ mod tests {
     #[test]
     fn tool_images_follow_the_function_responses_in_their_turn() {
         use super::super::tool_images::{JPEG_B64, tool_loop_with_image};
-        let (_, contents) = convert_messages(&tool_loop_with_image());
+        let (_, contents) = convert_messages_for_test(&tool_loop_with_image());
         let parts = contents[2]["parts"].as_array().unwrap();
         assert_eq!(contents[2]["role"], "user");
         assert!(parts[0].get("functionResponse").is_some());
@@ -1687,7 +1759,7 @@ mod tests {
         let mut msg = ChatMessage::assistant("the answer is 42");
         msg.thinking = Some("step 1: think hard".to_string());
         let messages = vec![ChatMessage::user("compute"), msg];
-        let (_, contents) = convert_messages(&messages);
+        let (_, contents) = convert_messages_for_test(&messages);
         let parts = contents[1]["parts"].as_array().unwrap();
         assert_eq!(parts.len(), 2);
         assert_eq!(parts[0]["text"], "step 1: think hard");
@@ -2297,6 +2369,63 @@ mod tests {
         assert_eq!(tc.id.as_deref(), Some("call_0"));
 
         assert_eq!(count_tool_calls(&events), 1);
+    }
+
+    #[test]
+    fn signatures_on_calls_are_kept_for_the_model_that_wrote_them() {
+        let mut events: Vec<StreamEvent> = Vec::new();
+        let mut stream = GeminiStream::new("gemini-3-flash".to_string());
+        let chunk = json!({
+            "candidates": [{
+                "content": {"parts": [
+                    {"functionCall": {"name": "read_file", "args": {"path": "a"}},
+                     "thoughtSignature": "c2lnLWE="},
+                    {"functionCall": {"name": "read_file", "args": {"path": "b"}}},
+                ]},
+                "finishReason": "STOP",
+            }]
+        })
+        .to_string();
+        stream.on_frame(&chunk, &mut events).unwrap();
+        let response = stream.finish(&mut events).unwrap();
+        let continuation = response.provider_continuation.expect("continuation");
+        let signed = continuation
+            .gemini_signatures("gemini-3-flash")
+            .expect("this model's");
+        assert_eq!(signed.len(), 1, "only the first parallel call is signed");
+        assert_eq!(signed[0].call_id, "call_0");
+        assert_eq!(signed[0].signature, "c2lnLWE=");
+        assert!(continuation.gemini_signatures("gemini-3-pro").is_none());
+
+        // Replayed: the signature on its call, nothing on the other.
+        let mut turn = ChatMessage::assistant("").with_provider_continuation(continuation);
+        turn.tool_calls = response.tool_calls;
+        let history = [ChatMessage::user("read both"), turn];
+        let (_, contents) = convert_messages(&history, "gemini-3-flash");
+        let parts = contents[1]["parts"].as_array().unwrap();
+        assert_eq!(parts[0]["thoughtSignature"], "c2lnLWE=");
+        assert!(parts[1].get("thoughtSignature").is_none());
+
+        // Another model never saw it: the first call gets the documented
+        // stand-in instead.
+        let (_, contents) = convert_messages(&history, "gemini-3-pro");
+        let parts = contents[1]["parts"].as_array().unwrap();
+        assert_eq!(parts[0]["thoughtSignature"], UNSIGNED);
+        assert!(parts[1].get("thoughtSignature").is_none());
+    }
+
+    #[test]
+    fn a_response_without_calls_leaves_no_continuation() {
+        let mut events: Vec<StreamEvent> = Vec::new();
+        let mut stream = GeminiStream::new("gemini-3-flash".to_string());
+        let chunk = json!({"candidates": [{
+            "content": {"parts": [{"text": "hi", "thoughtSignature": "c2ln"}]},
+            "finishReason": "STOP",
+        }]})
+        .to_string();
+        stream.on_frame(&chunk, &mut events).unwrap();
+        let response = stream.finish(&mut events).unwrap();
+        assert!(response.provider_continuation.is_none());
     }
 
     #[test]
