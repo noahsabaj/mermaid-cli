@@ -153,7 +153,7 @@ pub fn handle_query_result(state: &mut State, cmds: &mut Vec<Cmd>, result: Query
             // overwrite `state.turn` to `Idle` below and lose the only handle —
             // the turn's CancellationToken + JoinSet — that could stop the
             // running model call and tool tasks, orphaning them uncancellable;
-            // their parked approval requests could never be answered either (#2).
+            // their parked approval requests could never be answered either.
             if let Some(id) = state.turn.id() {
                 cmds.push(Cmd::CancelScope(id));
                 // Drop the cancelled turn's parked approval/question modals and
@@ -1023,7 +1023,7 @@ pub fn handle_manual_compact(state: &mut State, cmds: &mut Vec<Cmd>, instruction
         return;
     }
 
-    // Instructions/memory are kept fresh by the config watcher (#45); read as
+    // Instructions/memory are kept fresh by the config watcher; read as
     // injected data so the reducer does no I/O before building the request.
     let turn = state.ids.fresh_turn();
     state.turn = TurnState::Compacting {
@@ -1055,8 +1055,8 @@ pub fn handle_confirm_accepted(state: &mut State, cmds: &mut Vec<Cmd>) {
     match confirm.accept_msg_token {
         crate::state::ConfirmationTarget::ClearConversation => {
             // If a turn was still in flight when the user cleared, cancel its
-            // scope first and reset to `Idle` — mirroring `QueryResult::ConversationLoaded`
-            // (#2, F34). Without this the orphaned model/tool tasks keep running
+            // scope first and reset to `Idle` — mirroring `QueryResult::ConversationLoaded`.
+            // Without this the orphaned model/tool tasks keep running
             // (tools keep mutating files after a "clear"), and the still-active
             // turn's same-id `StreamDone`/`ToolFinished` would pass the stale
             // filter and commit a stray message into the freshly-cleared

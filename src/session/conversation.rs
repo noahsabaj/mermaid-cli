@@ -25,7 +25,7 @@ fn validate_conversation_id(id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Upper bound on a conversation file we'll read into memory (#129). A giant or
+/// Upper bound on a conversation file we'll read into memory. A giant or
 /// hostile `.mermaid/conversations/*.json` (or one with an enormous `content`)
 /// would otherwise OOM the process — `--continue` walks every file. 64 MiB is
 /// far above any real transcript yet bounds the worst case.
@@ -58,7 +58,7 @@ const TOOL_IMAGE_ELIDED_MARKER: &str = "\n[tool image not persisted]";
 const CHECKPOINT_SEQ_KEY: &str = "checkpoint_seq";
 
 /// Return a sanitized copy of `messages` with tool-returned image bytes
-/// removed before they reach durable storage (#99). Tool images (an MCP
+/// removed before they reach durable storage. Tool images (an MCP
 /// browser's page capture, say) can carry on-screen secrets and attach to
 /// **non-User** messages (the assistant message the capture is routed onto,
 /// or a tool outcome); user-supplied multimodal images attach to **User**
@@ -334,7 +334,7 @@ impl ConversationManager {
         let filename = format!("{}.json", conversation.id);
         let path = self.conversations_dir.join(filename);
 
-        // Sanitize before persisting: strip tool-returned image bytes (#99)
+        // Sanitize before persisting: strip tool-returned image bytes
         // AND scrub credential-shaped strings, so a persisted `read_file` of
         // `.env` or an API error echoing a key can't sit in cleartext (mirrors
         // the --record redaction in recorder.rs). Only clones when scrubbing.
@@ -361,14 +361,12 @@ impl ConversationManager {
         }
         let json = serde_json::to_string_pretty(&value)?;
 
-        // F73's concurrent-writer guard is NOT here any more; it moved to the
-        // append (see `event_log::diverted_on_conflict`). Two reasons, both
-        // consequences of the log becoming the truth: this file is now a
+        // The concurrent-writer guard lives on the append (see
+        // `event_log::diverted_on_conflict`), not here: this file is a
         // derived cache, so a clobbered checkpoint costs a longer replay
-        // rather than lost history — and by the time a save reaches here the
+        // rather than lost history, and by the time a save reaches here the
         // append has already decided whether this process is still writing
-        // the shared session at all. Guarding the cache after the truth was
-        // written would only produce `.conflict` copies of a rebuildable file.
+        // the shared session at all.
 
         // Atomic write: a crash mid-save must not leave a half-written
         // checkpoint that resume would then have to distrust.
@@ -1154,7 +1152,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(10));
 
         // Plant a NEWER, corrupt file (well-formed name, garbage contents): the
-        // newest-by-mtime entry is unparseable, so #68 must skip it.
+        // newest-by-mtime entry is unparseable, so the lookup must skip it.
         let corrupt = manager.conversations_dir().join("20991231_235959_999.json");
         fs::write(&corrupt, b"{ not valid json").unwrap();
 
@@ -1182,7 +1180,7 @@ mod tests {
 
     #[test]
     fn load_conversation_tolerates_unknown_message_role() {
-        // F74: a conversation written by a NEWER build may carry a MessageRole
+        // A conversation written by a NEWER build may carry a MessageRole
         // this build doesn't model. It must still load — the unknown role maps to
         // a neutral System message — so `--continue` doesn't silently skip the
         // newest session (the prior behavior, when the whole parse hard-failed).
@@ -1306,7 +1304,7 @@ mod tests {
 
     #[test]
     fn read_conversation_capped_refuses_oversized_file() {
-        // #129: a file over the cap is refused before it's read into RAM. Use a
+        // A file over the cap is refused before it's read into RAM. Use a
         // sparse file so the test stays fast and doesn't actually write 64 MiB.
         let dir = std::env::temp_dir().join(format!("mermaid_conv_cap_{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
@@ -1326,10 +1324,4 @@ mod tests {
 
         let _ = fs::remove_dir_all(&dir);
     }
-
-    // The two tests that lived here pinned the snapshot-side F73 guard.
-    // That guard moved to the append, so its coverage moved with it:
-    // event_log::tests::a_second_writer_diverts_this_process_to_a_conflict_sibling.
-    // Keeping them here would assert that a derived cache defends itself
-    // against a writer that no longer races for it.
 }

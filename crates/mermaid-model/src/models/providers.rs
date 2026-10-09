@@ -187,8 +187,7 @@ pub const REGISTRY: &[ProviderProfile] = &[
         extra_headers: &[],
         reasoning_strategy: ReasoningStrategy::Effort,
         // Chat Completions doesn't stream reasoning content for o-series
-        // (encrypted server-side); only the Responses API does. Step 2
-        // targets Chat Completions, so None.
+        // (encrypted server-side); only the Responses API does, so None.
         reasoning_extraction: ReasoningExtraction::None,
         max_tokens_param: MaxTokensParam::MaxTokens,
         disable_parallel_tool_calls_for: &[],

@@ -1,4 +1,4 @@
-//! Background config watcher (#45).
+//! Background config watcher.
 //!
 //! Polls `MERMAID.md` and the memory directory on a fixed interval and emits
 //! [`Msg::InstructionsChanged`] / [`Msg::MemoryChanged`] whenever they change,

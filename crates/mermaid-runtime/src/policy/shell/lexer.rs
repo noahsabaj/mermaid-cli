@@ -454,7 +454,7 @@ pub(crate) const MAX_SUBST_DEPTH: u8 = 4;
 /// substitution in `command`: `$(…)`, backtick `` `…` ``, and `<(…)` / `>(…)`.
 /// The shell executes these as commands, so the classifier and the destructive
 /// hard-deny must see them too — `echo $(rm -rf ~)` is really `rm -rf ~`, not a
-/// benign `echo` (#F1). Single-quoted regions are skipped (there the shell
+/// benign `echo`. Single-quoted regions are skipped (there the shell
 /// treats `$(`/backticks literally); double-quoted regions are NOT (a
 /// substitution inside double quotes is still expanded). Nested parens are
 /// tracked so the body of `$(a $(b))` is captured whole and re-scanned by the
@@ -481,7 +481,7 @@ pub(crate) fn extract_substitutions_inner(command: &str, quote_blind: bool) -> V
 }
 
 /// Lexically collapse `.`/`..` in a POSIX-style path so an interior `..` can't
-/// disguise a catastrophic root: `/etc/../etc` resolves to `/etc` (#F3). No
+/// disguise a catastrophic root: `/etc/../etc` resolves to `/etc`. No
 /// filesystem access — this is the obfuscation-defeating companion to the
 /// trailing-slash/glob stripping in [`is_dangerous_root`].
 pub(crate) fn collapse_parent_refs(p: &str) -> String {

@@ -22,7 +22,7 @@ pub(super) async fn handle_command(command: &str, require_auth: bool) -> Result<
 
     // Only `health` (liveness + DB path, no sensitive rows) is served in the
     // plaintext form. The plaintext DATA commands used to serve tasks, sessions,
-    // snapshots, etc. with NO auth — bypassing the #21 pairing-token gate that
+    // snapshots, etc. with NO auth — bypassing the pairing-token gate that
     // the JSON `runtime_*` reads enforce, so any same-UID process could read
     // session messages and full DB snapshots straight off the socket. Nothing in
     // the repo speaks plaintext (every client sends JSON, including `health`), so
@@ -137,7 +137,7 @@ pub(super) async fn handle_task_command(
             model_id,
         } => {
             let store = mermaid_runtime::RuntimeStore::open_default()?;
-            // F18 (RC-E): tag daemon-created tasks so the startup reconcile may
+            // Tag daemon-created tasks so the startup reconcile may
             // recover them — interactive CLI tasks stay un-owned and are spared.
             let task = store.tasks().create(
                 mermaid_runtime::NewTask::new(title, project_path, model_id).daemon_owned(),
@@ -180,7 +180,7 @@ pub(super) async fn handle_task_command(
             // burst of runs executes bounded by `daemon.max_concurrent_tasks`
             // instead of stampeding the GPU. The full prompt is persisted for
             // that deferred execution (and survives a daemon restart).
-            // F18 (RC-E): daemon-owned, so a crash leaving it `Running` is
+            // Daemon-owned, so a crash leaving it `Running` is
             // recovered by the next startup reconcile.
             let task = store.tasks().create(
                 mermaid_runtime::NewTask::new(
@@ -408,7 +408,7 @@ pub(super) fn handle_admin_command(
         } => {
             let store = mermaid_runtime::RuntimeStore::open_default()?;
             let ttl_days = ttl_days.unwrap_or(mermaid_runtime::DEFAULT_PAIRING_TTL_DAYS);
-            // #65: clamp so a socket caller can't mint a never-expiring token by
+            // Clamp so a socket caller can't mint a never-expiring token by
             // sending ttl_days <= 0.
             let ttl_days = mermaid_runtime::clamp_pairing_ttl_days(ttl_days);
             let expires_at = mermaid_runtime::pairing_expiry_from_now(ttl_days);

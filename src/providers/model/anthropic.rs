@@ -113,7 +113,7 @@ impl ModelProvider for AnthropicProvider {
         let usage = response.usage.clone();
         let provider_continuation = response.provider_continuation.clone();
         let stop_reason = response.stop_reason.clone();
-        // F3: the wrapper's `Done` is the sole terminal event, and it goes on
+        // The wrapper's `Done` is the sole terminal event, and it goes on
         // the same sink the adapter just finished writing to — so it cannot
         // overtake a `ToolCall` still in flight. Carrying
         // `provider_continuation` out of `ModelResponse` here is what lets

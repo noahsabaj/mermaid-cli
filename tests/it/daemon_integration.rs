@@ -1,9 +1,8 @@
 //! Live integration exercise for the daemon / persistence hardening fixes whose
-//! unit coverage is only sequential / in-process: the atomic approval claim
-//! (#118), the restart reconcile (#120), the startup GC (#130), and the daemon
-//! singleton flock (#131).
+//! unit coverage is only sequential / in-process: the atomic approval claim,
+//! the restart reconcile, the startup GC, and the daemon singleton flock.
 //!
-//! `#118` runs in the default suite — it's deterministic (in-process threads).
+//! The approval-claim test runs in the default suite — it's deterministic (in-process threads).
 //! The three `#[ignore]`d tests spawn a real `mermaidd` and assert its
 //! on-startup wiring; run them with:
 //!
@@ -170,7 +169,7 @@ fn make_approval(store: &RuntimeStore, action: &str) -> String {
 
 #[test]
 fn approval_claim_has_exactly_one_winner_under_thread_contention() {
-    // #118: many processes can race `mermaid approve <id>`. The claim is an
+    // Many processes can race `mermaid approve <id>`. The claim is an
     // atomic `UPDATE ... WHERE user_decision IS NULL`, so exactly one may win and
     // run the un-rollback-able effect. Unit tests only check this sequentially;
     // here N threads — each its own connection, so this is real SQLite
@@ -228,7 +227,7 @@ fn approval_claim_has_exactly_one_winner_under_thread_contention() {
 #[test]
 #[ignore = "spawns a real mermaidd; run with: cargo nextest run --test integration --run-ignored only it::daemon_integration::"]
 fn daemon_singleton_flock_rejects_a_second_start() {
-    // #131: a daemon-lifetime advisory flock makes two concurrent starts safe —
+    // A daemon-lifetime advisory flock makes two concurrent starts safe —
     // the second must refuse rather than race the connect-probe → unlink → bind
     // dance and knock the first off its socket.
     let base = fresh_base("flock");
@@ -268,7 +267,7 @@ fn daemon_singleton_flock_rejects_a_second_start() {
 #[test]
 #[ignore = "spawns a real mermaidd; run with: cargo nextest run --test integration --run-ignored only it::daemon_integration::"]
 fn daemon_startup_reconciles_running_task_and_gcs_old_archived_row() {
-    // #120 + #130: on startup the daemon recovers state a crashed predecessor
+    // On startup the daemon recovers state a crashed predecessor
     // left stranded — a task stuck `Running` is failed, and archived rows past
     // the retention window are pruned while active ones are kept. Both run in the
     // same startup block, before the control socket is bound.

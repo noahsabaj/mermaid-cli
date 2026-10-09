@@ -29,7 +29,7 @@ const MAX_WALK_DEPTH: usize = 32;
 
 /// Per-file byte cap when reading a memory `.md` during the per-turn index
 /// refresh. A single fact is tiny; this only bounds a pathological/huge file so
-/// `refresh()` can't be made to slurp unbounded bytes every turn (F47).
+/// `refresh()` can't be made to slurp unbounded bytes every turn.
 const MAX_MEMORY_FILE_BYTES: usize = 64_000;
 
 /// Outcome of a per-turn `refresh()`, for optional status reporting.
@@ -211,7 +211,7 @@ fn load_root(dir: &Path, scope: MemoryScope) -> Vec<MemoryEntry> {
         let mtime = meta.modified().unwrap_or(UNIX_EPOCH);
         // Bounded read: this dir is re-scanned every turn by `refresh()`, so
         // never slurp a pathologically large `.md` whole — and surface (not
-        // silently swallow) a read error instead of indexing an empty stub (F47).
+        // silently swallow) a read error instead of indexing an empty stub.
         let raw = match mermaid_model::utils::read_file_capped(&path, MAX_MEMORY_FILE_BYTES) {
             Ok((bytes, _truncated)) => String::from_utf8_lossy(&bytes).into_owned(),
             Err(e) => {
@@ -377,10 +377,10 @@ pub fn write_to_dir(
     std::fs::create_dir_all(dir)?;
     // Redact credential-shaped strings before persisting model-written memory:
     // a fact that summarizes a `.env` the model read would otherwise store a
-    // key in the durable (and always-index-loaded) memory file (#69). Scrub all
+    // key in the durable (and always-index-loaded) memory file. Scrub all
     // four fields — the `name` re-enters the always-loaded system-prompt index
     // and `tags` ride along in frontmatter, so redacting only description+body
-    // would still leak a secret pasted into the name/tags (F9). Redact the name
+    // would still leak a secret pasted into the name/tags. Redact the name
     // BEFORE slugifying so a credential can't survive in the on-disk filename.
     let name = mermaid_model::utils::redact_secrets(name);
     let description = mermaid_model::utils::redact_secrets(description);
@@ -651,7 +651,7 @@ mod tests {
 
     #[test]
     fn write_to_dir_redacts_name_and_tags() {
-        // F9: a credential pasted into the name or a tag must be scrubbed too —
+        // A credential pasted into the name or a tag must be scrubbed too —
         // the name re-enters the always-loaded index, and tags persist in
         // frontmatter. Redacting only description+body would still leak.
         let _lock = FS_LOCK.lock().unwrap_or_else(|e| e.into_inner());

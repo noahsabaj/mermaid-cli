@@ -42,7 +42,7 @@ pub(super) async fn dispatch_call_model(
     let provider = match factory.resolve(&request.model_id).await {
         Ok(p) => p,
         Err(e) => {
-            let error = classify_error_for_ui(&e);
+            let error = e.to_user_facing();
             let _ = msg_tx.send(Msg::UpstreamError { turn, error }).await;
             return;
         },
@@ -50,12 +50,12 @@ pub(super) async fn dispatch_call_model(
     {
         // Telemetry write — offload the synchronous DB upserts to the blocking
         // pool so they never stall this model-call dispatch path, which runs on
-        // every turn (#39).
+        // every turn.
         let model_id = request.model_id.clone();
         let caps = provider.capabilities().clone();
         // Own this telemetry write inside the per-turn task (await it) instead of
         // a detached `spawn_blocking` whose handle was dropped — so a panic in the
-        // upsert surfaces and shutdown isn't racing an untracked DB write (#F41).
+        // upsert surfaces and shutdown isn't racing an untracked DB write.
         // It is a few-ms SQLite upsert before a multi-second model call, so
         // awaiting it here does not meaningfully stall the turn (the "never stall
         // dispatch" rule is about the synchronous reducer path, not this task).
@@ -312,7 +312,7 @@ pub(super) async fn dispatch_call_model(
                     }
                 }
             }
-            let error = classify_error_for_ui(&e);
+            let error = e.to_user_facing();
             run_provider_error_hook(&request.model_id, &error).await;
             let _ = msg_tx.send(Msg::UpstreamError { turn, error }).await;
         },
@@ -367,7 +367,7 @@ fn spawn_stream_relay(
             let event = tokio::select! {
                 biased;
                 _ = relay_token.cancelled() => {
-                    // #F40: a cancel landing right after the provider finished must
+                    // A cancel landing right after the provider finished must
                     // not discard the terminal Done it already enqueued. Drain the
                     // buffered events and relay only a terminal Done — so the
                     // just-completed turn's usage is still recorded — while NOT
@@ -467,7 +467,7 @@ pub(super) async fn dispatch_provider_stream(
     match provider.chat(request, ctx).await {
         Ok(_) | Err(ModelError::Cancelled) => {},
         Err(e) => {
-            let error = classify_error_for_ui(&e);
+            let error = e.to_user_facing();
             run_provider_error_hook(&model_id, &error).await;
             let _ = msg_tx.send(Msg::UpstreamError { turn, error }).await;
         },

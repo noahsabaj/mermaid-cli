@@ -233,7 +233,7 @@ fn lookup(name: &str) -> Option<&'static RegistryEntry> {
 }
 
 /// Reject a package name that npx/uvx would parse as an option rather than a
-/// package: an empty name, or one beginning with `-` (F78). The launcher places
+/// package: an empty name, or one beginning with `-`. The launcher places
 /// the package immediately after `npx -y` / `uvx` with no `--` end-of-options
 /// guard, so a leading-dash name (e.g. `--registry=http://evil`) would be
 /// swallowed as a flag. Real npm/PyPI names are `@scope/...` or start with an
@@ -257,7 +257,7 @@ fn validate_package_name(package: &str) -> Result<()> {
 /// - `npx` uses `["-y", <package>, ...extra_args]` (auto-installs).
 /// - `uvx` uses `[<package>, ...extra_args]` (no `-y` flag).
 ///
-/// Validates the package name first (F78): a dash-leading or empty name is
+/// Validates the package name first: a dash-leading or empty name is
 /// refused so it can't be smuggled into the launcher argv as a flag.
 fn build_launch_args(command: &str, package: &str, extra_args: &[String]) -> Result<Vec<String>> {
     validate_package_name(package)?;
@@ -270,7 +270,7 @@ fn build_launch_args(command: &str, package: &str, extra_args: &[String]) -> Res
 }
 
 /// Versions to pin curated registry packages to, so `mermaid add <name>` installs
-/// an audited release instead of always-`latest` (#F51). **Empty by default** —
+/// an audited release instead of always-`latest`. **Empty by default** —
 /// pinning a curated package is a maintainer decision made with verified versions
 /// at the quarterly registry re-verification (see the module header); until a
 /// version is listed here a curated entry tracks `latest`, gated by the
@@ -340,7 +340,7 @@ pub async fn validate_argv(
     // Gracefully shut the validation child down on EVERY path — success, an
     // initialize/list_tools error, or the timeout — instead of only on success.
     // The old `?` short-circuit skipped this and fell back to `kill_on_drop`,
-    // bypassing the close-stdin -> SIGTERM -> SIGKILL escalation (#139).
+    // bypassing the close-stdin -> SIGTERM -> SIGKILL escalation.
     client.shutdown().await;
 
     match result {
@@ -364,7 +364,7 @@ pub async fn validate_http(config: &mermaid_domain::McpServerConfig) -> Result<V
     })
     .await;
 
-    // End the session on EVERY path — success, error, or timeout (#139).
+    // End the session on EVERY path — success, error, or timeout.
     client.shutdown().await;
 
     match result {
@@ -385,7 +385,7 @@ fn convention_patterns(name: &str) -> Vec<String> {
 }
 
 /// Build the npm packument URL for `package`, percent-encoding the whole name as
-/// ONE path segment (F77). Pushing the name through the `url` crate encodes every
+/// ONE path segment. Pushing the name through the `url` crate encodes every
 /// character that isn't valid in a path segment — the scope `/` (→ `%2F`), plus
 /// `?`, `#`, `%`, space, … — so a name carrying those reaches the registry as the
 /// correct path instead of being truncated into a query/fragment or split into
@@ -406,9 +406,8 @@ fn npm_packument_url(package: &str) -> Result<reqwest::Url> {
 }
 
 /// Check whether an npm package *exists* via a registry metadata lookup —
-/// WITHOUT executing it. This is the #10 fix: the old code probed convention
-/// names by running `npx -y <guess>`, so a typosquatted guess executed before
-/// any confirmation. A metadata GET never runs the package.
+/// WITHOUT executing it. Running `npx -y <guess>` would execute a typosquatted
+/// guess before any confirmation; a metadata GET never runs the package.
 async fn npm_package_exists(client: &reqwest::Client, package: &str) -> Result<bool> {
     let url = npm_packument_url(package)?;
     let response = client
@@ -428,7 +427,7 @@ async fn npm_package_exists(client: &reqwest::Client, package: &str) -> Result<b
 }
 
 /// Step B: probe convention-based npm names for *existence* (a metadata
-/// lookup), NOT by spawning them (the #10 RCE). Returns the first that exists.
+/// lookup), NOT by spawning them. Returns the first that exists.
 async fn try_conventions(client: &reqwest::Client, name: &str) -> Option<String> {
     for pattern in convention_patterns(name) {
         println!("  Checking npm for {pattern}...");
@@ -440,7 +439,7 @@ async fn try_conventions(client: &reqwest::Client, name: &str) -> Option<String>
 }
 
 /// Confirm (default NO) before fetching+running a package that is NOT in the
-/// trusted built-in registry — the #10 gate. `assume_yes` (`--yes`) is an
+/// trusted built-in registry. `assume_yes` (`--yes`) is an
 /// explicit opt-in for scripted use; without it a non-interactive session
 /// refuses rather than silently running untrusted code.
 fn confirm_untrusted_package(package: &str, command: &str, assume_yes: bool) -> Result<bool> {
@@ -466,7 +465,7 @@ fn confirm_untrusted_package(package: &str, command: &str, assume_yes: bool) -> 
     Ok(is_affirmative(input.trim()))
 }
 
-/// Confirm before fetching+running a *curated* registry package (#F51). Even a
+/// Confirm before fetching+running a *curated* registry package. Even a
 /// trusted entry pulls the LATEST release from npm/PyPI on every launch and runs
 /// it with the user's privileges, so a compromised upstream release would
 /// execute without notice — "in the registry" is not "pinned to audited code".
@@ -561,12 +560,12 @@ async fn search_npm(client: &reqwest::Client, name: &str) -> Result<Option<(Stri
 /// Resolve an MCP server name to a ready-to-configure server.
 /// Tries: A (built-in registry, trusted) → B (npm convention names) →
 /// C (npm search). Any non-registry result must be confirmed before it is
-/// returned, because configuring it leads to executing it via `npx -y` (#10).
+/// returned, because configuring it leads to executing it via `npx -y`.
 /// `assume_yes` (from `--yes`) is an explicit opt-in for non-interactive use.
 pub async fn resolve(name: &str, assume_yes: bool) -> Result<ResolvedServer> {
     // Step A: Built-in registry — curated, but still fetches+runs the latest
     // third-party release, so require informed consent (bypassable with --yes)
-    // rather than executing it silently (#F51).
+    // rather than executing it silently.
     if let Some(entry) = lookup(name) {
         println!("Found: {} ({})", entry.package, entry.description);
         if !confirm_registry_launch(entry.package, entry.command, assume_yes)? {
@@ -574,7 +573,7 @@ pub async fn resolve(name: &str, assume_yes: bool) -> Result<ResolvedServer> {
         }
         return Ok(ResolvedServer {
             command: entry.command.to_string(),
-            // Pin to an audited version when one is configured (#F51); else latest.
+            // Pin to an audited version when one is configured; else latest.
             package: pin_curated_package(entry.package),
             env_vars: entry
                 .env_vars
@@ -594,7 +593,7 @@ pub async fn resolve(name: &str, assume_yes: bool) -> Result<ResolvedServer> {
 
     // Step B: convention names — existence check only (no spawn), then confirm.
     if let Some(package) = try_conventions(&client, name).await {
-        // Refuse a dash-leading/empty name before it reaches the launcher (F78).
+        // Refuse a dash-leading/empty name before it reaches the launcher.
         validate_package_name(&package)?;
         println!("Found: {package}");
         if !confirm_untrusted_package(&package, "npx", assume_yes)? {
@@ -614,7 +613,7 @@ pub async fn resolve(name: &str, assume_yes: bool) -> Result<ResolvedServer> {
     // package is validated (executed) exactly once afterwards, by `add_server`.
     match search_npm(&client, name).await {
         Ok(Some((package, description))) => {
-            // Refuse a dash-leading/empty name before it reaches the launcher (F78).
+            // Refuse a dash-leading/empty name before it reaches the launcher.
             validate_package_name(&package)?;
             println!("Found: {package} — {description}");
             if !confirm_untrusted_package(&package, "npx", assume_yes)? {
@@ -653,7 +652,7 @@ mod tests {
     /// adding / updating entries.
     #[test]
     fn apply_pin_appends_version_when_pinned() {
-        // #F51 mechanism: a pinned curated package gets `@version`; an unpinned
+        // A pinned curated package gets `@version`; an unpinned
         // one is unchanged. (The shipped PINNED_VERSIONS is empty by design.)
         let pins = &[("@upstash/context7-mcp", "1.2.3")][..];
         assert_eq!(
@@ -757,7 +756,7 @@ mod tests {
     async fn resolve_registry_name_needs_no_network() {
         // A trusted built-in entry resolves via lookup() alone — no HTTP. With
         // `--yes` the curated-launch consent gate is bypassed, so this exercises
-        // the no-network path without prompting (#F51).
+        // the no-network path without prompting.
         let resolved = resolve("context7", true).await.expect("registry resolve");
         assert_eq!(resolved.command, "npx");
         assert_eq!(resolved.package, "@upstash/context7-mcp");
@@ -765,7 +764,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_registry_name_fails_closed_without_consent() {
-        // #F51: a curated entry now requires consent before its latest release is
+        // A curated entry now requires consent before its latest release is
         // fetched and run. Non-interactively (test stdin is not a TTY) and without
         // `--yes`, resolution must refuse rather than silently execute it.
         assert!(
@@ -774,7 +773,7 @@ mod tests {
         );
     }
 
-    // F77: the existence-probe URL must percent-encode the WHOLE package name as
+    // The existence-probe URL must percent-encode the WHOLE package name as
     // one path segment — not just the scope slash.
     #[test]
     fn npm_packument_url_encodes_whole_name_as_one_segment() {
@@ -805,7 +804,7 @@ mod tests {
         assert!(s.contains("%25"), "'%' should be percent-encoded: {s}");
     }
 
-    // F78: a package name that npx/uvx would parse as a flag must be refused.
+    // A package name that npx/uvx would parse as a flag must be refused.
     #[test]
     fn validate_package_name_rejects_dash_and_empty() {
         assert!(validate_package_name("").is_err());
@@ -819,7 +818,7 @@ mod tests {
 
     #[test]
     fn build_launch_args_rejects_leading_dash_and_builds_argv() {
-        // Dash-leading / empty packages are refused before launch (F78).
+        // Dash-leading / empty packages are refused before launch.
         assert!(build_launch_args("npx", "-evil", &[]).is_err());
         assert!(build_launch_args("uvx", "", &[]).is_err());
         // Valid packages build the expected argv (package never first; npx keeps -y).

@@ -862,7 +862,7 @@ fn tool_progress_output_does_not_append_message() {
     );
 }
 
-/// F14: Ctrl+V in the chat input emits `Cmd::ReadClipboard`. The
+/// Ctrl+V in the chat input emits `Cmd::ReadClipboard`. The
 /// reducer stays pure — the actual clipboard read runs off-thread
 /// in the effect runner.
 #[test]
@@ -883,7 +883,7 @@ fn ctrl_v_in_editing_input_emits_read_clipboard() {
     );
 }
 
-/// F14: Ctrl+V while a confirmation modal is open should NOT
+/// Ctrl+V while a confirmation modal is open should NOT
 /// hijack the keystroke — the user might be mid-confirmation and
 /// accidentally paste into dismissed UI. Gated out.
 #[test]
@@ -903,7 +903,7 @@ fn ctrl_v_with_confirm_modal_open_is_noop() {
     assert!(!cmds.iter().any(|c| matches!(c, Cmd::ReadClipboard)));
 }
 
-/// F14: Ctrl+V in the conversation-list picker must not trigger
+/// Ctrl+V in the conversation-list picker must not trigger
 /// a clipboard read. The picker has its own key handling.
 #[test]
 fn ctrl_v_in_conversation_list_mode_is_noop() {
@@ -1278,7 +1278,7 @@ fn model_switch_probes_vision_and_arms_warning_only_with_staged_image() {
     );
 }
 
-/// F14: a `Msg::ClipboardRead(Image)` (the Ctrl+V clipboard read result)
+/// A `Msg::ClipboardRead(Image)` (the Ctrl+V clipboard read result)
 /// creates an Attachment entry and emits `Cmd::WriteImageToTemp`. This is the
 /// existing contract; the test pins it so the Ctrl+V wiring has a
 /// known-good downstream to rely on.
@@ -1621,7 +1621,7 @@ fn cancel_and_reset_paths_clear_pending_question() {
 #[test]
 fn load_conversation_mid_turn_cancels_orphaned_scope() {
     // `/load` while a turn is generating must cancel the in-flight scope,
-    // not silently overwrite `state.turn` and orphan the running tasks (#2).
+    // not silently overwrite `state.turn` and orphan the running tasks.
     let mut state = fresh_state();
     state.turn = start_generating(TurnId(5), std::time::SystemTime::now());
     let history = fresh_state().session.conversation.clone();
@@ -1764,7 +1764,7 @@ fn load_conversation_recomputes_the_scratchpad() {
 
 #[test]
 fn clear_conversation_mid_turn_cancels_scope_and_resets_turn() {
-    // F34: confirming `/clear` while a turn is generating must cancel the
+    // Confirming `/clear` while a turn is generating must cancel the
     // in-flight scope and reset to Idle (mirroring `ConversationLoaded`), so
     // the orphaned model/tool tasks stop and a stray same-id
     // `StreamDone`/`ToolFinished` can't commit into the cleared conversation.
@@ -1957,7 +1957,7 @@ fn clear_conversation_drops_queued_messages() {
 
 #[test]
 fn upstream_error_during_cancelling_is_dropped() {
-    // F35: a late `UpstreamError` from a cancelled provider call (same turn
+    // A late `UpstreamError` from a cancelled provider call (same turn
     // id, state already `Cancelling`) must be a no-op — not paint a spurious
     // error line for the user's own cancel, and not drain a queued message
     // early (which would race the terminal `TurnCancelled` from `drop_scope`).
@@ -2268,7 +2268,7 @@ fn submit_prompt_on_idle_transitions_to_generating() {
     let (state, cmds) = update(state, msg);
     assert!(matches!(state.turn, TurnState::Generating { .. }));
     // CallModel only — instructions/memory freshness comes from the config
-    // watcher (#45) in the TUI and a synchronous load in the one-shot paths,
+    // watcher in the TUI and a synchronous load in the one-shot paths,
     // so submit never refreshes inline.
     assert!(cmds.iter().any(|c| matches!(c, Cmd::CallModel { .. })));
     // user message committed
@@ -4512,7 +4512,7 @@ fn context_text_explains_auto_compaction_policy() {
     assert!(text.contains("Hard limit risk:"));
 }
 
-/// F4 defense-in-depth: if a later refactor weakens the stale
+/// Defense in depth: if a later refactor weakens the stale
 /// filter at the top of `update_step`, `handle_upstream_error`
 /// still refuses to mutate state when the error's turn id doesn't
 /// match the active turn. Direct-call the helper to exercise the
@@ -4577,7 +4577,7 @@ fn upstream_error_ends_turn_and_records_line() {
 #[test]
 fn upstream_error_drains_queued_message() {
     // A provider error ends the turn; a message the user queued mid-turn
-    // must be submitted, not stranded until the next manual prompt (#121).
+    // must be submitted, not stranded until the next manual prompt.
     let mut state = fresh_state();
     state.turn = start_generating(TurnId(1), std::time::SystemTime::now());
     state
@@ -6286,7 +6286,7 @@ fn approval_requested_enqueues_modal() {
 
 #[test]
 fn approval_requested_during_cancelling_is_dropped() {
-    // #74: a tool task unwinding under cancellation can still emit an
+    // A tool task unwinding under cancellation can still emit an
     // ApprovalRequested; parking a modal for it would outlive the turn.
     let mut state = fresh_state();
     state.turn = TurnState::Cancelling {
@@ -6313,7 +6313,7 @@ fn approval_requested_during_cancelling_is_dropped() {
 
 #[test]
 fn copy_selection_emits_clipboard_cmd_when_nonempty() {
-    // #18: the copy side effect flows through the reducer as a Cmd.
+    // The copy side effect flows through the reducer as a Cmd.
     let (_s, cmds) = update(fresh_state(), Msg::CopySelection("hello".to_string()));
     assert!(
         cmds.iter()
@@ -6557,7 +6557,7 @@ fn mcp_server_ready_updates_entry_status() {
 
 #[test]
 fn build_chat_request_orders_mcp_tools_by_server_name() {
-    // #F68: `state.mcp.servers` is a HashMap with per-process randomized
+    // `state.mcp.servers` is a HashMap with per-process randomized
     // iteration order. `build_chat_request` must sort servers by name so the
     // emitted `ChatRequest.tools` ordering is deterministic across runs
     // (byte-reproducible requests / prompt-cache stability).
@@ -7736,7 +7736,7 @@ fn generating(id: u64, partial: &str) -> TurnState {
 
 #[test]
 fn queued_message_keeps_attachments_from_queue_time() {
-    // Axis 1 #1: a message queued while busy must re-submit with the
+    // A message queued while busy must re-submit with the
     // attachments present when it was queued, not whatever is live when the
     // FIFO drains.
     let mut state = fresh_state();
@@ -7783,7 +7783,7 @@ fn queued_message_keeps_attachments_from_queue_time() {
 
 #[test]
 fn stream_done_without_usage_keeps_previous_last_token_usage() {
-    // Axis 1 #2: a turn reporting no usage must not wipe the last request's
+    // A turn reporting no usage must not wipe the last request's
     // usage to "n/a".
     let mut state = fresh_state();
     state.turn = generating(1, "first");
@@ -7821,7 +7821,7 @@ fn stream_done_without_usage_keeps_previous_last_token_usage() {
 
 #[test]
 fn stream_tool_call_outside_generating_is_dropped_without_panic() {
-    // Axis 1 #5: a tool-call event arriving after the turn left Generating
+    // A tool-call event arriving after the turn left Generating
     // is dropped (and logged), never panics or mutates state.
     let mut state = fresh_state();
     let call = PendingToolCall {
@@ -7854,7 +7854,7 @@ fn stream_tool_call_outside_generating_is_dropped_without_panic() {
 
 #[test]
 fn exit_commits_interrupted_partial_before_saving() {
-    // Axis 1 #6: quitting mid-stream preserves the partial assistant reply
+    // Quitting mid-stream preserves the partial assistant reply
     // (with an interrupted marker) so `--continue` shows what was on screen.
     let mut state = fresh_state();
     state.turn = generating(1, "half written");
@@ -7872,7 +7872,7 @@ fn exit_commits_interrupted_partial_before_saving() {
 
 #[test]
 fn backgrounded_tool_completes_turn_not_stranded() {
-    // Axis 1 #8 (verified non-bug): Ctrl+B fires BackgroundScope but leaves
+    // Ctrl+B fires BackgroundScope but leaves
     // the reducer in ExecutingTools; the detachable tool still returns a
     // success outcome, so the turn advances normally. Locks that behavior.
     let mut state = fresh_state();
@@ -7924,7 +7924,7 @@ fn backgrounded_tool_completes_turn_not_stranded() {
 
 #[test]
 fn builtin_tool_schema_tokens_msg_updates_runtime() {
-    // Axis 1 #4: the runner's report lands on runtime state.
+    // The runner's report lands on runtime state.
     let state = fresh_state();
     let (state, _) = update(state, Msg::BuiltinToolSchemaTokens(4321));
     assert_eq!(state.runtime.builtin_tool_schema_tokens, 4321);
@@ -7932,7 +7932,7 @@ fn builtin_tool_schema_tokens_msg_updates_runtime() {
 
 #[test]
 fn context_text_folds_in_builtin_tool_tokens() {
-    // Axis 1 #4: /context shows a disclaimer before the runner reports, and
+    // /context shows a disclaimer before the runner reports, and
     // the real figure afterward.
     let mut state = fresh_state();
     let before = context_text(&state);

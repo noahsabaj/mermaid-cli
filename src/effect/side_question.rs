@@ -71,7 +71,7 @@ async fn stream_answer(
     match result {
         Ok(_) => SideOutcome::Done { tried_tools },
         Err(e) => {
-            let error = classify_error_for_ui(&e);
+            let error = e.to_user_facing();
             SideOutcome::Failed(format!("{}: {}", error.summary, error.message))
         },
     }
