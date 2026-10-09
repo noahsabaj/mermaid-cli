@@ -12,6 +12,9 @@
 //!   arrives and the policy gate, the read-only sandbox, checkpoints and
 //!   approvals all see the tool they know. The call itself is replayed in the
 //!   native form from the turn's continuation.
+//! - **OpenAI's own `computer` tool**, standing in for Mermaid's `computer`
+//!   the same way (see `openai_computer`): one call, a batch of actions,
+//!   one screenshot back.
 //! - **Server-side compaction** (`context_management`): past the trigger the
 //!   API summarizes the conversation into an encrypted `compaction` item,
 //!   which is replayed in place of everything before it.
@@ -27,7 +30,9 @@
 
 use serde_json::{Value, json};
 
+use super::computer_toolset::TOOL as COMPUTER;
 use super::learning::{Optional, Rejections};
+use super::openai_computer;
 use super::responses::{
     APPLY_PATCH, Replay, accepted_effort, combined_instructions, function_tools, messages_to_input,
     sent_effort,
@@ -87,14 +92,26 @@ pub(super) fn build_request_body(
     if !instructions.is_empty() {
         body["instructions"] = Value::String(instructions);
     }
+    let registered = |wanted: &str| {
+        config
+            .tools
+            .iter()
+            .any(|tool| tool.pointer("/function/name").and_then(Value::as_str) == Some(wanted))
+    };
     let native_patch = config.native_tools.text_editor
         && !rejected.contains(NATIVE_PATCH)
-        && config.tools.iter().any(|tool| {
-            tool.pointer("/function/name").and_then(Value::as_str) == Some(APPLY_PATCH)
-        });
-    let mut tools = function_tools(&config.tools, |name| native_patch && name == APPLY_PATCH);
+        && registered(APPLY_PATCH);
+    let native_computer = config.native_tools.computer
+        && !rejected.contains(openai_computer::REJECTION)
+        && registered(COMPUTER);
+    let mut tools = function_tools(&config.tools, |name| {
+        (native_patch && name == APPLY_PATCH) || (native_computer && name == COMPUTER)
+    });
     if native_patch {
         tools.push(json!({"type": "apply_patch"}));
+    }
+    if native_computer {
+        tools.push(json!({"type": openai_computer::TOOL_TYPE}));
     }
     if !tools.is_empty() {
         body["tools"] = Value::Array(tools);
@@ -200,6 +217,20 @@ pub(super) fn sent_optionals(body: &Value) -> Vec<Optional> {
         sent.push(
             Optional::new(NATIVE_PATCH, "OpenAI's apply_patch tool", &["apply_patch"])
                 .unless(&["apply_patch_call"]),
+        );
+    }
+    if tools.is_some_and(|tools| {
+        tools
+            .iter()
+            .any(|tool| tool["type"] == openai_computer::TOOL_TYPE)
+    }) {
+        sent.push(
+            Optional::new(
+                openai_computer::REJECTION,
+                "OpenAI's computer tool",
+                &["computer"],
+            )
+            .unless(&[openai_computer::CALL_TYPE]),
         );
     }
     if body.get(COMPACTION_PARAM).is_some() {

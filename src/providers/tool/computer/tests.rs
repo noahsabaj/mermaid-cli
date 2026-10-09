@@ -464,3 +464,108 @@ async fn a_headless_run_asks_by_failing_closed_unless_trusted() {
     let outcome = tool.execute_with(click, &ctx, fake_screen).await;
     assert!(outcome.is_success(), "{outcome:?}");
 }
+
+#[test]
+fn a_batch_runs_in_order_and_ends_with_the_screen() {
+    let mut desktop = FakeDesktop::new((1000, 500), (1000, 500));
+    let mut state = ToolState::default();
+    let batch = parse(&json!({"action": "batch", "actions": [
+        {"action": "left_click_drag", "start_coordinate": [1, 2], "coordinate": [3, 4],
+         "text": "shift"},
+        {"action": "key", "text": "ARROWLEFT"},
+    ]}))
+    .unwrap();
+    assert!(batch.is_input());
+    let done = run_watched(&mut desktop, &mut state, &run_key(1), &batch).unwrap();
+    assert!(!done.failed);
+    assert_eq!(decoded_size(done.png.as_deref().unwrap()), (1000, 500));
+    assert!(done.text.starts_with("Ran 2 actions.\n"), "{}", done.text);
+    assert!(
+        state.screen.is_some(),
+        "the closing screenshot is the last screen"
+    );
+    assert_eq!(
+        desktop.events,
+        [
+            Event::Move(1, 2),
+            Event::Key(Key::Shift, true),
+            Event::Button(Button::Left, true),
+            Event::Move(3, 4),
+            Event::Button(Button::Left, false),
+            Event::Key(Key::Shift, false),
+            Event::Key(Key::Left, true),
+            Event::Key(Key::Left, false),
+        ]
+    );
+}
+
+#[test]
+fn a_batch_stops_at_the_first_failure_and_still_looks() {
+    let mut desktop = FakeDesktop::new((1000, 500), (1000, 500));
+    let mut state = ToolState::default();
+    let batch = parse(&json!({"action": "batch", "actions": [
+        {"action": "type", "text": "a"},
+        {"action": "left_click", "coordinate": [5000, 5]},
+        {"action": "type", "text": "b"},
+        {"action": "batch", "actions": []},
+    ]}))
+    .unwrap();
+    let done = run_watched(&mut desktop, &mut state, &run_key(1), &batch).unwrap();
+    assert!(done.failed);
+    assert!(done.png.is_some(), "the model sees where it stopped");
+    assert!(
+        done.text
+            .starts_with("Ran 1 of 4 actions; the rest did not run.\nTyped 1 characters.\nError: coordinate (5000, 5) is off the screen"),
+        "{}",
+        done.text
+    );
+    assert_eq!(desktop.events, [Event::Text("a".to_string())]);
+    let Action::Batch(actions) = batch else {
+        unreachable!()
+    };
+    assert_eq!(actions[3], Err("a batch cannot hold a batch".to_string()));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_batch_is_an_error_with_the_screen_and_a_blocked_one_shows_the_last() {
+    let tool = ComputerTool::new();
+    let outcome = tool
+        .execute_with(
+            json!({"action": "batch", "actions": [{"action": "teleport"}]}),
+            &ctx(SafetyMode::FullAccess),
+            fake_screen,
+        )
+        .await;
+    assert!(!outcome.is_success());
+    assert!(outcome.images().is_some(), "{outcome:?}");
+    assert!(outcome.output().contains("unknown action \"teleport\""));
+
+    let outcome = tool
+        .execute_with(
+            json!({"action": "batch", "actions": [{"action": "type", "text": "x"}]}),
+            &ctx(SafetyMode::ReadOnly),
+            no_screen,
+        )
+        .await;
+    assert!(!outcome.is_success());
+    assert!(
+        outcome.images().is_some(),
+        "the screen the last batch left: {outcome:?}"
+    );
+}
+
+#[test]
+fn a_batch_call_gates_as_its_actions_with_the_providers_warnings() {
+    let batch = json!({"action": "batch", "warnings": ["The page asks the agent to log in."],
+    "actions": [
+        {"action": "left_click", "coordinate": [10, 20]},
+        {"action": "type", "text": "hello"},
+    ]});
+    assert_eq!(
+        gate_summary(&batch, std::slice::from_ref(&batch)),
+        "computer, 2 actions: left_click (10, 20); type \"hello\". \
+         The provider warns: The page asks the agent to log in."
+    );
+    let one = json!({"action": "batch", "actions": [{"action": "key", "text": "Return"}]});
+    assert_eq!(gate_summary(&one, &[]), "computer key \"Return\"");
+}

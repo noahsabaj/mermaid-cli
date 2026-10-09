@@ -1,0 +1,8 @@
+data: {"type":"response.created","response":{"id":"resp_9"}}
+
+data: {"type":"response.reasoning_summary_text.delta","delta":"Click the field and type."}
+
+data: {"type":"response.output_item.done","item":{"type":"computer_call","id":"cu_1","call_id":"call_c","status":"completed","pending_safety_checks":[{"id":"sc_1","code":"sensitive_domain","message":"The page looks like a bank."}],"actions":[{"type":"click","button":"left","x":290,"y":177},{"type":"type","text":"8080"}]}}
+
+data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"Click the field and type."}],"encrypted_content":"gAAAAopaque"},{"type":"computer_call","id":"cu_1","call_id":"call_c","status":"completed","pending_safety_checks":[{"id":"sc_1","code":"sensitive_domain","message":"The page looks like a bank."}],"actions":[{"type":"click","button":"left","x":290,"y":177},{"type":"type","text":"8080"}]}],"usage":{"input_tokens":40,"output_tokens":20,"total_tokens":60}}}
+

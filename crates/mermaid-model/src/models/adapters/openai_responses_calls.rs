@@ -304,3 +304,147 @@ async fn server_compaction_is_offered_until_refused() {
         "the harness compacts from now on"
     );
 }
+
+fn computer_config() -> ModelConfig {
+    ModelConfig {
+        tools: ["read_file", "computer"].into_iter().map(tool).collect(),
+        native_tools: NativeTools {
+            text_editor: false,
+            shell: false,
+            computer: true,
+        },
+        ..ModelConfig::default()
+    }
+}
+
+#[tokio::test]
+async fn a_computer_call_runs_as_one_batch_and_goes_back_with_its_screenshot() {
+    let provider = MockProvider::start(|_| Reply::stream(SSE, &fixture("computer_call.sse"))).await;
+    let adapter = adapter(&provider);
+    let user = ChatMessage::user("set the port to 8080");
+    let (result, events) = chat(&adapter, std::slice::from_ref(&user), &computer_config()).await;
+    let response = result.expect("chat");
+    assert_eq!(
+        tool_types(&provider.bodies_to("/responses")[0]),
+        ["read_file", "computer"]
+    );
+    assert_eq!(
+        provider.bodies_to("/responses")[0]["tools"][1],
+        json!({"type": "computer"}),
+        "the native tool, not Mermaid's schema"
+    );
+
+    let calls: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            StreamEvent::ToolCall(call) => Some(call.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(calls.len(), 1, "streamed once, not again from the terminal");
+    assert_eq!(calls[0].function.name, "computer");
+    assert_eq!(
+        calls[0].function.arguments,
+        json!({"action": "batch", "warnings": ["The page looks like a bank."], "actions": [
+            {"action": "left_click", "coordinate": [290, 177]},
+            {"action": "type", "text": "8080"},
+        ]})
+    );
+
+    // The next request: the call goes back as written, answered with the
+    // screenshot; the result's text is not sent, since it reports no failure.
+    let mut turn = ChatMessage::assistant("");
+    turn.tool_calls = response.tool_calls.clone();
+    let turn = turn.with_provider_continuation(response.provider_continuation.expect("state"));
+    let history = [
+        user,
+        turn,
+        ChatMessage::tool("call_c", "computer", "Ran 2 actions.")
+            .with_images(vec!["iVBORw0KGgoAAAANSUhEUg==".to_string()]),
+    ];
+    let (result, _) = chat(&adapter, &history, &computer_config()).await;
+    result.expect("second turn");
+    let input = provider.bodies_to("/responses")[1]["input"].clone();
+    assert_eq!(input[1]["type"], "reasoning");
+    assert_eq!(input[2]["type"], "computer_call");
+    assert_eq!(input[2]["id"], "cu_1", "the API's schema requires the id");
+    assert_eq!(
+        input[3],
+        json!({
+            "type": "computer_call_output",
+            "call_id": "call_c",
+            "output": {
+                "type": "computer_screenshot",
+                "image_url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==",
+            },
+            "acknowledged_safety_checks": [
+                {"id": "sc_1", "code": "sensitive_domain", "message": "The page looks like a bank."},
+            ],
+        })
+    );
+    assert_eq!(
+        input.as_array().map(Vec::len),
+        Some(4),
+        "no second copy of the picture"
+    );
+
+    // A failure is told in words after the output.
+    let mut failed = history.clone();
+    failed[2] = ChatMessage::tool("call_c", "computer", "Error: the user moved the mouse")
+        .with_images(vec!["iVBORw0KGgoAAAANSUhEUg==".to_string()]);
+    let (result, _) = chat(&adapter, &failed, &computer_config()).await;
+    result.expect("third turn");
+    let input = provider.bodies_to("/responses")[2]["input"].clone();
+    assert_eq!(input[3]["type"], "computer_call_output");
+    assert_eq!(
+        input[4],
+        json!({"type": "message", "role": "user", "content": [{
+            "type": "input_text",
+            "text": "Result of computer call call_c: Error: the user moved the mouse",
+        }]})
+    );
+}
+
+#[tokio::test]
+async fn a_model_without_the_computer_tool_gets_mermaids_schema_and_keeps_apply_patch() {
+    let provider = MockProvider::start(|r| {
+        let native = r.body["tools"]
+            .as_array()
+            .is_some_and(|tools| tools.iter().any(|t| t["type"] == "computer"));
+        if native {
+            return Reply::error(
+                400,
+                &json!({"error": {
+                    "message": "Tool 'computer' is not supported with this model.",
+                    "type": "invalid_request_error",
+                    "param": "tools",
+                }}),
+            );
+        }
+        Reply::stream(SSE, &fixture("text.sse"))
+    })
+    .await;
+    let adapter = adapter(&provider);
+    let mut config = computer_config();
+    config.native_tools.text_editor = true;
+    config.tools = ["read_file", "apply_patch", "computer"]
+        .into_iter()
+        .map(tool)
+        .collect();
+    let (result, _) = chat(&adapter, &[ChatMessage::user("hi")], &config).await;
+    result.expect("retry succeeds");
+    let sent = provider.bodies_to("/responses");
+    assert_eq!(sent.len(), 2);
+    assert_eq!(
+        tool_types(&sent[1]),
+        ["read_file", "computer", "apply_patch"],
+        "Mermaid's computer schema, and apply_patch still native"
+    );
+    assert_eq!(sent[1]["tools"][1]["type"], "function");
+    assert!(
+        adapter
+            .param_memory()
+            .snapshot()
+            .contains("native_computer")
+    );
+}

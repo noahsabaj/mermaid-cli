@@ -33,6 +33,8 @@ pub mod native_tools;
 pub mod ollama;
 pub mod ollama_sizing;
 pub mod openai_compat;
+/// OpenAI's `computer` tool, mapped onto Mermaid's `computer` tool.
+mod openai_computer;
 /// OpenAI's requests on the Responses API: kept reasoning, its own
 /// `apply_patch` tool, server-side compaction.
 mod openai_responses;

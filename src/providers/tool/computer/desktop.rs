@@ -57,7 +57,8 @@ pub(crate) trait Desktop {
 }
 
 /// Parse one key name, case-insensitively: a single character, or a name
-/// from the X keysym set with the common aliases (`enter`, `esc`, `cmd`).
+/// from the X keysym set with the common aliases (`enter`, `esc`, `cmd`,
+/// and OpenAI's `ARROWLEFT`).
 pub(crate) fn parse_key(name: &str) -> Result<Key, String> {
     let mut chars = name.chars();
     if let (Some(c), None) = (chars.next(), chars.next()) {
@@ -75,10 +76,10 @@ pub(crate) fn parse_key(name: &str) -> Result<Key, String> {
         "end" => Key::End,
         "page_up" | "pageup" | "prior" => Key::PageUp,
         "page_down" | "pagedown" | "next" => Key::PageDown,
-        "left" => Key::Left,
-        "up" => Key::Up,
-        "right" => Key::Right,
-        "down" => Key::Down,
+        "left" | "arrowleft" => Key::Left,
+        "up" | "arrowup" => Key::Up,
+        "right" | "arrowright" => Key::Right,
+        "down" | "arrowdown" => Key::Down,
         "space" => Key::Space,
         "shift" | "shift_l" | "shift_r" => Key::Shift,
         "ctrl" | "control" | "control_l" | "control_r" => Key::Control,

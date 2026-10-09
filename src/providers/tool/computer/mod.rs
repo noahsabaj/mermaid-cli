@@ -6,7 +6,9 @@
 //! no element finder and no procedure for the model to follow. The actions
 //! and their fields are those of Anthropic's computer toolset, which Claude
 //! is trained on; `native_tools.rs` rewrites a toolset call onto this tool,
-//! and other vision models call it directly.
+//! and other vision models call it directly. OpenAI's computer tool sends a
+//! list of actions and wants the screen back after them: it arrives as the
+//! `batch` action, which no schema offers.
 //!
 //! Screenshots, `zoom` and `cursor_position` only look, so they run in every
 //! safety mode once the user has turned the tool on. Every other action goes
@@ -156,6 +158,7 @@ enum Action {
     Drag {
         from: (i64, i64),
         to: (i64, i64),
+        hold: Vec<Key>,
     },
     Move((i64, i64)),
     MouseDown(Option<(i64, i64)>),
@@ -175,15 +178,19 @@ enum Action {
         chord: Vec<Key>,
         secs: f64,
     },
+    /// Actions run in order, then a screenshot. One that does not parse
+    /// stops the batch where it stands.
+    Batch(Vec<Result<Action, String>>),
 }
 
 impl Action {
     /// Whether the action changes anything on the screen.
     fn is_input(&self) -> bool {
-        !matches!(
-            self,
-            Self::Screenshot | Self::Zoom(_) | Self::CursorPosition | Self::Wait(_)
-        )
+        match self {
+            Self::Screenshot | Self::Zoom(_) | Self::CursorPosition | Self::Wait(_) => false,
+            Self::Batch(actions) => actions.iter().flatten().any(Self::is_input),
+            _ => true,
+        }
     }
 }
 
@@ -263,6 +270,7 @@ fn parse(args: &Value) -> Result<Action, String> {
         "left_click_drag" => Action::Drag {
             from: required_point(args, "start_coordinate", action)?,
             to: required_point(args, "coordinate", action)?,
+            hold: held(args)?,
         },
         "mouse_move" => Action::Move(required_point(args, "coordinate", action)?),
         "left_mouse_down" => Action::MouseDown(point(args, "coordinate")?),
@@ -300,6 +308,17 @@ fn parse(args: &Value) -> Result<Action, String> {
             chord: parse_chord(text(args, action)?)?,
             secs: secs(args, action)?,
         },
+        "batch" => Action::Batch(
+            args.get("actions")
+                .and_then(Value::as_array)
+                .ok_or("`batch` needs `actions`")?
+                .iter()
+                .map(|one| match one.get("action").and_then(Value::as_str) {
+                    Some("batch") => Err("a batch cannot hold a batch".to_string()),
+                    _ => parse(one),
+                })
+                .collect(),
+        ),
         other => {
             return Err(format!(
                 "unknown action \"{other}\"; the actions are {}",
@@ -309,11 +328,14 @@ fn parse(args: &Value) -> Result<Action, String> {
     })
 }
 
-/// What a finished action returns: text, and a PNG for the looking actions.
+/// What a finished action returns: text, and a PNG for the looking actions
+/// and a batch. A batch that stopped at a failure still returns the screen,
+/// so it reports the failure as `failed` rather than as an error.
 #[derive(Debug)]
 struct Done {
     text: String,
     png: Option<Vec<u8>>,
+    failed: bool,
 }
 
 impl Done {
@@ -321,6 +343,7 @@ impl Done {
         Self {
             text: text.into(),
             png: None,
+            failed: false,
         }
     }
 }
@@ -422,6 +445,7 @@ fn look(
                     s.sent.0, s.sent.1
                 ),
                 png: Some(png(&picture, s.sent)?),
+                failed: false,
             })
         },
         Action::Zoom([x0, y0, x1, y1]) => {
@@ -444,6 +468,7 @@ fn look(
                     size.0, size.1
                 ),
                 png: Some(png(&crop, size)?),
+                failed: false,
             })
         },
         _ => unreachable!("not a looking action: {action:?}"),
@@ -493,15 +518,17 @@ fn pointer(
                 None => format!("{name} at the pointer."),
             }))
         },
-        Action::Drag { from, to } => {
+        Action::Drag { from, to, hold } => {
             let s = current(desktop, shot)?;
             let start = to_input(desktop, &s, *from)?;
             let end = to_input(desktop, &s, *to)?;
             desktop.move_to(start.0, start.1)?;
-            desktop.button(Button::Left, true)?;
-            let moved = desktop.move_to(end.0, end.1);
-            let released = desktop.button(Button::Left, false);
-            moved.and(released)?;
+            holding(desktop, hold, |d| {
+                d.button(Button::Left, true)?;
+                let moved = d.move_to(end.0, end.1);
+                let released = d.button(Button::Left, false);
+                moved.and(released)
+            })?;
             Ok(Done::text(format!(
                 "Dragged from ({}, {}) to ({}, {}).",
                 from.0, from.1, to.0, to.1
@@ -657,16 +684,106 @@ struct ToolState {
 }
 
 /// What the gate shows and decides for an input action: the action, or the
-/// whole batch when the model sent several.
+/// whole batch when the model sent several, in calls of their own or in one
+/// `batch` call. Warnings the provider attached to a call come last.
 fn gate_summary(args: &Value, batch: &[Value]) -> String {
-    if batch.len() < 2 {
-        return describe(args);
-    }
-    let actions: Vec<String> = batch
+    let calls = if batch.is_empty() {
+        std::slice::from_ref(args)
+    } else {
+        batch
+    };
+    let actions: Vec<&Value> = calls
         .iter()
-        .map(|a| describe(a).trim_start_matches("computer ").to_string())
+        .flat_map(|call| match call.get("actions").and_then(Value::as_array) {
+            Some(inner) => inner.iter().collect(),
+            None => vec![call],
+        })
         .collect();
-    format!("computer, {} actions: {}", batch.len(), actions.join("; "))
+    let summary = match actions.as_slice() {
+        [one] => describe(one),
+        _ => {
+            let described: Vec<String> = actions
+                .iter()
+                .map(|a| describe(a).trim_start_matches("computer ").to_string())
+                .collect();
+            format!(
+                "computer, {} actions: {}",
+                actions.len(),
+                described.join("; ")
+            )
+        },
+    };
+    let warnings: Vec<&str> = calls
+        .iter()
+        .filter_map(|call| call.get("warnings").and_then(Value::as_array))
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    if warnings.is_empty() {
+        summary
+    } else {
+        format!("{summary}. The provider warns: {}", warnings.join(" "))
+    }
+}
+
+/// Run a batch's actions in order, each watched like a call of its own, and
+/// stop at the first that fails. Then look: a batch always returns the
+/// screen as its actions left it.
+fn run_batch(
+    desktop: &mut dyn Desktop,
+    state: &mut ToolState,
+    run_key: &RunKey,
+    actions: &[Result<Action, String>],
+) -> Done {
+    let mut lines = Vec::new();
+    let mut ran = 0;
+    let mut changed = false;
+    for action in actions {
+        let done = action
+            .clone()
+            .and_then(|action| run_watched(desktop, state, run_key, &action));
+        match done {
+            Ok(done) => {
+                ran += 1;
+                changed |= action.as_ref().is_ok_and(Action::is_input);
+                lines.push(done.text);
+            },
+            Err(e) => {
+                lines.push(format!("Error: {e}"));
+                break;
+            },
+        }
+    }
+    let failed = ran < actions.len();
+    if changed {
+        std::thread::sleep(SETTLE);
+    }
+    let png = match run_watched(desktop, state, run_key, &Action::Screenshot) {
+        Ok(shot) => {
+            lines.push(shot.text);
+            shot.png
+        },
+        Err(e) => {
+            lines.push(format!("Could not take the screenshot: {e}"));
+            None
+        },
+    };
+    let noun = |n: usize| if n == 1 { "action" } else { "actions" };
+    let head = if failed {
+        format!(
+            "Ran {ran} of {} {}; the rest did not run.",
+            actions.len(),
+            noun(actions.len())
+        )
+    } else {
+        format!("Ran {ran} {}.", noun(ran))
+    };
+    lines.insert(0, head);
+    Done {
+        text: lines.join("\n"),
+        failed: failed || png.is_none(),
+        png,
+    }
 }
 
 /// Run `action` with the pointer watch: an input action first checks that
@@ -678,6 +795,9 @@ fn run_watched(
     run_key: &RunKey,
     action: &Action,
 ) -> Result<Done, String> {
+    if let Action::Batch(actions) = action {
+        return Ok(run_batch(desktop, state, run_key, actions));
+    }
     if !action.is_input() {
         let done = run(desktop, &mut state.shot, action);
         if let (Action::Screenshot, Ok(Done { png: Some(png), .. })) = (action, &done) {
@@ -775,6 +895,18 @@ impl ComputerTool {
         blocked
     }
 
+    /// A batch that did not run still returns the screen the model last saw:
+    /// the provider that sends batches wants a picture back for every call.
+    fn with_last_screen(&self, outcome: ToolOutcome, batch: bool) -> ToolOutcome {
+        let screen = batch.then(|| self.state().screen.clone()).flatten();
+        match screen {
+            Some(png) => {
+                outcome.with_images(vec![base64::engine::general_purpose::STANDARD.encode(png)])
+            },
+            None => outcome,
+        }
+    }
+
     async fn execute_with(
         &self,
         args: Value,
@@ -787,6 +919,7 @@ impl ComputerTool {
             Err(e) => return ToolOutcome::error(e, None),
         };
         let input = action.is_input();
+        let batch = matches!(action, Action::Batch(_));
         let run = RunKey::of(ctx);
         if input {
             let stopped = self
@@ -795,10 +928,10 @@ impl ComputerTool {
                 .as_ref()
                 .is_some_and(|w| w.run == run && w.stopped);
             if stopped {
-                return ToolOutcome::error(MOVED, None);
+                return self.with_last_screen(ToolOutcome::error(MOVED, None), batch);
             }
             if let Some(blocked) = self.gate(&args, ctx).await {
-                return blocked;
+                return self.with_last_screen(blocked, batch);
             }
         }
         let done = match action {
@@ -813,12 +946,17 @@ impl ComputerTool {
             Ok(done) => done,
             Err(e) => return ToolOutcome::error(e, Some(started.elapsed().as_secs_f64())),
         };
-        if input {
+        // A batch settles before its closing screenshot.
+        if input && !batch {
             tokio::time::sleep(SETTLE).await;
         }
         let elapsed = started.elapsed().as_secs_f64();
-        let summary = done.text.lines().next().unwrap_or_default().to_string();
-        let outcome = ToolOutcome::success(done.text, summary, elapsed);
+        let outcome = if done.failed {
+            ToolOutcome::error(done.text, Some(elapsed))
+        } else {
+            let summary = done.text.lines().next().unwrap_or_default().to_string();
+            ToolOutcome::success(done.text, summary, elapsed)
+        };
         match done.png {
             Some(png) => {
                 outcome.with_images(vec![base64::engine::general_purpose::STANDARD.encode(png)])
@@ -867,7 +1005,7 @@ impl ToolExecutor for ComputerTool {
                     },
                     "text": {
                         "type": "string",
-                        "description": "Text for `type`; a key or chord for `key` and `hold_key`; keys to hold for clicks and `scroll`."
+                        "description": "Text for `type`; a key or chord for `key` and `hold_key`; keys to hold for clicks, `left_click_drag` and `scroll`."
                     },
                     "scroll_direction": { "type": "string", "enum": ["up", "down", "left", "right"] },
                     "scroll_amount": { "type": "integer", "minimum": 1, "description": "Wheel clicks. Default 3." },
