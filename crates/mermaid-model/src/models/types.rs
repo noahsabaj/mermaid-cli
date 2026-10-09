@@ -339,35 +339,6 @@ impl ChatMessage {
         self.provider_continuation = Some(continuation);
         self
     }
-
-    /// Extract thinking blocks from message content.
-    /// Returns `(thinking_content, answer_content)`.
-    ///
-    /// Performs a single `find` for the start marker; the previous version
-    /// scanned twice (`contains` + `find`) and called `find("Thinking...")`
-    /// again inside the if-let-chain.
-    ///
-    /// Safety: `str::find()` returns byte offsets. The markers `"Thinking..."`
-    /// and `"...done thinking."` are pure ASCII, so adding their `.len()`
-    /// always lands on a valid UTF-8 char boundary.
-    #[must_use]
-    pub fn extract_thinking(text: &str) -> (Option<String>, String) {
-        let Some(thinking_start) = text.find("Thinking...") else {
-            return (None, text.to_string());
-        };
-        let content_start = thinking_start + "Thinking...".len();
-
-        if let Some(thinking_end) = text.find("...done thinking.") {
-            let thinking_text = text[content_start..thinking_end].trim().to_string();
-            let answer_start = thinking_end + "...done thinking.".len();
-            let answer_text = text[answer_start..].trim().to_string();
-            return (Some(thinking_text), answer_text);
-        }
-
-        // Start marker without end marker — thinking is still in progress.
-        let thinking_text = text[content_start..].trim().to_string();
-        (Some(thinking_text), String::new())
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -695,23 +666,6 @@ mod tests {
         assert_eq!(usage.source, TokenUsageSource::Provider);
     }
 
-    // --- extract_thinking ---
-
-    #[test]
-    fn extract_thinking_no_marker_returns_text_unchanged() {
-        let (thinking, answer) = ChatMessage::extract_thinking("just a plain answer");
-        assert_eq!(thinking, None);
-        assert_eq!(answer, "just a plain answer");
-    }
-
-    #[test]
-    fn extract_thinking_complete_block() {
-        let raw = "Thinking...\n  reasoning here\n...done thinking.\n\nFinal answer";
-        let (thinking, answer) = ChatMessage::extract_thinking(raw);
-        assert_eq!(thinking.as_deref(), Some("reasoning here"));
-        assert_eq!(answer, "Final answer");
-    }
-
     #[test]
     fn provider_continuation_round_trips_through_serde() {
         // Anthropic encrypted server state — must survive
@@ -825,14 +779,6 @@ mod tests {
         let msg: ChatMessage = serde_json::from_str(json).expect("tolerant");
         assert_eq!(msg.role, MessageRole::System);
         assert_eq!(msg.content, "hi");
-    }
-
-    #[test]
-    fn extract_thinking_in_progress_no_end_marker() {
-        let raw = "Thinking...\n  partial reasoning so far";
-        let (thinking, answer) = ChatMessage::extract_thinking(raw);
-        assert_eq!(thinking.as_deref(), Some("partial reasoning so far"));
-        assert_eq!(answer, "");
     }
 
     #[test]

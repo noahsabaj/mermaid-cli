@@ -122,12 +122,12 @@ pub async fn run_interactive_with(
     // header: replay seeds `State::new` with the recorded value and gets the
     // same initial conversation id/title.
     let startup_now = chrono::Local::now();
-    // Fold enabled plugins' MCP servers + agent types into the merged config
-    // BEFORE anything consumes it (State::new seeds server rows, the
-    // recording header captures the merged config — replay-faithful, and the
-    // provider factory + tool registry see the same view).
-    let plugin_assets = crate::app::plugin_assets::load();
-    let plugin_warnings = crate::app::plugin_assets::apply(&mut config, &plugin_assets);
+    // Fold agent files and enabled plugins' MCP servers + agent types into
+    // the merged config BEFORE anything consumes it (State::new seeds server
+    // rows, the recording header captures the merged config — replay-faithful,
+    // and the provider factory + tool registry see the same view).
+    let (prompt_commands, asset_warnings) =
+        crate::app::file_assets::load_with_plugins(&mut config, &cwd);
     let mut state = State::new(
         config.clone(),
         cwd.clone(),
@@ -168,9 +168,10 @@ pub async fn run_interactive_with(
     // Skills load once at startup (authored artifacts, no watcher); the config
     // watcher below keeps only instructions/memory fresh.
     state.skills = crate::app::skills::load(&cwd);
-    // Plugin prompt commands: same restart-to-refresh policy as skills.
-    state.plugin_commands = plugin_assets.commands;
-    for warning in plugin_warnings {
+    // Prompt commands (files and plugins): same restart-to-refresh policy as
+    // skills.
+    state.plugin_commands = prompt_commands;
+    for warning in asset_warnings {
         state
             .ui
             .pending_msgs

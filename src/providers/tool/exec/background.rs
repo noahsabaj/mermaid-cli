@@ -78,7 +78,8 @@ pub(crate) async fn run_background_command(
         };
 
         let mut output = format!(
-            "Background command started.\nPID: {}\nLog: {}\n{}\n",
+            "Background command started.\nPID: {}\nID: bg-{} (background_process reads, waits for or stops it)\nLog: {}\n{}\n",
+            pid,
             pid,
             log_path.display(),
             startup.ready_message
@@ -318,6 +319,17 @@ pub(crate) async fn read_log_lossy(path: &Path) -> String {
 
 #[cfg(not(target_os = "windows"))]
 pub(crate) async fn process_running(pid: u32) -> bool {
+    // A process that has exited but not yet been reaped (a zombie) still
+    // answers `kill -0`. Its parent is init or a container's pid 1, which
+    // reaps on its own schedule, so on Linux read the state instead.
+    #[cfg(target_os = "linux")]
+    if let Ok(stat) = tokio::fs::read_to_string(format!("/proc/{pid}/stat")).await
+        && let Some(state) = stat
+            .rsplit_once(')')
+            .and_then(|(_, rest)| rest.trim_start().chars().next())
+    {
+        return !matches!(state, 'Z' | 'X');
+    }
     Command::new("kill")
         .arg("-0")
         .arg(pid.to_string())

@@ -332,66 +332,11 @@ impl RuntimeClient {
     /// shape, and -- when the call falls back to the local database -- if that read
     /// fails. A daemon that is simply not running is not an error: the client falls
     /// back.
-    pub fn hygiene_preview(&self) -> Result<RuntimeRead<RuntimeHygienePreview>> {
-        self.read(
-            crate::runtime_client::DaemonRequest::RuntimeHygienePreview.to_wire(),
-            |service| service.hygiene_preview(),
-        )
-    }
-
-    /// # Errors
-    ///
-    /// Errors if the daemon rejects the action or answers with an unexpected shape,
-    /// and -- when the call falls back to acting on the local database -- if that
-    /// fails. A daemon that is simply not running is not an error: the client falls
-    /// back.
-    pub fn hygiene_archive(&self) -> Result<RuntimeRead<RuntimeHygieneArchive>> {
-        self.read_inner(
-            crate::runtime_client::DaemonRequest::RuntimeHygieneArchive.to_wire(),
-            true,
-            |service| service.hygiene_archive(),
-        )
-    }
-
-    /// # Errors
-    ///
-    /// Errors if the daemon rejects the request or answers with an unexpected
-    /// shape, and -- when the call falls back to the local database -- if that read
-    /// fails. A daemon that is simply not running is not an error: the client falls
-    /// back.
     pub fn task_detail(&self, id: &str) -> Result<RuntimeRead<RuntimeTaskDetail>> {
         self.read(
             crate::runtime_client::DaemonRequest::RuntimeTaskDetail { id: id.to_string() }
                 .to_wire(),
             |service| service.task_detail(id),
-        )
-    }
-
-    /// # Errors
-    ///
-    /// Errors if the daemon rejects the request or answers with an unexpected
-    /// shape, and -- when the call falls back to the local database -- if that read
-    /// fails. A daemon that is simply not running is not an error: the client falls
-    /// back.
-    pub fn approval_detail(&self, id: &str) -> Result<RuntimeRead<RuntimeApprovalDetail>> {
-        self.read(
-            crate::runtime_client::DaemonRequest::RuntimeApprovalDetail { id: id.to_string() }
-                .to_wire(),
-            |service| service.approval_detail(id),
-        )
-    }
-
-    /// # Errors
-    ///
-    /// Errors if the daemon rejects the request or answers with an unexpected
-    /// shape, and -- when the call falls back to the local database -- if that read
-    /// fails. A daemon that is simply not running is not an error: the client falls
-    /// back.
-    pub fn checkpoint_detail(&self, id: &str) -> Result<RuntimeRead<RuntimeCheckpointDetail>> {
-        self.read(
-            crate::runtime_client::DaemonRequest::RuntimeCheckpointDetail { id: id.to_string() }
-                .to_wire(),
-            |service| service.checkpoint_detail(id),
         )
     }
 
@@ -648,25 +593,6 @@ impl RuntimeClient {
             }
             .to_wire(),
             |service| Ok(json!({"ok": true, "model": service.model_info(model)})),
-        )
-    }
-
-    /// # Errors
-    ///
-    /// Errors if the daemon rejects the action or answers with an unexpected shape,
-    /// and -- when the call falls back to acting on the local database -- if that
-    /// fails. A daemon that is simply not running is not an error: the client falls
-    /// back.
-    pub fn set_safety_mode(&self, mode: &str) -> Result<Value> {
-        self.action_authed(
-            crate::runtime_client::DaemonRequest::SetSafetyMode {
-                mode: mode.to_string(),
-            }
-            .to_wire(),
-            |service| {
-                let safety = service.set_safety_mode(mode)?;
-                Ok(json!({"ok": true, "safety": safety}))
-            },
         )
     }
 

@@ -255,11 +255,6 @@ pub struct PromptConfig {
     pub append_system_prompt: Vec<String>,
 }
 impl PromptConfig {
-    #[must_use]
-    pub fn render_system_prompt(&self, default_prompt: &str) -> String {
-        self.append_extras(self.base_prompt(default_prompt))
-    }
-
     /// The base prompt before any `append_system_prompt` extras: the user's
     /// override when set, else `default_prompt`.
     ///
@@ -776,6 +771,9 @@ pub struct AgentTypeConfig {
     /// Isolate a type you fan out with; leave a type shared when its writes
     /// need to be visible to the parent immediately.
     pub isolation: Option<String>,
+    /// When to use this type, shown to the model in the `agent` tool's
+    /// description next to the type's name.
+    pub description: Option<String>,
 }
 
 /// User-supplied remote provider configuration. All fields are optional for a

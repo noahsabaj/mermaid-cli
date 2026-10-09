@@ -599,18 +599,6 @@ impl EffectRunner {
         (Self::new(tx, workdir), rx)
     }
 
-    /// Pair constructor that also wires the real provider factory +
-    /// tool registry. Used by `app::run_interactive`.
-    #[must_use]
-    pub fn pair_with_bindings(
-        workdir: PathBuf,
-        config: Config,
-        tools: Arc<ToolRegistry>,
-    ) -> (Self, mpsc::Receiver<Msg>) {
-        let providers = Arc::new(ProviderFactory::new(config));
-        Self::pair_from(workdir, providers, tools)
-    }
-
     /// Pair constructor that takes a pre-built `ProviderFactory`.
     /// Used when the caller needs to share a `ProviderFactory` with
     /// the `SubagentSpawner` so subagents can issue model calls

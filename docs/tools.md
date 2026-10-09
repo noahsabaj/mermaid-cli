@@ -5,7 +5,7 @@ The tool table lives in the [README](../README.md#tools). This covers the behavi
 ## Core tools
 
 Always registered: `read_file`, `write_file`, `edit_file`, `apply_patch`, `delete_file`,
-`create_directory`, `execute_command`, `memory`, `agent`, the checklist trio (`task_create`,
+`create_directory`, `execute_command`, `background_process`, `memory`, `agent`, the checklist trio (`task_create`,
 `task_update`, `task_list`), `ask_user_question`, and the context pair (`context_archive`,
 `compact_context`, below).
 `web_search` and `web_fetch` register when their backend is viable (below); MCP tools when a
@@ -29,6 +29,16 @@ where commands run under PowerShell. A model that refuses these tools gets Merma
 from then on; `[tools] provider_native = false` always sends Mermaid's. OpenAI's `apply_patch`
 and `shell` tools exist only in the Responses API, which Mermaid does not use for OpenAI;
 Mermaid's own `apply_patch` already takes the same patch format.
+
+Background processes: `execute_command` with `mode="background"` (or a foreground command the
+user moves to the background with Ctrl+B) returns an id such as `bg-1234`. `background_process`
+takes that id. `read` returns the output written since the last read, at most the newest 32 KiB,
+and whether the process still runs. `wait` blocks until the process exits, a `pattern` appears in
+new output, or `timeout_secs` passes (default 300, at most 3600; Esc ends it early), then returns
+the same as `read`. `stop` ends the process tree. `list` shows the session's processes. The tool
+reaches only processes this Mermaid process started for the calling session, never a raw pid, so
+it needs no approval in any safety mode. Exit codes are not recorded. The user's `/logs` and
+`/stop` work on the same processes.
 
 Paths outside the project (absolute, or traversing out of it) resolve to where they point and
 are gated as external access: `read_only` denies, `ask` prompts with a per-directory

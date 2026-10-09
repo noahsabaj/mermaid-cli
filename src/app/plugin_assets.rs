@@ -203,7 +203,7 @@ pub(crate) fn assets_from_manifest(
             name,
             description: description.unwrap_or_default(),
             body: body.trim().to_string(),
-            plugin: plugin.clone(),
+            origin: format!("plugin:{plugin}"),
         });
     }
     for entry in &manifest.agents {
@@ -257,8 +257,8 @@ pub fn apply(config: &mut mermaid_domain::Config, assets: &PluginAssets) -> Vec<
     for (name, agent) in &assets.agent_types {
         if config.agents.types.contains_key(name) {
             warnings.push(format!(
-                "plugin agent type '{name}' is shadowed by [agents.types.{name}] in config; \
-                 using the config entry"
+                "plugin agent type '{name}' is shadowed by [agents.types.{name}] in config \
+                 or an agent file; using that one"
             ));
             continue;
         }
@@ -472,6 +472,7 @@ mod tests {
                 preamble: None,
                 model: None,
                 isolation: None,
+                description: None,
             },
         );
         let warnings = apply(&mut config, &assets);

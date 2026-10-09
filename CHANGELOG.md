@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Mermaid reads Claude Code's files.** A user who moved from Claude Code
+  used to lose their instructions, skills, commands and agents, because
+  Mermaid read only `AGENTS.md`, `MERMAID.md` and `.mermaid/skills/`. Now
+  `CLAUDE.md` (or `.claude/CLAUDE.md`) loads when a directory has no
+  `AGENTS.md`, and Mermaid reads `skills/`, `commands/` and `agents/` from
+  `.mermaid/`, `.claude/` and `.agents/` in the project and from
+  `~/.config/mermaid/`, `~/.claude/` and `~/.agents/`; `.mermaid/` wins on a
+  same name. A `commands/*.md` file is a prompt command (`$ARGUMENTS`, `$1`,
+  `$2`, ...), so you can add your own commands without writing a plugin. An
+  `agents/*.md` file is an agent type: Claude Code tool names map to
+  Mermaid's, an agent that cannot write gets a `read_only` ceiling, and a
+  project file cannot redefine `general` or `explore`. The `agent` tool now
+  lists the configured types with their new `description`, so the model knows
+  they exist. See docs/plugins.md, "Files from other tools".
+
 - **Remote MCP servers that need an OAuth sign-in now connect.** Hosted
   servers such as Linear, Notion, Sentry and Atlassian answer `401` until the
   user signs in, so Mermaid could not use them. `mermaid add <name> --url
@@ -40,8 +55,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and a key Mermaid does not know is never touched. Bare `mermaid` at a
   terminal lists the keys and asks `Delete them now? [y/N]` first; headless
   runs, pipes and scripts never ask and never edit.
+- **The model can follow the processes it starts in the background.** Before,
+  a command run with `mode="background"` returned a pid and log path, and only
+  the user could check it with `/logs` or end it with `/stop`; a foreground
+  command is killed after 300 seconds, so the model could not wait for a long
+  build or test run except by polling with `sleep`. The new
+  `background_process` tool takes the `bg-<pid>` id: `read` returns the output
+  written since the last read, `wait` blocks until the process exits, a text
+  appears in its output, or a timeout of up to an hour passes (Esc ends it),
+  `stop` ends the process tree, and `list` shows the session's processes. It
+  reaches only processes this session started, never a raw pid.
 
 ### Fixed
+
+- **A background command that exits at once is reported as exited on Linux.**
+  The liveness check used `kill -0`, which succeeds on a process that has
+  exited but has not been reaped yet. In a container whose pid 1 reaps late,
+  a command that failed during startup was reported as started and running.
+  The check now reads the process state from `/proc` first.
 
 - **The highlighted row in `/load` and the rewind picker can be read.** Its
   meta, `(14 msg · 2026-01-01 12:34)` or `(#1 back)`, was drawn in
@@ -75,6 +106,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `status_bar`, `user_message`, `assistant_message`, `system_message`,
   `mode_normal`, `mode_accept_edits` and `mode_bypass_all`. All three themes
   defined them and no widget read them.
+- **Code nothing called.** A sweep that let the compiler see past `pub`
+  found functions and fields with no caller left in the workspace:
+  `ActionRequest::cwd` and `resolve_dir` (only plan mode read them; the exec
+  tool still set the field), `ReasoningExtraction::parse_delta` and
+  `ChatMessage::extract_thinking` (the adapters parse inline),
+  `Cmd::is_turn_scoped` (the effect runner uses `scope_turn`),
+  `PromptConfig::render_system_prompt`, `StartupConfig`,
+  `EffectRunner::pair_with_bindings`, `TurnScope::join_next`,
+  `Engine::is_settled`, `EngineGone::into_message`, five `RuntimeClient`
+  wrappers the CLI never called, and the input widget's unread cursor
+  state. Comments and manifests that named moved or deleted files now name
+  the real ones. No behaviour changes.
 
 ## [0.29.0] - 2026-09-30
 
