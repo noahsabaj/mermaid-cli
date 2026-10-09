@@ -2247,8 +2247,11 @@ mod tests {
         let outcome = WriteFileTool.execute(args(&file), c).await;
         assert!(outcome.is_success(), "added-root write: {outcome:?}");
         assert_eq!(fs::read_to_string(&file).unwrap(), "new\n");
+        // The fixture's own directory name: unique per test and process, and
+        // free of path separators, which the JSON manifest escapes on Windows.
+        let fixture = project.parent().unwrap().file_name().unwrap();
         assert!(
-            any_checkpoint_mentions(&file.display().to_string()),
+            any_checkpoint_mentions(fixture.to_str().unwrap()),
             "a write in an added root must be checkpointed"
         );
 
