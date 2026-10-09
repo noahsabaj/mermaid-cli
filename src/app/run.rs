@@ -164,7 +164,7 @@ pub async fn run_interactive_with(
     // NO_COLOR (https://no-color.org): present and non-empty disables all
     // color. Read once here — the reducer never touches the environment; the
     // render layer resolves `Theme::plain()` off this flag.
-    state.ui.no_color = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
+    state.ui.no_color = crate::app::terminal::no_color_requested();
     // Skills load once at startup (authored artifacts, no watcher); the config
     // watcher below keeps only instructions/memory fresh.
     state.skills = crate::app::skills::load(&cwd);

@@ -133,14 +133,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
     // choice (colors off entirely); otherwise `/theme` picks dark/light.
     let want = (state.ui.theme, state.ui.no_color);
     if rstate.applied_theme != Some(want) {
-        rstate.theme = if state.ui.no_color {
-            theme::Theme::plain()
-        } else {
-            match state.ui.theme {
-                mermaid_domain::ThemeChoice::Dark => theme::Theme::dark(),
-                mermaid_domain::ThemeChoice::Light => theme::Theme::light(),
-            }
-        };
+        rstate.theme = theme::Theme::resolve(state.ui.theme, state.ui.no_color);
         // The wrapped-line cache is theme-keyed, but drop stale entries
         // eagerly rather than letting the old palette's lines linger.
         rstate.wrapped_line_cache.clear();

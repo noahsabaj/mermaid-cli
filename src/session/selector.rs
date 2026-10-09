@@ -26,6 +26,7 @@ use std::io;
 use std::path::Path;
 
 use super::conversation::ConversationManager;
+use crate::render::theme::Theme;
 use mermaid_domain::ConversationHistory;
 
 /// Entries the mouse wheel scrolls the picker viewport per notch. The wheel
@@ -47,6 +48,10 @@ pub struct SessionEntry {
 /// `None` if the user cancelled. `now` is injected so the relative-time labels
 /// are testable and match the caller's clock.
 ///
+/// `theme` is the palette the session will open with (see [`Theme::resolve`]),
+/// so the picker follows `ui.theme` and `NO_COLOR` like the TUI it hands over
+/// to.
+///
 /// # Errors
 ///
 /// Entering raw mode and the alternate screen, drawing, reading events, and
@@ -58,6 +63,7 @@ pub fn select_conversation(
     entries: Vec<SessionEntry>,
     manager: &ConversationManager,
     now: DateTime<Local>,
+    theme: &Theme,
 ) -> Result<Option<ConversationHistory>> {
     if entries.is_empty() {
         println!("No previous conversations found in this directory.");
@@ -74,7 +80,7 @@ pub fn select_conversation(
     let mut terminal = Terminal::new(backend)?;
 
     let mut state = SelectorState::new(entries);
-    let result = run_selector(&mut terminal, &mut state, manager, now);
+    let result = run_selector(&mut terminal, &mut state, manager, now, theme);
 
     disable_raw_mode()?;
     execute!(
@@ -231,9 +237,10 @@ fn run_selector(
     state: &mut SelectorState,
     manager: &ConversationManager,
     now: DateTime<Local>,
+    theme: &Theme,
 ) -> Result<Option<ConversationHistory>> {
     loop {
-        terminal.draw(|f| render(f, state, now))?;
+        terminal.draw(|f| render(f, state, now, theme))?;
 
         match event::read()? {
             Event::Key(key) => {
@@ -282,11 +289,35 @@ fn run_selector(
     }
 }
 
-// Palette — kept local (this mini-TUI runs before the themed app is built) but
-// chosen to read like the main UI: cyan accent, gray meta, dim hints.
-const ACCENT: Color = Color::Cyan;
-const META: Color = Color::Gray;
-const DIM: Color = Color::DarkGray;
+/// The picker's inks, each taken from the theme slot the main UI uses for the
+/// same role, so the picker reads like the TUI in every theme and draws no
+/// colour under `NO_COLOR`. Under the dark theme they are cyan, gray, dark
+/// gray, white and yellow.
+struct Palette {
+    /// The header, the selection marker and the selected title.
+    accent: Color,
+    /// The project name and the meta line under each title.
+    meta: Color,
+    /// The search placeholder, the no-match note and the key hints.
+    dim: Color,
+    /// Unselected titles and the typed query.
+    text: Color,
+    /// The delete confirmation.
+    warn: Color,
+}
+
+impl Palette {
+    fn new(theme: &Theme) -> Self {
+        let colors = &theme.colors;
+        Self {
+            accent: colors.info.to_color(),
+            meta: colors.text_secondary.to_color(),
+            dim: colors.text_disabled.to_color(),
+            text: colors.text_primary.to_color(),
+            warn: colors.warning.to_color(),
+        }
+    }
+}
 
 /// Draw the picker: header, search line, project name, one two-line block per
 /// filtered session (windowed by the scroll offset), then the key hints.
@@ -294,7 +325,8 @@ const DIM: Color = Color::DarkGray;
 /// Takes `&mut SelectorState` because the viewport height is only known here:
 /// it records how many entries fit (for follow-selection) and clamps the
 /// wheel-driven scroll offset to the valid range.
-pub fn render(f: &mut Frame, state: &mut SelectorState, now: DateTime<Local>) {
+pub fn render(f: &mut Frame, state: &mut SelectorState, now: DateTime<Local>, theme: &Theme) {
+    let palette = Palette::new(theme);
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -326,19 +358,21 @@ pub fn render(f: &mut Frame, state: &mut SelectorState, now: DateTime<Local>) {
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
             "Resume session",
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(palette.accent)
+                .add_modifier(Modifier::BOLD),
         ))),
         title,
     );
 
     // Search line: the query, or a muted placeholder when empty.
     let search_line = if state.query.is_empty() {
-        Line::from(Span::styled("  Search…", Style::default().fg(DIM)))
+        Line::from(Span::styled("  Search…", Style::default().fg(palette.dim)))
     } else {
         Line::from(vec![
             Span::styled("  ", Style::default()),
-            Span::styled(state.query.clone(), Style::default().fg(Color::White)),
-            Span::styled("▏", Style::default().fg(ACCENT)),
+            Span::styled(state.query.clone(), Style::default().fg(palette.text)),
+            Span::styled("▏", Style::default().fg(palette.accent)),
         ])
     };
     f.render_widget(Paragraph::new(search_line), search);
@@ -352,7 +386,9 @@ pub fn render(f: &mut Frame, state: &mut SelectorState, now: DateTime<Local>) {
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 name,
-                Style::default().fg(META).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(palette.meta)
+                    .add_modifier(Modifier::BOLD),
             ))),
             project,
         );
@@ -361,7 +397,7 @@ pub fn render(f: &mut Frame, state: &mut SelectorState, now: DateTime<Local>) {
     let lines: Vec<Line> = if filtered.is_empty() {
         vec![Line::from(Span::styled(
             "  No sessions match your search.",
-            Style::default().fg(DIM),
+            Style::default().fg(palette.dim),
         ))]
     } else {
         filtered
@@ -369,13 +405,15 @@ pub fn render(f: &mut Frame, state: &mut SelectorState, now: DateTime<Local>) {
             .enumerate()
             .skip(scroll_offset)
             .take(visible)
-            .flat_map(|(row, &idx)| entry_block(&state.entries[idx], row == selected, now))
+            .flat_map(|(row, &idx)| {
+                entry_block(&state.entries[idx], row == selected, now, &palette)
+            })
             .collect()
     };
     f.render_widget(Paragraph::new(lines), list);
 
     // Hints line, or the delete confirm prompt when one is armed.
-    let hints_line = hints_line(state, pending_delete);
+    let hints_line = hints_line(state, pending_delete, &palette);
     f.render_widget(Paragraph::new(hints_line), hints);
 }
 
@@ -384,28 +422,35 @@ fn entry_block(
     entry: &SessionEntry,
     is_selected: bool,
     now: DateTime<Local>,
+    palette: &Palette,
 ) -> [Line<'static>; 3] {
     let (marker, title_style) = if is_selected {
         (
             "> ",
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(palette.accent)
+                .add_modifier(Modifier::BOLD),
         )
     } else {
-        ("  ", Style::default().fg(Color::White))
+        ("  ", Style::default().fg(palette.text))
     };
     let title_line = Line::from(vec![
-        Span::styled(marker, Style::default().fg(ACCENT)),
+        Span::styled(marker, Style::default().fg(palette.accent)),
         Span::styled(entry.history.title.clone(), title_style),
     ]);
     let meta_line = Line::from(vec![Span::styled(
         format!("  {}", meta_label(entry, now)),
-        Style::default().fg(META),
+        Style::default().fg(palette.meta),
     )]);
     [title_line, meta_line, Line::from("")]
 }
 
 /// The key hints, or the delete confirm prompt when one is armed.
-fn hints_line(state: &SelectorState, pending_delete: Option<usize>) -> Line<'static> {
+fn hints_line(
+    state: &SelectorState,
+    pending_delete: Option<usize>,
+    palette: &Palette,
+) -> Line<'static> {
     if let Some(idx) = pending_delete {
         let name: String = state
             .entries
@@ -414,12 +459,12 @@ fn hints_line(state: &SelectorState, pending_delete: Option<usize>) -> Line<'sta
             .unwrap_or_default();
         Line::from(Span::styled(
             format!("Delete \"{name}\"?  y confirms · any other key cancels"),
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(palette.warn),
         ))
     } else {
         Line::from(Span::styled(
             "↑↓ select · type to search · del delete · enter resume · esc cancel",
-            Style::default().fg(DIM),
+            Style::default().fg(palette.dim),
         ))
     }
 }
@@ -617,7 +662,9 @@ mod tests {
         ]);
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| render(f, &mut state, now)).unwrap();
+        terminal
+            .draw(|f| render(f, &mut state, now, &Theme::dark()))
+            .unwrap();
         let buf = terminal.backend().buffer();
         let mut text = String::new();
         for y in 0..buf.area.height {
@@ -650,7 +697,9 @@ mod tests {
         }
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| render(f, &mut state, now)).unwrap();
+        terminal
+            .draw(|f| render(f, &mut state, now, &Theme::dark()))
+            .unwrap();
         let buf = terminal.backend().buffer();
         let mut text = String::new();
         for y in 0..buf.area.height {
@@ -687,11 +736,15 @@ mod tests {
         let backend = TestBackend::new(80, 14);
         let mut terminal = Terminal::new(backend).unwrap();
         // First frame records the viewport height for the follow clamp.
-        terminal.draw(|f| render(f, &mut state, now)).unwrap();
+        terminal
+            .draw(|f| render(f, &mut state, now, &Theme::dark()))
+            .unwrap();
         for _ in 0..7 {
             state.move_down();
         }
-        terminal.draw(|f| render(f, &mut state, now)).unwrap();
+        terminal
+            .draw(|f| render(f, &mut state, now, &Theme::dark()))
+            .unwrap();
         let text = dump(&terminal);
         assert!(
             text.contains("> Session 7"),
@@ -713,10 +766,14 @@ mod tests {
         );
         let backend = TestBackend::new(80, 14);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| render(f, &mut state, now)).unwrap();
+        terminal
+            .draw(|f| render(f, &mut state, now, &Theme::dark()))
+            .unwrap();
 
         state.scroll_viewport_down(); // wheel down: viewport moves, selection doesn't
-        terminal.draw(|f| render(f, &mut state, now)).unwrap();
+        terminal
+            .draw(|f| render(f, &mut state, now, &Theme::dark()))
+            .unwrap();
         let text = dump(&terminal);
         assert_eq!(state.selected, 0, "the wheel must not move the selection");
         assert!(
@@ -748,6 +805,54 @@ mod tests {
             state.current().map(|e| e.history.title.as_str()),
             Some("keep"),
             "selection re-clamped onto the surviving entry"
+        );
+    }
+
+    #[test]
+    fn draws_with_the_session_theme() {
+        // The picker takes the palette the TUI will open with: the theme's
+        // accent on the header and its text ink on an unselected title, and
+        // no colour at all under NO_COLOR.
+        let now = at(2026, 7, 2, 12, 0);
+        let draw = |theme: &Theme| {
+            let mut state = SelectorState::new(vec![
+                entry("Examine the workspace", Some("main"), now, 1),
+                entry("Older session", None, now, 1),
+            ]);
+            let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
+            terminal
+                .draw(|f| render(f, &mut state, now, theme))
+                .unwrap();
+            terminal.backend().buffer().clone()
+        };
+        for make_theme in [Theme::dark, Theme::light] {
+            let theme = make_theme();
+            let buf = draw(&theme);
+            let colors = &theme.colors;
+            assert_eq!(
+                buf[(0, 0)].fg,
+                colors.info.to_color(),
+                "{} header",
+                theme.name
+            );
+            // Row 9 is the second entry's title, unselected, after its marker.
+            assert_eq!(buf[(2, 9)].symbol(), "O", "{} layout", theme.name);
+            assert_eq!(
+                buf[(2, 9)].fg,
+                colors.text_primary.to_color(),
+                "{} title",
+                theme.name
+            );
+        }
+        assert_eq!(
+            draw(&Theme::dark())[(0, 0)].fg,
+            Color::Cyan,
+            "dark keeps its cyan"
+        );
+        let plain = draw(&Theme::plain());
+        assert!(
+            plain.content().iter().all(|cell| cell.fg == Color::Reset),
+            "NO_COLOR draws no colour"
         );
     }
 }

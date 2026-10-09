@@ -146,9 +146,9 @@ checkpoint_on_mutation = true
 
 [ui]
 # TUI color theme: "dark" (default) or "light". Switch live with
-# `/theme dark|light` (persists here). Setting the NO_COLOR environment
-# variable (any non-empty value) disables colors entirely, regardless of
-# this value.
+# `/theme dark|light` (persists here); the `--resume` picker follows it too.
+# Setting the NO_COLOR environment variable (any non-empty value) disables
+# colors entirely, regardless of this value.
 theme = "dark"
 
 [output]
