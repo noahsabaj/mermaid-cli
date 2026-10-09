@@ -217,6 +217,7 @@ impl ToolRegistry {
         r.register(Arc::new(filesystem::DeleteFileTool));
         r.register(Arc::new(filesystem::CreateDirectoryTool));
         r.register(Arc::new(exec::ExecuteCommandTool));
+        r.register(Arc::new(exec::jobs::BackgroundProcessTool));
         r.register(Arc::new(memory::MemoryTool));
         r.register(Arc::new(ask_user_question::AskUserQuestionTool));
         r.register(Arc::new(tasks::TaskCreateTool));
@@ -301,6 +302,7 @@ mod tests {
             "delete_file",
             "create_directory",
             "execute_command",
+            "background_process",
             "memory",
         ] {
             assert!(r.get(name).is_some(), "missing: {name}");
