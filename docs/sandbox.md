@@ -8,8 +8,11 @@ approval policy. Two dimensions, each with its own flag (or config key):
   and macOS Seatbelt kill/deny internet sockets while sparing local `AF_UNIX` IPC; Windows
   AppContainers omit network capabilities while sparing localhost (`127.0.0.1`) loopback.
 - `--confine-fs` (`safety.filesystem = "project"`): write-class filesystem access is allowed
-  only beneath the project root, the working directory, the system temp directory, and (on
-  unix) `/dev`. Reads and execution stay unrestricted.
+  only beneath the project root, every added working directory (`--add-dir`,
+  `[workspace] additional_dirs`, `/add-dir`), the working directory, the system temp
+  directory, and (on unix) `/dev`. Reads and execution stay unrestricted. An added directory
+  carries the project root's trust, so it is writable exactly like the project root; one
+  added mid-session with `/add-dir` applies from the next command.
 - `--sandbox`: both at once.
 
 Enforcement is per-platform, behind one facade:
@@ -26,7 +29,7 @@ not requested is granted back explicitly: `--confine-fs` alone attaches the inte
 internet-client-server and private-network capabilities, and `--no-network` alone grants
 the working directory and the temp directory. There is no "writes unconfined" setting for
 an AppContainer, so a `--no-network` command on Windows can write its project and temp
-files but not, say, the user's home directory. That is the one place the Windows backend
+files but not, say, the user's home directory or an added working directory. That is the one place the Windows backend
 is stricter than the flag asks.
 
 The sandbox is applied by the hidden `mermaid __sandbox-exec` launcher just before it runs

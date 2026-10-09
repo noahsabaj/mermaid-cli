@@ -62,7 +62,9 @@ plugin-relative paths in `plugin.toml`:
   appear in the `/` palette tagged `(plugin:<name>)` and in `/help`; running `/deploy prod`
   substitutes `prod` for `$ARGUMENTS` (or appends the args when the token is absent) and submits
   the expansion as a normal prompt — the transcript shows the expanded text, so recordings
-  replay without the plugin. Built-in commands always win over a same-named prompt.
+  replay without the plugin. Built-in commands always win over a same-named prompt. MCP servers'
+  prompts share the palette as `/mcp__<server>__<prompt>` (see
+  [tools.md](tools.md#prompts)).
 - **`agents = ["types.toml"]`** — each file's `[types.<name>]` tables are agent types (same
   shape as `[agents.types.<name>]`): the model can spawn them via the `agent` tool. Your config's
   same-named type wins with a warning.

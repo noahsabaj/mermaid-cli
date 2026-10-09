@@ -39,6 +39,13 @@ pub enum Query {
     /// Scan the conversations directory for the `/load` picker (newest
     /// first). Answered by [`QueryResult::ConversationsListed`].
     ListConversations,
+    /// Ctrl+R — the prompts sent in this project's saved sessions, newest
+    /// first and without repeats. Answered by
+    /// [`QueryResult::RecentPromptsListed`].
+    ListRecentPrompts {
+        max_sessions: usize,
+        max_prompts: usize,
+    },
     /// Discover every model the user could switch to, for the `/model`
     /// picker. Best-effort and strictly read-only: a dead Ollama is NOT
     /// started, an unreachable provider is skipped. Answered by
@@ -84,6 +91,29 @@ pub enum Query {
     /// [`QueryResult::OutputStyleLoaded`]. `project` is only the persist
     /// target the reducer will use — lookup always spans both scopes.
     LoadOutputStyle { name: String, project: bool },
+    /// `/add-dir <path>` — canonicalize one added working root (relative
+    /// paths against the project directory, `~` against home) and check it
+    /// is a directory. Read-only: the reducer decides what to do with the
+    /// answer. Answered by [`QueryResult::AddedDirResolved`].
+    ResolveAddedDir { raw: String },
+    /// `/mcp__<server>__<prompt> args` — `prompts/get` on the server that
+    /// advertised the prompt. `attachment_ids` are the images staged when
+    /// the command ran; they ride through so the answer submits with them,
+    /// exactly as a typed prompt would. Answered by
+    /// [`QueryResult::McpPromptLoaded`].
+    GetMcpPrompt(McpPromptRequest),
+}
+
+/// The `prompts/get` a [`Query::GetMcpPrompt`] asks for. `command` is the
+/// slash-command name, echoed back for messages; `server` and `prompt` are
+/// RAW names; `arguments` are already mapped onto the declared ones.
+#[derive(Debug, Clone)]
+pub struct McpPromptRequest {
+    pub command: String,
+    pub server: String,
+    pub prompt: String,
+    pub arguments: std::collections::BTreeMap<String, String>,
+    pub attachment_ids: Vec<u64>,
 }
 
 impl Query {
@@ -94,6 +124,7 @@ impl Query {
         match self {
             Self::LoadConversation { .. } => "load_conversation",
             Self::ListConversations => "list_conversations",
+            Self::ListRecentPrompts { .. } => "list_recent_prompts",
             Self::ListAvailableModels => "list_available_models",
             Self::ListProjectFiles => "list_project_files",
             Self::ListRuntimeTasks { .. } => "list_runtime_tasks",
@@ -105,6 +136,8 @@ impl Query {
             Self::ListRuntimePlugins => "list_runtime_plugins",
             Self::ListOutputStyles => "list_output_styles",
             Self::LoadOutputStyle { .. } => "load_output_style",
+            Self::ResolveAddedDir { .. } => "resolve_added_dir",
+            Self::GetMcpPrompt(_) => "get_mcp_prompt",
         }
     }
 
@@ -128,6 +161,14 @@ impl Query {
                 message_index,
             } => format!("list_fork_checkpoints({session_id} > {message_index})"),
             Self::LoadOutputStyle { name, .. } => format!("load_output_style({name})"),
+            Self::ListRecentPrompts {
+                max_sessions,
+                max_prompts,
+            } => format!("list_recent_prompts(sessions={max_sessions}, prompts={max_prompts})"),
+            Self::ResolveAddedDir { raw } => format!("resolve_added_dir({raw})"),
+            // The command names the server and prompt; the argument values
+            // are user payload and stay out of traces.
+            Self::GetMcpPrompt(request) => format!("get_mcp_prompt({})", request.command),
             Self::ListOutputStyles
             | Self::ListConversations
             | Self::ListAvailableModels
@@ -151,6 +192,8 @@ pub enum QueryResult {
     ConversationLoaded(Box<crate::ConversationHistory>),
     /// Candidates for the `/load` picker, newest first.
     ConversationsListed(Vec<ConversationSummary>),
+    /// Saved sessions' prompts for the Ctrl+R search, newest first.
+    RecentPromptsListed(Vec<String>),
     /// Everything the user can switch to, already grouped and sorted for
     /// the `/model` picker.
     AvailableModelsListed(Vec<ModelChoice>),
@@ -191,6 +234,32 @@ pub enum QueryResult {
         custom: bool,
         source: String,
     },
+    /// Response to `/add-dir <path>`: the canonical directory, or why it
+    /// could not be added. `raw` echoes the request for the message.
+    AddedDirResolved {
+        raw: String,
+        resolved: Result<std::path::PathBuf, String>,
+    },
+    /// Reply to [`Query::GetMcpPrompt`].
+    McpPromptLoaded(McpPromptAnswer),
+}
+
+/// The answer to one [`McpPromptRequest`]: its `command` and
+/// `attachment_ids` echoed back, and the prompt's text or why it could not
+/// be fetched.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpPromptAnswer {
+    pub command: String,
+    pub attachment_ids: Vec<u64>,
+    pub result: Result<McpPromptText, String>,
+}
+
+/// The usable text of a `prompts/get` answer: the text parts joined, plus
+/// how many non-text parts (images, audio, binary resources) were left out.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpPromptText {
+    pub text: String,
+    pub skipped: usize,
 }
 
 #[cfg(test)]
