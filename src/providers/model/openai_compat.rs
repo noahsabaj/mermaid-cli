@@ -7,6 +7,11 @@
 //! `ProviderProfile` (registry entry) and applies per-provider
 //! reasoning shapes (flat `reasoning_effort` vs nested `reasoning:
 //! {effort}`). This wrapper just forwards.
+//!
+//! OpenAI itself goes to the Responses API through the same adapter, and that
+//! path emits a `provider_continuation` (its encrypted reasoning, native tool
+//! calls and compaction) which MUST round-trip; it is forwarded onto the
+//! `FinalResponse` so the reducer can commit it. Chat Completions emits none.
 
 use std::collections::HashMap;
 
@@ -84,12 +89,17 @@ impl ModelProvider for OpenAICompatProvider {
         })
         .await;
         let window = limits.as_ref().and_then(|l| l.max_context_tokens);
+        // Seeded first: whether the model compacts natively is "until it
+        // refused", and a refusal may be from an earlier session.
+        self.rejections
+            .seed(&provider, &model, self.adapter.param_memory())
+            .await;
         ContextSizing {
             model_max: window,
             effective: window,
             source: None,
             max_output: limits.as_ref().and_then(|l| l.max_output_tokens),
-            compacts_natively: false,
+            compacts_natively: self.adapter.compacts_natively(),
         }
     }
 
@@ -159,6 +169,7 @@ impl ModelProvider for OpenAICompatProvider {
         };
 
         let usage = response.usage.clone();
+        let provider_continuation = response.provider_continuation.clone();
         let stop_reason = response.stop_reason.clone();
         // The terminal Done goes on the same sink the adapter just finished
         // writing to, so it cannot overtake a still-queued ToolCall.
@@ -166,14 +177,14 @@ impl ModelProvider for OpenAICompatProvider {
             .sink
             .send(StreamEvent::Done {
                 usage: usage.clone(),
-                provider_continuation: None,
+                provider_continuation: provider_continuation.clone(),
                 stop_reason: stop_reason.clone(),
             })
             .await;
 
         Ok(FinalResponse {
             usage,
-            provider_continuation: None,
+            provider_continuation,
             tool_calls: response.tool_calls.unwrap_or_default(),
             stop_reason,
         })

@@ -27,7 +27,15 @@ pub enum ProviderContinuation {
         native_tool_calls: Vec<String>,
     },
     /// Meta Responses output items, including encrypted reasoning state.
-    MetaResponses { output: Vec<MetaResponseItem> },
+    MetaResponses { output: Vec<ResponseItem> },
+    /// OpenAI Responses output items: encrypted reasoning, native tool calls
+    /// in the form the model wrote them, and any server-side compaction item.
+    /// `model` is the model that wrote them: encrypted state is replayed only
+    /// to that model, and a session that switches model replays plain history.
+    OpenaiResponses {
+        model: String,
+        output: Vec<ResponseItem>,
+    },
 }
 
 impl ProviderContinuation {
@@ -45,12 +53,12 @@ impl ProviderContinuation {
     pub fn anthropic_signature(&self) -> Option<&str> {
         match self {
             Self::Anthropic { signature, .. } => Some(signature.as_str()).filter(|s| !s.is_empty()),
-            Self::MetaResponses { .. } => None,
+            Self::MetaResponses { .. } | Self::OpenaiResponses { .. } => None,
         }
     }
 
-    /// The same continuation without its server-side compaction block;
-    /// `None` when that block was all it held.
+    /// The same continuation without its server-side compaction state;
+    /// `None` when that was all it held.
     #[must_use]
     pub fn without_compaction(self) -> Option<Self> {
         match self {
@@ -69,6 +77,10 @@ impl ProviderContinuation {
                 native_tool_calls,
             }),
             meta @ Self::MetaResponses { .. } => Some(meta),
+            Self::OpenaiResponses { model, mut output } => {
+                output.retain(|item| !item.is_compaction());
+                (!output.is_empty()).then_some(Self::OpenaiResponses { model, output })
+            },
         }
     }
 
@@ -77,7 +89,18 @@ impl ProviderContinuation {
     pub const fn anthropic_compaction(&self) -> Option<&serde_json::Value> {
         match self {
             Self::Anthropic { compaction, .. } => compaction.as_ref(),
-            Self::MetaResponses { .. } => None,
+            Self::MetaResponses { .. } | Self::OpenaiResponses { .. } => None,
+        }
+    }
+
+    /// Whether the provider compacted the conversation server-side on this
+    /// turn, so that it reads everything before it from this turn's state.
+    #[must_use]
+    pub fn carries_server_compaction(&self) -> bool {
+        match self {
+            Self::Anthropic { compaction, .. } => compaction.is_some(),
+            Self::MetaResponses { .. } => false,
+            Self::OpenaiResponses { output, .. } => output.iter().any(ResponseItem::is_compaction),
         }
     }
 
@@ -89,33 +112,55 @@ impl ProviderContinuation {
             Self::Anthropic {
                 native_tool_calls, ..
             } => native_tool_calls.iter().any(|call| call == id),
-            Self::MetaResponses { .. } => false,
+            Self::MetaResponses { .. } | Self::OpenaiResponses { .. } => false,
         }
     }
 
     #[must_use]
-    pub fn meta_output(&self) -> Option<&[MetaResponseItem]> {
+    pub fn meta_output(&self) -> Option<&[ResponseItem]> {
         match self {
             Self::MetaResponses { output } => Some(output),
-            Self::Anthropic { .. } => None,
+            Self::Anthropic { .. } | Self::OpenaiResponses { .. } => None,
         }
     }
 
-    pub fn retain_meta_function_calls(&mut self, mut keep: impl FnMut(&str) -> bool) {
-        if let Self::MetaResponses { output } = self {
-            output.retain(|item| item.function_call_id().is_none_or(&mut keep));
+    /// The OpenAI output items to replay to `model`: `None` for another
+    /// provider's state, or for state another model wrote.
+    #[must_use]
+    pub fn openai_output(&self, model: &str) -> Option<&[ResponseItem]> {
+        match self {
+            Self::OpenaiResponses {
+                model: wrote,
+                output,
+            } if wrote == model => Some(output),
+            Self::Anthropic { .. } | Self::MetaResponses { .. } | Self::OpenaiResponses { .. } => {
+                None
+            },
+        }
+    }
+
+    /// Keep only the replayed tool calls whose id `keep` accepts.
+    pub fn retain_tool_calls(&mut self, mut keep: impl FnMut(&str) -> bool) {
+        if let Self::MetaResponses { output } | Self::OpenaiResponses { output, .. } = self {
+            output.retain(|item| item.call_id().is_none_or(&mut keep));
         }
     }
 }
 
-/// One Meta Responses output item saved for stateless replay. Reasoning items
-/// split their encrypted payload from the remaining JSON so the ciphertext can
-/// be serialized as base64 bytes. This keeps generic persistence redaction from
-/// mistaking a ciphertext for a credential and corrupting the replay state.
+/// One Responses-API output item saved for stateless replay. Items that carry
+/// encrypted state (reasoning, a server-side compaction) split the payload
+/// from the remaining JSON so the ciphertext can be serialized as base64
+/// bytes. This keeps generic persistence redaction from mistaking a
+/// ciphertext for a credential and corrupting the replay state.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum MetaResponseItem {
+pub enum ResponseItem {
     Reasoning {
+        item: serde_json::Value,
+        #[serde(with = "crate::utils::serde_base64::string")]
+        encrypted_content: String,
+    },
+    Compaction {
         item: serde_json::Value,
         #[serde(with = "crate::utils::serde_base64::string")]
         encrypted_content: String,
@@ -125,19 +170,33 @@ pub enum MetaResponseItem {
     },
 }
 
-impl MetaResponseItem {
+/// The output item types that are tool calls, each answered by an item of
+/// the same name with `_output` appended.
+const CALL_ITEM_TYPES: [&str; 2] = ["function_call", "apply_patch_call"];
+
+impl ResponseItem {
     pub fn from_wire(mut item: serde_json::Value) -> Self {
-        let is_reasoning =
-            item.get("type").and_then(serde_json::Value::as_str) == Some("reasoning");
-        if is_reasoning
+        let kind = item
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        if matches!(kind.as_str(), "reasoning" | "compaction")
             && let Some(encrypted) = item
                 .as_object_mut()
                 .and_then(|object| object.remove("encrypted_content"))
                 .and_then(|value| value.as_str().map(str::to_string))
         {
-            return Self::Reasoning {
-                item,
-                encrypted_content: encrypted,
+            return if kind == "reasoning" {
+                Self::Reasoning {
+                    item,
+                    encrypted_content: encrypted,
+                }
+            } else {
+                Self::Compaction {
+                    item,
+                    encrypted_content: encrypted,
+                }
             };
         }
         Self::Other { item }
@@ -147,6 +206,10 @@ impl MetaResponseItem {
     pub fn to_wire(&self) -> serde_json::Value {
         match self {
             Self::Reasoning {
+                item,
+                encrypted_content,
+            }
+            | Self::Compaction {
                 item,
                 encrypted_content,
             } => {
@@ -163,13 +226,39 @@ impl MetaResponseItem {
         }
     }
 
-    pub fn function_call_id(&self) -> Option<&str> {
-        let item = match self {
-            Self::Reasoning { item, .. } | Self::Other { item } => item,
-        };
-        (item.get("type").and_then(serde_json::Value::as_str) == Some("function_call"))
-            .then(|| item.get("call_id").and_then(serde_json::Value::as_str))
+    fn item(&self) -> &serde_json::Value {
+        match self {
+            Self::Reasoning { item, .. } | Self::Compaction { item, .. } | Self::Other { item } => {
+                item
+            },
+        }
+    }
+
+    /// The item's wire `type`.
+    #[must_use]
+    pub fn kind(&self) -> &str {
+        self.item()
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+    }
+
+    /// The `call_id` of a tool-call item (`function_call`, `apply_patch_call`).
+    #[must_use]
+    pub fn call_id(&self) -> Option<&str> {
+        CALL_ITEM_TYPES
+            .contains(&self.kind())
+            .then(|| {
+                self.item()
+                    .get("call_id")
+                    .and_then(serde_json::Value::as_str)
+            })
             .flatten()
+    }
+
+    #[must_use]
+    pub const fn is_compaction(&self) -> bool {
+        matches!(self, Self::Compaction { .. })
     }
 }
 
@@ -215,7 +304,7 @@ pub struct ChatMessage {
     #[serde(default)]
     pub tool_name: Option<String>,
     /// Provider-owned continuation state. Anthropic stores its signed thinking
-    /// block; Meta stores ordered Responses output items for encrypted replay.
+    /// block; Meta and OpenAI store ordered Responses output items for encrypted replay.
     /// Other providers leave this unset and ignore it on the wire.
     #[serde(default)]
     pub provider_continuation: Option<ProviderContinuation>,
@@ -233,8 +322,7 @@ impl ChatMessage {
             .rposition(|m| {
                 m.provider_continuation
                     .as_ref()
-                    .and_then(ProviderContinuation::anthropic_compaction)
-                    .is_some()
+                    .is_some_and(ProviderContinuation::carries_server_compaction)
             })
             .unwrap_or(0);
         &history[start..]
@@ -749,7 +837,7 @@ mod tests {
         let original = "eyJopaque.reasoning.payload";
         let message = ChatMessage::assistant("done").with_provider_continuation(
             ProviderContinuation::MetaResponses {
-                output: vec![MetaResponseItem::from_wire(serde_json::json!({
+                output: vec![ResponseItem::from_wire(serde_json::json!({
                     "type": "reasoning",
                     "id": "rs_1",
                     "summary": [],

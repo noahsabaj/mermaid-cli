@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **OpenAI models keep their reasoning between tool calls.** `openai/<model>`
+  now goes to OpenAI's Responses API instead of Chat Completions. On Chat
+  Completions a reasoning model's reasoning was thrown away at every tool
+  call, so it started again from zero at each step; now its encrypted
+  reasoning comes back with each request (`store: false`: nothing is kept on
+  OpenAI's side), and the reasoning summary shows in the reasoning panel. On
+  the same endpoint the model gets OpenAI's own `apply_patch` tool, which GPT-5
+  models are trained on, in place of Mermaid's schema for `apply_patch`; each
+  call is rewritten onto Mermaid's `apply_patch` before it runs, so every
+  safety gate applies, and `[tools] provider_native = false` turns it off.
+  Automatic compaction is done by OpenAI's server-side compaction, like on
+  Anthropic (`[compaction] provider_native`). A model that refuses any of
+  these (reasoning on `gpt-4.1`, `apply_patch` on an older model) is remembered
+  and gets a request without it. Other OpenAI-compatible providers, and custom
+  `[providers.<name>]` entries, keep Chat Completions; a proxy that serves only
+  Chat Completions can be set up as a custom provider. Meta's adapter shares
+  the new Responses code.
 - **Mermaid cleans up the config keys it no longer reads.** A config file
   written by an older `mermaid init` still carries sections a later release
   removed, such as `[plan]` (0.28.0) or `[computer_use]` and

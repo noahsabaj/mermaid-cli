@@ -31,7 +31,16 @@ pub mod native_tools;
 pub mod ollama;
 pub mod ollama_sizing;
 pub mod openai_compat;
+/// OpenAI's requests on the Responses API: kept reasoning, its own
+/// `apply_patch` tool, server-side compaction.
+mod openai_responses;
+/// OpenAI on Responses end to end: kept reasoning, `apply_patch` translated
+/// and replayed, refusals learned.
+#[cfg(test)]
+mod openai_responses_calls;
 pub mod output_budget;
+/// The Responses wire format the Meta and OpenAI adapters share.
+pub(crate) mod responses;
 /// Anthropic's server-side compaction, end to end: asked for, replayed,
 /// and learned when refused.
 #[cfg(test)]

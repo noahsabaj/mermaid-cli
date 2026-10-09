@@ -76,9 +76,12 @@ fn anthropic(provider: &MockProvider, model: &str) -> AnthropicAdapter {
         .expect("adapter")
 }
 
+/// A Chat Completions provider with OpenAI's request shape (flat
+/// `reasoning_effort`, `max_tokens` first). OpenAI itself speaks Responses,
+/// which `openai_responses_calls` drives.
 fn openai(provider: &MockProvider, model: &str) -> OpenAICompatAdapter {
     OpenAICompatAdapter::new(
-        lookup_provider("openai").expect("openai profile"),
+        lookup_provider("groq").expect("groq profile"),
         format!("{}/v1", provider.url),
         Some("key".into()),
         model.into(),
@@ -153,6 +156,20 @@ async fn every_adapter_serves_an_unknown_model_on_the_first_request() {
     let provider = MockProvider::start(|_| Reply::stream(SSE, &fixture("meta", "text.sse"))).await;
     let (result, _) = chat(&meta(&provider, "muse-nova-2"), &config).await;
     assert_eq!(result.expect("meta").content, "Hello, world");
+    assert_eq!(provider.bodies_to("/responses").len(), 1);
+
+    let provider =
+        MockProvider::start(|_| Reply::stream(SSE, &fixture("openai_responses", "text.sse"))).await;
+    let openai_responses = OpenAICompatAdapter::new(
+        lookup_provider("openai").expect("openai profile"),
+        format!("{}/v1", provider.url),
+        Some("key".into()),
+        "gpt-nova-9".into(),
+        HashMap::new(),
+    )
+    .expect("adapter");
+    let (result, _) = chat(&openai_responses, &config).await;
+    assert_eq!(result.expect("openai").content, "Hello, world");
     assert_eq!(provider.bodies_to("/responses").len(), 1);
 
     let provider = MockProvider::start(|r| {

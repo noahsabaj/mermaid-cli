@@ -178,9 +178,9 @@ fn fixture(provider: &str, name: &str) -> String {
 mod protocols {
     use super::super::anthropic::AnthropicStream;
     use super::super::gemini::GeminiStream;
-    use super::super::meta::MetaStream;
     use super::super::ollama::OllamaStream;
     use super::super::openai_compat::OpenAICompatStream;
+    use super::super::responses::{Provider, ResponsesStream};
 
     pub(super) fn anthropic() -> AnthropicStream {
         AnthropicStream::new("claude-test".to_string())
@@ -194,8 +194,12 @@ mod protocols {
         OllamaStream::new("ollama-test".to_string())
     }
 
-    pub(super) fn meta() -> MetaStream {
-        MetaStream::new("muse-spark-test".to_string())
+    pub(super) fn meta() -> ResponsesStream {
+        ResponsesStream::new(Provider::Meta, "muse-spark-test".to_string())
+    }
+
+    pub(super) fn openai_responses() -> ResponsesStream {
+        ResponsesStream::new(Provider::OpenAi, "gpt-test".to_string())
     }
 
     /// `deepinfra` carries `ReasoningExtraction::DeltaContentField
@@ -240,6 +244,7 @@ macro_rules! all_providers {
             scenario!(protocols::gemini, "gemini", $sse),
             scenario!(protocols::openai_compat, "openai_compat", $sse),
             scenario!(protocols::meta, "meta", $sse),
+            scenario!(protocols::openai_responses, "openai_responses", $sse),
             scenario!(protocols::ollama, "ollama", $ndjson),
         ]
     };
@@ -375,6 +380,11 @@ async fn oversized_everywhere(needle: &str) -> Vec<(ScenarioResult, &'static str
             oversized("meta", "reasoning.sse", needle)
         ),
         scenario_body!(
+            protocols::openai_responses,
+            "openai_responses",
+            oversized("openai_responses", "reasoning.sse", needle)
+        ),
+        scenario_body!(
             protocols::ollama,
             "ollama",
             oversized("ollama", "reasoning.ndjson", needle)
@@ -486,6 +496,11 @@ async fn no_usage_frame_means_no_usage_everywhere() {
             protocols::meta,
             "meta",
             strip_usage(&fixture("meta", "text.sse"))
+        ),
+        scenario_body!(
+            protocols::openai_responses,
+            "openai_responses",
+            strip_usage(&fixture("openai_responses", "text.sse"))
         ),
         scenario_body!(
             protocols::ollama,

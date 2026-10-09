@@ -17,25 +17,15 @@
 //! tags inside `delta.content` (Together-R1, Wave 6 adds the stripper),
 //! or not at all (OpenAI Chat Completions encrypts).
 //!
-//! # Why Chat Completions, not Responses API
+//! # OpenAI itself speaks Responses
 //!
-//! As of 2026-04, OpenAI's official docs flag the Responses API
-//! (`POST /responses`) as the recommended default and Chat Completions
-//! (`POST /chat/completions`) as legacy. Mermaid uses Chat Completions
-//! deliberately because it's the universal OpenAI-compat shape: Groq,
-//! OpenRouter, Cerebras, DeepInfra, Together, Fireworks, vLLM, and
-//! SambaNova all implement Chat Completions; the Responses API is
-//! OpenAI-only. Migrating this adapter would either (a) break OpenAI-
-//! compat coverage for those providers, or (b) require a separate
-//! OpenAI-direct adapter that bypasses this path. Both are non-trivial
-//! work for marginal gain — Chat Completions still works on the OpenAI
-//! direct endpoint, just without Responses-specific features (built-in
-//! reasoning summaries, structured-output tools, etc.).
-//!
-//! When/if a Responses-only feature becomes load-bearing for Mermaid,
-//! the right move is a focused new adapter (`openai_responses.rs`)
-//! routed through `providers::factory::ProviderFactory` for `provider == "openai"`,
-//! leaving this OpenAI-compat path for everyone else.
+//! Chat Completions is the universal OpenAI-compatible shape, so it stays the
+//! default here. OpenAI's own profile says `WireApi::Responses`: on Chat
+//! Completions its reasoning models lose their reasoning at every tool call,
+//! and its native tools and server-side compaction exist only on Responses.
+//! Those requests are built by `openai_responses` and read by the shared
+//! Responses stream (`responses`); the client, the retries, the learning
+//! loop and the model listing are this adapter's for both.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -49,6 +39,8 @@ use super::accumulator::{
     CappedText, ended_without_terminal, error_body, parse_tool_args, push_tool_arg,
 };
 use super::learning::{Learning, Optional, ParamMemory, Rejections};
+use super::openai_responses;
+use super::responses::{Provider, ResponsesStream};
 use crate::models::ModelCapabilities;
 use crate::models::adapters::driver::{
     Flow, Framing, StreamProtocol, drive_stream, plain_http_error,
@@ -56,7 +48,7 @@ use crate::models::adapters::driver::{
 use crate::models::config::ModelConfig;
 use crate::models::error::{BackendError, ModelError, Result};
 use crate::models::providers::{
-    MaxTokensParam, ProviderProfile, ReasoningExtraction, ReasoningStrategy,
+    MaxTokensParam, ProviderProfile, ReasoningExtraction, ReasoningStrategy, WireApi,
 };
 use crate::models::reasoning::{
     ReasoningCapability, ReasoningChunk, ReasoningLevel, nearest_effort,
@@ -314,7 +306,10 @@ impl OpenAICompatAdapter {
                 })
             })?;
 
-        let capabilities = derive_capabilities(profile, &model_name);
+        let mut capabilities = derive_capabilities(profile, &model_name);
+        if profile.wire_api == WireApi::Responses {
+            capabilities = capabilities.with_provider_continuation();
+        }
 
         Ok(Self {
             client,
@@ -333,6 +328,18 @@ impl OpenAICompatAdapter {
     #[must_use]
     pub const fn param_memory(&self) -> &ParamMemory {
         &self.memory
+    }
+
+    /// Whether this model can take server-side compaction: on the Responses
+    /// API, until the provider refuses it. Only meaningful once the memory is
+    /// seeded.
+    #[must_use]
+    pub fn compacts_natively(&self) -> bool {
+        self.profile.wire_api == WireApi::Responses
+            && !self
+                .memory
+                .snapshot()
+                .contains(openai_responses::COMPACTION_PARAM)
     }
 
     /// Build the JSON request body for `/chat/completions`, avoiding what the
@@ -465,12 +472,13 @@ impl OpenAICompatAdapter {
         body
     }
 
-    /// POST `/chat/completions` and return the raw response.
+    /// POST `body` to the endpoint `path` (`chat/completions`, `responses`)
+    /// and return the raw response.
     /// Transparently retries on 5xx, 429, or reqwest connect failures
     /// via `crate::models::retry::retry_transient_http`. Useful for Groq /
     /// OpenRouter / etc. when an upstream relay hiccups.
-    async fn send_chat(&self, body: &Value) -> Result<reqwest::Response> {
-        let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
+    async fn post(&self, path: &str, body: &Value) -> Result<reqwest::Response> {
+        let url = format!("{}/{path}", self.base_url.trim_end_matches('/'));
         // A stable idempotency key, generated ONCE and reused across every retry
         // attempt, lets an OpenAI-compatible endpoint that honors `Idempotency-Key`
         // (OpenAI, Groq, OpenRouter, …) dedupe a retried POST instead of generating
@@ -499,6 +507,45 @@ impl OpenAICompatAdapter {
                 })
             })
         })
+        .await
+    }
+
+    /// One turn on the Responses API (see `openai_responses`). Always
+    /// streamed, since that is the only shape the encrypted reasoning arrives
+    /// in; a sink-less call drives the same stream and drops the events.
+    async fn chat_responses(
+        &self,
+        messages: &[ChatMessage],
+        config: &ModelConfig,
+        sink: Option<StreamSink>,
+    ) -> Result<ModelResponse> {
+        let mut learning = Learning::start(&self.memory, &self.model_name, sink.as_ref());
+        let response = loop {
+            let body = openai_responses::build_request_body(
+                messages,
+                config,
+                &self.model_name,
+                &self.capabilities.supports_reasoning,
+                learning.rejections(),
+            );
+            let response = self.post("responses", &body).await?;
+            if !learning.is_retryable(&response) {
+                break response;
+            }
+            let err = plain_http_error(response).await;
+            learning
+                .retry_or_fail(err, &openai_responses::sent_optionals(&body))
+                .await?;
+        };
+        learning.settle(&response);
+        if !response.status().is_success() {
+            return Err(plain_http_error(response).await);
+        }
+        drive_stream(
+            response.bytes_stream(),
+            ResponsesStream::new(Provider::OpenAi, self.model_name.clone()),
+            sink.as_ref(),
+        )
         .await
     }
 
@@ -1090,6 +1137,9 @@ impl Model for OpenAICompatAdapter {
         config: &ModelConfig,
         sink: Option<StreamSink>,
     ) -> Result<ModelResponse> {
+        if self.profile.wire_api == WireApi::Responses {
+            return self.chat_responses(messages, config, sink).await;
+        }
         let stream = sink.is_some();
         // Optimistic send; a 400/422 naming an optional parameter takes it
         // back and retries (see `learning`).
@@ -1097,7 +1147,7 @@ impl Model for OpenAICompatAdapter {
         let response = loop {
             let body =
                 self.build_request_body_with(messages, config, stream, learning.rejections());
-            let response = self.send_chat(&body).await?;
+            let response = self.post("chat/completions", &body).await?;
             if !learning.is_retryable(&response) {
                 break response;
             }
