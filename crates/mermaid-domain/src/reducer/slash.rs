@@ -275,7 +275,57 @@ pub fn handle_query_result(state: &mut State, cmds: &mut Vec<Cmd>, result: Query
             };
             handle_output_style_loaded(state, cmds, &name, project, loaded);
         },
+        QueryResult::McpPromptLoaded(answer) => handle_mcp_prompt_loaded(state, cmds, answer),
     }
+}
+
+/// Submit a fetched MCP prompt as a normal user prompt — the transcript
+/// shows the prompt's TEXT, so a recording replays without the server.
+/// Re-enters through `Msg::SubmitPrompt`, which queues it behind a busy turn
+/// like anything else typed.
+fn handle_mcp_prompt_loaded(
+    state: &mut State,
+    cmds: &mut Vec<Cmd>,
+    answer: crate::query::McpPromptAnswer,
+) {
+    let crate::query::McpPromptAnswer {
+        command,
+        attachment_ids,
+        result,
+    } = answer;
+    let loaded = match result {
+        Ok(loaded) if !loaded.text.trim().is_empty() => loaded,
+        Ok(_) => {
+            push_system(
+                state,
+                cmds,
+                format!("MCP prompt /{command} returned no text content."),
+            );
+            return;
+        },
+        Err(reason) => {
+            push_system(
+                state,
+                cmds,
+                format!("MCP prompt /{command} failed: {reason}"),
+            );
+            return;
+        },
+    };
+    if loaded.skipped > 0 {
+        push_system(
+            state,
+            cmds,
+            format!(
+                "MCP prompt /{command}: skipped {} non-text part(s).",
+                loaded.skipped
+            ),
+        );
+    }
+    state.ui.pending_msgs.push_back(crate::Msg::SubmitPrompt {
+        text: loaded.text,
+        attachment_ids,
+    });
 }
 
 /// Append a runtime listing (or generic runtime text) to the transcript as a
@@ -711,7 +761,7 @@ pub fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
         },
         SlashCmd::Help => {
             state.session.append(
-                ChatMessage::system(help_text(&state.plugin_commands)),
+                ChatMessage::system(help_text(&state.prompt_commands)),
                 state.now,
             );
             cmds.push(state.session.save_conversation_cmd());
@@ -721,6 +771,26 @@ pub fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
         },
         SlashCmd::MissingArg(usage) => {
             push_system(state, cmds, usage);
+        },
+        SlashCmd::McpPrompt {
+            command,
+            server,
+            prompt,
+            arguments,
+        } => {
+            // Capture the staged images NOW, as the plugin path does at
+            // submit: they belong to this command, not to whatever is staged
+            // when the server answers.
+            let attachment_ids = state.ui.attachments.iter().map(|a| a.id).collect();
+            cmds.push(Cmd::Query(Query::GetMcpPrompt(
+                crate::query::McpPromptRequest {
+                    command,
+                    server,
+                    prompt,
+                    arguments,
+                    attachment_ids,
+                },
+            )));
         },
     }
 }

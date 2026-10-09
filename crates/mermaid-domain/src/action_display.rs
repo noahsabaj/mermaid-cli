@@ -659,6 +659,21 @@ pub fn display_info_for_shell(
             "Compact".to_string(),
             string_arg("focus").unwrap_or_default(),
         ),
+        crate::mcp_resources::LIST_MCP_RESOURCES => (
+            "MCP".to_string(),
+            format!(
+                "{} resources",
+                string_arg("server").unwrap_or_else(|| "all".to_string())
+            ),
+        ),
+        crate::mcp_resources::READ_MCP_RESOURCE => (
+            "MCP".to_string(),
+            format!(
+                "{}:{}",
+                string_arg("server").unwrap_or_default(),
+                string_arg("uri").unwrap_or_default()
+            ),
+        ),
         n if n.starts_with("mcp__") => {
             let rest = &n[5..];
             let target = rest.replacen("__", ":", 1);

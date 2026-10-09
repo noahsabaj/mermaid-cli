@@ -776,7 +776,34 @@ impl EffectRunner {
                         .unwrap_or_default(),
                 )
             }),
+            Query::GetMcpPrompt(request) => self.dispatch_get_mcp_prompt(request),
         }
+    }
+
+    /// `Query::GetMcpPrompt` — `prompts/get` on the server that advertised
+    /// the prompt. Always answers, so a failure reaches the transcript
+    /// instead of the command silently doing nothing.
+    fn dispatch_get_mcp_prompt(&mut self, request: mermaid_domain::query::McpPromptRequest) {
+        let tx = self.msg_tx.clone();
+        self.detached.spawn(async move {
+            let result = match crate::mcp::manager_ref::get() {
+                Some(manager) => manager
+                    .get_prompt(&request.server, &request.prompt, &request.arguments)
+                    .await
+                    // The reason lands in the persisted transcript.
+                    .map_err(|e| mermaid_model::utils::redact_secrets(&e.to_string())),
+                None => Err("MCP servers not initialized".to_string()),
+            };
+            let _ = tx
+                .send(Msg::QueryResult(QueryResult::McpPromptLoaded(
+                    mermaid_domain::query::McpPromptAnswer {
+                        command: request.command,
+                        attachment_ids: request.attachment_ids,
+                        result,
+                    },
+                )))
+                .await;
+        });
     }
 
     /// `Query::ListOutputStyles` — every selectable output style

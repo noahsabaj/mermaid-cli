@@ -68,12 +68,14 @@ pub fn deferred_unpromoted(state: &State) -> Vec<(&String, &McpToolSpec)> {
         .collect()
 }
 
-/// The MCP portion of `ChatRequest.tools`: non-deferred servers' tools plus
-/// promoted tools, with one `tool_search` definition LAST while any
-/// deferred tool remains unpromoted. The effect runner prepends built-ins.
+/// The MCP portion of `ChatRequest.tools`: the resource tools FIRST while a
+/// ready server supports resources (`crate::mcp_resources`, never deferred),
+/// then non-deferred servers' tools plus promoted tools, with one
+/// `tool_search` definition LAST while any deferred tool remains unpromoted.
+/// The effect runner prepends built-ins.
 #[must_use]
 pub fn mcp_tool_definitions(state: &State) -> Vec<ToolDefinition> {
-    let mut defs = Vec::new();
+    let mut defs = super::mcp_resources::resource_tool_definitions(state);
     for (_, entry) in ready_servers(state) {
         let defers = server_defers(state, entry);
         for tool in allowed_tools(entry) {
@@ -286,6 +288,7 @@ mod tests {
             config: McpServerConfig::default(),
             status: McpServerStatus::Ready,
             tools,
+            resources: false,
         }
     }
 

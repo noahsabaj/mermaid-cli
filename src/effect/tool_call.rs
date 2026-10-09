@@ -321,7 +321,12 @@ pub(super) async fn dispatch_init_mcp_servers(
         let tx = tx.clone();
         join.spawn(async move {
             let msg = match manager.start_server(&name, &config).await {
-                Ok(tools) => Msg::McpServerReady { name, tools },
+                Ok(catalog) => Msg::McpServerReady {
+                    name,
+                    tools: catalog.tools,
+                    resources: catalog.resources,
+                    prompts: catalog.prompts,
+                },
                 Err(e) => Msg::McpServerErrored {
                     name,
                     reason: e.to_string(),

@@ -16,7 +16,9 @@ use anyhow::{Result, anyhow};
 use std::sync::Arc;
 use tracing::{info, warn};
 
-use super::client::{ContentBlock, McpClient, McpToolDef, McpToolResult};
+use super::client::{
+    ContentBlock, McpClient, McpPromptDef, McpResource, McpToolDef, McpToolResult, ResourceContents,
+};
 use super::sanitize;
 use super::transport::{StdioTransport, Transport};
 use super::transport_http::HttpTransport;
@@ -29,6 +31,16 @@ use mermaid_domain::{McpServerConfig, TransportKind};
 /// `initialize`) already fits; this catches spawn-level hangs. A config
 /// override is deliberately deferred until someone needs it.
 pub const MCP_STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// What a started server offers, for the reducer's `Msg::McpServerReady`:
+/// its sanitized tool specs, whether it serves resources, and its prompts as
+/// ready-made slash commands.
+#[derive(Debug, Default)]
+pub struct ServerCatalog {
+    pub tools: Vec<McpToolSpec>,
+    pub resources: bool,
+    pub prompts: Vec<mermaid_domain::PromptCommand>,
+}
 
 /// Per-server runtime: the live client plus sanitized-name bookkeeping.
 struct ServerRuntime {
@@ -77,9 +89,10 @@ impl McpServerManager {
             .unwrap_or_else(|| sanitize::sanitize_segment(raw_name))
     }
 
-    /// Spawn + initialize + `list_tools` for one server, bounded by
-    /// [`MCP_STARTUP_TIMEOUT`]; inserts the runtime and returns the
-    /// sanitized specs for the reducer's `Msg::McpServerReady`.
+    /// Spawn + initialize + `list_tools` (+ `list_prompts` when the server
+    /// declares prompts) for one server, bounded by [`MCP_STARTUP_TIMEOUT`];
+    /// inserts the runtime and returns its [`ServerCatalog`] for the
+    /// reducer's `Msg::McpServerReady`.
     ///
     /// # Errors
     ///
@@ -93,7 +106,7 @@ impl McpServerManager {
         &self,
         name: &str,
         config: &McpServerConfig,
-    ) -> Result<Vec<McpToolSpec>> {
+    ) -> Result<ServerCatalog> {
         self.start_server_with_timeout(name, config, MCP_STARTUP_TIMEOUT)
             .await
     }
@@ -105,7 +118,7 @@ impl McpServerManager {
         name: &str,
         config: &McpServerConfig,
         timeout: Duration,
-    ) -> Result<Vec<McpToolSpec>> {
+    ) -> Result<ServerCatalog> {
         match &config.url {
             Some(url) => info!("Starting MCP server: {} ({})", name, url),
             None => info!(
@@ -118,7 +131,7 @@ impl McpServerManager {
         }
 
         let started = tokio::time::timeout(timeout, Self::start_one(name, config)).await;
-        let (client, tools) = match started {
+        let (client, tools, prompts) = match started {
             Ok(Ok(pair)) => pair,
             Ok(Err(e)) => {
                 warn!("Failed to start MCP server '{}': {}", name, e);
@@ -138,10 +151,17 @@ impl McpServerManager {
 
         let alias = self.alias_for(name);
         let (specs, raw_tool_names) = sanitize::sanitize_server_tools(&alias, &tools);
+        let catalog = ServerCatalog {
+            tools: specs.clone(),
+            resources: client.capabilities.resources,
+            prompts: sanitize::sanitize_server_prompts(&alias, name, &prompts),
+        };
         info!(
-            "MCP server '{}' ready: {} tools ({})",
+            "MCP server '{}' ready: {} tools, {} prompts{} ({})",
             name,
             specs.len(),
+            catalog.prompts.len(),
+            if catalog.resources { ", resources" } else { "" },
             client
                 .server_info
                 .as_ref()
@@ -163,14 +183,16 @@ impl McpServerManager {
             .write()
             .expect("mcp registry lock poisoned")
             .insert(name.to_string(), runtime);
-        Ok(specs)
+        Ok(catalog)
     }
 
-    /// Start a single MCP server, initialize, and list tools.
+    /// Start a single MCP server, initialize, and list its tools and (when
+    /// declared) prompts. A failing `prompts/list` costs the server its
+    /// prompt commands, not its startup: tools are the primary surface.
     async fn start_one(
         name: &str,
         config: &McpServerConfig,
-    ) -> Result<(McpClient, Vec<McpToolDef>)> {
+    ) -> Result<(McpClient, Vec<McpToolDef>, Vec<McpPromptDef>)> {
         let transport: Transport = match config.transport_kind()? {
             TransportKind::Stdio => {
                 StdioTransport::spawn(&config.command, &config.args, &config.env)
@@ -191,7 +213,16 @@ impl McpServerManager {
             .await
             .map_err(|e| anyhow!("MCP server '{name}' tool discovery failed: {e}"))?;
 
-        Ok((client, tools))
+        let prompts = if client.capabilities.prompts {
+            client.list_prompts().await.unwrap_or_else(|e| {
+                warn!("MCP server '{}' prompt discovery failed: {}", name, e);
+                Vec::new()
+            })
+        } else {
+            Vec::new()
+        };
+
+        Ok((client, tools, prompts))
     }
 
     /// All discovered tools as (raw server name, sanitized spec) pairs,
@@ -313,6 +344,82 @@ impl McpServerManager {
         client.call_tool(&raw_tool, arguments).await
     }
 
+    /// Resolve `server` (raw config name or sanitized alias) to its raw name
+    /// and live client. Lock released before returning.
+    fn client_for(&self, server: &str) -> Result<(String, Arc<McpClient>)> {
+        let guard = self.inner.read().expect("mcp registry lock poisoned");
+        let (raw, runtime) = guard
+            .get_key_value(server)
+            .or_else(|| {
+                self.aliases
+                    .get(server)
+                    .and_then(|raw| guard.get_key_value(raw.as_str()))
+            })
+            .ok_or_else(|| anyhow!("MCP server '{server}' not found or not running"))?;
+        if runtime.client.is_shutdown() {
+            return Err(anyhow!("MCP server '{server}' has been stopped"));
+        }
+        Ok((raw.clone(), Arc::clone(&runtime.client)))
+    }
+
+    /// Raw names of the running servers that declared `resources`, sorted.
+    pub fn resource_servers(&self) -> Vec<String> {
+        let guard = self.inner.read().expect("mcp registry lock poisoned");
+        let mut names: Vec<String> = guard
+            .iter()
+            .filter(|(_, rt)| rt.client.capabilities.resources && !rt.client.is_shutdown())
+            .map(|(name, _)| name.clone())
+            .collect();
+        names.sort_unstable();
+        names
+    }
+
+    /// `resources/list` on one server. Returns the raw server name with the
+    /// listing so callers can label it.
+    ///
+    /// # Errors
+    ///
+    /// An unknown or stopped server, one that never declared `resources`,
+    /// and whatever the request fails with.
+    pub async fn list_resources(&self, server: &str) -> Result<(String, Vec<McpResource>)> {
+        let (raw, client) = self.client_for(server)?;
+        if !client.capabilities.resources {
+            return Err(anyhow!("MCP server '{raw}' does not provide resources"));
+        }
+        Ok((raw, client.list_resources().await?))
+    }
+
+    /// `resources/read` of `uri` on one server.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::list_resources`], plus the server rejecting the URI.
+    pub async fn read_resource(&self, server: &str, uri: &str) -> Result<Vec<ResourceContents>> {
+        let (raw, client) = self.client_for(server)?;
+        if !client.capabilities.resources {
+            return Err(anyhow!("MCP server '{raw}' does not provide resources"));
+        }
+        client.read_resource(uri).await
+    }
+
+    /// `prompts/get` of the raw-named `prompt` on `server`, reduced to the
+    /// text Mermaid submits: text parts (and embedded text resources) joined
+    /// by blank lines, plus a count of the non-text parts left out.
+    ///
+    /// # Errors
+    ///
+    /// An unknown or stopped server and whatever the request fails with.
+    pub async fn get_prompt(
+        &self,
+        server: &str,
+        prompt: &str,
+        arguments: &std::collections::BTreeMap<String, String>,
+    ) -> Result<mermaid_domain::query::McpPromptText> {
+        let (_, client) = self.client_for(server)?;
+        let blocks = client.get_prompt(prompt, arguments).await?;
+        Ok(prompt_text(&blocks))
+    }
+
     /// Convert an MCP tool result into text suitable for a tool result message.
     /// Images are returned separately for multimodal attachment. Audio is
     /// attached through the same channel — adapters that don't support audio
@@ -431,6 +538,30 @@ impl McpServerManager {
     }
 }
 
+/// Join a prompt's text parts (embedded text resources included) with blank
+/// lines, counting everything else — images, audio, links, binary
+/// resources — as skipped.
+fn prompt_text(blocks: &[ContentBlock]) -> mermaid_domain::query::McpPromptText {
+    let mut parts = Vec::new();
+    let mut skipped = 0;
+    for block in blocks {
+        match block {
+            ContentBlock::Text(text)
+            | ContentBlock::Resource {
+                text: Some(text), ..
+            } => parts.push(text.as_str()),
+            ContentBlock::Image { .. }
+            | ContentBlock::Audio { .. }
+            | ContentBlock::ResourceLink { .. }
+            | ContentBlock::Resource { text: None, .. } => skipped += 1,
+        }
+    }
+    mermaid_domain::query::McpPromptText {
+        text: parts.join("\n\n"),
+        skipped,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -497,13 +628,102 @@ mod tests {
         let mut configs = HashMap::new();
         configs.insert("remote".to_string(), config.clone());
         let mgr = McpServerManager::new(&configs);
-        let specs = mgr
+        let catalog = mgr
             .start_server_with_timeout("remote", &config, Duration::from_secs(30))
             .await
             .expect("http server must start");
+        let specs = catalog.tools;
         assert_eq!(specs.len(), 1);
+        // `capabilities: {}` declares neither resources nor prompts, so no
+        // prompts/list request was made.
+        assert!(!catalog.resources);
+        assert!(catalog.prompts.is_empty());
+        assert!(mgr.resource_servers().is_empty());
         assert_eq!(specs[0].name, "mcp__remote__echo");
         assert!(mgr.has_server("remote"));
+    }
+
+    #[tokio::test]
+    async fn resources_and_prompts_server_exposes_both_through_the_manager() {
+        use super::super::transport_http::test_fixture::{
+            fixture, json_reply, rpc_response, status_reply,
+        };
+        let init = r#"{"protocolVersion":"2025-11-25","capabilities":{"resources":{},"prompts":{}},"serverInfo":{"name":"fx"}}"#;
+        let fx = fixture(vec![
+            json_reply(&rpc_response(1, init)),
+            status_reply(202, "Accepted"),
+            json_reply(&rpc_response(2, r#"{"tools":[]}"#)),
+            json_reply(&rpc_response(
+                3,
+                r#"{"prompts":[{"name":"Summarize","description":"Sum it up"}]}"#,
+            )),
+            json_reply(&rpc_response(
+                4,
+                r#"{"resources":[{"uri":"mem://notes","name":"notes"}]}"#,
+            )),
+            json_reply(&rpc_response(
+                5,
+                r#"{"messages":[{"role":"user","content":{"type":"text","text":"one"}},{"role":"user","content":{"type":"audio","data":"AA==","mimeType":"audio/wav"}},{"role":"user","content":{"type":"resource","resource":{"uri":"mem://x","text":"two"}}}]}"#,
+            )),
+        ])
+        .await;
+        let config = fx.config();
+        let mut configs = HashMap::new();
+        configs.insert("Notes.Srv".to_string(), config.clone());
+        let mgr = McpServerManager::new(&configs);
+        let catalog = mgr
+            .start_server_with_timeout("Notes.Srv", &config, Duration::from_secs(30))
+            .await
+            .expect("server must start");
+        assert!(catalog.resources);
+        assert_eq!(catalog.prompts.len(), 1);
+        assert_eq!(catalog.prompts[0].name, "mcp__notes_srv__summarize");
+        assert_eq!(catalog.prompts[0].mcp_server(), Some("Notes.Srv"));
+        assert_eq!(mgr.resource_servers(), ["Notes.Srv"]);
+
+        // The sanitized alias routes like the raw name does.
+        let (raw, resources) = mgr.list_resources("Notes_Srv").await.expect("list");
+        assert_eq!(raw, "Notes.Srv");
+        assert_eq!(resources[0].uri, "mem://notes");
+
+        let text = mgr
+            .get_prompt("Notes.Srv", "Summarize", &std::collections::BTreeMap::new())
+            .await
+            .expect("get");
+        assert_eq!(text.text, "one\n\ntwo");
+        assert_eq!(text.skipped, 1);
+    }
+
+    #[tokio::test]
+    async fn resources_are_refused_for_a_server_without_the_capability() {
+        use super::super::transport_http::test_fixture::{
+            fixture, json_reply, rpc_response, status_reply,
+        };
+        let init = r#"{"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"fx"}}"#;
+        let fx = fixture(vec![
+            json_reply(&rpc_response(1, init)),
+            status_reply(202, "Accepted"),
+            json_reply(&rpc_response(2, r#"{"tools":[]}"#)),
+        ])
+        .await;
+        let config = fx.config();
+        let mut configs = HashMap::new();
+        configs.insert("plain".to_string(), config.clone());
+        let mgr = McpServerManager::new(&configs);
+        mgr.start_server_with_timeout("plain", &config, Duration::from_secs(30))
+            .await
+            .expect("server must start");
+        assert!(mgr.resource_servers().is_empty());
+        let err = mgr
+            .read_resource("plain", "mem://x")
+            .await
+            .expect_err("no resources capability");
+        assert!(
+            err.to_string().contains("does not provide resources"),
+            "{err}"
+        );
+        // Nothing beyond startup reached the wire.
+        assert_eq!(fx.requests().await.len(), 3);
     }
 
     #[tokio::test]

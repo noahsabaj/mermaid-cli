@@ -184,7 +184,7 @@ pub async fn run_non_interactive_with(
     state.instructions = instructions;
     state.memory = memory;
     state.skills = skills;
-    state.plugin_commands = plugin_assets.commands;
+    state.prompt_commands = plugin_assets.commands;
 
     // Bootstrap effects (MCP init) before the first prompt.
     //

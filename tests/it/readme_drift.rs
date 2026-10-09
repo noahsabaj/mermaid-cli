@@ -49,6 +49,9 @@ const NOT_BUILTINS: &[&str] = &[
     // Example of a PLUGIN-defined prompt command in the plugins section —
     // dynamic by design, so it can't be in the static registry.
     "deploy",
+    // `/mcp__<server>__<prompt>`: MCP servers' prompt commands, read up to
+    // the first `_`. Discovered at startup, so never in the registry.
+    "mcp",
 ];
 
 #[test]

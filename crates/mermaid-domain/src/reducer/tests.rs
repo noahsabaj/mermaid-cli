@@ -6106,19 +6106,29 @@ fn editor_returned_replaces_draft() {
     assert_eq!(state.ui.input_buffer, "kept");
 }
 
-fn plugin_cmd(name: &str, body: &str) -> crate::PluginCommand {
-    crate::PluginCommand {
+fn plugin_cmd(name: &str, body: &str) -> crate::PromptCommand {
+    crate::PromptCommand {
         name: name.to_string(),
         description: "does things".to_string(),
-        body: body.to_string(),
-        plugin: "demo".to_string(),
+        source: crate::PromptSource::Plugin {
+            plugin: "demo".to_string(),
+            body: body.to_string(),
+        },
+    }
+}
+
+/// Plugin-prompt expansion text (the `Text` arm of `invoke`).
+fn expand(cmd: &crate::PromptCommand, args: &str) -> String {
+    match cmd.invoke(args) {
+        crate::PromptInvocation::Text(text) => text,
+        crate::PromptInvocation::Slash(slash) => panic!("plugin prompt expanded to {slash:?}"),
     }
 }
 
 #[test]
 fn plugin_command_expands_into_a_prompt_submit() {
     let mut state = fresh_state();
-    state.plugin_commands = vec![plugin_cmd("deploy", "Deploy to $ARGUMENTS now.")];
+    state.prompt_commands = vec![plugin_cmd("deploy", "Deploy to $ARGUMENTS now.")];
     state.ui.input_buffer = "/deploy prod".to_string();
     let (mut state, _) = update(state, key(KeyCode::Enter));
     // The reducer re-enters pending_msgs itself; the expansion lands as a
@@ -6135,7 +6145,7 @@ fn plugin_command_expands_into_a_prompt_submit() {
     assert!(state.ui.input_buffer.is_empty());
     // No-args + no token: body submits verbatim.
     state.turn = crate::TurnState::Idle;
-    state.plugin_commands = vec![plugin_cmd("ship", "Ship it.")];
+    state.prompt_commands = vec![plugin_cmd("ship", "Ship it.")];
     state.ui.input_buffer = "/ship".to_string();
     let (state, _) = update(state, key(KeyCode::Enter));
     let queued_or_committed = state
@@ -6154,7 +6164,7 @@ fn plugin_command_expands_into_a_prompt_submit() {
 #[test]
 fn a_slash_line_naming_no_command_never_falls_through_to_a_plugin() {
     let mut state = fresh_state();
-    state.plugin_commands = vec![plugin_cmd("deploy", "body")];
+    state.prompt_commands = vec![plugin_cmd("deploy", "body")];
     state.ui.input_buffer = "/nosuch".to_string();
     let (state, _) = update(state, key(KeyCode::Enter));
     let last = state.session.messages().last().unwrap().content.clone();
@@ -6166,7 +6176,7 @@ fn a_slash_line_naming_no_command_never_falls_through_to_a_plugin() {
 fn builtin_wins_over_same_named_plugin_command() {
     // Structural guarantee on top of the loader's shadowing filter.
     let mut state = fresh_state();
-    state.plugin_commands = vec![plugin_cmd("help", "hijacked")];
+    state.prompt_commands = vec![plugin_cmd("help", "hijacked")];
     state.ui.input_buffer = "/help".to_string();
     let (state, _) = update(state, key(KeyCode::Enter));
     let last = state.session.messages().last().unwrap().content.clone();
@@ -6191,7 +6201,7 @@ fn palette_filter_entries_appends_plugins_and_agrees_on_indices() {
     assert_eq!(d[0].name(), "deploy");
     // Tab-completion path: cursor over the plugin row completes it.
     let mut state = fresh_state();
-    state.plugin_commands = plugin;
+    state.prompt_commands = plugin;
     state.ui.input_buffer = "/dep".to_string();
     state.ui.palette_cursor = Some(0);
     let (state, _) = update(state, key(KeyCode::Tab));
@@ -6201,24 +6211,228 @@ fn palette_filter_entries_appends_plugins_and_agrees_on_indices() {
 #[test]
 fn help_lists_plugin_commands() {
     let mut state = fresh_state();
-    state.plugin_commands = vec![plugin_cmd("deploy", "body")];
+    state.prompt_commands = vec![plugin_cmd("deploy", "body")];
     let (state, _) = update(state, Msg::Slash(SlashCmd::Help));
     let last = state.session.messages().last().unwrap().content.clone();
-    assert!(last.contains("Plugin commands:"), "{last}");
+    assert!(last.contains("Prompt commands:"), "{last}");
     assert!(
         last.contains("/deploy - does things (plugin:demo)"),
         "{last}"
     );
 }
 
+/// A ready MCP server `srv` advertising one prompt, `review`, with a
+/// required `file` and an optional `focus` argument.
+fn state_with_mcp_prompt() -> State {
+    let mut state = fresh_state();
+    state.prompt_commands = vec![plugin_cmd("deploy", "body")];
+    let prompt = crate::PromptCommand {
+        name: "mcp__srv__review".to_string(),
+        description: "Review a file".to_string(),
+        source: crate::PromptSource::Mcp(crate::McpPrompt {
+            server: "srv".to_string(),
+            prompt: "Review".to_string(),
+            arguments: vec![
+                crate::McpPromptArg {
+                    name: "file".to_string(),
+                    description: "File to review".to_string(),
+                    required: true,
+                },
+                crate::McpPromptArg {
+                    name: "focus".to_string(),
+                    description: String::new(),
+                    required: false,
+                },
+            ],
+        }),
+    };
+    let (state, _) = update(
+        state,
+        Msg::McpServerReady {
+            name: "srv".to_string(),
+            tools: vec![],
+            resources: false,
+            prompts: vec![prompt],
+        },
+    );
+    state
+}
+
+fn mcp_prompt_queries(cmds: &[Cmd]) -> Vec<&crate::query::McpPromptRequest> {
+    cmds.iter()
+        .filter_map(|cmd| match cmd {
+            Cmd::Query(crate::Query::GetMcpPrompt(request)) => Some(request),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn mcp_prompts_join_the_palette_after_plugins_and_leave_with_their_server() {
+    let state = state_with_mcp_prompt();
+    let names: Vec<&str> = state
+        .prompt_commands
+        .iter()
+        .map(|c| c.name.as_str())
+        .collect();
+    assert_eq!(names, ["deploy", "mcp__srv__review"]);
+    let rows = crate::slash_commands::filter_entries("mcp__", &state.prompt_commands);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].description(), "Review a file (mcp:srv)");
+    // The server going away takes its prompts with it; plugin prompts stay.
+    let (state, _) = update(
+        state,
+        Msg::McpServerErrored {
+            name: "srv".to_string(),
+            reason: "exit 1".to_string(),
+        },
+    );
+    let names: Vec<&str> = state
+        .prompt_commands
+        .iter()
+        .map(|c| c.name.as_str())
+        .collect();
+    assert_eq!(names, ["deploy"]);
+}
+
+#[test]
+fn mcp_prompt_command_fetches_then_submits_the_prompt_text() {
+    let mut state = state_with_mcp_prompt();
+    state.ui.input_buffer = "/mcp__srv__review src/main.rs error handling".to_string();
+    let (state, cmds) = update(state, key(KeyCode::Enter));
+    assert!(state.ui.input_buffer.is_empty());
+    // Positional args map in declaration order; the surplus joins the last.
+    let requests = mcp_prompt_queries(&cmds);
+    assert_eq!(requests.len(), 1, "{cmds:?}");
+    let request = requests[0];
+    assert_eq!(
+        (request.server.as_str(), request.prompt.as_str()),
+        ("srv", "Review")
+    );
+    assert_eq!(request.arguments["file"], "src/main.rs");
+    assert_eq!(request.arguments["focus"], "error handling");
+    // Nothing is sent to the model until the server answers.
+    assert!(
+        !state
+            .session
+            .messages()
+            .iter()
+            .any(|m| m.role == mermaid_model::models::MessageRole::User)
+    );
+
+    let (state, _) = update(
+        state,
+        Msg::QueryResult(crate::QueryResult::McpPromptLoaded(
+            crate::query::McpPromptAnswer {
+                command: "mcp__srv__review".to_string(),
+                attachment_ids: vec![],
+                result: Ok(crate::query::McpPromptText {
+                    text: "Review src/main.rs for error handling.".to_string(),
+                    skipped: 1,
+                }),
+            },
+        )),
+    );
+    let messages = state.session.messages();
+    let last_user = messages
+        .iter()
+        .rev()
+        .find(|m| m.role == mermaid_model::models::MessageRole::User)
+        .map(|m| m.content.as_str());
+    assert_eq!(last_user, Some("Review src/main.rs for error handling."));
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.content == "MCP prompt /mcp__srv__review: skipped 1 non-text part(s)."),
+        "the skipped part is noted"
+    );
+}
+
+#[test]
+fn mcp_prompt_missing_required_argument_prints_usage_and_fetches_nothing() {
+    let mut state = state_with_mcp_prompt();
+    state.ui.input_buffer = "/mcp__srv__review".to_string();
+    let (state, cmds) = update(state, key(KeyCode::Enter));
+    assert!(mcp_prompt_queries(&cmds).is_empty());
+    let last = state.session.messages().last().unwrap().content.clone();
+    assert_eq!(
+        last,
+        "Usage: /mcp__srv__review <file> [focus]\n  file - File to review"
+    );
+}
+
+#[test]
+fn mcp_prompt_failure_reaches_the_transcript_without_submitting() {
+    let state = state_with_mcp_prompt();
+    let (state, _) = update(
+        state,
+        Msg::QueryResult(crate::QueryResult::McpPromptLoaded(
+            crate::query::McpPromptAnswer {
+                command: "mcp__srv__review".to_string(),
+                attachment_ids: vec![],
+                result: Err("unknown prompt".to_string()),
+            },
+        )),
+    );
+    let messages = state.session.messages();
+    assert_eq!(
+        messages.last().unwrap().content,
+        "MCP prompt /mcp__srv__review failed: unknown prompt"
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|m| m.role == mermaid_model::models::MessageRole::User)
+    );
+}
+
+#[test]
+fn mcp_prompt_arguments_honor_quotes_and_ignore_extras_without_declarations() {
+    let prompt = crate::McpPrompt {
+        server: "s".to_string(),
+        prompt: "p".to_string(),
+        arguments: vec![
+            crate::McpPromptArg {
+                name: "a".to_string(),
+                description: String::new(),
+                required: true,
+            },
+            crate::McpPromptArg {
+                name: "b".to_string(),
+                description: String::new(),
+                required: true,
+            },
+        ],
+    };
+    let SlashCmd::McpPrompt { arguments, .. } = prompt.invocation("cmd", r#""two words" last"#)
+    else {
+        panic!("expected a fetch");
+    };
+    assert_eq!(arguments["a"], "two words");
+    assert_eq!(arguments["b"], "last");
+    // One required argument short: usage, not a fetch.
+    assert!(matches!(
+        prompt.invocation("cmd", "only"),
+        SlashCmd::MissingArg(_)
+    ));
+    let bare = crate::McpPrompt {
+        arguments: vec![],
+        ..prompt
+    };
+    let SlashCmd::McpPrompt { arguments, .. } = bare.invocation("cmd", "stray words") else {
+        panic!("expected a fetch");
+    };
+    assert!(arguments.is_empty());
+}
+
 #[test]
 fn plugin_command_expand_cases() {
     let cmd = plugin_cmd("x", "Do $ARGUMENTS and $ARGUMENTS.");
-    assert_eq!(cmd.expand("this"), "Do this and this.");
-    assert_eq!(cmd.expand("  "), "Do  and .");
+    assert_eq!(expand(&cmd, "this"), "Do this and this.");
+    assert_eq!(expand(&cmd, "  "), "Do  and .");
     let cmd = plugin_cmd("x", "Just do it.");
-    assert_eq!(cmd.expand(""), "Just do it.");
-    assert_eq!(cmd.expand("with args"), "Just do it.\n\nwith args");
+    assert_eq!(expand(&cmd, ""), "Just do it.");
+    assert_eq!(expand(&cmd, "with args"), "Just do it.\n\nwith args");
 }
 
 #[test]
@@ -6527,6 +6741,7 @@ fn mcp_server_ready_updates_entry_status() {
             },
             status: McpServerStatus::Starting,
             tools: vec![],
+            resources: false,
         },
     );
     let (state, _) = update(
@@ -6534,6 +6749,8 @@ fn mcp_server_ready_updates_entry_status() {
         Msg::McpServerReady {
             name: "s1".to_string(),
             tools: vec![],
+            resources: false,
+            prompts: vec![],
         },
     );
     assert_eq!(state.mcp.servers["s1"].status, McpServerStatus::Ready);
@@ -6568,6 +6785,7 @@ fn build_chat_request_orders_mcp_tools_by_server_name() {
                     input_schema: serde_json::json!({}),
                     read_only_hint: false,
                 }],
+                resources: false,
             },
         );
     }
@@ -6610,6 +6828,7 @@ fn tool_search_call_is_intercepted_and_promotes_for_the_follow_up() {
                 input_schema: serde_json::json!({"type": "object"}),
                 read_only_hint: false,
             }],
+            resources: false,
         },
     );
     state.turn = TurnState::Generating {
@@ -7194,6 +7413,7 @@ fn mcp_server_errored_sets_status_and_emits_status_line() {
             },
             status: McpServerStatus::Starting,
             tools: vec![],
+            resources: false,
         },
     );
     let (state, _) = update(
@@ -8559,7 +8779,7 @@ fn typing_an_absolute_path_never_opens_the_slash_palette() {
     );
     assert!(!crate::input_kind::palette_is_open(
         &state.ui.input_buffer,
-        &state.plugin_commands
+        &state.prompt_commands
     ));
 }
 
