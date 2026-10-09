@@ -71,17 +71,17 @@ pub(crate) fn help_text(plugin_commands: &[crate::PluginCommand]) -> String {
     }
     if !plugin_commands.is_empty() {
         lines.push(String::new());
-        lines.push("Plugin commands:".to_string());
+        lines.push("Prompt commands:".to_string());
         for cmd in plugin_commands {
             lines.push(format!(
-                "  /{} - {} (plugin:{})",
+                "  /{} - {} ({})",
                 cmd.name,
                 if cmd.description.is_empty() {
                     "prompt"
                 } else {
                     &cmd.description
                 },
-                cmd.plugin
+                cmd.origin
             ));
         }
     }

@@ -18,11 +18,12 @@ use std::time::UNIX_EPOCH;
 
 use mermaid_model::constants::{INSTRUCTIONS_TRUNCATION_MARKER, MAX_INSTRUCTIONS_BYTES};
 
-/// Instruction files Mermaid understands, in load order. `AGENTS.md` (the
-/// cross-tool open standard) is read first; `MERMAID.md` (mermaid-specific) is
-/// read last so its guidance overrides `AGENTS.md` on conflict. These are the
-/// only two recognized — there is intentionally no CLAUDE.md/GEMINI.md support.
-pub const INSTRUCTION_FILENAMES: &[&str] = &["AGENTS.md", "MERMAID.md"];
+/// Claude Code's instruction files, read in place of `AGENTS.md` only when a
+/// directory has no `AGENTS.md` — the mirror of Claude Code reading AGENTS.md
+/// when there is no CLAUDE.md. A project that has both keeps them in sync by
+/// hand or by import, so loading both would send the same rules twice. The
+/// first one present wins.
+pub const AGENTS_FALLBACK_FILENAMES: &[&str] = &["CLAUDE.md", ".claude/CLAUDE.md"];
 
 /// Hard cap on how many directory levels `find_instruction_files` walks up
 /// before giving up. Guards against pathological symlink loops.
@@ -123,11 +124,7 @@ fn find_instruction_files_bounded(start: &Path, home: Option<&Path>) -> Vec<Path
         if home == Some(current.as_path()) {
             return Vec::new();
         }
-        let found: Vec<PathBuf> = INSTRUCTION_FILENAMES
-            .iter()
-            .map(|name| current.join(name))
-            .filter(|candidate| candidate.is_file())
-            .collect();
+        let found = instruction_files_in(&current);
         if !found.is_empty() {
             return found;
         }
@@ -144,6 +141,29 @@ fn find_instruction_files_bounded(start: &Path, home: Option<&Path>) -> Vec<Path
         }
     }
     Vec::new()
+}
+
+/// The supported instruction files present in `dir`, in load order.
+/// `AGENTS.md` (the cross-tool open standard, else the first of
+/// [`AGENTS_FALLBACK_FILENAMES`]) is read first; `MERMAID.md`
+/// (mermaid-specific) is read last so its guidance overrides on conflict.
+fn instruction_files_in(dir: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let agents = dir.join("AGENTS.md");
+    if agents.is_file() {
+        found.push(agents);
+    } else if let Some(fallback) = AGENTS_FALLBACK_FILENAMES
+        .iter()
+        .map(|name| dir.join(name))
+        .find(|candidate| candidate.is_file())
+    {
+        found.push(fallback);
+    }
+    let mermaid = dir.join("MERMAID.md");
+    if mermaid.is_file() {
+        found.push(mermaid);
+    }
+    found
 }
 
 /// Read the file at `path`, truncate to `MAX_INSTRUCTIONS_BYTES` if
@@ -405,6 +425,43 @@ mod tests {
         let _ = fs::remove_dir_all(&p);
         fs::create_dir_all(&p).expect("create temp dir");
         p
+    }
+
+    #[test]
+    fn claude_md_loads_only_when_there_is_no_agents_md() {
+        let _lock = FS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = temp_dir("claude_fallback");
+        fs::write(dir.join("CLAUDE.md"), "claude rules").unwrap();
+        fs::write(dir.join("MERMAID.md"), "mermaid rules").unwrap();
+        assert_eq!(
+            find_instruction_files(&dir),
+            vec![dir.join("CLAUDE.md"), dir.join("MERMAID.md")]
+        );
+        let loaded = load_from_paths(&find_instruction_files(&dir)).expect("load");
+        assert!(loaded.content.contains("# Project Instructions: CLAUDE.md"));
+
+        // With AGENTS.md present, CLAUDE.md is not read (no rules twice).
+        fs::write(dir.join("AGENTS.md"), "agent rules").unwrap();
+        assert_eq!(
+            find_instruction_files(&dir),
+            vec![dir.join("AGENTS.md"), dir.join("MERMAID.md")]
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dot_claude_claude_md_is_the_last_fallback() {
+        let _lock = FS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = temp_dir("dot_claude_fallback");
+        fs::create_dir_all(dir.join(".claude")).unwrap();
+        fs::write(dir.join(".claude").join("CLAUDE.md"), "rules").unwrap();
+        assert_eq!(
+            find_instruction_files(&dir),
+            vec![dir.join(".claude").join("CLAUDE.md")]
+        );
+        fs::write(dir.join("CLAUDE.md"), "root rules").unwrap();
+        assert_eq!(find_instruction_files(&dir), vec![dir.join("CLAUDE.md")]);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

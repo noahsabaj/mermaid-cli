@@ -30,7 +30,7 @@ pub(super) async fn dispatch_call_model(
         let error = UserFacingError {
             summary: "not wired".to_string(),
             message: "EffectRunner has no ProviderFactory bound".to_string(),
-            suggestion: "construct via EffectRunner::pair_with_bindings".to_string(),
+            suggestion: "construct via EffectRunner::pair_from".to_string(),
             category: mermaid_model::models::ErrorCategory::Internal,
             recoverable: false,
         };

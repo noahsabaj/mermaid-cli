@@ -26,8 +26,6 @@
 //!     on Windows, and the next keystroke comes back `BrokenPipe` — which reads
 //!     exactly like the app crashing.
 
-#![allow(dead_code)] // Each test binary uses a different slice of this.
-
 pub mod evals;
 pub mod stub_model;
 

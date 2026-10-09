@@ -109,13 +109,6 @@ impl TurnScope {
         self.token.is_cancelled()
     }
 
-    /// Join one task if any has completed. Returns `None` immediately
-    /// when the set is empty or nothing is ready. Intended for the
-    /// main loop's per-tick bookkeeping — not a blocking drain.
-    pub async fn join_next(&mut self) -> Option<Result<(), tokio::task::JoinError>> {
-        self.joins.join_next().await
-    }
-
     /// True iff no child task is currently running inside this scope.
     /// The main loop uses this after a `cancel()` to decide when to
     /// transition from `TurnState::Cancelling` back to `Idle`.
@@ -204,7 +197,7 @@ mod tests {
         });
         assert_eq!(scope.len(), 1);
         // Wait for it.
-        let result = scope.join_next().await;
+        let result = scope.joins.join_next().await;
         assert!(result.is_some());
         assert!(scope.is_empty());
     }
