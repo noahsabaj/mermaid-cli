@@ -57,7 +57,10 @@ mermaid --confine-fs run "tidy the tests"       # Confine shell writes to the pr
 mermaid --sandbox run "refactor this"           # Both at once (see docs/sandbox.md)
 mermaid add <name>                              # Add an MCP server (e.g., context7, git)
 mermaid remove <name>                           # Remove a configured MCP server
+mermaid add <name> --url <URL>                  # Add a remote MCP server (signs in if it uses OAuth)
 mermaid mcp                                     # List configured MCP servers
+mermaid mcp login <name>                        # Sign in to a remote MCP server (OAuth, in the browser)
+mermaid mcp logout <name>                       # Delete a remote MCP server's stored sign-in
 ```
 
 `mermaid tasks`, `mermaid processes`, `mermaid plugin`, and the other durable-runtime verbs are

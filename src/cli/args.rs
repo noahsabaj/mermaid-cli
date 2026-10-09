@@ -355,14 +355,30 @@ pub enum Commands {
         /// secret never lands in config.toml.
         #[arg(long = "env-header", requires = "url")]
         env_header: Vec<String>,
+        /// OAuth client id for --url, for a server that does not let Mermaid
+        /// register itself (an OAuth app you registered there).
+        #[arg(long = "client-id", requires = "url")]
+        client_id: Option<String>,
+        /// Environment variable holding the --client-id app's secret, read
+        /// at sign-in and refresh; the secret never lands in config.toml.
+        #[arg(long = "client-secret-env", requires = "client_id")]
+        client_secret_env: Option<String>,
+        /// Fixed port for the sign-in redirect
+        /// (`http://127.0.0.1:<port>/callback`), for an app registered with
+        /// one exact redirect URI.
+        #[arg(long = "callback-port", requires = "url")]
+        callback_port: Option<u16>,
     },
     /// Remove a configured MCP server
     Remove {
         /// MCP server name to remove
         name: String,
     },
-    /// List configured MCP servers
-    Mcp,
+    /// List configured MCP servers, or sign in to a remote one
+    Mcp {
+        #[command(subcommand)]
+        command: Option<McpCommand>,
+    },
     /// Configure Ollama Cloud API key (interactive prompt). Run this
     /// from your shell before starting mermaid — it reads stdin and
     /// doesn't work from inside the TUI.
@@ -409,6 +425,21 @@ pub enum Commands {
         /// run's errors; the text answer is still returned.
         #[arg(long, value_name = "FILE")]
         output_schema: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum McpCommand {
+    /// Sign in to a remote MCP server with OAuth (opens the browser) and
+    /// store its tokens in the OS keyring
+    Login {
+        /// Configured MCP server name
+        name: String,
+    },
+    /// Remove a remote MCP server's stored sign-in from the OS keyring
+    Logout {
+        /// Configured MCP server name
+        name: String,
     },
 }
 
@@ -708,6 +739,53 @@ mod tests {
         assert!(
             Cli::try_parse_from(["mermaid", "add", "gh", "--header", "X: y"]).is_err(),
             "--header must require --url"
+        );
+    }
+
+    #[test]
+    fn mcp_login_logout_and_oauth_add_flags_parse() {
+        let cli = Cli::try_parse_from(["mermaid", "mcp"]).expect("bare mcp lists");
+        assert!(matches!(cli.command, Some(Commands::Mcp { command: None })));
+        let cli = Cli::try_parse_from(["mermaid", "mcp", "login", "linear"]).expect("login");
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Mcp { command: Some(McpCommand::Login { name }) }) if name == "linear"
+        ));
+        let cli = Cli::try_parse_from(["mermaid", "mcp", "logout", "linear"]).expect("logout");
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Mcp { command: Some(McpCommand::Logout { name }) }) if name == "linear"
+        ));
+        let cli = Cli::try_parse_from([
+            "mermaid",
+            "add",
+            "gh",
+            "--url",
+            "https://example.com/mcp",
+            "--client-id",
+            "abc",
+            "--client-secret-env",
+            "GH_SECRET",
+            "--callback-port",
+            "8765",
+        ])
+        .expect("parses");
+        match cli.command {
+            Some(Commands::Add {
+                client_id,
+                client_secret_env,
+                callback_port,
+                ..
+            }) => {
+                assert_eq!(client_id.as_deref(), Some("abc"));
+                assert_eq!(client_secret_env.as_deref(), Some("GH_SECRET"));
+                assert_eq!(callback_port, Some(8765));
+            },
+            other => panic!("expected Add, got {other:?}"),
+        }
+        assert!(
+            Cli::try_parse_from(["mermaid", "add", "gh", "--client-id", "abc"]).is_err(),
+            "--client-id must require --url"
         );
     }
 

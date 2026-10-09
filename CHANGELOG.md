@@ -36,6 +36,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   project file cannot redefine `general` or `explore`. The `agent` tool now
   lists the configured types with their new `description`, so the model knows
   they exist. See docs/plugins.md, "Files from other tools".
+
+- **Remote MCP servers that need an OAuth sign-in now connect.** Hosted
+  servers such as Linear, Notion, Sentry and Atlassian answer `401` until the
+  user signs in, so Mermaid could not use them. `mermaid add <name> --url
+  <URL>` now opens the browser to sign in when the server asks for it, and
+  `mermaid mcp login <name>` / `mermaid mcp logout <name>` sign in again or
+  delete the sign-in. The flow follows the MCP authorization spec
+  (2026-07-28): resource and authorization-server metadata discovery, PKCE
+  `S256`, the `resource` indicator, and the `iss` check before the code is
+  redeemed. Mermaid identifies itself with a Client ID Metadata Document,
+  and uses Dynamic Client Registration only for servers without it. Tokens
+  go to the OS keyring, bound to the server's URL, and refresh on their own;
+  `mermaid mcp` marks the servers that are signed in. A server that needs a
+  client registered by hand takes `[mcp_servers.<name>.oauth]` (`client_id`,
+  `client_secret_env`, `callback_port`, `scopes`), or the matching
+  `--client-id`, `--client-secret-env` and `--callback-port` flags on
+  `mermaid add --url`. `mermaid remove <name>` also deletes the server's
+  stored sign-in.
+
 - **Mermaid cleans up the config keys it no longer reads.** A config file
   written by an older `mermaid init` still carries sections a later release
   removed, such as `[plan]` (0.28.0) or `[computer_use]` and
@@ -49,6 +68,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and a key Mermaid does not know is never touched. Bare `mermaid` at a
   terminal lists the keys and asks `Delete them now? [y/N]` first; headless
   runs, pipes and scripts never ask and never edit.
+- **`read_file` shows pictures to the model.** A PNG, JPEG, GIF or WebP file
+  (known by its first bytes, not its name) comes back as an image beside a
+  one-line `[image/png, 48213 bytes]` result, so a vision model can look at a
+  screenshot, a chart or a mockup it was pointed at. A picture over 3.75 MiB,
+  whose base64 passes the 5 MiB a provider takes in one image, is refused with
+  its size. The text editor's `view` of a picture returns it the same way.
 - **The model can follow the processes it starts in the background.** Before,
   a command run with `mode="background"` returned a pid and log path, and only
   the user could check it with `/logs` or end it with `/stop`; a foreground
@@ -61,6 +86,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reaches only processes this session started, never a raw pid.
 
 ### Fixed
+
+- **Images a tool returns reach the model.** An MCP tool's screenshot was
+  drawn in the chat and never sent: tool results carried text only. Each
+  result now carries its images: inside the `tool_result` for Anthropic, and
+  for OpenAI-compatible, Ollama, Gemini and Meta, which take images only from
+  the user, right after the run of results, each labelled `Image returned by
+  tool call <id>:`. Only the newest three images in a conversation go out, as
+  before. Every adapter also sends an image's real media type (JPEG, GIF and
+  WebP were all labelled PNG).
 
 - **A background command that exits at once is reported as exited on Linux.**
   The liveness check used `kill -0`, which succeeds on a process that has

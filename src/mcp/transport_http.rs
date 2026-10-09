@@ -6,7 +6,10 @@
 //! negotiated protocol version (`MCP-Protocol-Version`) ride as headers on
 //! every subsequent request. Shutdown is an HTTP DELETE of the session.
 //!
-//! Out of scope (v1): OAuth flows, the GET server-listening stream, and the
+//! OAuth: when the server uses it, every request carries the bearer token
+//! from `mermaid mcp login` (see `super::oauth`).
+//!
+//! Out of scope (v1): the GET server-listening stream, and the
 //! deprecated two-endpoint HTTP+SSE transport. SSE resumption (GET +
 //! `Last-Event-ID`) is implemented only for the SEP-1699 polling case: a
 //! server that closes the connection mid-request after assigning event IDs.
@@ -14,17 +17,18 @@
 use anyhow::{Context, Result, anyhow, bail};
 use futures::StreamExt;
 use reqwest::StatusCode;
-use reqwest::header::{ACCEPT, HeaderMap, HeaderName, HeaderValue};
+use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
 use serde_json::{Value, json};
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::time::{Duration, timeout};
 
+use super::oauth::OAuthSession;
 use super::transport::{
     REQUEST_TIMEOUT_SECS, extract_jsonrpc_result, is_response, parse_response_id,
 };
 use mermaid_domain::{McpServerConfig, TransportKind};
-use mermaid_model::utils::{HostClass, classify_host, drain_sse_events};
+use mermaid_model::utils::{CredentialStore, HostClass, classify_host, drain_sse_events};
 
 /// TCP connect budget. Separate from the response budget: a dead host should
 /// fail in seconds, not eat the whole 30s control-call window.
@@ -84,13 +88,26 @@ pub(super) struct HttpTransport {
     protocol_version: RwLock<Option<HeaderValue>>,
     /// Monotonic request ID counter.
     next_id: AtomicU64,
+    /// OAuth bearer tokens from `mermaid mcp login`. `None` when the config
+    /// sends its own `Authorization` header.
+    oauth: Option<OAuthSession>,
 }
 
 impl HttpTransport {
-    /// Build a transport for `config` (which must be url-shaped). Fails fast on
-    /// an invalid url/scheme or an unparseable header NAME — error messages
-    /// never include header values, which are secrets.
-    pub fn new(config: &McpServerConfig) -> Result<Self> {
+    /// Build a transport for server `name` with `config` (which must be
+    /// url-shaped). Fails fast on an invalid url/scheme or an unparseable
+    /// header NAME — error messages never include header values, which are
+    /// secrets. OAuth tokens come from the OS keyring.
+    pub fn new(name: &str, config: &McpServerConfig) -> Result<Self> {
+        Self::with_store(name, config, None)
+    }
+
+    /// [`Self::new`] with the token store injected (`None` = OS keyring).
+    pub(super) fn with_store(
+        name: &str,
+        config: &McpServerConfig,
+        store: Option<std::sync::Arc<dyn CredentialStore>>,
+    ) -> Result<Self> {
         // Re-validate rather than trust the caller: enforces url-presence and
         // the https-or-loopback scheme rule on every construction path.
         if config.transport_kind()? != TransportKind::Http {
@@ -103,21 +120,7 @@ impl HttpTransport {
         let url = reqwest::Url::parse(url_str)
             .map_err(|e| anyhow!("invalid MCP server url '{url_str}': {e}"))?;
 
-        // reqwest connects to IP-literal hosts directly, never consulting the
-        // dns_resolver below — vet literals here so the private-network policy
-        // also holds for `url = "https://192.168.1.5/mcp"`. DNS names classify
-        // as Public and are vetted at connect time by McpVettingResolver.
-        let host = url.host_str().unwrap_or_default();
-        let blocked = match classify_host(host) {
-            HostClass::Loopback | HostClass::Public => false,
-            _ => !config.allow_private_network,
-        };
-        if blocked {
-            bail!(
-                "refusing to connect MCP server '{host}': it is a private/internal \
-                 address (set allow_private_network = true for this server to permit it)"
-            );
-        }
+        check_ip_literal(&url, config.allow_private_network)?;
 
         let mut static_headers = HeaderMap::new();
         for (name, value) in &config.headers {
@@ -135,18 +138,9 @@ impl HttpTransport {
             env_headers.push((n, var.clone()));
         }
 
-        let client = reqwest::Client::builder()
-            .user_agent(format!("mermaid/{}", env!("CARGO_PKG_VERSION")))
-            .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
-            // Following a redirect would forward Authorization headers to a
-            // possibly different origin.
-            .redirect(reqwest::redirect::Policy::none())
-            .dns_resolver(std::sync::Arc::new(McpVettingResolver {
-                allow_private: config.allow_private_network,
-            }))
-            .build()
-            .context("failed to build MCP HTTP client")?;
+        let client = vetted_client(config.allow_private_network)?;
 
+        let oauth = OAuthSession::for_server(name, config, store, client.clone());
         Ok(Self {
             client,
             url,
@@ -155,6 +149,7 @@ impl HttpTransport {
             session_id: RwLock::new(None),
             protocol_version: RwLock::new(None),
             next_id: AtomicU64::new(1),
+            oauth,
         })
     }
 
@@ -238,14 +233,18 @@ impl HttpTransport {
         };
         let result = timeout(
             Duration::from_secs(DELETE_TIMEOUT_SECS),
-            self.client.delete(self.url.clone()).headers(headers).send(),
+            self.send_authed(
+                headers,
+                |h| self.client.delete(self.url.clone()).headers(h),
+                || "MCP session DELETE failed".to_string(),
+            ),
         )
         .await;
         match result {
             Ok(Ok(resp)) if resp.status() == StatusCode::METHOD_NOT_ALLOWED => {
                 tracing::debug!("MCP: server does not allow client session termination (405)");
             },
-            Ok(Err(e)) => tracing::debug!("MCP: session DELETE failed: {}", e),
+            Ok(Err(e)) => tracing::debug!("MCP: session DELETE failed: {:#}", e),
             Err(_) => tracing::debug!("MCP: session DELETE timed out"),
             Ok(Ok(_)) => {},
         }
@@ -255,13 +254,12 @@ impl HttpTransport {
     /// Content-Type (plain JSON object vs SSE stream).
     async fn request_roundtrip(&self, method: &str, id: u64, request: &Value) -> Result<Value> {
         let response = self
-            .client
-            .post(self.url.clone())
-            .headers(self.request_headers(Some(ACCEPT_POST))?)
-            .json(request)
-            .send()
-            .await
-            .with_context(|| format!("MCP HTTP request failed (method: {method})"))?;
+            .send_authed(
+                self.request_headers(Some(ACCEPT_POST))?,
+                |h| self.client.post(self.url.clone()).headers(h).json(request),
+                || format!("MCP HTTP request failed (method: {method})"),
+            )
+            .await?;
         self.capture_session(response.headers());
 
         let status = response.status();
@@ -341,12 +339,12 @@ impl HttpTransport {
                     .map_err(|_| anyhow!("MCP SSE event id is not a valid header value"))?,
             );
             let resumed = self
-                .client
-                .get(self.url.clone())
-                .headers(headers)
-                .send()
-                .await
-                .with_context(|| format!("MCP SSE resume failed (method: {method})"))?;
+                .send_authed(
+                    headers,
+                    |h| self.client.get(self.url.clone()).headers(h),
+                    || format!("MCP SSE resume failed (method: {method})"),
+                )
+                .await?;
             self.capture_session(resumed.headers());
             if !resumed.status().is_success() {
                 let status = resumed.status();
@@ -445,13 +443,12 @@ impl HttpTransport {
     async fn post_message(&self, message: &Value) -> Result<()> {
         let fut = async {
             let response = self
-                .client
-                .post(self.url.clone())
-                .headers(self.request_headers(Some(ACCEPT_POST))?)
-                .json(message)
-                .send()
-                .await
-                .context("MCP HTTP post failed")?;
+                .send_authed(
+                    self.request_headers(Some(ACCEPT_POST))?,
+                    |h| self.client.post(self.url.clone()).headers(h).json(message),
+                    || "MCP HTTP post failed".to_string(),
+                )
+                .await?;
             self.capture_session(response.headers());
             let status = response.status();
             if !status.is_success() {
@@ -462,6 +459,59 @@ impl HttpTransport {
         timeout(Duration::from_secs(NOTIFICATION_TIMEOUT_SECS), fut)
             .await
             .map_err(|_| anyhow!("MCP notification timed out after {NOTIFICATION_TIMEOUT_SECS}s"))?
+    }
+
+    /// Send one request built by `build`, with the OAuth bearer token when
+    /// this server uses OAuth. On 401 it retries once with a refreshed token;
+    /// with none to be had, or on a 403 `insufficient_scope`, the error is
+    /// [`AuthRequired`](super::oauth::AuthRequired), naming the login command.
+    /// `what` labels transport failures.
+    async fn send_authed(
+        &self,
+        headers: HeaderMap,
+        build: impl Fn(HeaderMap) -> reqwest::RequestBuilder,
+        what: impl Fn() -> String,
+    ) -> Result<reqwest::Response> {
+        let Some(oauth) = &self.oauth else {
+            return build(headers).send().await.with_context(what);
+        };
+        let with_bearer = |bearer: Option<&HeaderValue>| {
+            let mut h = headers.clone();
+            if let Some(b) = bearer {
+                h.insert(AUTHORIZATION, b.clone());
+            }
+            h
+        };
+        let sent = oauth.bearer().await;
+        let response = build(with_bearer(sent.as_ref()))
+            .send()
+            .await
+            .with_context(&what)?;
+        match response.status() {
+            StatusCode::UNAUTHORIZED => {},
+            StatusCode::FORBIDDEN => {
+                if let Some(scope) = super::oauth::insufficient_scope(response.headers()) {
+                    let scope = Some(scope).filter(|s| !s.is_empty());
+                    if let Some(s) = &scope {
+                        oauth.note_insufficient_scope(s).await;
+                    }
+                    return Err(oauth.sign_in_required(scope));
+                }
+                return Ok(response);
+            },
+            _ => return Ok(response),
+        }
+        let Some(fresh) = oauth.after_unauthorized(sent.as_ref()).await else {
+            return Err(oauth.sign_in_required(None));
+        };
+        let retry = build(with_bearer(Some(&fresh)))
+            .send()
+            .await
+            .with_context(&what)?;
+        if retry.status() == StatusCode::UNAUTHORIZED {
+            return Err(oauth.sign_in_required(None));
+        }
+        Ok(retry)
     }
 
     /// The header set for one request: static config headers, env-resolved
@@ -601,6 +651,43 @@ impl SseMeta {
     }
 }
 
+/// Refuse an IP-literal host the private-network policy blocks. reqwest
+/// connects to IP-literal hosts directly, never consulting the dns_resolver
+/// of [`vetted_client`] — so literals are vetted here, and the policy also
+/// holds for `url = "https://192.168.1.5/mcp"`. DNS names classify as Public
+/// and are vetted at connect time by [`McpVettingResolver`].
+pub(super) fn check_ip_literal(url: &reqwest::Url, allow_private: bool) -> Result<()> {
+    let host = url.host_str().unwrap_or_default();
+    let blocked = match classify_host(host) {
+        HostClass::Loopback | HostClass::Public => false,
+        _ => !allow_private,
+    };
+    if blocked {
+        bail!(
+            "refusing to connect MCP server '{host}': it is a private/internal \
+             address (set allow_private_network = true for this server to permit it)"
+        );
+    }
+    Ok(())
+}
+
+/// The HTTP client for one MCP server's traffic: its endpoint and, for
+/// OAuth, the metadata, registration and token endpoints it names. Same
+/// private-network policy for all of them, since the server chooses the
+/// OAuth URLs.
+pub(super) fn vetted_client(allow_private: bool) -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .user_agent(format!("mermaid/{}", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
+        // Following a redirect would forward Authorization headers to a
+        // possibly different origin, and could reach an IP literal the
+        // resolver never sees.
+        .redirect(reqwest::redirect::Policy::none())
+        .dns_resolver(std::sync::Arc::new(McpVettingResolver { allow_private }))
+        .build()
+        .context("failed to build MCP HTTP client")
+}
+
 /// Connect-time DNS vetting for MCP endpoints. Unlike `web_fetch`'s resolver,
 /// loopback is always allowed (local MCP servers are a first-class case);
 /// private / link-local / CGNAT / metadata addresses are blocked unless the
@@ -676,8 +763,15 @@ pub(super) mod test_fixture {
             }
         }
 
+        /// A transport whose OAuth token store is an empty in-memory one,
+        /// so no test reads the real keyring.
         pub fn transport(&self) -> HttpTransport {
-            HttpTransport::new(&self.config()).expect("transport")
+            HttpTransport::with_store(
+                "fx",
+                &self.config(),
+                Some(Arc::new(super::super::oauth::MemStore::default())),
+            )
+            .expect("transport")
         }
     }
 
@@ -906,7 +1000,12 @@ mod tests {
             "X-Missing".to_string(),
             "MERMAID_TEST_MCP_HTTP_ENV_HEADER_MISSING".to_string(),
         );
-        let t = HttpTransport::new(&config).expect("transport");
+        let t = HttpTransport::with_store(
+            "t",
+            &config,
+            Some(std::sync::Arc::new(super::super::oauth::MemStore::default())),
+        )
+        .expect("transport");
         t.send_request("ping", json!({})).await.expect("result");
         let req = fx.requests().await.remove(0).to_ascii_lowercase();
         assert!(req.contains("x-static-token: static-secret"), "{req}");
@@ -924,7 +1023,7 @@ mod tests {
             .headers
             .insert("bad header".to_string(), "secret-value".to_string());
         // map to () — HttpTransport has no Debug (it holds secret headers).
-        let err = HttpTransport::new(&config)
+        let err = HttpTransport::new("t", &config)
             .map(|_| ())
             .expect_err("bad name");
         assert!(err.to_string().contains("bad header"), "{err}");
@@ -1149,7 +1248,7 @@ mod tests {
         };
         // No expect_err: HttpTransport deliberately has no Debug impl (it
         // holds secret-bearing headers).
-        let err = match HttpTransport::new(&private) {
+        let err = match HttpTransport::new("t", &private) {
             Ok(_) => panic!("private literal must be rejected"),
             Err(e) => e,
         };
@@ -1158,19 +1257,19 @@ mod tests {
             url: Some("https://[::ffff:169.254.169.254]/mcp".to_string()),
             ..Default::default()
         };
-        assert!(HttpTransport::new(&metadata).is_err());
+        assert!(HttpTransport::new("t", &metadata).is_err());
         let opted_in = McpServerConfig {
             url: Some("https://192.168.1.5/mcp".to_string()),
             allow_private_network: true,
             ..Default::default()
         };
-        assert!(HttpTransport::new(&opted_in).is_ok());
+        assert!(HttpTransport::new("t", &opted_in).is_ok());
         // Loopback literals stay first-class.
         let loopback = McpServerConfig {
             url: Some("http://127.0.0.1:9099/mcp".to_string()),
             ..Default::default()
         };
-        assert!(HttpTransport::new(&loopback).is_ok());
+        assert!(HttpTransport::new("t", &loopback).is_ok());
     }
 
     #[test]
@@ -1179,6 +1278,6 @@ mod tests {
             command: "npx".to_string(),
             ..Default::default()
         };
-        assert!(HttpTransport::new(&config).is_err());
+        assert!(HttpTransport::new("t", &config).is_err());
     }
 }

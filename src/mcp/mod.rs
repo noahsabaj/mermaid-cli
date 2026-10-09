@@ -5,6 +5,7 @@
 pub mod add;
 mod client;
 pub mod manager_ref;
+pub mod oauth;
 mod registry;
 pub mod sanitize;
 mod server_manager;
