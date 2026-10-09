@@ -215,6 +215,7 @@ pub fn handle_query_result(state: &mut State, cmds: &mut Vec<Cmd>, result: Query
             // If the user already navigated away (Esc before the
             // list landed), the event silently drops.
         },
+        QueryResult::RecentPromptsListed(prompts) => merge_recent_prompts(state, prompts),
         QueryResult::ProjectFilesListed(files) => {
             state.ui.project_files_loading = false;
             state.ui.project_files = Some(files);
@@ -283,7 +284,90 @@ pub fn handle_query_result(state: &mut State, cmds: &mut Vec<Cmd>, result: Query
             };
             handle_output_style_loaded(state, cmds, &name, project, loaded);
         },
+        QueryResult::AddedDirResolved { raw, resolved: r } => on_added_dir(state, cmds, &raw, r),
+        QueryResult::McpPromptLoaded(answer) => handle_mcp_prompt_loaded(state, cmds, answer),
     }
+}
+
+/// Answer `/add-dir <path>` once the effect layer has canonicalized it. A
+/// directory already covered (the project root or below it, or an existing
+/// added root) is reported rather than appended, so the list never holds a
+/// root twice.
+fn on_added_dir(
+    state: &mut State,
+    cmds: &mut Vec<Cmd>,
+    raw: &str,
+    resolved: Result<std::path::PathBuf, String>,
+) {
+    let text = match resolved {
+        Err(reason) => reason,
+        Ok(dir) if dir.starts_with(&state.cwd) => format!(
+            "{} is inside the project directory already; nothing to add.",
+            dir.display()
+        ),
+        Ok(dir) if state.additional_dirs.contains(&dir) => {
+            format!("{} is already an added working directory.", dir.display())
+        },
+        Ok(dir) => {
+            let text = format!(
+                "Added working directory for this session: {} (from '{raw}'). File tools and \
+                 shell commands treat it like the project directory.",
+                dir.display()
+            );
+            state.additional_dirs.push(dir);
+            text
+        },
+    };
+    push_system(state, cmds, text);
+}
+
+/// Submit a fetched MCP prompt as a normal user prompt — the transcript
+/// shows the prompt's TEXT, so a recording replays without the server.
+/// Re-enters through `Msg::SubmitPrompt`, which queues it behind a busy turn
+/// like anything else typed.
+fn handle_mcp_prompt_loaded(
+    state: &mut State,
+    cmds: &mut Vec<Cmd>,
+    answer: crate::query::McpPromptAnswer,
+) {
+    let crate::query::McpPromptAnswer {
+        command,
+        attachment_ids,
+        result,
+    } = answer;
+    let loaded = match result {
+        Ok(loaded) if !loaded.text.trim().is_empty() => loaded,
+        Ok(_) => {
+            push_system(
+                state,
+                cmds,
+                format!("MCP prompt /{command} returned no text content."),
+            );
+            return;
+        },
+        Err(reason) => {
+            push_system(
+                state,
+                cmds,
+                format!("MCP prompt /{command} failed: {reason}"),
+            );
+            return;
+        },
+    };
+    if loaded.skipped > 0 {
+        push_system(
+            state,
+            cmds,
+            format!(
+                "MCP prompt /{command}: skipped {} non-text part(s).",
+                loaded.skipped
+            ),
+        );
+    }
+    state.ui.pending_msgs.push_back(crate::Msg::SubmitPrompt {
+        text: loaded.text,
+        attachment_ids,
+    });
 }
 
 /// Append a runtime listing (or generic runtime text) to the transcript as a
@@ -388,10 +472,34 @@ pub fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
             cmds.push(Cmd::Query(Query::ListConversations));
         },
         SlashCmd::Usage => {
-            state
-                .session
-                .append(ChatMessage::system(usage_text(state)), state.now);
-            cmds.push(state.session.save_conversation_cmd());
+            // Pricing needs config and maybe the network, so a session with
+            // spend asks the effect layer and reports when the prices land.
+            if state.session.usage_by_model.is_empty() {
+                state
+                    .session
+                    .append(ChatMessage::system(usage_text(state, None)), state.now);
+                cmds.push(state.session.save_conversation_cmd());
+            } else {
+                cmds.push(Cmd::ResolveModelPrices {
+                    models: state.session.usage_by_model.keys().cloned().collect(),
+                    pricing: state.settings.pricing.clone(),
+                    fetch_catalog: state.settings.safety.network
+                        != crate::config::NetworkPolicy::Deny,
+                });
+            }
+        },
+        SlashCmd::Init(focus) => {
+            // An ordinary prompt: the transcript shows exactly what was
+            // asked, and the model does the work with its normal tools.
+            let mut text = crate::prompts::INIT_PROMPT.to_string();
+            if let Some(focus) = focus {
+                text.push_str("\n\n");
+                text.push_str(&focus);
+            }
+            state.ui.pending_msgs.push_back(Msg::SubmitPrompt {
+                text,
+                attachment_ids: Vec::new(),
+            });
         },
         SlashCmd::Todos(arg) => {
             handle_todos_command(state, cmds, arg.as_deref());
@@ -414,6 +522,21 @@ pub fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
                 },
             }
         },
+        SlashCmd::AddDir(None) => {
+            let text = if state.additional_dirs.is_empty() {
+                format!(
+                    "No added working directories. Project: {}. /add-dir <path> adds one \
+                     for this session.",
+                    state.cwd.display()
+                )
+            } else {
+                format!("Added working directories: {}", added_dirs_display(state))
+            };
+            push_system(state, cmds, text);
+        },
+        // Canonicalizing touches the filesystem, so it runs as a query; the
+        // answer lands in `on_added_dir`.
+        SlashCmd::AddDir(Some(raw)) => cmds.push(Cmd::Query(Query::ResolveAddedDir { raw })),
         SlashCmd::Context(cmd) => {
             use crate::ContextCmd;
             let model_id = state.session.model_id.clone();
@@ -582,7 +705,7 @@ pub fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
             let text = format!(
                 "Handoff report\n\n{}\n\n{}",
                 context_text(state),
-                usage_text(state)
+                usage_text(state, None)
             );
             state.session.append(ChatMessage::system(text), state.now);
             cmds.push(state.session.save_conversation_cmd());
@@ -591,7 +714,7 @@ pub fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
             let text = format!(
                 "Runtime report\n\n{}\n\n{}",
                 context_text(state),
-                usage_text(state)
+                usage_text(state, None)
             );
             state.session.append(ChatMessage::system(text), state.now);
             cmds.push(state.session.save_conversation_cmd());
@@ -724,7 +847,7 @@ pub fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
         },
         SlashCmd::Help => {
             state.session.append(
-                ChatMessage::system(help_text(&state.plugin_commands)),
+                ChatMessage::system(help_text(&state.prompt_commands)),
                 state.now,
             );
             cmds.push(state.session.save_conversation_cmd());
@@ -734,6 +857,26 @@ pub fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
         },
         SlashCmd::MissingArg(usage) => {
             push_system(state, cmds, usage);
+        },
+        SlashCmd::McpPrompt {
+            command,
+            server,
+            prompt,
+            arguments,
+        } => {
+            // Capture the staged images NOW, as the plugin path does at
+            // submit: they belong to this command, not to whatever is staged
+            // when the server answers.
+            let attachment_ids = state.ui.attachments.iter().map(|a| a.id).collect();
+            cmds.push(Cmd::Query(Query::GetMcpPrompt(
+                crate::query::McpPromptRequest {
+                    command,
+                    server,
+                    prompt,
+                    arguments,
+                    attachment_ids,
+                },
+            )));
         },
     }
 }
@@ -1151,6 +1294,7 @@ pub fn handle_confirm_accepted(state: &mut State, cmds: &mut Vec<Cmd>) {
             state.runtime.goal = crate::goal::GoalProgress::default();
             state.session.last_token_usage = None;
             state.session.cumulative_token_usage = TokenUsageTotals::default();
+            state.session.usage_by_model.clear();
             // Same rationale as `ConversationLoaded`: the cleared-away run's
             // summary counters must not survive into the fresh conversation.
             reset_run_counters(state);

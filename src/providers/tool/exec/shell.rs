@@ -127,28 +127,38 @@ pub(crate) fn build_sandboxed_shell(command: &str, sandbox: &SandboxPlan) -> Com
 }
 
 /// Where the effective working directory landed: inside the project, inside
-/// the session scratchpad, or outside both (escalated to `ExternalDirectory`).
+/// the session scratchpad, inside an added working root, or outside all of
+/// them (escalated to `ExternalDirectory`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CwdContainment {
     Project,
     Scratchpad,
+    AddedDir,
     External,
 }
 
 /// Classify the (already-canonicalized) effective workdir. The scratchpad
-/// check canonicalizes the scratch root itself; if that fails (dir missing,
-/// permissions) the cwd fails closed to `External` — never to a downgrade.
+/// and added-root checks canonicalize each root themselves; if that fails
+/// (dir missing, permissions) the root matches nothing and the cwd fails
+/// closed to `External` — never to a downgrade.
 pub(crate) fn classify_cwd(
     within_project: bool,
     effective_workdir: &Path,
     scratchpad: Option<&Path>,
+    additional: &[PathBuf],
 ) -> CwdContainment {
     if within_project {
         return CwdContainment::Project;
     }
-    match scratchpad.and_then(|s| std::fs::canonicalize(s).ok()) {
-        Some(scratch) if effective_workdir.starts_with(&scratch) => CwdContainment::Scratchpad,
-        _ => CwdContainment::External,
+    let contains = |root: &Path| {
+        std::fs::canonicalize(root).is_ok_and(|real| effective_workdir.starts_with(real))
+    };
+    if scratchpad.is_some_and(contains) {
+        CwdContainment::Scratchpad
+    } else if additional.iter().any(|root| contains(root)) {
+        CwdContainment::AddedDir
+    } else {
+        CwdContainment::External
     }
 }
 

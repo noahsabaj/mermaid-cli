@@ -16,6 +16,7 @@ mermaid --model nvidia/z-ai/glm-5.2             # NVIDIA NIM (requires NVIDIA_AP
 mermaid --model cloudflare/@cf/zai-org/glm-5.2  # Cloudflare Workers AI (CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID)
 mermaid --reasoning high                        # Override default reasoning depth
 mermaid --path /path/to/project                  # Run against a specific project directory
+mermaid --add-dir ../shared-lib                  # Also work in another directory with the project's trust (repeatable)
 mermaid --record /tmp/session.jsonl              # Record reducer events for replay/debugging
 mermaid --replay /tmp/session.jsonl              # Reconstruct a recorded session (headless, deterministic)
 mermaid --append-system-prompt "Prefer small diffs" # Add one-off runtime instructions
@@ -66,6 +67,27 @@ mermaid mcp logout <name>                       # Delete a remote MCP server's s
 `mermaid tasks`, `mermaid processes`, `mermaid plugin`, and the other durable-runtime verbs are
 documented in [runtime.md](runtime.md).
 
+### Added working directories
+
+`--add-dir <dir>` (repeatable), `[workspace] additional_dirs` in your user config
+([configuration.md](configuration.md)) and `/add-dir <path>` mid-session give extra directories
+the same trust as the project directory:
+
+- The file tools treat paths inside them like project paths: no outside-the-project approval or
+  Auto-mode review, edits are checkpointed, and writes go through the same symlink-confined
+  helpers with the added directory as the root. A symlink inside one that points out of it does
+  not count as inside, and neither does a path outside that symlinks in.
+- `execute_command` with a `working_dir` inside one is not escalated.
+- `--confine-fs` / `--sandbox` let shell commands write there ([sandbox.md](sandbox.md)).
+- `read_only` mode still blocks writes everywhere; reads of an added directory are simply not
+  external reads.
+- Subagents get the same list, and `/doctor` and the model's session facts name them.
+
+Each path is canonicalized when it is added; one that does not exist is an error (at startup,
+the session does not start). Flag paths resolve against the shell's current directory, config
+and `/add-dir` paths against the project directory. A repository's `.mermaid/config.toml` cannot
+add one. Additions made with `/add-dir` last until the session exits and are not saved.
+
 ## Keyboard shortcuts
 
 | Key | Action |
@@ -88,6 +110,7 @@ documented in [runtime.md](runtime.md).
 | `@` | Open the fuzzy file picker (at the start of a word); type to filter, Tab/Enter inserts `@path`, Esc dismisses |
 | Tab | In palette: complete highlighted command name |
 | Up/Down | Navigate input history; palette and conversation-list navigation |
+| Ctrl+R | Search earlier prompts, from this session and the project's saved sessions; type to filter, Ctrl+R or Down for the next match, Enter puts the prompt in the composer (it is not sent) |
 | Mouse Wheel | Scroll chat |
 
 ### Message queuing and mid-run steering
@@ -131,6 +154,7 @@ A line is a command only when its first word names one. Anything else that happe
 Everyday:
 
 - `/doctor` — show current model, safety, prompt, instruction, and tool readiness
+- `/init [focus]` — ask the agent to write AGENTS.md for this project, or improve the one there; extra words are added to the request
 - `/clear`, `/save [name]`, `/load [id]`, `/list` — manage the conversation
 - `/cancel [id]` — cancel the active turn or a durable task
 - `/handoff [id]`, `/report [id]` — write a current-context report or inspect a task report
@@ -138,6 +162,7 @@ Everyday:
 - `/todos` — show or edit the task checklist the agent keeps for the current run
 - `/goal [condition|clear]` — keep working until the condition is met (see Goals below); no argument shows the goal's status
 - `/scratchpad` — show the session's scratch directory and what is in it
+- `/add-dir [path]` — add a working directory for the rest of the session (relative paths resolve against the project directory, `~` against your home), or list the added ones. See "Added working directories" below
 - `/btw <question>` — ask a side question while the agent works; see [Side questions](#side-questions)
 - `/editor` — compose the prompt in `$VISUAL`/`$EDITOR` (Ctrl+O keeps the current draft)
 - `/help` (`/h`), `/quit` (`/q`)
@@ -147,7 +172,8 @@ Model and context:
 - `/model` — open the model picker: every model this machine can reach, local Ollama models grouped first, the active one marked, type to filter (↑↓ navigate · Enter switch · Esc cancel). Rows drop the provider their group heading already names — `mistralai/mistral-large-2-instruct` under `nvidia` — and the footer shows the highlighted row's full id, the string `/model <name>` and `--model` take. `/model <name>` switches directly; either way an Ollama model auto-pulls if needed
 - `/reasoning <level>` — set reasoning: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`
 - `/visible-reasoning [on|off|toggle]` — show or hide reasoning blocks in the transcript
-- `/usage`, `/context`, `/compact [instructions]`
+- `/usage` — token usage for the last request and the session, and an estimated cost per model at list prices (see `[pricing]` in [configuration.md](configuration.md))
+- `/context`, `/compact [instructions]`
 - `/autocompact [tokens|off|on|reset] [global|project] [current-model|all-models]` — show or set when automatic compaction starts. `/autocompact 250000` compacts the current model at 250k tokens. The value goes to your user config, or to the project config with `project`; `all-models` sets it for every model. A value for one model overrides the one for all models. `off` and `on` apply to all models. `reset all-models` removes every auto-compact value from that file
 - `/model-info <model>`
 - `/output-style [name] [--project]` — show or set the output style (voice/format preset: `default`, `proactive`, `concise`, `explanatory`, `learning`, or a custom style file). Persists to your user config, or to the project config with `--project`; applies to the next message, subagents keep the stock prompt

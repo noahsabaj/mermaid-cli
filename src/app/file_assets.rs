@@ -19,7 +19,7 @@
 
 use std::path::{Path, PathBuf};
 
-use mermaid_domain::{AgentTypeConfig, PluginCommand, SkillSource};
+use mermaid_domain::{AgentTypeConfig, PromptCommand, PromptSource, SkillSource};
 
 /// One directory that may hold `skills/`, `commands/` and `agents/`.
 #[derive(Debug, Clone)]
@@ -64,7 +64,7 @@ pub fn asset_roots(cwd: &Path) -> Vec<AssetRoot> {
 #[derive(Debug, Default)]
 pub struct FileAssets {
     /// Deduplicated by name, highest precedence first.
-    pub commands: Vec<PluginCommand>,
+    pub commands: Vec<PromptCommand>,
     /// Deduplicated by name, highest precedence first.
     pub agent_types: Vec<(String, AgentTypeConfig)>,
     pub warnings: Vec<String>,
@@ -91,7 +91,7 @@ pub fn load(cwd: &Path) -> FileAssets {
 pub fn load_with_plugins(
     config: &mut mermaid_domain::Config,
     cwd: &Path,
-) -> (Vec<PluginCommand>, Vec<String>) {
+) -> (Vec<PromptCommand>, Vec<String>) {
     let files = load(cwd);
     let mut warnings = apply(config, &files);
     let plugins = crate::app::plugin_assets::load();
@@ -207,7 +207,7 @@ fn file_stem(path: &Path) -> String {
 
 /// One `commands/*.md` file as a prompt command. The name is the file stem
 /// (Claude Code's rule) unless the frontmatter sets `name:`.
-fn parse_command(path: &Path, raw: &str, source: SkillSource) -> Result<PluginCommand, String> {
+fn parse_command(path: &Path, raw: &str, source: SkillSource) -> Result<PromptCommand, String> {
     let (fields, body) = super::skills::parse_frontmatter_fields(raw);
     let field = |key: &str| {
         fields
@@ -237,11 +237,13 @@ fn parse_command(path: &Path, raw: &str, source: SkillSource) -> Result<PluginCo
             "command file {shown}: '/{name}' shadows a built-in command; skipped"
         ));
     }
-    Ok(PluginCommand {
+    Ok(PromptCommand {
         name,
         description: field("description").unwrap_or_default(),
-        body: body.trim().to_string(),
-        origin: source.label().to_string(),
+        source: PromptSource::Markdown {
+            origin: source.label().to_string(),
+            body: body.trim().to_string(),
+        },
     })
 }
 
@@ -481,10 +483,16 @@ mod tests {
         assert!(assets.warnings.is_empty(), "{:?}", assets.warnings);
         let names: Vec<&str> = assets.commands.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, ["deploy", "fix-issue", "component"]);
-        assert_eq!(assets.commands[0].body, "Mermaid deploy");
+        assert!(matches!(
+            &assets.commands[0].source,
+            PromptSource::Markdown { body, .. } if body == "Mermaid deploy"
+        ));
         assert_eq!(assets.commands[1].description, "Fix a GitHub issue");
-        assert_eq!(assets.commands[1].origin, "project");
-        assert_eq!(assets.commands[1].expand("42"), "Fix issue #42.");
+        assert_eq!(assets.commands[1].origin(), "project");
+        assert_eq!(
+            assets.commands[1].invoke("42"),
+            mermaid_domain::PromptInvocation::Text("Fix issue #42.".to_string())
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

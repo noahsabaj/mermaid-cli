@@ -54,7 +54,7 @@ use crate::providers::ProviderFactory;
 use crate::providers::ctx::ExecContext;
 use mermaid_domain::{
     Msg, State, TokenUsageTotals, ToolDefinition, ToolMetadata, ToolOutcome, ToolRunMetadata,
-    TurnState,
+    TurnState, UsageByModel,
 };
 use mermaid_model::models::MessageRole;
 use mermaid_runtime::SafetyMode;
@@ -748,7 +748,7 @@ impl SubagentTool {
             Some(state) => {
                 // Continuations accumulate usage across drives in one State;
                 // snapshot so only THIS drive's delta rolls up to the parent.
-                let before = state.session.cumulative_token_usage;
+                let before = UsageSnapshot::of(&state);
                 (state, before)
             },
             None => (
@@ -759,7 +759,7 @@ impl SubagentTool {
                     chrono::Local::now(),
                     std::env::temp_dir(),
                 ),
-                TokenUsageTotals::default(),
+                UsageSnapshot::default(),
             ),
         };
         // A per-call model override retargets a continued child too; without
@@ -804,6 +804,9 @@ impl SubagentTool {
         // may have appeared, or moved after a `/clear`, since the child was
         // first built).
         child_state.session.scratchpad = ctx.scratchpad.clone();
+        // The same for the added working roots: the parent's LIVE list, so a
+        // `/add-dir` since the child was built reaches continuations too.
+        child_state.additional_dirs = ctx.additional_dirs.clone();
         let (instructions, memory, skills) =
             crate::app::instructions::load_project_context(&cwd, &config.memory);
         child_state.instructions = instructions;
@@ -934,7 +937,7 @@ struct DetachArgs<F> {
     description: String,
     type_name: String,
     child_model_id: String,
-    usage_before: TokenUsageTotals,
+    usage_before: UsageSnapshot,
     timeout_secs: u64,
     started: Instant,
     /// Moves with the child: a detached agent outlives the turn, so its
@@ -1055,6 +1058,7 @@ impl SubagentTool {
                         success: outcome.is_success(),
                         cancelled,
                         usage,
+                        usage_by_model: outcome.metadata.usage_by_model.clone(),
                         tokens: tokens_total,
                         duration_secs: started.elapsed().as_secs(),
                     })
@@ -1080,7 +1084,7 @@ async fn finish_drive(
     agent_id: String,
     description: &str,
     child_model_id: String,
-    usage_before: TokenUsageTotals,
+    usage_before: UsageSnapshot,
     timeout_secs: u64,
     started: Instant,
     result: Result<String, DriveError>,
@@ -1088,7 +1092,12 @@ async fn finish_drive(
     workspace: Workspace,
     merge_cx: MergeContext,
 ) -> ToolOutcome {
-    let child_usage = usage_delta(final_state.session.cumulative_token_usage, usage_before);
+    let child_usage = usage_delta(
+        final_state.session.cumulative_token_usage,
+        usage_before.total,
+    );
+    let child_usage_by_model =
+        usage_by_model_delta(&final_state.session.usage_by_model, &usage_before.by_model);
 
     // Land the work, but only for a child that finished. A timed-out or
     // errored child stopped mid-edit: merging half a change is worse than
@@ -1137,7 +1146,7 @@ async fn finish_drive(
 
     let elapsed = started.elapsed().as_secs_f64();
     let trailer = format!("[agent_id: {agent_id} — pass agent_id to continue this child]");
-    let metadata = subagent_metadata(child_model_id, child_usage, agent_id);
+    let metadata = subagent_metadata(child_model_id, child_usage, child_usage_by_model, agent_id);
     // The workspace note goes above the trailer: what happened to the child's
     // edits is part of its result, not bookkeeping.
     let trailer = if workspace_report.note.is_empty() {
@@ -1187,21 +1196,64 @@ async fn finish_drive(
 fn subagent_metadata(
     model_id: String,
     usage: TokenUsageTotals,
+    usage_by_model: UsageByModel,
     agent_id: String,
 ) -> ToolRunMetadata {
-    let token_usage = (usage.total_tokens() > 0).then(|| mermaid_model::models::TokenUsage {
+    let token_usage = (usage.total_tokens() > 0).then(|| provider_usage(usage));
+    let usage_by_model = if token_usage.is_some() {
+        usage_by_model
+            .into_iter()
+            .filter(|(_, part)| part.total_tokens() > 0)
+            .map(|(model, part)| (model, provider_usage(part)))
+            .collect()
+    } else {
+        std::collections::BTreeMap::new()
+    };
+    ToolRunMetadata {
+        detail: ToolMetadata::Subagent { model_id, agent_id },
+        token_usage,
+        usage_by_model,
+        ..ToolRunMetadata::default()
+    }
+}
+
+fn provider_usage(usage: TokenUsageTotals) -> mermaid_model::models::TokenUsage {
+    mermaid_model::models::TokenUsage {
         prompt_tokens: usage.prompt_tokens,
         completion_tokens: usage.completion_tokens,
         cached_input_tokens: usage.cached_input_tokens,
         cache_creation_input_tokens: usage.cache_creation_input_tokens,
         reasoning_output_tokens: usage.reasoning_output_tokens,
         source: Default::default(),
-    });
-    ToolRunMetadata {
-        detail: ToolMetadata::Subagent { model_id, agent_id },
-        token_usage,
-        ..ToolRunMetadata::default()
     }
+}
+
+/// A child's usage meters before a drive, so only that drive's delta rolls
+/// up to the parent.
+#[derive(Default)]
+struct UsageSnapshot {
+    total: TokenUsageTotals,
+    by_model: UsageByModel,
+}
+
+impl UsageSnapshot {
+    fn of(state: &State) -> Self {
+        Self {
+            total: state.session.cumulative_token_usage,
+            by_model: state.session.usage_by_model.clone(),
+        }
+    }
+}
+
+/// `usage_delta` per model: what each model spent in this drive.
+fn usage_by_model_delta(after: &UsageByModel, before: &UsageByModel) -> UsageByModel {
+    after
+        .iter()
+        .map(|(model, totals)| {
+            let earlier = before.get(model).copied().unwrap_or_default();
+            (model.clone(), usage_delta(*totals, earlier))
+        })
+        .collect()
 }
 
 /// The child-session usage attributable to ONE drive: cumulative totals
@@ -1911,6 +1963,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn child_state_inherits_the_parent_added_dirs() {
+        // A subagent works with the parent's added working roots: the child
+        // State is built from the startup config, so without the refresh
+        // block a `/add-dir` made mid-session would not reach it.
+        let (mut ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), PathBuf::from("/tmp"));
+        ctx.additional_dirs = vec![PathBuf::from("/srv/shared")];
+        let mut child_state = test_state();
+        assert!(child_state.additional_dirs.is_empty());
+        child_state.additional_dirs = ctx.additional_dirs.clone();
+        assert_eq!(
+            child_state.additional_dirs,
+            vec![PathBuf::from("/srv/shared")]
+        );
+    }
+
     /// When `ExecContext::model_id` is empty (the test builder's
     /// default), the fallback walks `config.default_model.{provider,name}`.
     /// This pins the happy-path behavior.
@@ -1938,6 +2006,7 @@ mod tests {
             config: mermaid_domain::McpServerConfig::default(),
             status: McpServerStatus::Starting,
             tools: Vec::new(),
+            resources: false,
         };
         let mut servers = std::collections::HashMap::new();
         servers.insert("slack".to_string(), entry());
@@ -1989,10 +2058,24 @@ mod tests {
                 completion_tokens: 40,
                 ..TokenUsageTotals::default()
             },
+            UsageByModel::from([
+                (
+                    "ollama/test".to_string(),
+                    TokenUsageTotals {
+                        prompt_tokens: 100,
+                        completion_tokens: 40,
+                        ..TokenUsageTotals::default()
+                    },
+                ),
+                ("ollama/idle".to_string(), TokenUsageTotals::default()),
+            ]),
             "a7".to_string(),
         );
         let usage = some.token_usage.expect("usage attached");
         assert_eq!(usage.total_tokens(), 140);
+        // The split keeps only models that spent something in this drive.
+        assert_eq!(some.usage_by_model.len(), 1);
+        assert_eq!(some.usage_by_model["ollama/test"].total_tokens(), 140);
         assert_eq!(usage.completion_tokens, 40);
         assert!(matches!(
             some.detail,
@@ -2003,9 +2086,11 @@ mod tests {
         let none = subagent_metadata(
             "ollama/test".to_string(),
             TokenUsageTotals::default(),
+            UsageByModel::new(),
             "a8".to_string(),
         );
         assert!(none.token_usage.is_none());
+        assert!(none.usage_by_model.is_empty());
     }
 
     #[test]

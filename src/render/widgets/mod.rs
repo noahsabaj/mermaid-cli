@@ -25,6 +25,7 @@ mod conversation_list;
 mod file_picker;
 mod input;
 mod model_picker;
+mod prompt_search;
 mod question;
 mod rewind_picker;
 mod session_header;
@@ -40,6 +41,7 @@ pub use conversation_list::ConversationListWidget;
 pub use file_picker::FilePickerWidget;
 pub use input::{InputWidget, input_cursor_position, rendered_row_count};
 pub use model_picker::{MODEL_PICKER_HEIGHT, ModelPickerWidget};
+pub use prompt_search::PromptSearchWidget;
 pub use question::{QuestionModalWidget, question_modal_height};
 pub use rewind_picker::RewindPickerWidget;
 pub use session_header::{

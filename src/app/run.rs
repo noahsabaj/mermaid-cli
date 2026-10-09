@@ -170,7 +170,7 @@ pub async fn run_interactive_with(
     state.skills = crate::app::skills::load(&cwd);
     // Prompt commands (files and plugins): same restart-to-refresh policy as
     // skills.
-    state.plugin_commands = prompt_commands;
+    state.prompt_commands = prompt_commands;
     for warning in asset_warnings {
         state
             .ui

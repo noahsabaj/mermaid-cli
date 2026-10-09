@@ -96,6 +96,7 @@ pub(crate) fn tool_dispatch(state: &State) -> crate::cmd::ToolDispatch {
         session_id: state.session.conversation.id.clone(),
         message_index: state.session.messages().len(),
         scratchpad: state.session.scratchpad.clone(),
+        additional_dirs: state.additional_dirs.clone(),
         computer_batch: Vec::new(),
     }
 }
@@ -193,11 +194,22 @@ pub fn handle_tool_finished(
             // total) into the session counters, so the footer and the
             // end-of-run "used N tokens" summary count the whole tree.
             if let Some(usage) = outcome.metadata.token_usage.as_ref() {
+                let session_model = state.session.model_id.clone();
+                let attribution = match &outcome.metadata.detail {
+                    _ if !outcome.metadata.usage_by_model.is_empty() => {
+                        UsageAttribution::Split(&outcome.metadata.usage_by_model)
+                    },
+                    crate::ToolMetadata::Subagent { model_id, .. } => {
+                        UsageAttribution::Model(model_id)
+                    },
+                    _ => UsageAttribution::Model(&session_model),
+                };
                 fold_token_usage(
                     &mut state.session,
                     &mut state.runtime,
                     usage,
                     UsageFold::Subagent,
+                    attribution,
                 );
             }
             // The model asked to checkpoint: the follow-up model call this
