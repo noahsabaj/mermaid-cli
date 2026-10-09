@@ -15,7 +15,7 @@ Editing: `edit_file` is for one location -- `target_content` must match once (or
 `allow_multiple`), with matching that degrades in steps from exact through trailing-whitespace,
 full-trim and Unicode normalisation before refusing. `apply_patch` is for multi-hunk and
 new-file work and takes a unified diff, range headers included. Both write atomically beneath
-the resolved root, snapshot a checkpoint for `/undo`, and replay through the approval queue.
+the resolved root, snapshot a checkpoint for `/restore`, and replay through the approval queue.
 
 On Anthropic, the model gets Anthropic's own text editor and bash tools, the definitions Claude
 is trained on, in place of Mermaid's schemas for the same work: the text editor stands in for
@@ -63,7 +63,7 @@ that compacts server-side (Anthropic), the provider handles that automatic trigg
 
 MCP servers contribute additional tools under the `mcp__<server>__<tool>` prefix when configured. Names and schemas are sanitized to provider-safe form at startup (charset `[A-Za-z0-9_-]`, 64-char cap, `$ref` inlining and other schema normalization); `enabled_tools`/`disabled_tools` filters keep matching the RAW tool names the server itself advertises.
 
-Servers start concurrently at launch, each bounded by a 60-second timeout, and report ready/errored individually.
+Servers start concurrently at launch and report ready/errored individually.
 
 By default MCP tools are **deferred**: instead of advertising every server's tools on every request, the model gets one `tool_search` tool that searches deferred tool names/descriptions and promotes matches to direct advertisement for the rest of the session — deferred schemas don't count against `/context` until promoted. Opt out globally with `mcp_defer_tools = false` at the top level of config, or per server with `defer = false` on its `[mcp_servers.<name>]` entry.
 
@@ -118,7 +118,7 @@ it needs the native fetch backend.
 
 Inspect an existing `web_fetch` snapshot with Unicode-caseless `pattern` matching, or page through it with stable `start_line`/`line_count` continuation, without refetching.
 
-Backend selection, redirect and provenance rules, and the transfer budgets are in
+Backend selection and redirect rules are in
 [configuration.md](configuration.md#web-tool-backends).
 
 ## Inline approvals
