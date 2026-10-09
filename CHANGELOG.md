@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`/btw` asks a side question without touching the conversation.** Type
+  `/btw what was that config file called?` at any time, also while the agent
+  works. The model answers from the session so far in a pane under the
+  composer, as a separate call that does not interrupt the running turn. The
+  question and answer are never saved, compacted, or sent with later turns;
+  later side questions see the newest 20 earlier ones. The side call has no
+  tools. Esc closes the pane, Up/Down scrolls, Left/Right steps through
+  earlier answers, `c` copies the answer, `x` clears the earlier ones, and a
+  bare `/btw` reopens the newest answer. `f` forks the answer into a
+  background agent that carries on from it with full tools; `/agents` lists
+  it and its report is posted to the conversation.
+
 - **`/goal` keeps Mermaid working until a condition is met.** `/goal all tests
   pass and clippy is clean` starts a turn with the condition as the request.
   Each time the run would end, a separate model call with no tools reads the

@@ -31,6 +31,7 @@ pub(crate) mod goal_loop;
 pub(crate) mod input;
 pub(crate) mod lifecycle;
 pub(crate) mod safety_mode;
+pub(crate) mod side_question;
 pub(crate) mod slash;
 pub(crate) mod streaming;
 pub(crate) mod subagents;
@@ -43,6 +44,7 @@ pub use goal_loop::*;
 pub use input::*;
 pub use lifecycle::*;
 pub use safety_mode::*;
+pub use side_question::*;
 pub use slash::*;
 pub use streaming::*;
 pub use subagents::*;
@@ -609,6 +611,12 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
         },
         Msg::RuntimeText(text) => {
             append_runtime_note(&mut state, &mut cmds, text);
+        },
+        Msg::SideQuestionText { id, chunk } => {
+            state.side_questions.push_chunk(id, &chunk);
+        },
+        Msg::SideQuestionFinished { id, outcome } => {
+            handle_side_question_finished(&mut state, id, outcome);
         },
         Msg::ModelPullFinished { model } => {
             push_system(&mut state, &mut cmds, format!("Pulled {model}"));
