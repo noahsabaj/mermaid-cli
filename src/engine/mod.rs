@@ -325,13 +325,6 @@ impl<S: EffectSink, O: StepObserver> Engine<S, O> {
         matches!(self.state().turn, TurnState::Idle)
     }
 
-    /// Idle, with no user prompt waiting to seed the next turn. What every
-    /// headless driver means by "done".
-    #[must_use]
-    pub fn is_settled(&self) -> bool {
-        self.is_idle() && self.state().ui.queued_messages.is_empty()
-    }
-
     /// The `Option`'s contract, spelled once: it is `Some` at every observable
     /// point. Takes the borrowed field rather than `&self` so callers that
     /// also need `&mut self.observer` can split the borrow.

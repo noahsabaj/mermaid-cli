@@ -1,7 +1,7 @@
 //! Drift guard for the lint policy — the same registry-backed truth pattern
 //! `readme_drift.rs` uses.
 //!
-//! The `[lints.clippy]` table is DUPLICATED into all three manifests rather
+//! The `[lints.clippy]` table is DUPLICATED into all four manifests rather
 //! than inherited via `[workspace.lints]` + `lints.workspace = true`. That is
 //! not an oversight. The `isolated-crate-build` CI job copies `crates/.` into a
 //! directory with no workspace root above it, and `lints.workspace = true` is a

@@ -23,7 +23,7 @@
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::reasoning::{ReasoningChunk, ReasoningLevel};
+use super::reasoning::ReasoningLevel;
 
 /// Static description of one OpenAI-compatible provider.
 #[derive(Debug, Clone)]
@@ -159,31 +159,6 @@ pub enum ReasoningExtraction {
     /// Adapter strips tags and reroutes inside-tag bytes to the
     /// reasoning channel via a streaming state machine.
     InlineThinkTags,
-}
-
-impl ReasoningExtraction {
-    /// Pull reasoning content out of a streaming delta JSON. Returns
-    /// `None` if this strategy doesn't extract from the JSON body
-    /// (`None` and `InlineThinkTags`) or if the delta has no reasoning.
-    /// `InlineThinkTags` is handled separately at the byte-stream level
-    /// in the adapter; this method returns `None` for it.
-    #[must_use]
-    pub fn parse_delta(&self, delta: &Value) -> Option<ReasoningChunk> {
-        match self {
-            Self::None | Self::InlineThinkTags => None,
-            Self::DeltaContentField(field) => {
-                let text = delta.get(field).and_then(|v| v.as_str())?;
-                if text.is_empty() {
-                    None
-                } else {
-                    Some(ReasoningChunk {
-                        text: text.to_string(),
-                        signature: None,
-                    })
-                }
-            },
-        }
-    }
 }
 
 /// User-friendly string form for `compat = "..."` in config.toml when a
@@ -555,48 +530,6 @@ mod tests {
         ] {
             assert_eq!(s.render(level), None);
         }
-    }
-
-    // --- ReasoningExtraction::parse_delta ---
-
-    #[test]
-    fn delta_field_extraction_finds_named_field() {
-        let e = ReasoningExtraction::DeltaContentField("reasoning_content");
-        let delta = json!({"reasoning_content": "weighing options", "content": ""});
-        let chunk = e.parse_delta(&delta).expect("should extract");
-        assert_eq!(chunk.text, "weighing options");
-        assert!(chunk.signature.is_none());
-    }
-
-    #[test]
-    fn delta_field_extraction_returns_none_when_absent() {
-        let e = ReasoningExtraction::DeltaContentField("reasoning_content");
-        let delta = json!({"content": "regular text"});
-        assert!(e.parse_delta(&delta).is_none());
-    }
-
-    #[test]
-    fn delta_field_extraction_returns_none_for_empty_string() {
-        let e = ReasoningExtraction::DeltaContentField("reasoning");
-        let delta = json!({"reasoning": ""});
-        assert!(e.parse_delta(&delta).is_none());
-    }
-
-    #[test]
-    fn none_extraction_always_returns_none() {
-        let e = ReasoningExtraction::None;
-        assert!(e.parse_delta(&json!({"reasoning_content": "x"})).is_none());
-    }
-
-    #[test]
-    fn inline_think_tags_does_not_parse_via_json() {
-        // Inline tags are handled at the byte-stream level in the
-        // adapter (Wave 6); this method always returns None for them.
-        let e = ReasoningExtraction::InlineThinkTags;
-        assert!(
-            e.parse_delta(&json!({"content": "<think>x</think>"}))
-                .is_none()
-        );
     }
 
     // --- CompatStyle ---
