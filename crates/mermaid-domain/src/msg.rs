@@ -270,9 +270,16 @@ pub enum Msg {
 
     // ── MCP (from effect::mcp) ──────────────────────────────────────
     /// `initialize` succeeded; server is ready to dispatch tools.
+    /// `resources` is the server's advertised `resources` capability (it
+    /// gates the `list_mcp_resources`/`read_mcp_resource` tools); `prompts`
+    /// are its `prompts/list` entries as ready-made slash commands.
     McpServerReady {
         name: String,
         tools: Vec<McpToolSpec>,
+        #[serde(default)]
+        resources: bool,
+        #[serde(default)]
+        prompts: Vec<crate::PromptCommand>,
     },
     /// Server startup failed OR the child exited with non-zero.
     McpServerErrored {
@@ -320,6 +327,9 @@ pub enum Msg {
     },
     /// Generic daemon/runtime text response.
     RuntimeText(String),
+    /// Prices for `/usage` (from `Cmd::ResolveModelPrices`): the reducer
+    /// writes the usage report with a cost block.
+    ModelPricesResolved(crate::cost::ModelPrices),
 
     // ── Side questions (`/btw`) ─────────────────────────────────────
     /// A streamed chunk of a side question's answer. Keyed by the side
@@ -417,6 +427,9 @@ pub enum Msg {
         /// Provider-reported usage for the child's whole drive (None when the
         /// provider reported nothing — the display falls back to `tokens`).
         usage: Option<TokenUsage>,
+        /// `usage` split by model (`ToolRunMetadata::usage_by_model`).
+        #[serde(default)]
+        usage_by_model: std::collections::BTreeMap<String, TokenUsage>,
         /// Display token count (usage total, or the live estimate).
         tokens: usize,
         duration_secs: u64,
@@ -597,12 +610,18 @@ pub enum SlashCmd {
     Load(Option<String>),
     List,
     Usage,
+    /// Send the AGENTS.md prompt, with optional extra focus appended.
+    Init(Option<String>),
     /// The task checklist: no arg → show; `add <subject>` / `rm <id>` /
     /// `done <id>` / `clear` edit it (routed through the `TaskBroker`).
     Todos(Option<String>),
     /// Show the session scratch directory and a bounded listing of its
     /// contents (via `Cmd::ListScratchpad`).
     Scratchpad,
+    /// No arg → list the added working roots; `Some(path)` → add one for the
+    /// rest of the session (resolved by the effect layer via
+    /// `Query::ResolveAddedDir`).
+    AddDir(Option<String>),
     Context(ContextCmd),
     Compact(Option<String>),
     /// List saved durable memories.
@@ -668,6 +687,16 @@ pub enum SlashCmd {
     /// the reducer's arm is a plain print and a recording replays exactly
     /// what the user saw. Arity itself lives in the registry, not here.
     MissingArg(String),
+    /// An MCP prompt command (`/mcp__<server>__<prompt> args`), its typed
+    /// positional arguments already mapped onto the prompt's declared ones.
+    /// Never parsed from the registry: `PromptCommand::invoke` builds it.
+    /// Runs as `Query::GetMcpPrompt`; the answer submits as a user prompt.
+    McpPrompt {
+        command: String,
+        server: String,
+        prompt: String,
+        arguments: std::collections::BTreeMap<String, String>,
+    },
 }
 
 impl Msg {
@@ -738,6 +767,7 @@ impl Msg {
             | Self::QueryResult(_)
             | Self::ScratchpadReady { .. }
             | Self::RuntimeText(_)
+            | Self::ModelPricesResolved(_)
             | Self::SideQuestionText { .. }
             | Self::SideQuestionFinished { .. }
             | Self::ModelPullFinished { .. }
@@ -803,7 +833,7 @@ impl Msg {
             Self::SessionSaved => MsgKind::SessionSaved,
             Self::QueryResult(_) => MsgKind::QueryResult,
             Self::ScratchpadReady { .. } => MsgKind::ScratchpadReady,
-            Self::RuntimeText(_) => MsgKind::RuntimeStore,
+            Self::RuntimeText(_) | Self::ModelPricesResolved(_) => MsgKind::RuntimeStore,
             Self::SideQuestionText { .. } | Self::SideQuestionFinished { .. } => {
                 MsgKind::SideQuestion
             },
@@ -912,6 +942,8 @@ mod tests {
         let m = Msg::McpServerReady {
             name: "s".to_string(),
             tools: vec![],
+            resources: false,
+            prompts: vec![],
         };
         assert_eq!(m.turn_id(), None);
     }

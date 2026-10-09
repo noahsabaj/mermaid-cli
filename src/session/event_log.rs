@@ -389,6 +389,33 @@ impl EventLog {
         Ok(Some((events, highest)))
     }
 
+    /// The prompts the user sent in a session (`input` events), oldest
+    /// first, for the Ctrl+R prompt search. Cheaper than a fold: only lines
+    /// that can be an `input` event are parsed, so a long transcript costs a
+    /// scan, not a decode. Empty when there is no readable log.
+    pub(crate) fn read_inputs(&self, id: &str) -> Vec<String> {
+        let path = self.path_for(id);
+        let Ok(meta) = std::fs::metadata(&path) else {
+            return Vec::new();
+        };
+        if !meta.is_file() || meta.len() > MAX_LOG_BYTES {
+            return Vec::new();
+        }
+        let Ok(file) = File::open(&path) else {
+            return Vec::new();
+        };
+        BufReader::new(file)
+            .lines()
+            .map_while(Result::ok)
+            .filter(|raw| raw.contains(r#""type":"input""#))
+            .filter_map(|raw| serde_json::from_str::<SessionEventLine>(&raw).ok())
+            .filter_map(|line| match line.event {
+                SessionEvent::Input { text } => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Rebuild the conversation by folding the whole log from zero.
     /// `Ok(None)` when there is no readable log, or it does not begin with
     /// a `started` event.

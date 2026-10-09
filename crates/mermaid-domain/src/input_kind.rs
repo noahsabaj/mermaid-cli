@@ -79,9 +79,9 @@ pub enum InputKind<'a, 'p> {
     /// A built-in command. `rest` is everything after the leading `/`, ready
     /// for [`crate::parse_slash_command`].
     Builtin { rest: &'a str },
-    /// An enabled plugin's prompt command, with the args to expand it with.
-    Plugin {
-        cmd: &'p crate::PluginCommand,
+    /// A prompt command (plugin or MCP), with the args to expand it with.
+    Prompt {
+        cmd: &'p crate::PromptCommand,
         args: &'a str,
     },
     /// Prose for the model. Carries no payload because it always means the
@@ -92,13 +92,14 @@ pub enum InputKind<'a, 'p> {
 
 /// Classify the composer buffer. The ONLY way to ask "is this a command?".
 ///
-/// Built-ins win over plugins, matching the loader, which already refuses a
-/// plugin whose name shadows a built-in; keeping the order here too makes it
-/// structural rather than a coincidence of two guards agreeing.
+/// Built-ins win over prompt commands, matching the loader, which already
+/// refuses a plugin whose name shadows a built-in; keeping the order here too
+/// makes it structural rather than a coincidence of two guards agreeing. (MCP
+/// prompt names are `mcp__`-prefixed and cannot shadow one at all.)
 #[must_use]
 pub fn classify_input<'a, 'p>(
     buf: &'a str,
-    plugins: &'p [crate::PluginCommand],
+    prompts: &'p [crate::PromptCommand],
 ) -> InputKind<'a, 'p> {
     let Some(line) = command_line(buf) else {
         return InputKind::Text;
@@ -107,8 +108,8 @@ pub fn classify_input<'a, 'p>(
         return InputKind::Builtin { rest: line.rest };
     }
     let name = line.token.to_lowercase();
-    if let Some(cmd) = plugins.iter().find(|p| p.name == name) {
-        return InputKind::Plugin {
+    if let Some(cmd) = prompts.iter().find(|p| p.name == name) {
+        return InputKind::Prompt {
             cmd,
             args: line.args,
         };
@@ -125,10 +126,10 @@ pub fn classify_input<'a, 'p>(
 #[must_use]
 pub fn palette_rows<'p>(
     buf: &str,
-    plugins: &'p [crate::PluginCommand],
+    prompts: &'p [crate::PromptCommand],
 ) -> Option<Vec<PaletteEntry<'p>>> {
     let line = command_line(buf)?;
-    let rows = filter_entries(line.token, plugins);
+    let rows = filter_entries(line.token, prompts);
     (!rows.is_empty()).then_some(rows)
 }
 
@@ -139,8 +140,8 @@ pub fn palette_rows<'p>(
 /// [`palette_rows`] rather than reimplementing the prefix test — a second
 /// copy of that predicate is exactly the defect this module removes.
 #[must_use]
-pub fn palette_is_open(buf: &str, plugins: &[crate::PluginCommand]) -> bool {
-    palette_rows(buf, plugins).is_some()
+pub fn palette_is_open(buf: &str, prompts: &[crate::PromptCommand]) -> bool {
+    palette_rows(buf, prompts).is_some()
 }
 
 /// The `/word` to name in the "no commands match" hint, or `None` when there
@@ -166,12 +167,14 @@ mod tests {
     const DEB: &str =
         "/home/nsabaj/Downloads/grok-bot_0.44.0_amd64.deb can you make this run on fedora";
 
-    fn plugin(name: &str) -> crate::PluginCommand {
-        crate::PluginCommand {
+    fn plugin(name: &str) -> crate::PromptCommand {
+        crate::PromptCommand {
             name: name.to_string(),
             description: "does things".to_string(),
-            body: "body".to_string(),
-            origin: "plugin:demo".to_string(),
+            source: crate::PromptSource::Markdown {
+                origin: "plugin:demo".to_string(),
+                body: "body".to_string(),
+            },
         }
     }
 
@@ -299,7 +302,7 @@ mod tests {
         let plugins = vec![plugin("deploy")];
         assert!(matches!(
             classify_input("/deploy prod", &plugins),
-            InputKind::Plugin { cmd, args } if cmd.name == "deploy" && args == " prod"
+            InputKind::Prompt { cmd, args } if cmd.name == "deploy" && args == " prod"
         ));
         assert!(palette_is_open("/dep", &plugins));
     }

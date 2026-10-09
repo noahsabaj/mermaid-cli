@@ -38,7 +38,7 @@ use mermaid_model::ids::TurnId;
 use super::reducer::*;
 use super::request::*;
 
-pub(crate) fn help_text(plugin_commands: &[crate::PluginCommand]) -> String {
+pub(crate) fn help_text(prompt_commands: &[crate::PromptCommand]) -> String {
     let mut lines = Vec::with_capacity(COMMAND_REGISTRY.len() + COMMAND_GROUPS.len() + 2);
     lines.push("Mermaid commands".to_string());
     lines.push(
@@ -69,10 +69,10 @@ pub(crate) fn help_text(plugin_commands: &[crate::PluginCommand]) -> String {
             ));
         }
     }
-    if !plugin_commands.is_empty() {
+    if !prompt_commands.is_empty() {
         lines.push(String::new());
         lines.push("Prompt commands:".to_string());
-        for cmd in plugin_commands {
+        for cmd in prompt_commands {
             lines.push(format!(
                 "  /{} - {} ({})",
                 cmd.name,
@@ -81,7 +81,7 @@ pub(crate) fn help_text(plugin_commands: &[crate::PluginCommand]) -> String {
                 } else {
                     &cmd.description
                 },
-                cmd.origin
+                cmd.origin()
             ));
         }
     }
@@ -111,10 +111,27 @@ pub(crate) fn output_style_display(state: &State) -> String {
     )
 }
 
+/// The added working roots, comma-separated, or `none`.
+pub(crate) fn added_dirs_display(state: &State) -> String {
+    if state.additional_dirs.is_empty() {
+        return "none".to_string();
+    }
+    state
+        .additional_dirs
+        .iter()
+        .map(|dir| dir.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 pub(crate) fn doctor_text(state: &State) -> String {
     let mut lines = Vec::new();
     lines.push("Mermaid Doctor".to_string());
     lines.push(format!("Project: {}", state.cwd.display()));
+    lines.push(format!(
+        "Additional working directories: {}",
+        added_dirs_display(state)
+    ));
     lines.push(format!("Active model: {}", state.session.model_id));
     lines.push(format!("Reasoning: {}", state.session.reasoning.as_str()));
     lines.push(format!(
@@ -191,13 +208,42 @@ pub(crate) fn doctor_text(state: &State) -> String {
             .filter(|entry| matches!(entry.status, crate::McpServerStatus::Ready))
             .count()
     ));
+    lines.extend(mcp_server_lines(state));
     lines.push(
         "Useful next commands: /help, /context, /model-info <model>, /compact [focus]".to_string(),
     );
     lines.join("\n")
 }
 
-pub(crate) fn usage_text(state: &State) -> String {
+/// One `/doctor` line per ready MCP server, by name: what it contributes.
+fn mcp_server_lines(state: &State) -> Vec<String> {
+    let mut ready: Vec<(&String, &crate::McpServerEntry)> = state
+        .mcp
+        .servers
+        .iter()
+        .filter(|(_, entry)| matches!(entry.status, crate::McpServerStatus::Ready))
+        .collect();
+    ready.sort_by(|a, b| a.0.cmp(b.0));
+    ready
+        .into_iter()
+        .map(|(name, entry)| {
+            let prompts = state
+                .prompt_commands
+                .iter()
+                .filter(|cmd| cmd.mcp_server() == Some(name.as_str()))
+                .count();
+            format!(
+                "  {name}: {} tools, {prompts} prompts, resources {}",
+                entry.tools.len(),
+                if entry.resources { "yes" } else { "no" }
+            )
+        })
+        .collect()
+}
+
+/// The `/usage` report. `prices` adds the cost block; `None` when the
+/// session has spent nothing yet, so there is nothing to price.
+pub(crate) fn usage_text(state: &State, prices: Option<&crate::cost::ModelPrices>) -> String {
     let mut lines = Vec::new();
     lines.push("Usage".to_string());
     lines.push(format!("Model: {}", state.session.model_id));
@@ -237,6 +283,13 @@ pub(crate) fn usage_text(state: &State) -> String {
         "Session cumulative (all API calls, subagents included): {}",
         usage_totals_line(state.session.cumulative_token_usage)
     ));
+    if let Some(prices) = prices {
+        lines.push(String::new());
+        lines.extend(crate::cost::cost_lines(
+            &state.session.usage_by_model,
+            prices,
+        ));
+    }
 
     lines.join("\n")
 }

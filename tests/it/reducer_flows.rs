@@ -903,6 +903,8 @@ fn configured_mcp_servers_seed_state_and_ready_updates() {
                 input_schema: serde_json::json!({"type": "object"}),
                 read_only_hint: false,
             }],
+            resources: false,
+            prompts: vec![],
         },
     );
     let entry = &state.mcp.servers["context7"];
