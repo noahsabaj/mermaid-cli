@@ -497,6 +497,15 @@ impl ToolExecutor for SubagentTool {
         }
     }
 
+    async fn execute(&self, args: Value, ctx: ExecContext) -> ToolOutcome {
+        self.run(args, ctx, None).await
+    }
+}
+
+impl SubagentTool {
+    /// The `agent` tool's body. `fork` is set only for a `/btw` fork: the
+    /// user started it, so the spawn gate is skipped (the child's own tool
+    /// calls stay gated), and the fresh child inherits that conversation.
     #[expect(
         clippy::too_many_lines,
         reason = "a child session's whole lifecycle: the kill action, argument parsing, the gate \
@@ -505,7 +514,12 @@ impl ToolExecutor for SubagentTool {
          needs a dozen values the setup produced and the detach hands all of them on, so a helper \
          boundary anywhere in the middle would be a struct of everything"
     )]
-    async fn execute(&self, args: Value, ctx: ExecContext) -> ToolOutcome {
+    pub(crate) async fn run(
+        &self,
+        args: Value,
+        ctx: ExecContext,
+        fork: Option<Vec<mermaid_model::models::ChatMessage>>,
+    ) -> ToolOutcome {
         let started = Instant::now();
 
         // Kill action: cancel a backgrounded child (or evict a finished one
@@ -609,14 +623,15 @@ impl ToolExecutor for SubagentTool {
         // child inherits the live safety mode below, so its own tool calls
         // are re-gated at the same strength — a read_only child can fan out
         // exploration but still can't mutate anything.
-        if let Some(blocked) = super::policy_gate::gate_external(
-            &ctx,
-            "agent",
-            mermaid_runtime::ToolCategory::Subagent,
-            format!("subagent: {description}"),
-            &args,
-        )
-        .await
+        if fork.is_none()
+            && let Some(blocked) = super::policy_gate::gate_external(
+                &ctx,
+                "agent",
+                mermaid_runtime::ToolCategory::Subagent,
+                format!("subagent: {description}"),
+                &args,
+            )
+            .await
         {
             return blocked;
         }
@@ -753,6 +768,13 @@ impl ToolExecutor for SubagentTool {
             child_state.session.model_id = model.to_string();
         }
         let child_model_id = child_state.session.model_id.clone();
+        // A `/btw` fork starts from the parent conversation. Never a
+        // continuation: a fork always mints a fresh child.
+        if let Some(history) = fork {
+            let mut conversation = child_state.session.conversation.clone();
+            conversation.set_messages(history);
+            child_state.session.replace_conversation(conversation);
+        }
 
         // Refresh everything that may have moved since the child was built
         // (or since the parent session started): the injected clock, the
@@ -2259,6 +2281,58 @@ mod tests {
             std::fs::read_to_string(project.join("seed.txt")).is_ok(),
             "the project must survive a failed child"
         );
+    }
+
+    #[tokio::test]
+    async fn a_btw_fork_skips_the_spawn_gate_and_detaches_at_once() {
+        // The default `Auto` mode with no classifier would block a
+        // model-authored spawn. A fork is the user's own request, so it starts.
+        let mut config = mermaid_domain::Config::default();
+        config.ollama.host = "http://127.0.0.1:1".to_string();
+        let providers = Arc::new(ProviderFactory::new(config.clone()));
+        let web = Arc::new(WebCapabilities::resolve(&config.web));
+        let tool = SubagentTool::new(Arc::new(SubagentSpawner::new(providers, web)));
+        let (mut ctx, _rx) = crate::providers::ctx::test_exec_context_with_config(
+            TurnId(1),
+            ToolCallId(1),
+            std::env::temp_dir(),
+            config,
+        );
+        ctx.model_id = "ollama/does-not-exist".to_string();
+        let (notify_tx, mut notify_rx) = mpsc::channel(16);
+        ctx.notify = Some(notify_tx);
+        ctx.background.cancel();
+        let history = vec![mermaid_model::models::ChatMessage::user("earlier work")];
+
+        let outcome = tool
+            .run(
+                serde_json::json!({"prompt": "carry on", "description": "btw: carry on"}),
+                ctx,
+                Some(history),
+            )
+            .await;
+
+        assert!(outcome.is_success(), "{outcome:?}");
+        assert!(outcome.model_content.contains("moved to background"));
+        let started = tokio::time::timeout(Duration::from_secs(5), notify_rx.recv())
+            .await
+            .expect("a start notice")
+            .expect("channel alive");
+        assert!(
+            matches!(&started, Msg::BackgroundAgentStarted { description, .. } if description == "btw: carry on"),
+            "{started:?}"
+        );
+        // Let the child fail against the dead provider, so no task outlives
+        // the test.
+        loop {
+            let msg = tokio::time::timeout(Duration::from_secs(30), notify_rx.recv())
+                .await
+                .expect("the child finishes")
+                .expect("channel alive");
+            if matches!(msg, Msg::BackgroundAgentFinished { .. }) {
+                break;
+            }
+        }
     }
 
     #[tokio::test]

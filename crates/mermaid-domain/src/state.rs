@@ -98,6 +98,10 @@ pub struct State {
     /// emits `Cmd::ResolveQuestion`, unblocking the parked tool task. Empty in
     /// headless mode (no broker → the tool proceeds without asking).
     pub pending_question: VecDeque<PendingQuestionSet>,
+    /// `/btw` side questions and the pane that shows them. Outside the
+    /// conversation by design: nothing here is persisted or sent on a main
+    /// turn (see `side_question`).
+    pub side_questions: crate::side_question::SideQuestions,
     /// Runtime-only observability state: process registry, provider
     /// capability snapshot, and lifecycle timeline. Not sent to the
     /// model.
@@ -213,6 +217,7 @@ impl State {
             confirm: None,
             pending_approval: VecDeque::new(),
             pending_question: VecDeque::new(),
+            side_questions: crate::side_question::SideQuestions::default(),
             runtime,
             should_exit: false,
             output_schema: None,
@@ -1420,6 +1425,8 @@ pub enum Focus {
     QuestionModal,
     /// A yes/no confirmation (`/clear`).
     ConfirmModal,
+    /// The `/btw` side-question pane.
+    SideQuestion,
     /// One of the `UiMode` pickers (model / conversations / rewind).
     Picker,
     /// The plain composer.
@@ -1439,6 +1446,8 @@ impl State {
             Focus::QuestionModal
         } else if self.confirm.is_some() {
             Focus::ConfirmModal
+        } else if self.side_questions.view.is_some() {
+            Focus::SideQuestion
         } else if matches!(
             self.ui.mode,
             UiMode::ModelPicker { .. }

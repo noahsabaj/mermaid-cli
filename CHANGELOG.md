@@ -9,23 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **OpenAI models keep their reasoning between tool calls.** `openai/<model>`
-  now goes to OpenAI's Responses API instead of Chat Completions. On Chat
-  Completions a reasoning model's reasoning was thrown away at every tool
-  call, so it started again from zero at each step; now its encrypted
-  reasoning comes back with each request (`store: false`: nothing is kept on
-  OpenAI's side), and the reasoning summary shows in the reasoning panel. On
-  the same endpoint the model gets OpenAI's own `apply_patch` tool, which GPT-5
-  models are trained on, in place of Mermaid's schema for `apply_patch`; each
-  call is rewritten onto Mermaid's `apply_patch` before it runs, so every
-  safety gate applies, and `[tools] provider_native = false` turns it off.
-  Automatic compaction is done by OpenAI's server-side compaction, like on
-  Anthropic (`[compaction] provider_native`). A model that refuses any of
-  these (reasoning on `gpt-4.1`, `apply_patch` on an older model) is remembered
-  and gets a request without it. Other OpenAI-compatible providers, and custom
-  `[providers.<name>]` entries, keep Chat Completions; a proxy that serves only
-  Chat Completions can be set up as a custom provider. Meta's adapter shares
-  the new Responses code.
+- **`/btw` asks a side question without touching the conversation.** Type
+  `/btw what was that config file called?` at any time, also while the agent
+  works. The model answers from the session so far in a pane under the
+  composer, as a separate call that does not interrupt the running turn. The
+  question and answer are never saved, compacted, or sent with later turns;
+  later side questions see the newest 20 earlier ones. The side call has no
+  tools. Esc closes the pane, Up/Down scrolls, Left/Right steps through
+  earlier answers, `c` copies the answer, `x` clears the earlier ones, and a
+  bare `/btw` reopens the newest answer. `f` forks the answer into a
+  background agent that carries on from it with full tools; `/agents` lists
+  it and its report is posted to the conversation.
+
 - **`/goal` keeps Mermaid working until a condition is met.** `/goal all tests
   pass and clippy is clean` starts a turn with the condition as the request.
   Each time the run would end, a separate model call with no tools reads the
@@ -39,6 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `[goal] model` names another. `--resume` keeps the goal, and
   `mermaid run "/goal ..."` runs the loop headless, with a `goal:` error when
   it ends unmet. Claude Code, Codex and Cursor have the same command.
+
 - **Mermaid speaks MCP 2026-07-28, the newest protocol revision.** Each
   server gets a `server/discover` request first. A 2026-07-28 server then
   gets stateless requests with the version, client info and capabilities in
@@ -51,6 +47,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `initialize` handshake, and a stdio server that exits on the probe is
   started again for it. `x-mcp-header` is removed from the schemas the
   model sees.
+
 - **Mermaid reads Claude Code's files.** A user who moved from Claude Code
   used to lose their instructions, skills, commands and agents, because
   Mermaid read only `AGENTS.md`, `MERMAID.md` and `.mermaid/skills/`. Now
@@ -128,16 +125,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Windows and macOS use xcap and enigo; Linux speaks X11 directly, so no C
   library is linked. Wayland is not supported yet. Off by default because
   every screenshot sends the screen to the model's provider.
+- **OpenAI models keep their reasoning between tool calls.** `openai/<model>`
+  now goes to OpenAI's Responses API instead of Chat Completions. On Chat
+  Completions a reasoning model's reasoning was thrown away at every tool
+  call, so it started again from zero at each step; now its encrypted
+  reasoning comes back with each request (`store: false`: nothing is kept on
+  OpenAI's side), and the reasoning summary shows in the reasoning panel. On
+  the same endpoint the model gets OpenAI's own `apply_patch` tool, which GPT-5
+  models are trained on, in place of Mermaid's schema for `apply_patch`; each
+  call is rewritten onto Mermaid's `apply_patch` before it runs, so every
+  safety gate applies, and `[tools] provider_native = false` turns it off.
+  Automatic compaction is done by OpenAI's server-side compaction, like on
+  Anthropic (`[compaction] provider_native`). A model that refuses any of
+  these (reasoning on `gpt-4.1`, `apply_patch` on an older model) is remembered
+  and gets a request without it. Other OpenAI-compatible providers, and custom
+  `[providers.<name>]` entries, keep Chat Completions; a proxy that serves only
+  Chat Completions can be set up as a custom provider. Meta's adapter shares
+  the new Responses code.
 
 ### Fixed
 
-- **Automatic compaction works on GPT-6 and GPT-5.6.** GPT-6 models
-  (`gpt-6-astra`, `gpt-6.1-sol`, ...) had no entry in the model catalog, and
-  OpenAI's models endpoint gives no limits, so their context window was
-  unknown and automatic compaction never ran. They now have the documented
-  1.05M window. GPT-5.6 was listed at 1.5M; OpenAI documents 1.05M, so its
-  85% trigger sat above the real window and compaction could never run before
-  the request failed. It is now 1.05M.
 - **Images a tool returns reach the model.** An MCP tool's screenshot was
   drawn in the chat and never sent: tool results carried text only. Each
   result now carries its images: inside the `tool_result` for Anthropic, and
@@ -146,6 +153,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tool call <id>:`. Only the newest three images in a conversation go out, as
   before. Every adapter also sends an image's real media type (JPEG, GIF and
   WebP were all labelled PNG).
+
 - **A background command that exits at once is reported as exited on Linux.**
   The liveness check used `kill -0`, which succeeds on a process that has
   exited but has not been reaped yet. In a container whose pid 1 reaps late,
@@ -184,6 +192,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   takes the palette the session is about to open with, resolved by the TUI's
   own rule (`NO_COLOR` beats the theme choice). Under the default dark theme
   it looks exactly as before.
+- **Automatic compaction works on GPT-6 and GPT-5.6.** GPT-6 models
+  (`gpt-6-astra`, `gpt-6.1-sol`, ...) had no entry in the model catalog, and
+  OpenAI's models endpoint gives no limits, so their context window was
+  unknown and automatic compaction never ran. They now have the documented
+  1.05M window. GPT-5.6 was listed at 1.5M; OpenAI documents 1.05M, so its
+  85% trigger sat above the real window and compaction could never run before
+  the request failed. It is now 1.05M.
 
 ### Removed
 

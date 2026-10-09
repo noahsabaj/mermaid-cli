@@ -725,6 +725,7 @@ mod tests {
                 | MsgKind::QueryResult
                 | MsgKind::ScratchpadReady
                 | MsgKind::RuntimeStore
+                | MsgKind::SideQuestion
                 | MsgKind::ModelPullFinished
                 | MsgKind::ModelPullProgress
                 | MsgKind::Tick
@@ -786,6 +787,8 @@ mod tests {
                 texts: vec!["hook says hi".to_string()],
             },
             Msg::Slash(SlashCmd::Compact(None)),
+            Msg::Slash(SlashCmd::Btw(Some("which file?".to_string()))),
+            Msg::Slash(SlashCmd::Btw(None)),
             Msg::CancelTurn,
             Msg::BackgroundAgentStarted {
                 agent_id: "a7".to_string(),
@@ -1005,6 +1008,18 @@ mod tests {
                 path: std::path::PathBuf::from("/data/tmp/scratchpad/-proj/20260702_120000_123"),
             },
             Msg::RuntimeText("daemon says hi".to_string()),
+            Msg::SideQuestionText {
+                id: 1,
+                chunk: "src/parser.rs".to_string(),
+            },
+            Msg::SideQuestionFinished {
+                id: 1,
+                outcome: mermaid_domain::side_question::SideOutcome::Done { tried_tools: true },
+            },
+            Msg::SideQuestionFinished {
+                id: 2,
+                outcome: mermaid_domain::side_question::SideOutcome::Failed("offline".to_string()),
+            },
             Msg::QueryResult(QueryResult::RuntimeTasksListed(Vec::new())),
             Msg::QueryResult(QueryResult::RuntimeTaskLoaded {
                 task: None,
