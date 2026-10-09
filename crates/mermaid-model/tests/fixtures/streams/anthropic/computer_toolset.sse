@@ -1,0 +1,17 @@
+data: {"type":"message_start","message":{"id":"msg_08","usage":{"input_tokens":40}}}
+
+data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_click","name":"left_click","toolset_name":"computer"}}
+
+data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"coordinate\":[512,384]}"}}
+
+data: {"type":"content_block_stop","index":0}
+
+data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_shot","name":"screenshot","toolset_name":"computer"}}
+
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{}"}}
+
+data: {"type":"content_block_stop","index":1}
+
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":20}}
+
+data: {"type":"message_stop"}

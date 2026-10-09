@@ -530,6 +530,7 @@ fn native_tools_for(config: &Config) -> mermaid_model::models::NativeTools {
         text_editor: on,
         shell: on
             && mermaid_runtime::HostShell::current() != mermaid_runtime::HostShell::PowerShell,
+        computer: on,
     }
 }
 

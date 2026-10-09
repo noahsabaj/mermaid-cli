@@ -143,6 +143,10 @@ checkpoint_on_mutation = true
 # still run through Mermaid's file and shell tools, so every safety gate
 # applies. false always sends Mermaid's.
 # provider_native = true
+# Give the model the `computer` tool: screenshots, mouse and keyboard on your
+# real screen. Off by default: every screenshot goes to the model's provider.
+# Mouse and keyboard actions are gated like other external access.
+# computer = false
 
 [ui]
 # TUI color theme: "dark" (default) or "light". Switch live with
