@@ -1746,6 +1746,94 @@ fn doctor_reports_the_scratchpad_path() {
 }
 
 #[test]
+fn slash_add_dir_lists_resolves_and_appends() {
+    // Bare: a listing, no effect.
+    let state = fresh_state();
+    let (state, cmds) = update(state, Msg::Slash(SlashCmd::AddDir(None)));
+    assert!(!cmds.iter().any(|c| matches!(c, Cmd::Query(_))));
+    let msg = &state.session.messages().last().expect("listing").content;
+    assert!(msg.contains("No added working directories"), "{msg}");
+
+    // With a path: canonicalizing is I/O, so the reducer only asks.
+    let (state, cmds) = update(
+        state,
+        Msg::Slash(SlashCmd::AddDir(Some("../lib".to_string()))),
+    );
+    assert!(
+        cmds.iter().any(|c| matches!(
+            c,
+            Cmd::Query(Query::ResolveAddedDir { raw }) if raw == "../lib"
+        )),
+        "{cmds:?}"
+    );
+    assert!(
+        state.additional_dirs.is_empty(),
+        "nothing added before the answer"
+    );
+
+    // The answer appends the canonical dir, once.
+    let resolved = || {
+        Msg::QueryResult(QueryResult::AddedDirResolved {
+            raw: "../lib".to_string(),
+            resolved: Ok(PathBuf::from("/tmp/lib")),
+        })
+    };
+    let (state, _) = update(state, resolved());
+    assert_eq!(state.additional_dirs, vec![PathBuf::from("/tmp/lib")]);
+    let (state, _) = update(state, resolved());
+    assert_eq!(state.additional_dirs.len(), 1, "a repeat is not appended");
+    let msg = &state.session.messages().last().expect("note").content;
+    assert!(msg.contains("already an added working directory"), "{msg}");
+
+    // A dir under the project root adds nothing; a failure reports why.
+    let (state, _) = update(
+        state,
+        Msg::QueryResult(QueryResult::AddedDirResolved {
+            raw: "src".to_string(),
+            resolved: Ok(PathBuf::from("/tmp/project/src")),
+        }),
+    );
+    assert_eq!(state.additional_dirs.len(), 1);
+    let (state, _) = update(
+        state,
+        Msg::QueryResult(QueryResult::AddedDirResolved {
+            raw: "nope".to_string(),
+            resolved: Err("cannot add directory 'nope': not found".to_string()),
+        }),
+    );
+    assert_eq!(state.additional_dirs.len(), 1);
+    let msg = &state.session.messages().last().expect("error").content;
+    assert!(msg.contains("cannot add directory 'nope'"), "{msg}");
+
+    // Bare again: now it lists the root, and so does /doctor.
+    let (state, _) = update(state, Msg::Slash(SlashCmd::AddDir(None)));
+    let msg = &state.session.messages().last().expect("listing").content;
+    assert!(msg.contains("Added working directories: /tmp/lib"), "{msg}");
+    let (state, _) = update(state, Msg::Slash(SlashCmd::Doctor));
+    let report = &state.session.messages().last().expect("report").content;
+    assert!(
+        report.contains("Additional working directories: /tmp/lib"),
+        "{report}"
+    );
+}
+
+#[test]
+fn added_dirs_seed_from_config_and_survive_clear() {
+    let mut config = Config::default();
+    config.workspace.additional_dirs = vec![PathBuf::from("/srv/shared")];
+    let state = State::new(
+        config,
+        PathBuf::from("/tmp/project"),
+        "ollama/test".to_string(),
+        chrono::Local::now(),
+        PathBuf::from("/tmp"),
+    );
+    assert_eq!(state.additional_dirs, vec![PathBuf::from("/srv/shared")]);
+    let (state, _) = update(state, Msg::Slash(SlashCmd::Clear));
+    assert_eq!(state.additional_dirs, vec![PathBuf::from("/srv/shared")]);
+}
+
+#[test]
 fn load_conversation_recomputes_the_scratchpad() {
     let mut state = fresh_state();
     state.session.scratchpad = Some(std::path::PathBuf::from("/data/tmp/scratchpad/-proj/old"));
@@ -4257,6 +4345,7 @@ fn fold_token_usage_variants_route_to_the_right_meters() {
         &mut state.runtime,
         &usage,
         UsageFold::OwnRequest,
+        UsageAttribution::Model("ollama/test"),
     );
     assert_eq!(state.session.last_token_usage.unwrap().total_tokens(), 125);
     assert_eq!(state.session.cumulative_token_usage.total_tokens(), 125);
@@ -4271,6 +4360,7 @@ fn fold_token_usage_variants_route_to_the_right_meters() {
         &mut state.runtime,
         &usage,
         UsageFold::Subagent,
+        UsageAttribution::Model("ollama/test"),
     );
     assert!(state.session.last_token_usage.is_none());
     assert_eq!(state.session.cumulative_token_usage.total_tokens(), 250);
@@ -4282,6 +4372,7 @@ fn fold_token_usage_variants_route_to_the_right_meters() {
         &mut state.runtime,
         &usage,
         UsageFold::Compaction { mid_run: false },
+        UsageAttribution::Model("ollama/test"),
     );
     assert_eq!(state.session.last_token_usage.unwrap().total_tokens(), 125);
     assert_eq!(state.session.cumulative_token_usage.total_tokens(), 375);
@@ -4293,9 +4384,15 @@ fn fold_token_usage_variants_route_to_the_right_meters() {
         &mut state.runtime,
         &usage,
         UsageFold::Compaction { mid_run: true },
+        UsageAttribution::Model("ollama/test"),
     );
     assert_eq!(state.session.cumulative_token_usage.total_tokens(), 500);
     assert_eq!(state.runtime.run_tokens.output_tokens, 75);
+    // Every fold also lands under the model it is attributed to.
+    assert_eq!(
+        state.session.usage_by_model["ollama/test"].total_tokens(),
+        500
+    );
 }
 
 #[test]
@@ -6106,19 +6203,29 @@ fn editor_returned_replaces_draft() {
     assert_eq!(state.ui.input_buffer, "kept");
 }
 
-fn plugin_cmd(name: &str, body: &str) -> crate::PluginCommand {
-    crate::PluginCommand {
+fn plugin_cmd(name: &str, body: &str) -> crate::PromptCommand {
+    crate::PromptCommand {
         name: name.to_string(),
         description: "does things".to_string(),
-        body: body.to_string(),
-        origin: "plugin:demo".to_string(),
+        source: crate::PromptSource::Markdown {
+            origin: "plugin:demo".to_string(),
+            body: body.to_string(),
+        },
+    }
+}
+
+/// Plugin-prompt expansion text (the `Text` arm of `invoke`).
+fn expand(cmd: &crate::PromptCommand, args: &str) -> String {
+    match cmd.invoke(args) {
+        crate::PromptInvocation::Text(text) => text,
+        crate::PromptInvocation::Slash(slash) => panic!("plugin prompt expanded to {slash:?}"),
     }
 }
 
 #[test]
 fn plugin_command_expands_into_a_prompt_submit() {
     let mut state = fresh_state();
-    state.plugin_commands = vec![plugin_cmd("deploy", "Deploy to $ARGUMENTS now.")];
+    state.prompt_commands = vec![plugin_cmd("deploy", "Deploy to $ARGUMENTS now.")];
     state.ui.input_buffer = "/deploy prod".to_string();
     let (mut state, _) = update(state, key(KeyCode::Enter));
     // The reducer re-enters pending_msgs itself; the expansion lands as a
@@ -6135,7 +6242,7 @@ fn plugin_command_expands_into_a_prompt_submit() {
     assert!(state.ui.input_buffer.is_empty());
     // No-args + no token: body submits verbatim.
     state.turn = crate::TurnState::Idle;
-    state.plugin_commands = vec![plugin_cmd("ship", "Ship it.")];
+    state.prompt_commands = vec![plugin_cmd("ship", "Ship it.")];
     state.ui.input_buffer = "/ship".to_string();
     let (state, _) = update(state, key(KeyCode::Enter));
     let queued_or_committed = state
@@ -6154,7 +6261,7 @@ fn plugin_command_expands_into_a_prompt_submit() {
 #[test]
 fn a_slash_line_naming_no_command_never_falls_through_to_a_plugin() {
     let mut state = fresh_state();
-    state.plugin_commands = vec![plugin_cmd("deploy", "body")];
+    state.prompt_commands = vec![plugin_cmd("deploy", "body")];
     state.ui.input_buffer = "/nosuch".to_string();
     let (state, _) = update(state, key(KeyCode::Enter));
     let last = state.session.messages().last().unwrap().content.clone();
@@ -6166,7 +6273,7 @@ fn a_slash_line_naming_no_command_never_falls_through_to_a_plugin() {
 fn builtin_wins_over_same_named_plugin_command() {
     // Structural guarantee on top of the loader's shadowing filter.
     let mut state = fresh_state();
-    state.plugin_commands = vec![plugin_cmd("help", "hijacked")];
+    state.prompt_commands = vec![plugin_cmd("help", "hijacked")];
     state.ui.input_buffer = "/help".to_string();
     let (state, _) = update(state, key(KeyCode::Enter));
     let last = state.session.messages().last().unwrap().content.clone();
@@ -6191,7 +6298,7 @@ fn palette_filter_entries_appends_plugins_and_agrees_on_indices() {
     assert_eq!(d[0].name(), "deploy");
     // Tab-completion path: cursor over the plugin row completes it.
     let mut state = fresh_state();
-    state.plugin_commands = plugin;
+    state.prompt_commands = plugin;
     state.ui.input_buffer = "/dep".to_string();
     state.ui.palette_cursor = Some(0);
     let (state, _) = update(state, key(KeyCode::Tab));
@@ -6201,7 +6308,7 @@ fn palette_filter_entries_appends_plugins_and_agrees_on_indices() {
 #[test]
 fn help_lists_plugin_commands() {
     let mut state = fresh_state();
-    state.plugin_commands = vec![plugin_cmd("deploy", "body")];
+    state.prompt_commands = vec![plugin_cmd("deploy", "body")];
     let (state, _) = update(state, Msg::Slash(SlashCmd::Help));
     let last = state.session.messages().last().unwrap().content.clone();
     assert!(last.contains("Prompt commands:"), "{last}");
@@ -6211,30 +6318,234 @@ fn help_lists_plugin_commands() {
     );
 }
 
+/// A ready MCP server `srv` advertising one prompt, `review`, with a
+/// required `file` and an optional `focus` argument.
+fn state_with_mcp_prompt() -> State {
+    let mut state = fresh_state();
+    state.prompt_commands = vec![plugin_cmd("deploy", "body")];
+    let prompt = crate::PromptCommand {
+        name: "mcp__srv__review".to_string(),
+        description: "Review a file".to_string(),
+        source: crate::PromptSource::Mcp(crate::McpPrompt {
+            server: "srv".to_string(),
+            prompt: "Review".to_string(),
+            arguments: vec![
+                crate::McpPromptArg {
+                    name: "file".to_string(),
+                    description: "File to review".to_string(),
+                    required: true,
+                },
+                crate::McpPromptArg {
+                    name: "focus".to_string(),
+                    description: String::new(),
+                    required: false,
+                },
+            ],
+        }),
+    };
+    let (state, _) = update(
+        state,
+        Msg::McpServerReady {
+            name: "srv".to_string(),
+            tools: vec![],
+            resources: false,
+            prompts: vec![prompt],
+        },
+    );
+    state
+}
+
+fn mcp_prompt_queries(cmds: &[Cmd]) -> Vec<&crate::query::McpPromptRequest> {
+    cmds.iter()
+        .filter_map(|cmd| match cmd {
+            Cmd::Query(crate::Query::GetMcpPrompt(request)) => Some(request),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn mcp_prompts_join_the_palette_after_plugins_and_leave_with_their_server() {
+    let state = state_with_mcp_prompt();
+    let names: Vec<&str> = state
+        .prompt_commands
+        .iter()
+        .map(|c| c.name.as_str())
+        .collect();
+    assert_eq!(names, ["deploy", "mcp__srv__review"]);
+    let rows = crate::slash_commands::filter_entries("mcp__", &state.prompt_commands);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].description(), "Review a file (mcp:srv)");
+    // The server going away takes its prompts with it; plugin prompts stay.
+    let (state, _) = update(
+        state,
+        Msg::McpServerErrored {
+            name: "srv".to_string(),
+            reason: "exit 1".to_string(),
+        },
+    );
+    let names: Vec<&str> = state
+        .prompt_commands
+        .iter()
+        .map(|c| c.name.as_str())
+        .collect();
+    assert_eq!(names, ["deploy"]);
+}
+
+#[test]
+fn mcp_prompt_command_fetches_then_submits_the_prompt_text() {
+    let mut state = state_with_mcp_prompt();
+    state.ui.input_buffer = "/mcp__srv__review src/main.rs error handling".to_string();
+    let (state, cmds) = update(state, key(KeyCode::Enter));
+    assert!(state.ui.input_buffer.is_empty());
+    // Positional args map in declaration order; the surplus joins the last.
+    let requests = mcp_prompt_queries(&cmds);
+    assert_eq!(requests.len(), 1, "{cmds:?}");
+    let request = requests[0];
+    assert_eq!(
+        (request.server.as_str(), request.prompt.as_str()),
+        ("srv", "Review")
+    );
+    assert_eq!(request.arguments["file"], "src/main.rs");
+    assert_eq!(request.arguments["focus"], "error handling");
+    // Nothing is sent to the model until the server answers.
+    assert!(
+        !state
+            .session
+            .messages()
+            .iter()
+            .any(|m| m.role == mermaid_model::models::MessageRole::User)
+    );
+
+    let (state, _) = update(
+        state,
+        Msg::QueryResult(crate::QueryResult::McpPromptLoaded(
+            crate::query::McpPromptAnswer {
+                command: "mcp__srv__review".to_string(),
+                attachment_ids: vec![],
+                result: Ok(crate::query::McpPromptText {
+                    text: "Review src/main.rs for error handling.".to_string(),
+                    skipped: 1,
+                }),
+            },
+        )),
+    );
+    let messages = state.session.messages();
+    let last_user = messages
+        .iter()
+        .rev()
+        .find(|m| m.role == mermaid_model::models::MessageRole::User)
+        .map(|m| m.content.as_str());
+    assert_eq!(last_user, Some("Review src/main.rs for error handling."));
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.content == "MCP prompt /mcp__srv__review: skipped 1 non-text part(s)."),
+        "the skipped part is noted"
+    );
+}
+
+#[test]
+fn mcp_prompt_missing_required_argument_prints_usage_and_fetches_nothing() {
+    let mut state = state_with_mcp_prompt();
+    state.ui.input_buffer = "/mcp__srv__review".to_string();
+    let (state, cmds) = update(state, key(KeyCode::Enter));
+    assert!(mcp_prompt_queries(&cmds).is_empty());
+    let last = state.session.messages().last().unwrap().content.clone();
+    assert_eq!(
+        last,
+        "Usage: /mcp__srv__review <file> [focus]\n  file - File to review"
+    );
+}
+
+#[test]
+fn mcp_prompt_failure_reaches_the_transcript_without_submitting() {
+    let state = state_with_mcp_prompt();
+    let (state, _) = update(
+        state,
+        Msg::QueryResult(crate::QueryResult::McpPromptLoaded(
+            crate::query::McpPromptAnswer {
+                command: "mcp__srv__review".to_string(),
+                attachment_ids: vec![],
+                result: Err("unknown prompt".to_string()),
+            },
+        )),
+    );
+    let messages = state.session.messages();
+    assert_eq!(
+        messages.last().unwrap().content,
+        "MCP prompt /mcp__srv__review failed: unknown prompt"
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|m| m.role == mermaid_model::models::MessageRole::User)
+    );
+}
+
+#[test]
+fn mcp_prompt_arguments_honor_quotes_and_ignore_extras_without_declarations() {
+    let prompt = crate::McpPrompt {
+        server: "s".to_string(),
+        prompt: "p".to_string(),
+        arguments: vec![
+            crate::McpPromptArg {
+                name: "a".to_string(),
+                description: String::new(),
+                required: true,
+            },
+            crate::McpPromptArg {
+                name: "b".to_string(),
+                description: String::new(),
+                required: true,
+            },
+        ],
+    };
+    let SlashCmd::McpPrompt { arguments, .. } = prompt.invocation("cmd", r#""two words" last"#)
+    else {
+        panic!("expected a fetch");
+    };
+    assert_eq!(arguments["a"], "two words");
+    assert_eq!(arguments["b"], "last");
+    // One required argument short: usage, not a fetch.
+    assert!(matches!(
+        prompt.invocation("cmd", "only"),
+        SlashCmd::MissingArg(_)
+    ));
+    let bare = crate::McpPrompt {
+        arguments: vec![],
+        ..prompt
+    };
+    let SlashCmd::McpPrompt { arguments, .. } = bare.invocation("cmd", "stray words") else {
+        panic!("expected a fetch");
+    };
+    assert!(arguments.is_empty());
+}
+
 #[test]
 fn plugin_command_expand_cases() {
     let cmd = plugin_cmd("x", "Do $ARGUMENTS and $ARGUMENTS.");
-    assert_eq!(cmd.expand("this"), "Do this and this.");
-    assert_eq!(cmd.expand("  "), "Do  and .");
+    assert_eq!(expand(&cmd, "this"), "Do this and this.");
+    assert_eq!(expand(&cmd, "  "), "Do  and .");
     let cmd = plugin_cmd("x", "Just do it.");
-    assert_eq!(cmd.expand(""), "Just do it.");
-    assert_eq!(cmd.expand("with args"), "Just do it.\n\nwith args");
+    assert_eq!(expand(&cmd, ""), "Just do it.");
+    assert_eq!(expand(&cmd, "with args"), "Just do it.\n\nwith args");
 }
 
 #[test]
 fn prompt_command_expands_positional_arguments() {
     let cmd = plugin_cmd("x", "Fix issue #$1 with priority $2. All: $ARGUMENTS");
     assert_eq!(
-        cmd.expand("123 high"),
+        expand(&cmd, "123 high"),
         "Fix issue #123 with priority high. All: 123 high"
     );
     // A missing positional argument expands to nothing, and the args are not
     // appended a second time.
     let cmd = plugin_cmd("x", "Review $1$3 now.");
-    assert_eq!(cmd.expand("pr-7"), "Review pr-7 now.");
+    assert_eq!(expand(&cmd, "pr-7"), "Review pr-7 now.");
     // `$` not followed by a positive number stays as written.
     let cmd = plugin_cmd("x", "Keep $HOME and $0 and $");
-    assert_eq!(cmd.expand("a"), "Keep $HOME and $0 and $\n\na");
+    assert_eq!(expand(&cmd, "a"), "Keep $HOME and $0 and $\n\na");
 }
 
 #[test]
@@ -6543,6 +6854,7 @@ fn mcp_server_ready_updates_entry_status() {
             },
             status: McpServerStatus::Starting,
             tools: vec![],
+            resources: false,
         },
     );
     let (state, _) = update(
@@ -6550,6 +6862,8 @@ fn mcp_server_ready_updates_entry_status() {
         Msg::McpServerReady {
             name: "s1".to_string(),
             tools: vec![],
+            resources: false,
+            prompts: vec![],
         },
     );
     assert_eq!(state.mcp.servers["s1"].status, McpServerStatus::Ready);
@@ -6584,6 +6898,7 @@ fn build_chat_request_orders_mcp_tools_by_server_name() {
                     input_schema: serde_json::json!({}),
                     read_only_hint: false,
                 }],
+                resources: false,
             },
         );
     }
@@ -6626,6 +6941,7 @@ fn tool_search_call_is_intercepted_and_promotes_for_the_follow_up() {
                 input_schema: serde_json::json!({"type": "object"}),
                 read_only_hint: false,
             }],
+            resources: false,
         },
     );
     state.turn = TurnState::Generating {
@@ -6896,6 +7212,8 @@ fn execute_tool_cmd_carries_the_session_anchor() {
     let expected_session = state.session.conversation.id.clone();
     let expected_scratchpad = std::path::PathBuf::from("/data/tmp/scratchpad/-proj/s");
     state.session.scratchpad = Some(expected_scratchpad.clone());
+    let expected_added = vec![std::path::PathBuf::from("/srv/shared")];
+    state.additional_dirs = expected_added.clone();
     state.turn = TurnState::Generating {
         id: TurnId(9),
         started: std::time::SystemTime::now(),
@@ -6922,18 +7240,23 @@ fn execute_tool_cmd_carries_the_session_anchor() {
             stop_reason: None,
         },
     );
-    let (session_id, message_index, scratchpad) = cmds
+    let (session_id, message_index, scratchpad, added) = cmds
         .iter()
         .find_map(|c| match c {
             Cmd::ExecuteTool { dispatch, .. } => Some((
                 dispatch.session_id.clone(),
                 dispatch.message_index,
                 dispatch.scratchpad.clone(),
+                dispatch.additional_dirs.clone(),
             )),
             _ => None,
         })
         .expect("ExecuteTool dispatched");
     assert_eq!(session_id, expected_session);
+    assert_eq!(
+        added, expected_added,
+        "the added working roots ride on the dispatch"
+    );
     assert_eq!(
         scratchpad.as_deref(),
         Some(expected_scratchpad.as_path()),
@@ -7230,6 +7553,21 @@ fn system_prompt_names_the_scratchpad_path_once_ready() {
     );
 }
 
+#[test]
+fn system_prompt_states_the_added_working_roots() {
+    let mut state = fresh_state();
+    assert!(
+        !system_prompt_for_state(&state).contains("Additional working directories"),
+        "no line without added roots"
+    );
+    state.additional_dirs = vec![PathBuf::from("/srv/a"), PathBuf::from("/srv/b")];
+    let prompt = system_prompt_for_state(&state);
+    assert!(
+        prompt.contains("Additional working directories: /srv/a, /srv/b"),
+        "{prompt}"
+    );
+}
+
 /// A rewind used to blank the context gauge — 250k/1M became `context:
 /// n/a`, which reads as "the meter broke" rather than "there is less
 /// context now". The fork's context is the most precisely known thing
@@ -7357,6 +7695,7 @@ fn mcp_server_errored_sets_status_and_emits_status_line() {
             },
             status: McpServerStatus::Starting,
             tools: vec![],
+            resources: false,
         },
     );
     let (state, _) = update(
@@ -8307,6 +8646,7 @@ fn background_agent_lifecycle_registry_note_queue_and_usage() {
             success: true,
             cancelled: false,
             usage: Some(mermaid_model::models::TokenUsage::provider(70_000, 20_000)),
+            usage_by_model: std::collections::BTreeMap::new(),
             tokens: 90_000,
             duration_secs: 61,
         },
@@ -8343,6 +8683,7 @@ fn background_agent_report_waits_in_queue_while_a_turn_runs() {
             success: true,
             cancelled: false,
             usage: None,
+            usage_by_model: std::collections::BTreeMap::new(),
             tokens: 1_000,
             duration_secs: 5,
         },
@@ -8445,6 +8786,7 @@ fn cancelled_background_agent_notes_but_never_queues_a_report() {
             success: false,
             cancelled: true,
             usage: Some(mermaid_model::models::TokenUsage::provider(10_000, 5_000)),
+            usage_by_model: std::collections::BTreeMap::new(),
             tokens: 15_000,
             duration_secs: 42,
         },
@@ -8722,7 +9064,7 @@ fn typing_an_absolute_path_never_opens_the_slash_palette() {
     );
     assert!(!crate::input_kind::palette_is_open(
         &state.ui.input_buffer,
-        &state.plugin_commands
+        &state.prompt_commands
     ));
 }
 
@@ -8794,6 +9136,154 @@ fn a_double_slash_is_prose_not_a_command() {
 }
 
 #[test]
+fn usage_is_attributed_to_the_model_that_made_each_call() {
+    let mut state = fresh_state();
+    state.turn = TurnState::Generating {
+        id: TurnId(5),
+        started: std::time::SystemTime::now(),
+        partial_text: "done".to_string(),
+        partial_reasoning: String::new(),
+        tokens: 0,
+        phase: GenPhase::Streaming,
+        provider_continuation: None,
+        pending_tool_calls: Vec::new(),
+        continuation: false,
+    };
+    let (state, _) = update(
+        state,
+        Msg::StreamDone {
+            turn: TurnId(5),
+            usage: Some(TokenUsage::provider(120, 30)),
+            provider_continuation: None,
+            stop_reason: None,
+        },
+    );
+    assert_eq!(
+        state.session.usage_by_model["ollama/test"].total_tokens(),
+        150
+    );
+
+    // A subagent's split lands under each model it names, and the split
+    // rides the saved conversation so a resumed session keeps it.
+    let (state, call_id) = state_executing_agent_call();
+    let split = std::collections::BTreeMap::from([
+        ("anthropic/child".to_string(), TokenUsage::provider(100, 10)),
+        ("groq/grandchild".to_string(), TokenUsage::provider(5, 5)),
+    ]);
+    let metadata = crate::ToolRunMetadata {
+        detail: crate::ToolMetadata::Subagent {
+            model_id: "anthropic/child".to_string(),
+            agent_id: "a1".to_string(),
+        },
+        token_usage: Some(TokenUsage::provider(105, 15)),
+        usage_by_model: split,
+        ..Default::default()
+    };
+    let (state, _) = update(
+        state,
+        Msg::ToolFinished {
+            turn: TurnId(3),
+            call_id,
+            outcome: ToolOutcome::success("report", "subagent completed", 1.0)
+                .with_metadata(metadata),
+        },
+    );
+    assert_eq!(
+        state.session.usage_by_model["anthropic/child"].total_tokens(),
+        110
+    );
+    assert_eq!(
+        state.session.usage_by_model["groq/grandchild"].total_tokens(),
+        10
+    );
+    let saved = state.session.snapshot_conversation();
+    assert_eq!(saved.usage_by_model, state.session.usage_by_model);
+}
+
+fn state_with_usage() -> State {
+    let mut state = fresh_state();
+    state.session.usage_by_model.insert(
+        "anthropic/x".to_string(),
+        TokenUsageTotals {
+            prompt_tokens: 1_000_000,
+            ..TokenUsageTotals::default()
+        },
+    );
+    state
+}
+
+#[test]
+fn usage_asks_for_prices_only_when_there_is_spend() {
+    let (state, cmds) = update(fresh_state(), Msg::Slash(SlashCmd::Usage));
+    assert!(
+        cmds.iter()
+            .all(|c| !matches!(c, Cmd::ResolveModelPrices { .. }))
+    );
+    assert!(
+        state
+            .session
+            .messages()
+            .last()
+            .is_some_and(|m| m.content.starts_with("Usage") && !m.content.contains("Cost")),
+    );
+
+    let mut state = state_with_usage();
+    state.settings.safety.network = crate::config::NetworkPolicy::Deny;
+    let (state, cmds) = update(state, Msg::Slash(SlashCmd::Usage));
+    let asked = cmds.iter().find_map(|c| match c {
+        Cmd::ResolveModelPrices {
+            models,
+            fetch_catalog,
+            ..
+        } => Some((models.clone(), *fetch_catalog)),
+        _ => None,
+    });
+    assert_eq!(asked, Some((vec!["anthropic/x".to_string()], false)));
+
+    let prices = crate::cost::ModelPrices::from([(
+        "anthropic/x".to_string(),
+        crate::cost::PriceLookup::Priced {
+            price: crate::cost::ModelPrice {
+                input: 3.0,
+                output: 15.0,
+                cache_read: None,
+                cache_write: None,
+            },
+            source: crate::cost::PriceSource::Config,
+        },
+    )]);
+    let (state, _) = update(state, Msg::ModelPricesResolved(prices));
+    let report = &state.session.messages().last().expect("report").content;
+    assert!(report.contains("anthropic/x: $3.00 (config)"), "{report}");
+    assert!(report.contains("Total: $3.00"), "{report}");
+}
+
+#[test]
+fn init_sends_the_agents_md_prompt_with_any_focus() {
+    let (state, _) = update(
+        fresh_state(),
+        Msg::Slash(SlashCmd::Init(Some("mention the eval suite".to_string()))),
+    );
+    let sent = state
+        .session
+        .messages()
+        .iter()
+        .rev()
+        .find(|m| m.role == MessageRole::User)
+        .expect("a user prompt was sent");
+    assert!(
+        sent.content.starts_with("Write AGENTS.md"),
+        "{}",
+        sent.content
+    );
+    assert!(
+        sent.content.ends_with("mention the eval suite"),
+        "{}",
+        sent.content
+    );
+}
+
+#[test]
 fn autocompact_sends_the_change_and_applies_what_comes_back() {
     use crate::autocompact::{AutoCompactChange, AutoCompactSetting, ConfigFile};
     let (state, cmds) = update(
@@ -8850,6 +9340,62 @@ fn autocompact_sends_the_change_and_applies_what_comes_back() {
         build_chat_request(&state).compaction.auto_threshold_tokens,
         Some(250_000),
         "the next request uses the new threshold"
+    );
+}
+
+#[test]
+fn ctrl_r_searches_prompts_and_fills_the_composer() {
+    let ctrl_r = Msg::Key(Key {
+        code: KeyCode::Char('r'),
+        modifiers: KeyMods {
+            ctrl: true,
+            ..KeyMods::NONE
+        },
+    });
+    let mut state = fresh_state();
+    for prompt in ["fix the parser", "add tests", "fix the parser"] {
+        state
+            .session
+            .conversation
+            .add_to_input_history(prompt.to_string());
+    }
+    state
+        .session
+        .conversation
+        .add_to_input_history("add tests".to_string());
+    let (state, cmds) = update(state, ctrl_r.clone());
+    assert!(
+        cmds.iter()
+            .any(|c| matches!(c, Cmd::Query(Query::ListRecentPrompts { .. })))
+    );
+    let UiMode::PromptSearch { candidates, .. } = &state.ui.mode else {
+        panic!("search should be open");
+    };
+    // Newest first, each prompt once.
+    assert_eq!(
+        candidates,
+        &vec!["add tests".to_string(), "fix the parser".to_string()]
+    );
+
+    // Saved sessions' prompts append behind, without repeats.
+    let (state, _) = update(
+        state,
+        Msg::QueryResult(QueryResult::RecentPromptsListed(vec![
+            "fix the parser".to_string(),
+            "fix the lexer".to_string(),
+        ])),
+    );
+    // "fix" matches two; Ctrl+R steps to the older one; Enter uses it.
+    let (state, _) = update(state, key(KeyCode::Char('f')));
+    let (state, _) = update(state, key(KeyCode::Char('i')));
+    let (state, _) = update(state, ctrl_r);
+    let (state, _) = update(state, key(KeyCode::Enter));
+    assert!(matches!(state.ui.mode, UiMode::EditingInput));
+    assert_eq!(state.ui.input_buffer, "fix the lexer");
+    assert_eq!(state.ui.input_cursor, "fix the lexer".len());
+    assert!(
+        state.session.messages().is_empty(),
+        "choosing a prompt must not send it"
     );
 }
 

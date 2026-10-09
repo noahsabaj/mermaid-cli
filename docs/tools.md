@@ -9,7 +9,8 @@ Always registered: `read_file`, `write_file`, `edit_file`, `apply_patch`, `delet
 `task_update`, `task_list`), `ask_user_question`, and the context pair (`context_archive`,
 `compact_context`, below).
 `web_search` and `web_fetch` register when their backend is viable (below); MCP tools when a
-server is configured.
+server is configured, and `list_mcp_resources`/`read_mcp_resource` while a server serving
+resources is ready.
 
 Editing: `edit_file` is for one location -- `target_content` must match once (or set
 `allow_multiple`), with matching that degrades in steps from exact through trailing-whitespace,
@@ -115,6 +116,19 @@ no client capabilities (no sampling, elicitation or roots), so a tool call that 
 kind of input fails with an error.
 
 By default MCP tools are **deferred**: instead of advertising every server's tools on every request, the model gets one `tool_search` tool that searches deferred tool names/descriptions and promotes matches to direct advertisement for the rest of the session — deferred schemas don't count against `/context` until promoted. Opt out globally with `mcp_defer_tools = false` at the top level of config, or per server with `defer = false` on its `[mcp_servers.<name>]` entry.
+
+### Resources
+
+A server that declares the `resources` capability exposes read-only data (files, records, documents) beside its tools. While at least one such server is ready the model gets two built-in tools, never deferred behind `tool_search`:
+
+- `list_mcp_resources` returns each resource's `server`, `uri`, `name`, `description` and `mimeType` as JSON, for every resources-capable server or only the one named by `server`. A server whose listing fails reports its error in place of its resources.
+- `read_mcp_resource` takes `server` and `uri` and returns the text content. An image is attached the way MCP tool images are; other binary content is summarized by MIME type and size rather than sent as base64.
+
+Output is capped at 100,000 characters, keeping the head and the tail. Both tools pass the same policy gate as MCP tool calls: `read_only` blocks them, `ask` prompts each time (MCP access is never allowlisted), and `auto` classifies. Reading is read-only by protocol, so the external-writes floor that applies to write-shaped MCP tools does not.
+
+### Prompts
+
+A server that declares `prompts` contributes each of its prompts to the `/` palette as `/mcp__<server>__<prompt>` (sanitized like tool names, lowercased), tagged `(mcp:<server>)` like a plugin's prompt commands. Typed words map onto the prompt's declared arguments in order; double quotes group words, and the last argument takes whatever is left. A missing required argument prints a usage line. Otherwise Mermaid fetches the prompt (`prompts/get`) and sends its text as your message, so the transcript shows the text itself; non-text parts are left out with a note. A server's prompts leave the palette when it errors or stops. `/doctor` lists each ready server's tool and prompt counts and whether it serves resources.
 
 ### Remote servers and sign-in
 

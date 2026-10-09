@@ -75,9 +75,10 @@ pub(crate) struct SandboxPlan {
     pub(crate) network: bool,
     pub(crate) fs: bool,
     /// Write allowlist when `fs` applies: the project root (so a build in a
-    /// subdir can still write repo-root artifacts), the effective workdir
-    /// (out-of-project commands, separately gated by policy), the system
-    /// temp dir, and -- unix only -- /dev (`>/dev/null` is a write).
+    /// subdir can still write repo-root artifacts), the added working roots,
+    /// the effective workdir (out-of-project commands, separately gated by
+    /// policy), the system temp dir, and -- unix only -- /dev (`>/dev/null`
+    /// is a write). See [`confine_write_dirs`].
     pub(crate) confine_writes: Option<Vec<PathBuf>>,
     /// `read_only` mode on a platform that can contain it: the command runs
     /// under the fixed read-only sandbox (no writes, sockets, IPC, outward
@@ -85,6 +86,21 @@ pub(crate) struct SandboxPlan {
     /// stay off. The policy gate lets any command through on the strength of
     /// this, via `ActionRequest::read_only_contained`.
     pub(crate) read_only: bool,
+}
+
+/// The `--confine-fs` write allowlist: the project root, every added working
+/// root (they carry the project's trust), the effective workdir, the system
+/// temp dir and, on unix, `/dev`.
+pub(crate) fn confine_write_dirs(ctx: &ExecContext, effective_workdir: &Path) -> Vec<PathBuf> {
+    let mut dirs = vec![ctx.workdir.clone()];
+    dirs.extend(ctx.additional_dirs.iter().cloned());
+    dirs.push(effective_workdir.to_path_buf());
+    dirs.push(std::env::temp_dir());
+    if cfg!(unix) {
+        dirs.push(PathBuf::from("/dev"));
+    }
+    dirs.dedup();
+    dirs
 }
 
 impl SandboxPlan {
@@ -138,18 +154,7 @@ impl SandboxPlan {
                 }
             });
         }
-        let confine_writes = fs.then(|| {
-            let mut dirs = vec![
-                ctx.workdir.clone(),
-                effective_workdir.to_path_buf(),
-                std::env::temp_dir(),
-            ];
-            if cfg!(unix) {
-                dirs.push(PathBuf::from("/dev"));
-            }
-            dirs.dedup();
-            dirs
-        });
+        let confine_writes = fs.then(|| confine_write_dirs(ctx, effective_workdir));
         Self {
             network,
             fs,
@@ -243,10 +248,10 @@ impl ExecuteCommandTool {
         }
 
         // Resolve the effective working directory and decide containment. A
-        // cwd inside the session scratchpad stays a plain Shell request; any
-        // other out-of-project cwd is allowed but escalated to
-        // ExternalDirectory so the gate won't auto-allow even a read-only
-        // command run outside the project — closing the working_dir
+        // cwd inside the session scratchpad or an added working root stays a
+        // plain Shell request; any other out-of-project cwd is allowed but
+        // escalated to ExternalDirectory so the gate won't auto-allow even a
+        // read-only command run outside the project — closing the working_dir
         // containment bypass.
         let (effective_workdir, within_project) = match args
             .get("working_dir")
@@ -264,10 +269,11 @@ impl ExecuteCommandTool {
             within_project,
             &effective_workdir,
             ctx.scratchpad.as_deref(),
+            &ctx.additional_dirs,
         );
 
         let category = match containment {
-            CwdContainment::Project | CwdContainment::Scratchpad => {
+            CwdContainment::Project | CwdContainment::Scratchpad | CwdContainment::AddedDir => {
                 mermaid_runtime::ToolCategory::Shell
             },
             CwdContainment::External => mermaid_runtime::ToolCategory::ExternalDirectory,
@@ -962,6 +968,33 @@ mod tests {
             !args.contains(&"--confine-writes".to_string()),
             "…with no allowed roots: {args:?}"
         );
+    }
+
+    #[test]
+    fn confine_write_dirs_include_every_added_root() {
+        // `--confine-fs` must let shell commands write in an added working
+        // root exactly as in the project root: the same trust, so the same
+        // allowlist entry.
+        let (mut ctx, _rx) = crate::providers::ctx::test_exec_context(
+            TurnId(1),
+            ToolCallId(1),
+            PathBuf::from("/proj"),
+        );
+        ctx.additional_dirs = vec![PathBuf::from("/shared/lib"), PathBuf::from("/docs")];
+        let dirs = confine_write_dirs(&ctx, Path::new("/proj/sub"));
+        for want in ["/proj", "/shared/lib", "/docs", "/proj/sub"] {
+            assert!(
+                dirs.contains(&PathBuf::from(want)),
+                "{want} missing from {dirs:?}"
+            );
+        }
+        assert!(dirs.contains(&std::env::temp_dir()));
+
+        // Without added roots the list is what it always was.
+        ctx.additional_dirs.clear();
+        let dirs = confine_write_dirs(&ctx, Path::new("/proj"));
+        assert!(!dirs.contains(&PathBuf::from("/shared/lib")));
+        assert_eq!(dirs.first(), Some(&PathBuf::from("/proj")));
     }
 
     #[test]
@@ -1876,28 +1909,45 @@ mod tests {
 
         // In-project wins regardless of scratchpad.
         assert_eq!(
-            classify_cwd(true, &project, Some(&scratch)),
+            classify_cwd(true, &project, Some(&scratch), &[]),
             CwdContainment::Project
         );
         // A cwd inside the scratchpad is Scratchpad, not External — no
         // ExternalDirectory escalation for scratch work.
         assert_eq!(
-            classify_cwd(false, &scratch_real, Some(&scratch)),
+            classify_cwd(false, &scratch_real, Some(&scratch), &[]),
             CwdContainment::Scratchpad
         );
         // Without a scratchpad the same cwd stays External.
         assert_eq!(
-            classify_cwd(false, &scratch_real, None),
+            classify_cwd(false, &scratch_real, None, &[]),
             CwdContainment::External
         );
         // Outside both roots is External even with a scratchpad bound.
         assert_eq!(
-            classify_cwd(false, &outside, Some(&scratch)),
+            classify_cwd(false, &outside, Some(&scratch), &[]),
             CwdContainment::External
         );
         // A missing scratch dir can't match — fails closed to External.
         assert_eq!(
-            classify_cwd(false, &scratch_real, Some(&base.join("missing"))),
+            classify_cwd(false, &scratch_real, Some(&base.join("missing")), &[]),
+            CwdContainment::External
+        );
+        // An added working root claims a cwd inside it — no escalation — and
+        // nothing outside it; a missing added root matches nothing.
+        let added = base.join("added");
+        std::fs::create_dir_all(added.join("sub")).unwrap();
+        let added_sub = std::fs::canonicalize(added.join("sub")).unwrap();
+        assert_eq!(
+            classify_cwd(false, &added_sub, None, std::slice::from_ref(&added)),
+            CwdContainment::AddedDir
+        );
+        assert_eq!(
+            classify_cwd(false, &outside, None, std::slice::from_ref(&added)),
+            CwdContainment::External
+        );
+        assert_eq!(
+            classify_cwd(false, &added_sub, None, &[base.join("missing")]),
             CwdContainment::External
         );
 
@@ -1940,6 +1990,44 @@ mod tests {
         assert!(
             outcome.is_success(),
             "scratch cwd must not be escalated to ExternalDirectory: {outcome:?}",
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn added_dir_cwd_is_not_escalated_to_external_directory() {
+        // The same mirror for an added working root (`--add-dir`): a
+        // working_dir inside it keeps the plain Shell category, so the
+        // read-only command that is blocked in a random outside dir runs.
+        let base = std::env::temp_dir().join(format!("mermaid_acwd_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let project = base.join("project");
+        let added = base.join("added");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(added.join("sub")).unwrap();
+
+        let mut config = mermaid_domain::Config::default();
+        config.safety.mode = mermaid_runtime::SafetyMode::ReadOnly;
+        let (mut ctx, _rx) = crate::providers::ctx::test_exec_context_with_config(
+            TurnId(1),
+            ToolCallId(1),
+            project.clone(),
+            config,
+        );
+        ctx.additional_dirs = vec![std::fs::canonicalize(&added).unwrap()];
+        let outcome = ExecuteCommandTool
+            .execute(
+                serde_json::json!({
+                    "command": "echo hi",
+                    "working_dir": added.join("sub").display().to_string(),
+                }),
+                ctx,
+            )
+            .await;
+        assert!(
+            outcome.is_success(),
+            "added-root cwd must not be escalated to ExternalDirectory: {outcome:?}",
         );
 
         let _ = std::fs::remove_dir_all(&base);

@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde_json::Value;
 
-use super::client::McpToolDef;
+use super::client::{McpPromptDef, McpToolDef};
 use mermaid_domain::McpToolSpec;
 
 /// Maximum length of the full advertised tool name (`mcp__srv__tool`).
@@ -154,6 +154,39 @@ pub fn sanitize_server_tools(
         });
     }
     (specs, raw_names)
+}
+
+/// Turn one server's `prompts/list` into slash commands named
+/// `mcp__<server>__<prompt>`: the same segment sanitization and 64-char
+/// budget as tool names, then LOWERCASED, because the palette matches typed
+/// command words case-insensitively against lowercase names. Collisions
+/// (including ones lowercasing creates) are hash-suffixed in `prompts` order.
+#[must_use]
+pub fn sanitize_server_prompts(
+    sanitized_server: &str,
+    raw_server: &str,
+    prompts: &[McpPromptDef],
+) -> Vec<mermaid_domain::PromptCommand> {
+    let prefix = format!("mcp__{}__", sanitized_server.to_lowercase());
+    let budget = MAX_TOOL_NAME_LEN.saturating_sub(prefix.len()).max(1);
+    let mut taken: HashSet<String> = HashSet::new();
+    prompts
+        .iter()
+        .map(|def| {
+            let base = sanitize_segment(&def.name).to_lowercase();
+            let segment = fit_segment(&base, &def.name, budget, &taken).to_lowercase();
+            taken.insert(segment.clone());
+            mermaid_domain::PromptCommand {
+                name: format!("{prefix}{segment}"),
+                description: def.description.clone(),
+                source: mermaid_domain::PromptSource::Mcp(mermaid_domain::McpPrompt {
+                    server: raw_server.to_string(),
+                    prompt: def.name.clone(),
+                    arguments: def.arguments.clone(),
+                }),
+            }
+        })
+        .collect()
 }
 
 /// Depth cap for `$ref` inlining; a deeper (or cyclic) reference degrades
@@ -540,5 +573,36 @@ mod tests {
             "additionalProperties": false
         });
         assert_eq!(sanitize_schema(&schema), schema);
+    }
+
+    #[test]
+    fn prompt_commands_are_lowercase_unique_and_keep_raw_names() {
+        let prompt = |name: &str| McpPromptDef {
+            name: name.to_string(),
+            description: "d".to_string(),
+            arguments: Vec::new(),
+        };
+        let cmds = sanitize_server_prompts(
+            "My_Srv",
+            "My.Srv",
+            &[prompt("Review Code"), prompt("review_code")],
+        );
+        assert_eq!(cmds[0].name, "mcp__my_srv__review_code");
+        // Lowercasing made the second collide; it gets a stable suffix.
+        assert_ne!(cmds[1].name, cmds[0].name);
+        assert!(
+            cmds[1].name.starts_with("mcp__my_srv__review"),
+            "{}",
+            cmds[1].name
+        );
+        assert!(cmds.iter().all(|c| c.name == c.name.to_lowercase()));
+        let mermaid_domain::PromptSource::Mcp(mcp) = &cmds[0].source else {
+            panic!("MCP source expected");
+        };
+        assert_eq!(
+            (mcp.server.as_str(), mcp.prompt.as_str()),
+            ("My.Srv", "Review Code")
+        );
+        assert_eq!(cmds[0].origin(), "mcp:My.Srv");
     }
 }

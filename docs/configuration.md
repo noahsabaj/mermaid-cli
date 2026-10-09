@@ -47,7 +47,8 @@ structural:
   `reasoning_per_model`, `ollama`, `ollama_num_ctx_per_model`, `compaction`,
   `memory`, `output`, `ui`, and a `safety` subset. Anything else —
   including `web` (selects egress routing), `mcp_servers` (spawns commands), `providers`
-  (redirects traffic/credentials), `agents`, and `daemon` — is ignored with a warning.
+  (redirects traffic/credentials), `workspace` (adds working directories), `agents`, and
+  `daemon` — is ignored with a warning.
   `ollama.host`/`port` are also denied inside the otherwise-allowed `ollama` table.
 - `safety.mode`, `safety.network`, and `safety.filesystem` are clamped tighten-only against
   your user config: a project can turn the sandbox on or drop to `read_only`, but can never
@@ -128,6 +129,18 @@ checkpoint_on_mutation = true
 # 120s at high; a timeout or error escalates to you, never allows.
 # auto_classifier_model = "<provider>/<small-fast-model>"
 
+[workspace]
+# Extra working directories with the project directory's trust: the file
+# tools and execute_command work there without the outside-the-project
+# escalation, edits are checkpointed, and --confine-fs lets shell commands
+# write there. `--add-dir <dir>` (repeatable) adds to this list for one run;
+# `/add-dir <path>` adds one mid-session. `~` expands to your home directory
+# and relative paths resolve against the project directory. Every entry is
+# canonicalized at startup, and one that does not exist stops the session
+# with an error. User config, profiles and -c only: a project config cannot
+# set it.
+# additional_dirs = ["~/src/shared-lib"]
+
 [exec]
 # Foreground commands run on a pseudo-terminal by default (openpty on Unix,
 # ConPTY on Windows): the child sees a real console, so spinner/progress
@@ -171,6 +184,19 @@ theme = "dark"
 # (stock prompt), "proactive", "concise", "explanatory", "learning", or a
 # custom output-styles/<name>.md file. See "Output styles" below.
 # style = "concise"
+
+# Prices behind the cost estimate in /usage, in US dollars per million
+# tokens. A model with no entry here is priced from the public catalog at
+# catalog_url (fetched at most once a day, cached in the data dir, never with
+# safety.network = "deny"); local Ollama models cost $0. The project config
+# cannot set this table.
+[pricing]
+# catalog_url = ""   # never fetch the catalog; use only the prices below
+# [pricing.models."openrouter/acme/coder-1"]
+# input = 0.5
+# output = 2.0
+# cache_read = 0.05    # optional; defaults to the input price
+# cache_write = 0.625  # optional; defaults to the input price
 
 # Durable agent memory (the `memory` tool, the always-loaded index, and
 # /remember & friends). On by default.
