@@ -20,12 +20,13 @@ use reqwest::StatusCode;
 use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
 use serde_json::{Value, json};
 use std::sync::RwLock;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::time::{Duration, timeout};
 
 use super::oauth::OAuthSession;
 use super::transport::{
-    REQUEST_TIMEOUT_SECS, extract_jsonrpc_result, is_response, parse_response_id,
+    JsonRpcError, REQUEST_TIMEOUT_SECS, RequestTimeout, extract_jsonrpc_result, is_response,
+    parse_response_id,
 };
 use mermaid_domain::{McpServerConfig, TransportKind};
 use mermaid_model::utils::{CredentialStore, HostClass, classify_host, drain_sse_events};
@@ -57,6 +58,8 @@ const ERROR_BODY_SNIPPET_BYTES: usize = 200;
 const SESSION_HEADER: HeaderName = HeaderName::from_static("mcp-session-id");
 const PROTOCOL_VERSION_HEADER: HeaderName = HeaderName::from_static("mcp-protocol-version");
 const LAST_EVENT_ID_HEADER: HeaderName = HeaderName::from_static("last-event-id");
+/// 2026-07-28: the JSON-RPC method, mirrored for intermediaries.
+const METHOD_HEADER: HeaderName = HeaderName::from_static("mcp-method");
 
 /// Accept values: POSTs must advertise both response shapes; SSE resume GETs
 /// only ever get a stream.
@@ -91,6 +94,9 @@ pub(super) struct HttpTransport {
     /// OAuth bearer tokens from `mermaid mcp login`. `None` when the config
     /// sends its own `Authorization` header.
     oauth: Option<OAuthSession>,
+    /// Speaking the 2026-07-28 protocol: `Mcp-Method` on every request, no
+    /// session, no SSE resumption.
+    modern: AtomicBool,
 }
 
 impl HttpTransport {
@@ -150,6 +156,7 @@ impl HttpTransport {
             protocol_version: RwLock::new(None),
             next_id: AtomicU64::new(1),
             oauth,
+            modern: AtomicBool::new(false),
         })
     }
 
@@ -168,6 +175,19 @@ impl HttpTransport {
         params: Value,
         response_timeout_secs: u64,
     ) -> Result<Value> {
+        self.send_request_with_headers(method, params, response_timeout_secs, &HeaderMap::new())
+            .await
+    }
+
+    /// Like [`Self::send_request_with_timeout`], with extra headers on the
+    /// POST (the 2026-07-28 `Mcp-Name` and `Mcp-Param-*` headers).
+    pub async fn send_request_with_headers(
+        &self,
+        method: &str,
+        params: Value,
+        response_timeout_secs: u64,
+        extra: &HeaderMap,
+    ) -> Result<Value> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let request = json!({
             "jsonrpc": "2.0",
@@ -177,10 +197,13 @@ impl HttpTransport {
         });
         timeout(
             Duration::from_secs(response_timeout_secs),
-            self.request_roundtrip(method, id, &request),
+            self.request_roundtrip(method, id, &request, extra),
         )
         .await
-        .map_err(|_| anyhow!("MCP request timed out after {response_timeout_secs}s: {method}"))?
+        .map_err(|_| RequestTimeout {
+            method: method.to_string(),
+            secs: response_timeout_secs,
+        })?
     }
 
     /// Send a JSON-RPC notification. The server answers a client notification
@@ -194,6 +217,26 @@ impl HttpTransport {
         self.post_message(&notification)
             .await
             .with_context(|| format!("MCP notification failed (method: {method})"))
+    }
+
+    /// Enter (`Some(version)`) or leave (`None`) the 2026-07-28 shape. In it,
+    /// every request carries `MCP-Protocol-Version: <version>` and
+    /// `Mcp-Method`, and no session id is kept.
+    pub fn set_modern(&self, version: Option<&str>) {
+        self.modern.store(version.is_some(), Ordering::Release);
+        *self
+            .protocol_version
+            .write()
+            .expect("mcp protocol_version lock poisoned") =
+            version.and_then(|v| HeaderValue::from_str(v).ok());
+        *self
+            .session_id
+            .write()
+            .expect("mcp session_id lock poisoned") = None;
+    }
+
+    fn is_modern(&self) -> bool {
+        self.modern.load(Ordering::Acquire)
     }
 
     /// Record the protocol version negotiated during `initialize`; sent as the
@@ -252,10 +295,27 @@ impl HttpTransport {
 
     /// One request round-trip: POST, then dispatch on the response
     /// Content-Type (plain JSON object vs SSE stream).
-    async fn request_roundtrip(&self, method: &str, id: u64, request: &Value) -> Result<Value> {
+    async fn request_roundtrip(
+        &self,
+        method: &str,
+        id: u64,
+        request: &Value,
+        extra: &HeaderMap,
+    ) -> Result<Value> {
+        let mut headers = self.request_headers(Some(ACCEPT_POST))?;
+        for (name, value) in extra {
+            headers.insert(name, value.clone());
+        }
+        if self.is_modern() {
+            headers.insert(
+                METHOD_HEADER,
+                HeaderValue::from_str(method)
+                    .map_err(|_| anyhow!("MCP method '{method}' is not a valid header value"))?,
+            );
+        }
         let response = self
             .send_authed(
-                self.request_headers(Some(ACCEPT_POST))?,
+                headers,
                 |h| self.client.post(self.url.clone()).headers(h).json(request),
                 || format!("MCP HTTP request failed (method: {method})"),
             )
@@ -318,7 +378,8 @@ impl HttpTransport {
             }
             // Stream ended without our response. Without event IDs there is
             // nothing to resume from — the server just dropped the request.
-            let Some(last_id) = meta.last_event_id.clone() else {
+            // 2026-07-28 has no resumption at all: the request is lost.
+            let Some(last_id) = meta.last_event_id.clone().filter(|_| !self.is_modern()) else {
                 bail!("MCP SSE stream ended without a response (method: {method})");
             };
             reconnects += 1;
@@ -554,6 +615,10 @@ impl HttpTransport {
     /// source is the `InitializeResult` response; accepting it from any response
     /// is a safe superset). Lookup is case-insensitive by `HeaderMap` contract.
     fn capture_session(&self, headers: &HeaderMap) {
+        // 2026-07-28 has no sessions: a stray header is ignored.
+        if self.is_modern() {
+            return;
+        }
         if let Some(v) = headers.get(&SESSION_HEADER) {
             *self
                 .session_id
@@ -588,14 +653,41 @@ impl HttpTransport {
         let body = response.text().await.unwrap_or_default();
         let snippet = mermaid_model::utils::redact_secrets(&body);
         let end = snippet.floor_char_boundary(ERROR_BODY_SNIPPET_BYTES.min(snippet.len()));
-        anyhow!(
-            "MCP server returned HTTP {} (method: {}): {}",
-            status,
-            method,
-            &snippet[..end]
-        )
+        // A 2026-07-28 server puts a JSON-RPC error in a 4xx body (version,
+        // header and capability errors); keep it typed for era detection.
+        let rpc = serde_json::from_str::<Value>(&body)
+            .ok()
+            .and_then(|v| v.get("error").map(JsonRpcError::from_error_member));
+        HttpStatusError {
+            status: status.as_u16(),
+            rpc,
+            text: format!(
+                "MCP server returned HTTP {} (method: {}): {}",
+                status,
+                method,
+                &snippet[..end]
+            ),
+        }
+        .into()
     }
 }
+
+/// A non-success HTTP status from the MCP endpoint, with the JSON-RPC error
+/// its body carried, if any.
+#[derive(Debug)]
+pub(super) struct HttpStatusError {
+    pub status: u16,
+    pub rpc: Option<JsonRpcError>,
+    text: String,
+}
+
+impl std::fmt::Display for HttpStatusError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.text)
+    }
+}
+
+impl std::error::Error for HttpStatusError {}
 
 /// Tracks the SSE `id:` and `retry:` fields, which [`drain_sse_events`]
 /// deliberately discards. Fed the same raw bytes as the event buffer; only
@@ -1159,34 +1251,242 @@ mod tests {
         assert!(start.elapsed() < std::time::Duration::from_secs(5));
     }
 
+    /// The 400 a 2025-11-25 TypeScript-SDK server gives a request without a
+    /// session: a JSON-RPC error, but not a 2026-07-28 one.
+    fn legacy_no_session() -> Reply {
+        Reply::Raw({
+            let body = r#"{"jsonrpc":"2.0","id":null,"error":{"code":-32000,"message":"Bad Request: No valid session ID provided"}}"#;
+            format!(
+                "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+        })
+    }
+
+    fn rpc_error_reply(status: u16, code: i64, data: &str) -> Reply {
+        let body = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"error":{{"code":{code},"message":"m","data":{data}}}}}"#
+        );
+        Reply::Raw(format!(
+            "HTTP/1.1 {status} Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        ))
+    }
+
+    const DISCOVER_MODERN: &str = r#"{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{"tools":{}},"_meta":{"io.modelcontextprotocol/serverInfo":{"name":"modern-fx","version":"2.0"}}}"#;
+
     #[tokio::test]
-    async fn protocol_version_header_sent_after_initialize() {
+    async fn legacy_server_falls_back_to_initialize_with_session_headers() {
         let init_result = r#"{"protocolVersion":"2025-11-25","capabilities":{},"serverInfo":{"name":"fx","version":"1.0"}}"#;
         let fx = fixture(vec![
-            json_reply_with_headers(&rpc_response(1, init_result), "MCP-Session-Id: s9\r\n"),
+            legacy_no_session(),
+            json_reply_with_headers(&rpc_response(2, init_result), "MCP-Session-Id: s9\r\n"),
             status_reply(202, "Accepted"), // notifications/initialized
-            json_reply(&rpc_response(2, r#"{"tools":[]}"#)),
+            json_reply(&rpc_response(3, r#"{"tools":[]}"#)),
+        ])
+        .await;
+        let mut client = McpClient::new(fx.transport().into());
+        let info = client.initialize().await.expect("initialize");
+        assert_eq!(info.name, "fx");
+        assert_eq!(client.era(), super::super::client::Era::Legacy);
+        client.list_tools().await.expect("list");
+        let reqs = fx.requests().await;
+        assert_eq!(reqs.len(), 4);
+        // The probe is a 2026-07-28 request.
+        let probe = reqs[0].to_ascii_lowercase();
+        assert!(
+            probe.contains("mcp-protocol-version: 2026-07-28"),
+            "{probe}"
+        );
+        assert!(probe.contains("mcp-method: server/discover"), "{probe}");
+        assert!(
+            reqs[0].contains(r#""io.modelcontextprotocol/protocolVersion":"2026-07-28""#),
+            "{}",
+            reqs[0]
+        );
+        // initialize itself carries no version header.
+        let init = reqs[1].to_ascii_lowercase();
+        assert!(!init.contains("mcp-protocol-version"), "{init}");
+        assert!(!init.contains("mcp-method"), "{init}");
+        // Everything after initialize — including notifications/initialized —
+        // carries the negotiated version and the session id, and no _meta.
+        for req in &reqs[2..] {
+            let low = req.to_ascii_lowercase();
+            assert!(low.contains("mcp-protocol-version: 2025-11-25"), "{req}");
+            assert!(low.contains("mcp-session-id: s9"), "{req}");
+            assert!(!req.contains("io.modelcontextprotocol/"), "{req}");
+        }
+    }
+
+    #[tokio::test]
+    async fn modern_server_skips_the_handshake_and_mirrors_headers() {
+        let tools = r#"{"resultType":"complete","tools":[
+            {"name":"execute_sql","inputSchema":{"type":"object","properties":{
+                "region":{"type":"string","x-mcp-header":"Region"},
+                "query":{"type":"string"}}}},
+            {"name":"broken","inputSchema":{"type":"object","properties":{
+                "n":{"type":"number","x-mcp-header":"N"}}}}
+        ]}"#;
+        let call = r#"{"resultType":"complete","content":[{"type":"text","text":"ok"}]}"#;
+        let fx = fixture(vec![
+            // A stray session header must be ignored in 2026-07-28.
+            json_reply_with_headers(&rpc_response(1, DISCOVER_MODERN), "MCP-Session-Id: s9\r\n"),
+            json_reply(&rpc_response(2, tools)),
+            json_reply(&rpc_response(3, call)),
+        ])
+        .await;
+        let mut client = McpClient::new(fx.transport().into());
+        let info = client.initialize().await.expect("initialize");
+        assert_eq!(info.name, "modern-fx");
+        assert_eq!(client.era(), super::super::client::Era::Modern);
+        let listed = client.list_tools().await.expect("list");
+        let names: Vec<&str> = listed.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ["execute_sql"], "the invalid tool is left out");
+        let result = client
+            .call_tool(
+                "execute_sql",
+                &json!({"region": "us-west1", "query": "SELECT 1"}),
+            )
+            .await
+            .expect("call");
+        assert!(!result.is_error);
+
+        let reqs = fx.requests().await;
+        assert_eq!(reqs.len(), 3, "no initialize, no notification");
+        for req in &reqs {
+            let low = req.to_ascii_lowercase();
+            assert!(low.contains("mcp-protocol-version: 2026-07-28"), "{req}");
+            assert!(!low.contains("mcp-session-id"), "{req}");
+            assert!(
+                req.contains(r#""io.modelcontextprotocol/protocolVersion":"2026-07-28""#),
+                "{req}"
+            );
+            assert!(
+                req.contains(r#""io.modelcontextprotocol/clientCapabilities":{}"#),
+                "{req}"
+            );
+        }
+        let call = reqs[2].to_ascii_lowercase();
+        assert!(call.contains("mcp-method: tools/call"), "{call}");
+        assert!(call.contains("mcp-name: execute_sql"), "{call}");
+        assert!(call.contains("mcp-param-region: us-west1"), "{call}");
+    }
+
+    #[tokio::test]
+    async fn unsupported_version_with_a_legacy_entry_uses_the_handshake() {
+        let init_result =
+            r#"{"protocolVersion":"2025-11-25","capabilities":{},"serverInfo":{"name":"fx"}}"#;
+        let fx = fixture(vec![
+            rpc_error_reply(
+                400,
+                -32022,
+                r#"{"supported":["2025-11-25"],"requested":"2026-07-28"}"#,
+            ),
+            json_reply(&rpc_response(2, init_result)),
+            status_reply(202, "Accepted"),
+        ])
+        .await;
+        let mut client = McpClient::new(fx.transport().into());
+        client.initialize().await.expect("initialize");
+        assert_eq!(client.era(), super::super::client::Era::Legacy);
+    }
+
+    #[tokio::test]
+    async fn unsupported_version_with_no_common_version_is_an_error() {
+        let fx = fixture(vec![rpc_error_reply(
+            400,
+            -32022,
+            r#"{"supported":["2027-03-01"],"requested":"2026-07-28"}"#,
+        )])
+        .await;
+        let mut client = McpClient::new(fx.transport().into());
+        let err = client.initialize().await.expect_err("no common version");
+        assert!(err.to_string().contains("2027-03-01"), "{err}");
+        assert_eq!(fx.requests().await.len(), 1, "no fallback to initialize");
+    }
+
+    #[tokio::test]
+    async fn sign_in_needed_on_the_probe_is_not_a_legacy_server() {
+        let fx = fixture(vec![Reply::Raw(
+            "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Bearer\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                .to_string(),
+        )])
+        .await;
+        let mut client = McpClient::new(fx.transport().into());
+        let err = client.initialize().await.expect_err("sign-in needed");
+        assert!(super::super::oauth::is_auth_required(&err), "{err:#}");
+        assert_eq!(fx.requests().await.len(), 1, "no fallback to initialize");
+    }
+
+    #[tokio::test]
+    async fn input_required_with_state_only_is_retried_with_that_state() {
+        let fx = fixture(vec![
+            json_reply(&rpc_response(1, DISCOVER_MODERN)),
+            json_reply(&rpc_response(
+                2,
+                r#"{"resultType":"input_required","requestState":"opaque-1"}"#,
+            )),
+            json_reply(&rpc_response(
+                3,
+                r#"{"resultType":"complete","content":[{"type":"text","text":"done"}]}"#,
+            )),
+        ])
+        .await;
+        let mut client = McpClient::new(fx.transport().into());
+        client.initialize().await.expect("initialize");
+        let result = client.call_tool("t", &json!({})).await.expect("call");
+        assert!(
+            matches!(&result.content[0], super::super::client::ContentBlock::Text(t) if t == "done")
+        );
+        let reqs = fx.requests().await;
+        assert!(!reqs[1].contains("requestState"), "{}", reqs[1]);
+        assert!(
+            reqs[2].contains(r#""requestState":"opaque-1""#),
+            "{}",
+            reqs[2]
+        );
+    }
+
+    #[tokio::test]
+    async fn input_required_that_asks_questions_is_an_error() {
+        let fx = fixture(vec![
+            json_reply(&rpc_response(1, DISCOVER_MODERN)),
+            json_reply(&rpc_response(
+                2,
+                r#"{"resultType":"input_required","inputRequests":{"q":{"method":"elicitation/create","params":{}}}}"#,
+            )),
+        ])
+        .await;
+        let mut client = McpClient::new(fx.transport().into());
+        client.initialize().await.expect("initialize");
+        let err = client.call_tool("t", &json!({})).await.expect_err("asks");
+        assert!(err.to_string().contains("elicitation/create"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn header_mismatch_reloads_the_tool_list_and_retries() {
+        let old_tools = r#"{"tools":[{"name":"t","inputSchema":{"type":"object"}}]}"#;
+        let new_tools = r#"{"tools":[{"name":"t","inputSchema":{"type":"object","properties":{
+            "id":{"type":"string","x-mcp-header":"Id"}}}}]}"#;
+        let fx = fixture(vec![
+            json_reply(&rpc_response(1, DISCOVER_MODERN)),
+            json_reply(&rpc_response(2, old_tools)),
+            rpc_error_reply(400, -32020, "null"),
+            json_reply(&rpc_response(4, new_tools)),
+            json_reply(&rpc_response(5, r#"{"content":[]}"#)),
         ])
         .await;
         let mut client = McpClient::new(fx.transport().into());
         client.initialize().await.expect("initialize");
         client.list_tools().await.expect("list");
+        client
+            .call_tool("t", &json!({"id": "abc"}))
+            .await
+            .expect("retried call");
         let reqs = fx.requests().await;
-        assert_eq!(reqs.len(), 3);
-        assert!(
-            !reqs[0]
-                .to_ascii_lowercase()
-                .contains("mcp-protocol-version"),
-            "initialize itself carries no version header: {}",
-            reqs[0]
-        );
-        // Everything after initialize — including notifications/initialized —
-        // carries the negotiated version and the session id.
-        for req in &reqs[1..] {
-            let low = req.to_ascii_lowercase();
-            assert!(low.contains("mcp-protocol-version: 2025-11-25"), "{req}");
-            assert!(low.contains("mcp-session-id: s9"), "{req}");
-        }
+        assert_eq!(reqs.len(), 5);
+        assert!(!reqs[2].to_ascii_lowercase().contains("mcp-param-id"));
+        assert!(reqs[4].to_ascii_lowercase().contains("mcp-param-id: abc"));
     }
 
     #[tokio::test]
