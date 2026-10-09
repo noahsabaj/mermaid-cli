@@ -65,7 +65,7 @@ pub const MAX_OUTPUT_CONTINUATIONS: u32 = 4;
 // Ollama auto-sizing
 // Mermaid probes an Ollama model's real context window (`/api/show`) and sizes
 // `num_ctx`/`num_predict` automatically so users never touch Ollama config. See
-// `src/models/adapters/ollama_sizing.rs`.
+// `crates/mermaid-model/src/models/adapters/ollama_sizing.rs`.
 /// Conservative `num_ctx` used when memory can't be detected (and as the auto
 /// fallback). Comfortably above the compaction response reserve so auto-compaction
 /// stays sane on the smaller probed window.

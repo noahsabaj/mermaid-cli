@@ -1376,7 +1376,7 @@ fn map_search_results(
 /// Format search results for model consumption.
 ///
 /// Pure data -- no behavioral instructions. Citation rules live in the system
-/// prompt (src/prompts.rs), which is the SSOT for all model behavior.
+/// prompt (`crates/mermaid-domain/src/prompts.rs`), which is the SSOT for all model behavior.
 #[must_use]
 pub fn format_results(results: &[SearchResult]) -> String {
     let mut formatted = String::from("[SEARCH_RESULTS]\n");
