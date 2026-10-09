@@ -6,11 +6,6 @@
 //! they emit `ProgressEvent::Status` breadcrumbs for multi-file
 //! operations the old code couldn't surface without an observer
 //! callback.
-//!
-//! The implementations don't try to out-clever the existing tool
-//! behavior in `src/agents/filesystem.rs`. Same semantics, same error
-//! shapes — just wrapped in the new trait so future tools only have
-//! to learn this surface.
 
 use mermaid_domain::ProgressEvent;
 use std::path::{Path, PathBuf};

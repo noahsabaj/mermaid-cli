@@ -34,12 +34,6 @@ impl EngineGone {
     pub fn message(&self) -> &Msg {
         &self.0
     }
-
-    /// Take the undelivered message back.
-    #[must_use]
-    pub fn into_message(self) -> Msg {
-        *self.0
-    }
 }
 
 impl fmt::Display for EngineGone {

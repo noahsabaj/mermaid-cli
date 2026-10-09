@@ -217,6 +217,7 @@ impl ToolRegistry {
         r.register(Arc::new(filesystem::DeleteFileTool));
         r.register(Arc::new(filesystem::CreateDirectoryTool));
         r.register(Arc::new(exec::ExecuteCommandTool));
+        r.register(Arc::new(exec::jobs::BackgroundProcessTool));
         r.register(Arc::new(memory::MemoryTool));
         r.register(Arc::new(ask_user_question::AskUserQuestionTool));
         r.register(Arc::new(tasks::TaskCreateTool));
@@ -266,7 +267,9 @@ impl ToolRegistry {
             providers,
             Arc::clone(&web_capabilities),
         ));
-        r.register(Arc::new(subagent::SubagentTool::new(spawner.clone())));
+        r.register(Arc::new(
+            subagent::SubagentTool::new(spawner.clone()).with_types(&config.agents.types),
+        ));
         r.subagent_spawner = Some(spawner);
         r.web_capabilities = Some(web_capabilities);
 
@@ -299,6 +302,7 @@ mod tests {
             "delete_file",
             "create_directory",
             "execute_command",
+            "background_process",
             "memory",
         ] {
             assert!(r.get(name).is_some(), "missing: {name}");

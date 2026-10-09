@@ -5,6 +5,7 @@
 mod config;
 mod editor;
 pub mod event_source;
+pub mod file_assets;
 pub mod instructions;
 pub mod lifecycle;
 pub mod memory;

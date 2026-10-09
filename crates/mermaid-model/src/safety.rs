@@ -9,7 +9,6 @@
 //! and `mermaid-runtime` re-exports these names for its own API surface.
 
 use serde::{Deserialize, Serialize};
-use std::path::Path;
 
 /// Marker embedded verbatim in every read-only policy-denial `reason` (see
 /// the runtime engine's `PolicyEngine::decide`). Exposed so the
@@ -185,15 +184,6 @@ pub struct ActionRequest {
     /// (the default, and every unannotated tool) means write-shaped and
     /// subject to the floor.
     pub mcp_read_only_hint: bool,
-    /// The directory `command` will actually run in, when that is not the
-    /// project root — i.e. an explicit `working_dir` argument.
-    ///
-    /// Relative paths in a command resolve against THIS, not the project root.
-    /// Matching them against the project root while the shell runs the
-    /// command elsewhere approves one path and writes another. Carrying the
-    /// cwd on the request keeps the wrong value out of reach: see
-    /// [`ActionRequest::resolve_dir`].
-    pub cwd: Option<std::path::PathBuf>,
     /// For `ToolCategory::Shell` only: the caller will run this command inside
     /// the read-only OS sandbox, where the kernel denies writes, sockets, IPC,
     /// outward signals and privileges. In `read_only` mode that containment,
@@ -219,16 +209,8 @@ impl ActionRequest {
             path: None,
             arguments: None,
             mcp_read_only_hint: false,
-            cwd: None,
             read_only_contained: false,
         }
-    }
-
-    /// The directory command-relative paths must resolve against: the
-    /// request's own cwd when it has one, else `fallback` (the project root).
-    #[must_use]
-    pub fn resolve_dir<'a>(&'a self, fallback: &'a Path) -> &'a Path {
-        self.cwd.as_deref().unwrap_or(fallback)
     }
 }
 

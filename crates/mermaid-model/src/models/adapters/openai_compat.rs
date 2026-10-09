@@ -1155,8 +1155,8 @@ struct NonStreamingChoice {
 }
 
 /// Non-streaming response message. `extra` captures whatever extra fields
-/// (`reasoning_content`, `reasoning`) the provider emits — extracted via
-/// `ReasoningExtraction::parse_delta`-like logic in the adapter.
+/// (`reasoning_content`, `reasoning`) the provider emits, read out per the
+/// profile's `ReasoningExtraction` setting.
 #[derive(Debug, Deserialize)]
 struct ResponseMessage {
     #[serde(default)]
