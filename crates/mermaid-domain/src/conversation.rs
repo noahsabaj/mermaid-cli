@@ -76,6 +76,10 @@ pub struct ConversationHistory {
     pub last_token_usage: Option<crate::TokenUsageTotals>,
     #[serde(default)]
     pub cumulative_token_usage: crate::TokenUsageTotals,
+    /// The same spend split by the model that made each call, so `/usage`
+    /// can price each model at its own rate. Older files omit it.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub usage_by_model: crate::UsageByModel,
     #[serde(default)]
     pub context_usage: Option<crate::ContextUsageSnapshot>,
     /// Session lineage / provenance, all `#[serde(default)]` (older files omit
@@ -160,6 +164,7 @@ impl ConversationHistory {
             advertised_context: None,
             last_token_usage: None,
             cumulative_token_usage: crate::TokenUsageTotals::default(),
+            usage_by_model: crate::UsageByModel::new(),
             context_usage: None,
             // Lineage/provenance filled in by the impure startup path.
             forked_from: None,

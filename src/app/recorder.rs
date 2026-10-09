@@ -802,6 +802,10 @@ mod tests {
                 success: true,
                 cancelled: false,
                 usage: Some(mermaid_model::models::TokenUsage::provider(60_000, 30_000)),
+                usage_by_model: std::collections::BTreeMap::from([(
+                    "ollama/test".to_string(),
+                    mermaid_model::models::TokenUsage::provider(60_000, 30_000),
+                )]),
                 tokens: 90_000,
                 duration_secs: 132,
             },
@@ -983,6 +987,9 @@ mod tests {
                     updated_at: "2026-07-02".to_string(),
                 },
             ])),
+            Msg::QueryResult(QueryResult::RecentPromptsListed(vec![
+                "fix the parser".to_string(),
+            ])),
             Msg::QueryResult(QueryResult::ProjectFilesListed(vec![
                 "src/main.rs".to_string(),
                 "docs/".to_string(),
@@ -992,6 +999,28 @@ mod tests {
                 path: std::path::PathBuf::from("/data/tmp/scratchpad/-proj/20260702_120000_123"),
             },
             Msg::RuntimeText("daemon says hi".to_string()),
+            Msg::ModelPricesResolved(mermaid_domain::cost::ModelPrices::from([
+                (
+                    "anthropic/x".to_string(),
+                    mermaid_domain::cost::PriceLookup::Priced {
+                        price: mermaid_domain::cost::ModelPrice {
+                            input: 3.0,
+                            output: 15.0,
+                            cache_read: Some(0.3),
+                            cache_write: None,
+                        },
+                        source: mermaid_domain::cost::PriceSource::Catalog,
+                    },
+                ),
+                (
+                    "ollama/q".to_string(),
+                    mermaid_domain::cost::PriceLookup::Local,
+                ),
+                (
+                    "groq/z".to_string(),
+                    mermaid_domain::cost::PriceLookup::Unknown,
+                ),
+            ])),
             Msg::QueryResult(QueryResult::RuntimeTasksListed(Vec::new())),
             Msg::QueryResult(QueryResult::RuntimeTaskLoaded {
                 task: None,

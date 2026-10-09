@@ -72,7 +72,7 @@ Then ask for normal coding-agent work:
 - "find the bug in this failing test and fix it"
 - "review the current branch for regressions"
 
-Inside the TUI, use `/help` for grouped commands, `/doctor` for the session readiness report, `/context` to inspect prompt budget, `/compact [focus]` to create a handoff checkpoint, and Esc to interrupt the agent loop.
+Inside the TUI, use `/help` for grouped commands, `/doctor` for the session readiness report, `/init` to have the agent write an AGENTS.md, `/usage` for tokens and estimated cost, `/context` to inspect prompt budget, `/compact [focus]` to create a handoff checkpoint, and Esc to interrupt the agent loop.
 
 ## Usage
 
@@ -109,6 +109,7 @@ Every flag, structured output, headless session resume, and record/replay: [docs
 | Shift+Tab | Cycle safety mode: `read_only → ask → auto → full_access` |
 | Ctrl+V | Paste image or text from clipboard |
 | Ctrl+O | Compose the prompt in `$VISUAL`/`$EDITOR` |
+| Ctrl+R | Search earlier prompts (this session and saved ones) |
 | `/` | Open the slash-command palette (a line that names no command is sent as a message) |
 | `@` | Open the fuzzy file picker |
 

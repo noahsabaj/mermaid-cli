@@ -171,6 +171,16 @@ pub enum Cmd {
     /// path so the effect never re-derives it. Fire-and-forget.
     ListScratchpad { path: PathBuf },
 
+    /// `/usage` — look up a price for each model the session has spent
+    /// tokens on (user config first, then the public catalog unless
+    /// `fetch_catalog` is off). Answers with `Msg::ModelPricesResolved`.
+    /// Fire-and-forget.
+    ResolveModelPrices {
+        models: Vec<String>,
+        pricing: crate::config::PricingConfig,
+        fetch_catalog: bool,
+    },
+
     // ── Persistence ─────────────────────────────────────────────────
     /// Save the current conversation to disk. No-op if unchanged since
     /// last save (effect-side idempotence). `events` is the session-event
@@ -476,6 +486,7 @@ impl Cmd {
             Self::NotifyTaskCompleted { .. } => "notify_task_completed",
             Self::EnsureScratchpad { .. } => "ensure_scratchpad",
             Self::ListScratchpad { .. } => "list_scratchpad",
+            Self::ResolveModelPrices { .. } => "resolve_model_prices",
             Self::SaveConversation { .. } => "save_conversation",
             Self::SaveCompaction { .. } => "save_compaction",
             Self::SaveProcess(_) => "save_process",
@@ -568,6 +579,7 @@ impl Cmd {
             | Self::NotifyTaskCompleted { .. }
             | Self::EnsureScratchpad { .. }
             | Self::ListScratchpad { .. }
+            | Self::ResolveModelPrices { .. }
             | Self::SaveConversation { .. }
             | Self::SaveCompaction { .. }
             | Self::SaveProcess(_)
@@ -678,6 +690,9 @@ impl Cmd {
             },
             Self::ListScratchpad { path } => {
                 format!("list_scratchpad({})", path.display())
+            },
+            Self::ResolveModelPrices { models, .. } => {
+                format!("resolve_model_prices({})", models.join(", "))
             },
             Self::SaveConversation { snapshot, .. } => {
                 format!("save_conversation(id={})", snapshot.id)

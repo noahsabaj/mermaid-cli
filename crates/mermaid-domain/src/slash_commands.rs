@@ -99,6 +99,10 @@ pub const KEYBINDINGS: &[(&str, &str)] = &[
     ("Ctrl+J", "Insert a newline (multi-line input)"),
     ("Esc", "Interrupt the current turn"),
     ("Up / Down", "Browse input history"),
+    (
+        "Ctrl+R",
+        "Search earlier prompts, this session and saved ones",
+    ),
     ("PageUp / PageDown", "Scroll the transcript"),
     ("Shift+Up / Shift+Down", "Scroll the transcript one line"),
     ("End", "Jump to the newest message"),
@@ -196,9 +200,17 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         group: SlashCommandGroup::Everyday,
     },
     SlashCommand {
+        name: "init",
+        aliases: &[],
+        description: "Ask the agent to write or improve AGENTS.md for this project",
+        arg_hint: Some("[focus]"),
+        usage_note: None,
+        group: SlashCommandGroup::Everyday,
+    },
+    SlashCommand {
         name: "usage",
         aliases: &[],
-        description: "Show provider token usage and session totals",
+        description: "Show token usage, session totals and estimated cost",
         arg_hint: None,
         usage_note: None,
         group: SlashCommandGroup::ModelContext,
@@ -656,6 +668,7 @@ pub fn parse_slash_command(raw: &str) -> Option<crate::SlashCmd> {
         Some("load") => SlashCmd::Load(arg),
         Some("list") => SlashCmd::List,
         Some("usage") => SlashCmd::Usage,
+        Some("init") => SlashCmd::Init(arg),
         Some("todos") => SlashCmd::Todos(arg),
         Some("scratchpad") => SlashCmd::Scratchpad,
         Some("context") => {

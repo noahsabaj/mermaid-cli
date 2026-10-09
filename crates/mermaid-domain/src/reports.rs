@@ -197,7 +197,9 @@ pub(crate) fn doctor_text(state: &State) -> String {
     lines.join("\n")
 }
 
-pub(crate) fn usage_text(state: &State) -> String {
+/// The `/usage` report. `prices` adds the cost block; `None` when the
+/// session has spent nothing yet, so there is nothing to price.
+pub(crate) fn usage_text(state: &State, prices: Option<&crate::cost::ModelPrices>) -> String {
     let mut lines = Vec::new();
     lines.push("Usage".to_string());
     lines.push(format!("Model: {}", state.session.model_id));
@@ -237,6 +239,13 @@ pub(crate) fn usage_text(state: &State) -> String {
         "Session cumulative (all API calls, subagents included): {}",
         usage_totals_line(state.session.cumulative_token_usage)
     ));
+    if let Some(prices) = prices {
+        lines.push(String::new());
+        lines.extend(crate::cost::cost_lines(
+            &state.session.usage_by_model,
+            prices,
+        ));
+    }
 
     lines.join("\n")
 }

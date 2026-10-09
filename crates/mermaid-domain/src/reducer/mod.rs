@@ -29,6 +29,7 @@
 
 pub(crate) mod input;
 pub(crate) mod lifecycle;
+pub(crate) mod prompt_search;
 pub(crate) mod safety_mode;
 pub(crate) mod slash;
 pub(crate) mod streaming;
@@ -40,6 +41,7 @@ mod tests;
 
 pub use input::*;
 pub use lifecycle::*;
+pub use prompt_search::*;
 pub use safety_mode::*;
 pub use slash::*;
 pub use streaming::*;
@@ -605,6 +607,13 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
         Msg::RuntimeText(text) => {
             append_runtime_note(&mut state, &mut cmds, text);
         },
+        Msg::ModelPricesResolved(prices) => {
+            let text = crate::reports::usage_text(&state, Some(&prices));
+            state
+                .session
+                .append(mermaid_model::models::ChatMessage::system(text), state.now);
+            cmds.push(state.session.save_conversation_cmd());
+        },
         Msg::ModelPullFinished { model } => {
             push_system(&mut state, &mut cmds, format!("Pulled {model}"));
         },
@@ -720,6 +729,7 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             success,
             cancelled,
             usage,
+            usage_by_model,
             tokens,
             duration_secs,
         } => {
@@ -731,11 +741,18 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             // as `handle_tool_finished` does for foreground agent calls.
             // Cancelled children fold too — that work was still billed.
             if let Some(usage) = usage.as_ref() {
+                let session_model = state.session.model_id.clone();
+                let attribution = if usage_by_model.is_empty() {
+                    UsageAttribution::Model(&session_model)
+                } else {
+                    UsageAttribution::Split(&usage_by_model)
+                };
                 fold_token_usage(
                     &mut state.session,
                     &mut state.runtime,
                     usage,
                     UsageFold::Detached,
+                    attribution,
                 );
             }
             if cancelled {

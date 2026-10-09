@@ -39,6 +39,13 @@ pub enum Query {
     /// Scan the conversations directory for the `/load` picker (newest
     /// first). Answered by [`QueryResult::ConversationsListed`].
     ListConversations,
+    /// Ctrl+R — the prompts sent in this project's saved sessions, newest
+    /// first and without repeats. Answered by
+    /// [`QueryResult::RecentPromptsListed`].
+    ListRecentPrompts {
+        max_sessions: usize,
+        max_prompts: usize,
+    },
     /// Discover every model the user could switch to, for the `/model`
     /// picker. Best-effort and strictly read-only: a dead Ollama is NOT
     /// started, an unreachable provider is skipped. Answered by
@@ -94,6 +101,7 @@ impl Query {
         match self {
             Self::LoadConversation { .. } => "load_conversation",
             Self::ListConversations => "list_conversations",
+            Self::ListRecentPrompts { .. } => "list_recent_prompts",
             Self::ListAvailableModels => "list_available_models",
             Self::ListProjectFiles => "list_project_files",
             Self::ListRuntimeTasks { .. } => "list_runtime_tasks",
@@ -128,6 +136,10 @@ impl Query {
                 message_index,
             } => format!("list_fork_checkpoints({session_id} > {message_index})"),
             Self::LoadOutputStyle { name, .. } => format!("load_output_style({name})"),
+            Self::ListRecentPrompts {
+                max_sessions,
+                max_prompts,
+            } => format!("list_recent_prompts(sessions={max_sessions}, prompts={max_prompts})"),
             Self::ListOutputStyles
             | Self::ListConversations
             | Self::ListAvailableModels
@@ -151,6 +163,8 @@ pub enum QueryResult {
     ConversationLoaded(Box<crate::ConversationHistory>),
     /// Candidates for the `/load` picker, newest first.
     ConversationsListed(Vec<ConversationSummary>),
+    /// Saved sessions' prompts for the Ctrl+R search, newest first.
+    RecentPromptsListed(Vec<String>),
     /// Everything the user can switch to, already grouped and sorted for
     /// the `/model` picker.
     AvailableModelsListed(Vec<ModelChoice>),

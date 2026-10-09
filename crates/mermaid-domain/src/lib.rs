@@ -34,6 +34,7 @@ pub mod compaction;
 pub mod config;
 pub mod context;
 pub mod conversation;
+pub mod cost;
 pub mod file_mention;
 pub mod image_token;
 pub mod input_kind;
@@ -111,7 +112,7 @@ pub use state::{
     ContextUsageSnapshot, ConversationSummary, Focus, GenPhase, LiveToolStatus, McpServerEntry,
     McpServerStatus, McpState, McpToolSpec, ModelChoice, PendingApproval, PendingToolCall,
     PluginCommand, PromptTokenBreakdown, QueuedMessage, RewindCandidate, Session, State,
-    StatusKind, TokenUsageTotals, ToolOutcome, TurnState, UiMode, UiState,
+    StatusKind, TokenUsageTotals, ToolOutcome, TurnState, UiMode, UiState, UsageByModel,
     estimate_context_usage_for_request, estimate_tool_schema_tokens,
 };
 pub use transition::{

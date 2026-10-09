@@ -142,6 +142,8 @@ pub struct SessionScalars {
     pub last_token_usage: Option<TokenUsageTotals>,
     #[serde(default)]
     pub cumulative_token_usage: TokenUsageTotals,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub usage_by_model: crate::UsageByModel,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_usage: Option<ContextUsageSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -169,6 +171,7 @@ impl SessionScalars {
             advertised_context: snapshot.advertised_context.clone(),
             last_token_usage: snapshot.last_token_usage,
             cumulative_token_usage: snapshot.cumulative_token_usage,
+            usage_by_model: snapshot.usage_by_model.clone(),
             context_usage: snapshot.context_usage.clone(),
             git_branch: snapshot.git_branch.clone(),
             git_sha: snapshot.git_sha.clone(),
@@ -187,6 +190,7 @@ impl SessionScalars {
             .clone_from(&self.advertised_context);
         conversation.last_token_usage = self.last_token_usage;
         conversation.cumulative_token_usage = self.cumulative_token_usage;
+        conversation.usage_by_model.clone_from(&self.usage_by_model);
         conversation.context_usage.clone_from(&self.context_usage);
         conversation.git_branch.clone_from(&self.git_branch);
         conversation.git_sha.clone_from(&self.git_sha);
@@ -358,6 +362,7 @@ mod tests {
             advertised_context: None,
             last_token_usage: None,
             cumulative_token_usage: TokenUsageTotals::default(),
+            usage_by_model: crate::UsageByModel::new(),
             context_usage: None,
             git_branch: None,
             git_sha: None,

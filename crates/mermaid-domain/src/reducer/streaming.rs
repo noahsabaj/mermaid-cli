@@ -30,6 +30,16 @@ pub enum UsageFold {
     Detached,
 }
 
+/// Which model(s) made the calls a usage report covers, for
+/// `Session::usage_by_model`.
+pub enum UsageAttribution<'a> {
+    /// One model made every call.
+    Model(&'a str),
+    /// A subagent's drive, already split by model (its own subagents may
+    /// have run other models). The parts sum to the folded usage.
+    Split(&'a std::collections::BTreeMap<String, TokenUsage>),
+}
+
 /// The single accumulation point for provider-reported usage. Every path
 /// that bills tokens goes through here so the meters cannot drift apart.
 /// Takes the two sub-states it touches (not `&mut State`) so callers
@@ -39,9 +49,26 @@ pub fn fold_token_usage(
     runtime: &mut crate::RuntimeState,
     usage: &TokenUsage,
     fold: UsageFold,
+    attribution: UsageAttribution<'_>,
 ) {
     let totals = TokenUsageTotals::from_usage(usage);
     session.cumulative_token_usage.add_assign(totals);
+    match attribution {
+        UsageAttribution::Model(model) => session
+            .usage_by_model
+            .entry(model.to_string())
+            .or_default()
+            .add_assign(totals),
+        UsageAttribution::Split(parts) => {
+            for (model, part) in parts {
+                session
+                    .usage_by_model
+                    .entry(model.clone())
+                    .or_default()
+                    .add_assign(TokenUsageTotals::from_usage(part));
+            }
+        },
+    }
     let bank_run_output = match fold {
         UsageFold::OwnRequest => {
             session.last_token_usage = Some(totals);
@@ -195,6 +222,7 @@ pub fn handle_compaction_finished(
     state.runtime.auto_compact_suppressed = false;
 
     if let Some(usage) = result.usage {
+        let model = state.session.model_id.clone();
         fold_token_usage(
             &mut state.session,
             &mut state.runtime,
@@ -202,6 +230,7 @@ pub fn handle_compaction_finished(
             UsageFold::Compaction {
                 mid_run: !matches!(outcome, CompactionOutcome::Manual),
             },
+            UsageAttribution::Model(&model),
         );
     }
 
@@ -473,11 +502,13 @@ pub fn handle_stream_done(
                 && *id == turn
                 && let Some(u) = usage
             {
+                let model = state.session.model_id.clone();
                 fold_token_usage(
                     &mut state.session,
                     &mut state.runtime,
                     &u,
                     UsageFold::OwnRequest,
+                    UsageAttribution::Model(&model),
                 );
             }
             state.turn = other;
@@ -667,11 +698,13 @@ pub fn handle_stream_done(
     // reported request and the session total so the footer can label
     // the number honestly instead of presenting a giant raw counter.
     if let Some(u) = usage {
+        let model = state.session.model_id.clone();
         fold_token_usage(
             &mut state.session,
             &mut state.runtime,
             &u,
             UsageFold::OwnRequest,
+            UsageAttribution::Model(&model),
         );
         let max_context = state
             .session

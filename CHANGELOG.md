@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`/usage` shows what the session cost.** Below the token counts it now
+  lists each model the session used, subagents included, with an estimate
+  at list prices and a total. A price comes from `[pricing.models."<model>"]`
+  in your config first, then from the public catalog at models.dev (fetched
+  at most once a day and cached; set `[pricing] catalog_url = ""` to never
+  fetch it, and it is never fetched under `safety.network = "deny"`). Local
+  Ollama models cost $0. A model with no price says so and is left out of
+  the total. Saved sessions now record their usage per model, so a resumed
+  session keeps its cost.
+- **Ctrl+R searches the prompts you sent before.** It lists this session's
+  prompts at once and adds those of the project's last 50 saved sessions
+  as they load, newest first. Type to filter (every word must match, case
+  does not matter); Ctrl+R or Down goes to the next match; Enter puts the
+  prompt in the composer to edit or send; Esc leaves the draft as it was.
+- **`/init` asks the agent to write AGENTS.md.** It sends one ordinary
+  prompt: write the file at the project root with the build, test, lint
+  and run commands, the layout and the pitfalls an agent cannot learn
+  quickly from the code, or improve the file that is there. Words after
+  `/init` are added to the request.
 - **Mermaid cleans up the config keys it no longer reads.** A config file
   written by an older `mermaid init` still carries sections a later release
   removed, such as `[plan]` (0.28.0) or `[computer_use]` and

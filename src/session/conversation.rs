@@ -547,6 +547,27 @@ impl ConversationManager {
         Ok(conversations)
     }
 
+    /// Prompts from this project's saved sessions, newest first and without
+    /// repeats, for the Ctrl+R prompt search. Reads at most `max_sessions`
+    /// sessions (the most recently updated) and returns at most `max_prompts`.
+    #[must_use]
+    pub fn recent_prompts(&self, max_sessions: usize, max_prompts: usize) -> Vec<String> {
+        let metas = self.list_conversation_metas().unwrap_or_default();
+        let mut seen = std::collections::HashSet::new();
+        let mut prompts = Vec::new();
+        for meta in metas.iter().take(max_sessions) {
+            for text in self.events.read_inputs(&meta.id).into_iter().rev() {
+                if prompts.len() >= max_prompts {
+                    return prompts;
+                }
+                if seen.insert(text.clone()) {
+                    prompts.push(text);
+                }
+            }
+        }
+        prompts
+    }
+
     /// Fast session list: read each `<id>.meta` sidecar; for a session that
     /// lacks a (valid) one — older, or written by a pre-sidecar build — fall
     /// back to fully parsing its `<id>.json`. Message-less sessions are skipped.

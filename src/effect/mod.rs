@@ -695,6 +695,19 @@ impl EffectRunner {
         match query {
             Query::LoadConversation { id } => self.query_load_conversation(id, tx),
             Query::ListConversations => self.query_list_conversations(tx),
+            Query::ListRecentPrompts {
+                max_sessions,
+                max_prompts,
+            } => {
+                let workdir = self.workdir.clone();
+                self.send_blocking_query(move || {
+                    QueryResult::RecentPromptsListed(
+                        crate::session::ConversationManager::new(&workdir)
+                            .map(|mgr| mgr.recent_prompts(max_sessions, max_prompts))
+                            .unwrap_or_default(),
+                    )
+                });
+            },
             Query::ListAvailableModels => {
                 let providers = self.providers.clone();
                 self.detached.spawn(async move {
@@ -1264,6 +1277,19 @@ impl EffectRunner {
                     .await
                     .unwrap_or_else(|e| format!("Couldn't list the scratchpad: {e}"));
                     let _ = tx.send(Msg::RuntimeText(text)).await;
+                });
+            },
+            Cmd::ResolveModelPrices {
+                models,
+                pricing,
+                fetch_catalog,
+            } => {
+                // `/usage` — prices may need the network, so off the runner.
+                let tx = self.msg_tx.clone();
+                self.detached.spawn(async move {
+                    let prices =
+                        pricing::resolve_model_prices(models, pricing, fetch_catalog).await;
+                    let _ = tx.send(Msg::ModelPricesResolved(prices)).await;
                 });
             },
             Cmd::UserTaskEdit(edit) => {
@@ -1993,6 +2019,7 @@ fn note_stream_usage(
 mod compaction;
 mod memory;
 mod model_call;
+mod pricing;
 mod tool_call;
 
 use compaction::*;

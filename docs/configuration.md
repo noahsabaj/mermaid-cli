@@ -157,6 +157,19 @@ theme = "dark"
 # custom output-styles/<name>.md file. See "Output styles" below.
 # style = "concise"
 
+# Prices behind the cost estimate in /usage, in US dollars per million
+# tokens. A model with no entry here is priced from the public catalog at
+# catalog_url (fetched at most once a day, cached in the data dir, never with
+# safety.network = "deny"); local Ollama models cost $0. The project config
+# cannot set this table.
+[pricing]
+# catalog_url = ""   # never fetch the catalog; use only the prices below
+# [pricing.models."openrouter/acme/coder-1"]
+# input = 0.5
+# output = 2.0
+# cache_read = 0.05    # optional; defaults to the input price
+# cache_write = 0.625  # optional; defaults to the input price
+
 # Durable agent memory (the `memory` tool, the always-loaded index, and
 # /remember & friends). On by default.
 [memory]

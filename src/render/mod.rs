@@ -342,7 +342,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             widgets::question_modal_height(qset, &rstate.theme, frame.area().width)
         }),
         BottomPane::Confirm => 6,
-        BottomPane::ConversationList | BottomPane::Rewind => 12,
+        BottomPane::ConversationList | BottomPane::Rewind | BottomPane::PromptSearch => 12,
         BottomPane::ModelPicker => widgets::MODEL_PICKER_HEIGHT,
         BottomPane::FilePicker => {
             let rows = state.ui.file_picker_matches.len().clamp(1, 8);
@@ -646,6 +646,25 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
                 frame.render_widget(widget, chunks[4]);
             }
         },
+        BottomPane::PromptSearch => {
+            if let mermaid_domain::UiMode::PromptSearch {
+                candidates,
+                query,
+                cursor,
+                loading,
+            } = &state.ui.mode
+            {
+                use widgets::PromptSearchWidget;
+                let widget = PromptSearchWidget {
+                    theme: &rstate.theme,
+                    matches: &mermaid_domain::reducer::filter_prompts(candidates, query),
+                    query,
+                    cursor: *cursor,
+                    loading: *loading,
+                };
+                frame.render_widget(widget, chunks[4]);
+            }
+        },
         BottomPane::FilePicker => {
             use widgets::FilePickerWidget;
             let widget = FilePickerWidget {
@@ -726,6 +745,7 @@ enum BottomPane<'a> {
     ModelPicker,
     ConversationList,
     Rewind,
+    PromptSearch,
     FilePicker,
     Palette(Vec<mermaid_domain::slash_commands::PaletteEntry<'a>>),
     Status,
@@ -741,7 +761,8 @@ fn bottom_pane(state: &mermaid_domain::State) -> BottomPane<'_> {
             UiMode::ModelPicker { .. } => BottomPane::ModelPicker,
             UiMode::ConversationList { .. } => BottomPane::ConversationList,
             UiMode::RewindPicker { .. } => BottomPane::Rewind,
-            // `Focus::Picker` only resolves for the three picker modes.
+            UiMode::PromptSearch { .. } => BottomPane::PromptSearch,
+            // `Focus::Picker` only resolves for the picker modes.
             UiMode::EditingInput | UiMode::ModelList => BottomPane::Status,
         },
         Focus::Composer => {

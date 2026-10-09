@@ -315,6 +315,9 @@ pub enum Msg {
     },
     /// Generic daemon/runtime text response.
     RuntimeText(String),
+    /// Prices for `/usage` (from `Cmd::ResolveModelPrices`): the reducer
+    /// writes the usage report with a cost block.
+    ModelPricesResolved(crate::cost::ModelPrices),
 
     // ── Misc model operations ───────────────────────────────────────
     /// `/model <name>` finished pulling (Ollama only).
@@ -390,6 +393,9 @@ pub enum Msg {
         /// Provider-reported usage for the child's whole drive (None when the
         /// provider reported nothing — the display falls back to `tokens`).
         usage: Option<TokenUsage>,
+        /// `usage` split by model (`ToolRunMetadata::usage_by_model`).
+        #[serde(default)]
+        usage_by_model: std::collections::BTreeMap<String, TokenUsage>,
         /// Display token count (usage total, or the live estimate).
         tokens: usize,
         duration_secs: u64,
@@ -570,6 +576,8 @@ pub enum SlashCmd {
     Load(Option<String>),
     List,
     Usage,
+    /// Send the AGENTS.md prompt, with optional extra focus appended.
+    Init(Option<String>),
     /// The task checklist: no arg → show; `add <subject>` / `rm <id>` /
     /// `done <id>` / `clear` edit it (routed through the `TaskBroker`).
     Todos(Option<String>),
@@ -701,6 +709,7 @@ impl Msg {
             | Self::QueryResult(_)
             | Self::ScratchpadReady { .. }
             | Self::RuntimeText(_)
+            | Self::ModelPricesResolved(_)
             | Self::ModelPullFinished { .. }
             | Self::ModelPullProgress(_)
             | Self::Tick
@@ -762,7 +771,7 @@ impl Msg {
             Self::SessionSaved => MsgKind::SessionSaved,
             Self::QueryResult(_) => MsgKind::QueryResult,
             Self::ScratchpadReady { .. } => MsgKind::ScratchpadReady,
-            Self::RuntimeText(_) => MsgKind::RuntimeStore,
+            Self::RuntimeText(_) | Self::ModelPricesResolved(_) => MsgKind::RuntimeStore,
             Self::ModelPullFinished { .. } => MsgKind::ModelPullFinished,
             Self::ModelPullProgress(_) => MsgKind::ModelPullProgress,
             Self::Tick => MsgKind::Tick,

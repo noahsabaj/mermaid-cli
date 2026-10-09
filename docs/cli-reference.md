@@ -82,6 +82,7 @@ documented in [runtime.md](runtime.md).
 | `@` | Open the fuzzy file picker (at the start of a word); type to filter, Tab/Enter inserts `@path`, Esc dismisses |
 | Tab | In palette: complete highlighted command name |
 | Up/Down | Navigate input history; palette and conversation-list navigation |
+| Ctrl+R | Search earlier prompts, from this session and the project's saved sessions; type to filter, Ctrl+R or Down for the next match, Enter puts the prompt in the composer (it is not sent) |
 | Mouse Wheel | Scroll chat |
 
 ### Message queuing and mid-run steering
@@ -125,6 +126,7 @@ A line is a command only when its first word names one. Anything else that happe
 Everyday:
 
 - `/doctor` — show current model, safety, prompt, instruction, and tool readiness
+- `/init [focus]` — ask the agent to write AGENTS.md for this project, or improve the one there; extra words are added to the request
 - `/clear`, `/save [name]`, `/load [id]`, `/list` — manage the conversation
 - `/cancel [id]` — cancel the active turn or a durable task
 - `/handoff [id]`, `/report [id]` — write a current-context report or inspect a task report
@@ -139,7 +141,8 @@ Model and context:
 - `/model` — open the model picker: every model this machine can reach, local Ollama models grouped first, the active one marked, type to filter (↑↓ navigate · Enter switch · Esc cancel). Rows drop the provider their group heading already names — `mistralai/mistral-large-2-instruct` under `nvidia` — and the footer shows the highlighted row's full id, the string `/model <name>` and `--model` take. `/model <name>` switches directly; either way an Ollama model auto-pulls if needed
 - `/reasoning <level>` — set reasoning: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`
 - `/visible-reasoning [on|off|toggle]` — show or hide reasoning blocks in the transcript
-- `/usage`, `/context`, `/compact [instructions]`
+- `/usage` — token usage for the last request and the session, and an estimated cost per model at list prices (see `[pricing]` in [configuration.md](configuration.md))
+- `/context`, `/compact [instructions]`
 - `/model-info <model>`
 - `/output-style [name] [--project]` — show or set the output style (voice/format preset: `default`, `proactive`, `concise`, `explanatory`, `learning`, or a custom style file). Persists to your user config, or to the project config with `--project`; applies to the next message, subagents keep the stock prompt
 

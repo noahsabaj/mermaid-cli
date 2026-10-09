@@ -513,6 +513,22 @@ pub fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: K
         return;
     }
 
+    // Ctrl+R: search earlier prompts. Like Ctrl+O it only edits the draft,
+    // so it works while a turn is busy, but only from the plain composer; a
+    // second Ctrl+R inside the search steps to the next older match.
+    if mods.ctrl && code == KeyCode::Char('r') {
+        if matches!(state.ui.mode, UiMode::PromptSearch { .. }) {
+            prompt_search_next(state);
+        } else if matches!(state.ui.mode, UiMode::EditingInput)
+            && state.pending_approval.is_empty()
+            && state.pending_question.is_empty()
+            && state.confirm.is_none()
+        {
+            open_prompt_search(state, cmds);
+        }
+        return;
+    }
+
     // Transcript scrolling (keyboard): PageUp/PageDown by a page, Shift+Up/Down
     // by a line, End to jump back to the newest message. Reuses the pure
     // publish-then-diff scroll pipeline — the render layer applies the delta,
@@ -961,6 +977,7 @@ pub fn handle_picker_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode) 
         UiMode::ModelPicker { .. } => handle_model_picker_key(state, cmds, code),
         UiMode::ConversationList { .. } => handle_conversation_list_key(state, cmds, code),
         UiMode::RewindPicker { .. } => handle_rewind_picker_key(state, cmds, code),
+        UiMode::PromptSearch { .. } => handle_prompt_search_key(state, code),
         UiMode::EditingInput | UiMode::ModelList => {},
     }
 }

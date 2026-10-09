@@ -183,6 +183,7 @@ impl State {
                 safety_mode: settings.safety.mode,
                 last_token_usage: None,
                 cumulative_token_usage: TokenUsageTotals::default(),
+                usage_by_model: UsageByModel::new(),
                 context_usage: None,
                 is_subagent: false,
                 agent_preamble: None,
@@ -240,6 +241,9 @@ impl State {
         }
         self.session.last_token_usage = history.last_token_usage;
         self.session.cumulative_token_usage = history.cumulative_token_usage;
+        self.session
+            .usage_by_model
+            .clone_from(&history.usage_by_model);
         self.session
             .context_usage
             .clone_from(&history.context_usage);
@@ -301,6 +305,9 @@ impl State {
 /// stored. Providers report usage per API request; the session keeps
 /// both the last request and the cumulative API usage so the footer
 /// does not imply this is the current model context length.
+/// Session spend keyed by the model id that made the calls.
+pub type UsageByModel = std::collections::BTreeMap<String, TokenUsageTotals>;
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TokenUsageTotals {
     pub prompt_tokens: usize,
@@ -652,6 +659,9 @@ pub struct Session {
     pub last_token_usage: Option<TokenUsageTotals>,
     /// Prompt/completion/total API usage accumulated for this session.
     pub cumulative_token_usage: TokenUsageTotals,
+    /// `cumulative_token_usage` split by the model that made each call
+    /// (subagents under their own model), so `/usage` can price each one.
+    pub usage_by_model: UsageByModel,
     /// Latest model-visible context snapshot. This may be an estimate
     /// while a request is in flight and is replaced by provider-reported
     /// usage when available.
@@ -698,6 +708,7 @@ impl Session {
         history.safety_mode = Some(self.safety_mode);
         history.last_token_usage = self.last_token_usage;
         history.cumulative_token_usage = self.cumulative_token_usage;
+        history.usage_by_model.clone_from(&self.usage_by_model);
         history.context_usage = self.context_usage.clone();
         history
     }
@@ -1406,6 +1417,7 @@ impl State {
             UiMode::ModelPicker { .. }
                 | UiMode::ConversationList { .. }
                 | UiMode::RewindPicker { .. }
+                | UiMode::PromptSearch { .. }
         ) {
             Focus::Picker
         } else {
@@ -1448,6 +1460,15 @@ pub enum UiMode {
     RewindPicker {
         candidates: Vec<RewindCandidate>,
         cursor: usize,
+    },
+    /// Ctrl+R: search earlier prompts. `candidates` is newest first: this
+    /// session's history, then the saved sessions' prompts once they load
+    /// (`loading` until then). `cursor` walks the list `query` filters.
+    PromptSearch {
+        candidates: Vec<String>,
+        query: String,
+        cursor: usize,
+        loading: bool,
     },
 }
 

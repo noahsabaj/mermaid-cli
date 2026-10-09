@@ -4257,6 +4257,7 @@ fn fold_token_usage_variants_route_to_the_right_meters() {
         &mut state.runtime,
         &usage,
         UsageFold::OwnRequest,
+        UsageAttribution::Model("ollama/test"),
     );
     assert_eq!(state.session.last_token_usage.unwrap().total_tokens(), 125);
     assert_eq!(state.session.cumulative_token_usage.total_tokens(), 125);
@@ -4271,6 +4272,7 @@ fn fold_token_usage_variants_route_to_the_right_meters() {
         &mut state.runtime,
         &usage,
         UsageFold::Subagent,
+        UsageAttribution::Model("ollama/test"),
     );
     assert!(state.session.last_token_usage.is_none());
     assert_eq!(state.session.cumulative_token_usage.total_tokens(), 250);
@@ -4282,6 +4284,7 @@ fn fold_token_usage_variants_route_to_the_right_meters() {
         &mut state.runtime,
         &usage,
         UsageFold::Compaction { mid_run: false },
+        UsageAttribution::Model("ollama/test"),
     );
     assert_eq!(state.session.last_token_usage.unwrap().total_tokens(), 125);
     assert_eq!(state.session.cumulative_token_usage.total_tokens(), 375);
@@ -4293,9 +4296,15 @@ fn fold_token_usage_variants_route_to_the_right_meters() {
         &mut state.runtime,
         &usage,
         UsageFold::Compaction { mid_run: true },
+        UsageAttribution::Model("ollama/test"),
     );
     assert_eq!(state.session.cumulative_token_usage.total_tokens(), 500);
     assert_eq!(state.runtime.run_tokens.output_tokens, 75);
+    // Every fold also lands under the model it is attributed to.
+    assert_eq!(
+        state.session.usage_by_model["ollama/test"].total_tokens(),
+        500
+    );
 }
 
 #[test]
@@ -8144,6 +8153,7 @@ fn background_agent_lifecycle_registry_note_queue_and_usage() {
             success: true,
             cancelled: false,
             usage: Some(mermaid_model::models::TokenUsage::provider(70_000, 20_000)),
+            usage_by_model: std::collections::BTreeMap::new(),
             tokens: 90_000,
             duration_secs: 61,
         },
@@ -8180,6 +8190,7 @@ fn background_agent_report_waits_in_queue_while_a_turn_runs() {
             success: true,
             cancelled: false,
             usage: None,
+            usage_by_model: std::collections::BTreeMap::new(),
             tokens: 1_000,
             duration_secs: 5,
         },
@@ -8282,6 +8293,7 @@ fn cancelled_background_agent_notes_but_never_queues_a_report() {
             success: false,
             cancelled: true,
             usage: Some(mermaid_model::models::TokenUsage::provider(10_000, 5_000)),
+            usage_by_model: std::collections::BTreeMap::new(),
             tokens: 15_000,
             duration_secs: 42,
         },
@@ -8627,5 +8639,209 @@ fn a_double_slash_is_prose_not_a_command() {
     assert_eq!(
         state.session.messages().last().unwrap().content,
         "//forget everything"
+    );
+}
+
+#[test]
+fn usage_is_attributed_to_the_model_that_made_each_call() {
+    let mut state = fresh_state();
+    state.turn = TurnState::Generating {
+        id: TurnId(5),
+        started: std::time::SystemTime::now(),
+        partial_text: "done".to_string(),
+        partial_reasoning: String::new(),
+        tokens: 0,
+        phase: GenPhase::Streaming,
+        provider_continuation: None,
+        pending_tool_calls: Vec::new(),
+        continuation: false,
+    };
+    let (state, _) = update(
+        state,
+        Msg::StreamDone {
+            turn: TurnId(5),
+            usage: Some(TokenUsage::provider(120, 30)),
+            provider_continuation: None,
+            stop_reason: None,
+        },
+    );
+    assert_eq!(
+        state.session.usage_by_model["ollama/test"].total_tokens(),
+        150
+    );
+
+    // A subagent's split lands under each model it names, and the split
+    // rides the saved conversation so a resumed session keeps it.
+    let (state, call_id) = state_executing_agent_call();
+    let split = std::collections::BTreeMap::from([
+        ("anthropic/child".to_string(), TokenUsage::provider(100, 10)),
+        ("groq/grandchild".to_string(), TokenUsage::provider(5, 5)),
+    ]);
+    let metadata = crate::ToolRunMetadata {
+        detail: crate::ToolMetadata::Subagent {
+            model_id: "anthropic/child".to_string(),
+            agent_id: "a1".to_string(),
+        },
+        token_usage: Some(TokenUsage::provider(105, 15)),
+        usage_by_model: split,
+        ..Default::default()
+    };
+    let (state, _) = update(
+        state,
+        Msg::ToolFinished {
+            turn: TurnId(3),
+            call_id,
+            outcome: ToolOutcome::success("report", "subagent completed", 1.0)
+                .with_metadata(metadata),
+        },
+    );
+    assert_eq!(
+        state.session.usage_by_model["anthropic/child"].total_tokens(),
+        110
+    );
+    assert_eq!(
+        state.session.usage_by_model["groq/grandchild"].total_tokens(),
+        10
+    );
+    let saved = state.session.snapshot_conversation();
+    assert_eq!(saved.usage_by_model, state.session.usage_by_model);
+}
+
+fn state_with_usage() -> State {
+    let mut state = fresh_state();
+    state.session.usage_by_model.insert(
+        "anthropic/x".to_string(),
+        TokenUsageTotals {
+            prompt_tokens: 1_000_000,
+            ..TokenUsageTotals::default()
+        },
+    );
+    state
+}
+
+#[test]
+fn usage_asks_for_prices_only_when_there_is_spend() {
+    let (state, cmds) = update(fresh_state(), Msg::Slash(SlashCmd::Usage));
+    assert!(
+        cmds.iter()
+            .all(|c| !matches!(c, Cmd::ResolveModelPrices { .. }))
+    );
+    assert!(
+        state
+            .session
+            .messages()
+            .last()
+            .is_some_and(|m| m.content.starts_with("Usage") && !m.content.contains("Cost")),
+    );
+
+    let mut state = state_with_usage();
+    state.settings.safety.network = crate::config::NetworkPolicy::Deny;
+    let (state, cmds) = update(state, Msg::Slash(SlashCmd::Usage));
+    let asked = cmds.iter().find_map(|c| match c {
+        Cmd::ResolveModelPrices {
+            models,
+            fetch_catalog,
+            ..
+        } => Some((models.clone(), *fetch_catalog)),
+        _ => None,
+    });
+    assert_eq!(asked, Some((vec!["anthropic/x".to_string()], false)));
+
+    let prices = crate::cost::ModelPrices::from([(
+        "anthropic/x".to_string(),
+        crate::cost::PriceLookup::Priced {
+            price: crate::cost::ModelPrice {
+                input: 3.0,
+                output: 15.0,
+                cache_read: None,
+                cache_write: None,
+            },
+            source: crate::cost::PriceSource::Config,
+        },
+    )]);
+    let (state, _) = update(state, Msg::ModelPricesResolved(prices));
+    let report = &state.session.messages().last().expect("report").content;
+    assert!(report.contains("anthropic/x: $3.00 (config)"), "{report}");
+    assert!(report.contains("Total: $3.00"), "{report}");
+}
+
+#[test]
+fn init_sends_the_agents_md_prompt_with_any_focus() {
+    let (state, _) = update(
+        fresh_state(),
+        Msg::Slash(SlashCmd::Init(Some("mention the eval suite".to_string()))),
+    );
+    let sent = state
+        .session
+        .messages()
+        .iter()
+        .rev()
+        .find(|m| m.role == MessageRole::User)
+        .expect("a user prompt was sent");
+    assert!(
+        sent.content.starts_with("Write AGENTS.md"),
+        "{}",
+        sent.content
+    );
+    assert!(
+        sent.content.ends_with("mention the eval suite"),
+        "{}",
+        sent.content
+    );
+}
+
+#[test]
+fn ctrl_r_searches_prompts_and_fills_the_composer() {
+    let ctrl_r = Msg::Key(Key {
+        code: KeyCode::Char('r'),
+        modifiers: KeyMods {
+            ctrl: true,
+            ..KeyMods::NONE
+        },
+    });
+    let mut state = fresh_state();
+    for prompt in ["fix the parser", "add tests", "fix the parser"] {
+        state
+            .session
+            .conversation
+            .add_to_input_history(prompt.to_string());
+    }
+    state
+        .session
+        .conversation
+        .add_to_input_history("add tests".to_string());
+    let (state, cmds) = update(state, ctrl_r.clone());
+    assert!(
+        cmds.iter()
+            .any(|c| matches!(c, Cmd::Query(Query::ListRecentPrompts { .. })))
+    );
+    let UiMode::PromptSearch { candidates, .. } = &state.ui.mode else {
+        panic!("search should be open");
+    };
+    // Newest first, each prompt once.
+    assert_eq!(
+        candidates,
+        &vec!["add tests".to_string(), "fix the parser".to_string()]
+    );
+
+    // Saved sessions' prompts append behind, without repeats.
+    let (state, _) = update(
+        state,
+        Msg::QueryResult(QueryResult::RecentPromptsListed(vec![
+            "fix the parser".to_string(),
+            "fix the lexer".to_string(),
+        ])),
+    );
+    // "fix" matches two; Ctrl+R steps to the older one; Enter uses it.
+    let (state, _) = update(state, key(KeyCode::Char('f')));
+    let (state, _) = update(state, key(KeyCode::Char('i')));
+    let (state, _) = update(state, ctrl_r);
+    let (state, _) = update(state, key(KeyCode::Enter));
+    assert!(matches!(state.ui.mode, UiMode::EditingInput));
+    assert_eq!(state.ui.input_buffer, "fix the lexer");
+    assert_eq!(state.ui.input_cursor, "fix the lexer".len());
+    assert!(
+        state.session.messages().is_empty(),
+        "choosing a prompt must not send it"
     );
 }

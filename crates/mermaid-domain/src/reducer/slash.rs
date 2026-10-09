@@ -207,6 +207,7 @@ pub fn handle_query_result(state: &mut State, cmds: &mut Vec<Cmd>, result: Query
             // If the user already navigated away (Esc before the
             // list landed), the event silently drops.
         },
+        QueryResult::RecentPromptsListed(prompts) => merge_recent_prompts(state, prompts),
         QueryResult::ProjectFilesListed(files) => {
             state.ui.project_files_loading = false;
             state.ui.project_files = Some(files);
@@ -380,10 +381,34 @@ pub fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
             cmds.push(Cmd::Query(Query::ListConversations));
         },
         SlashCmd::Usage => {
-            state
-                .session
-                .append(ChatMessage::system(usage_text(state)), state.now);
-            cmds.push(state.session.save_conversation_cmd());
+            // Pricing needs config and maybe the network, so a session with
+            // spend asks the effect layer and reports when the prices land.
+            if state.session.usage_by_model.is_empty() {
+                state
+                    .session
+                    .append(ChatMessage::system(usage_text(state, None)), state.now);
+                cmds.push(state.session.save_conversation_cmd());
+            } else {
+                cmds.push(Cmd::ResolveModelPrices {
+                    models: state.session.usage_by_model.keys().cloned().collect(),
+                    pricing: state.settings.pricing.clone(),
+                    fetch_catalog: state.settings.safety.network
+                        != crate::config::NetworkPolicy::Deny,
+                });
+            }
+        },
+        SlashCmd::Init(focus) => {
+            // An ordinary prompt: the transcript shows exactly what was
+            // asked, and the model does the work with its normal tools.
+            let mut text = crate::prompts::INIT_PROMPT.to_string();
+            if let Some(focus) = focus {
+                text.push_str("\n\n");
+                text.push_str(&focus);
+            }
+            state.ui.pending_msgs.push_back(Msg::SubmitPrompt {
+                text,
+                attachment_ids: Vec::new(),
+            });
         },
         SlashCmd::Todos(arg) => {
             handle_todos_command(state, cmds, arg.as_deref());
@@ -573,7 +598,7 @@ pub fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
             let text = format!(
                 "Handoff report\n\n{}\n\n{}",
                 context_text(state),
-                usage_text(state)
+                usage_text(state, None)
             );
             state.session.append(ChatMessage::system(text), state.now);
             cmds.push(state.session.save_conversation_cmd());
@@ -582,7 +607,7 @@ pub fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
             let text = format!(
                 "Runtime report\n\n{}\n\n{}",
                 context_text(state),
-                usage_text(state)
+                usage_text(state, None)
             );
             state.session.append(ChatMessage::system(text), state.now);
             cmds.push(state.session.save_conversation_cmd());
@@ -1083,6 +1108,7 @@ pub fn handle_confirm_accepted(state: &mut State, cmds: &mut Vec<Cmd>) {
             state.session.conversation.git_branch = git_branch;
             state.session.last_token_usage = None;
             state.session.cumulative_token_usage = TokenUsageTotals::default();
+            state.session.usage_by_model.clear();
             // Same rationale as `ConversationLoaded`: the cleared-away run's
             // summary counters must not survive into the fresh conversation.
             reset_run_counters(state);
