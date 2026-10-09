@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::io::{self, Write};
 
 use crate::app::{load_config, remove_user_config_key, update_user_config_key};
-use mermaid_domain::McpServerConfig;
+use mermaid_domain::{McpOAuthConfig, McpServerConfig};
 
 use super::registry;
 
@@ -45,7 +45,7 @@ pub async fn add_server(
     println!("\nResolving '{name}'...");
 
     // Resolve the server package via A → B → C. A non-registry result requires
-    // explicit confirmation (or --yes) before it is returned (#10).
+    // explicit confirmation (or --yes) before it is returned.
     let resolved = registry::resolve(name, assume_yes).await?;
 
     // Prompt for required environment variables
@@ -169,13 +169,17 @@ fn confirm_overwrite(name: &str) -> Result<bool> {
 /// Reading the existing config or prompting, a malformed `--header` or
 /// `--env-header` pair, the validation connect failing — the server is
 /// contacted before anything is saved, so an unreachable `url` is never
-/// written to the config — and the write itself. Declining the overwrite
-/// prompt is `Ok`.
+/// written to the config — a sign-in that fails, and the write itself.
+/// Declining the overwrite prompt is `Ok`.
+///
+/// A server that answers with a sign-in challenge gets the OAuth browser
+/// flow (`mermaid mcp login`) right here, then is validated again.
 pub async fn add_http_server(
     name: &str,
     url: String,
     header_pairs: Vec<String>,
     env_header_pairs: Vec<String>,
+    oauth: Option<McpOAuthConfig>,
 ) -> Result<()> {
     if !confirm_overwrite(name)? {
         return Ok(());
@@ -185,11 +189,20 @@ pub async fn add_http_server(
         url: Some(url.clone()),
         headers: parse_header_pairs(&header_pairs)?,
         env_headers: parse_env_header_pairs(&env_header_pairs)?,
+        oauth,
         ..Default::default()
     };
 
     println!("\nValidating '{name}' ({url})...");
-    match registry::validate_http(&server_config).await {
+    let tools = match registry::validate_http(name, &server_config).await {
+        Err(e) if super::oauth::is_auth_required(&e) => {
+            println!("'{name}' needs you to sign in.");
+            super::oauth::login(name, &server_config).await?;
+            registry::validate_http(name, &server_config).await
+        },
+        other => other,
+    };
+    match tools {
         Ok(tools) => println!("Server ready: {} tool(s) available", tools.len()),
         Err(e) => return Err(anyhow!("Server '{name}' failed to start: {e}")),
     }
@@ -301,6 +314,10 @@ fn parse_env_pairs(pairs: &[String]) -> Result<HashMap<String, String>> {
 pub async fn remove_server(name: &str) -> Result<()> {
     if remove_user_config_key(&["mcp_servers", name])? {
         println!("Removed MCP server '{name}' from config.");
+        // Its sign-in goes with it. Best-effort: no keyring is no tokens.
+        if super::oauth::logout(name).unwrap_or(false) {
+            println!("Removed its stored sign-in.");
+        }
     } else {
         println!("MCP server '{name}' is not configured.");
         let config = load_config()?;

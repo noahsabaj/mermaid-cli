@@ -87,7 +87,7 @@ impl PolicyEngine {
         // the memory short-circuit below — so an operator can tighten (or relax)
         // any category. Only the hard-denied destructive pattern above outranks
         // it. (This block previously sat *after* the memory return, so a
-        // `PolicyOverride{ category: Memory, .. }` was silently ignored — #119.)
+        // `PolicyOverride{ category: Memory, .. }` was silently ignored.)
         if let Some(decision) = self
             .overrides
             .iter()
@@ -367,7 +367,9 @@ fn classify(request: &ActionRequest, host_shell: HostShell) -> RiskClass {
             .map(|cmd| shell::classify::classify_command_for(host_shell, cmd))
             .unwrap_or(RiskClass::ShellMutation),
         ToolCategory::Web | ToolCategory::Network => RiskClass::Network,
-        ToolCategory::ExternalDirectory | ToolCategory::Mcp => RiskClass::ExternalAccess,
+        ToolCategory::ExternalDirectory | ToolCategory::Mcp | ToolCategory::Computer => {
+            RiskClass::ExternalAccess
+        },
         ToolCategory::Subagent => RiskClass::Process,
         ToolCategory::Process => RiskClass::Process,
         // Short-circuited in `decide` before this risk is used for a decision;
@@ -415,7 +417,7 @@ mod tests {
 
     #[test]
     fn memory_override_is_applied() {
-        // #119: a user override targeting the Memory category must take effect.
+        // A user override targeting the Memory category must take effect.
         // It previously sat behind the memory short-circuit and was ignored, so
         // memory writes could only be stopped by read-only.
         let req = || ActionRequest::new("memory", ToolCategory::Memory, "memory remember");
@@ -990,7 +992,7 @@ mod tests {
 
     #[test]
     fn command_substitution_destructive_is_hard_denied() {
-        // #F1: a destructive command hidden in `$(…)` / backticks / process
+        // A destructive command hidden in `$(…)` / backticks / process
         // substitution must be hard-denied even in full_access — the shell
         // executes the substitution, so the gate must see inside it.
         for cmd in [
@@ -1062,7 +1064,7 @@ mod tests {
 
     #[test]
     fn ifs_and_interior_dotdot_evasions_are_hard_denied() {
-        // #F2/#F3: `${IFS}` word-glue and interior `..` must not evade the deny.
+        // `${IFS}` word-glue and interior `..` must not evade the deny.
         for cmd in [
             "rm${IFS}-rf${IFS}/",
             "rm -rf /etc/../etc",
@@ -1089,7 +1091,7 @@ mod tests {
 
     #[test]
     fn command_substitution_mutation_is_not_readonly() {
-        // #F1: even a non-catastrophic mutation hidden in `$(…)` must NOT classify
+        // Even a non-catastrophic mutation hidden in `$(…)` must NOT classify
         // ReadOnly — ReadOnly auto-allows with no prompt and no classifier in
         // read_only / ask / auto. A benign read-only substitution still stays
         // ReadOnly so the fix doesn't over-escalate ordinary work.
@@ -1396,7 +1398,7 @@ mod tests {
 
     #[test]
     fn shell_interpreter_c_payload_destructive_is_hard_denied() {
-        // #5: a destructive command hidden inside `bash -c "…"` must not slip
+        // A destructive command hidden inside `bash -c "…"` must not slip
         // past the tokenizer.
         for cmd in [
             "bash -c \"rm -rf /\"",
@@ -1420,7 +1422,7 @@ mod tests {
 
     #[test]
     fn windows_destructive_commands_are_hard_denied() {
-        // #6: Windows recursive delete / format of a system root.
+        // Windows recursive delete / format of a system root.
         for cmd in [
             "del /s /q C:\\",
             "rd /s /q C:\\Windows",
@@ -1443,7 +1445,7 @@ mod tests {
 
     #[test]
     fn redirect_to_sensitive_target_is_hard_denied() {
-        // #7: a benign head writing to cron / ssh / dotfiles / system paths via
+        // A benign head writing to cron / ssh / dotfiles / system paths via
         // a redirect or `tee`.
         for cmd in [
             "echo '* * * * * root sh' > /etc/cron.d/pwn",
@@ -2028,7 +2030,7 @@ mod tests {
 
     #[test]
     fn allow_override_is_anchored_to_argv0_and_single_command() {
-        // #8: an Allow override on `git` must not allow a chained command that
+        // An Allow override on `git` must not allow a chained command that
         // merely shares argv0.
         let allow_git = PolicyOverride {
             tool: Some("execute_command".to_string()),
@@ -2087,7 +2089,7 @@ mod tests {
 
     #[test]
     fn deny_override_still_substring_matches() {
-        // #8: Deny overrides keep substring matching (safe to over-match).
+        // Deny overrides keep substring matching (safe to over-match).
         let deny_curl = PolicyOverride {
             tool: Some("execute_command".to_string()),
             pattern: Some("curl".to_string()),
@@ -2103,10 +2105,14 @@ mod tests {
 
     #[test]
     fn read_only_mode_denies_external_tool_categories() {
-        // C1/H1/H2: ReadOnly must block mcp/raw network. Subagent spawn is
-        // the deliberate Allow exception; Web takes the separate Ask path
-        // tested below.
-        for cat in [ToolCategory::Network, ToolCategory::Mcp] {
+        // C1/H1/H2: ReadOnly must block mcp/raw network and computer input.
+        // Subagent spawn is the deliberate Allow exception; Web takes the
+        // separate Ask path tested below.
+        for cat in [
+            ToolCategory::Network,
+            ToolCategory::Mcp,
+            ToolCategory::Computer,
+        ] {
             let decision =
                 PolicyEngine::new(SafetyMode::ReadOnly).decide(&ActionRequest::new("t", cat, "s"));
             assert!(
@@ -2213,7 +2219,7 @@ mod tests {
 
     #[test]
     fn chained_commands_cannot_hide_a_dangerous_head() {
-        // #1: glued operators and newlines must not let a second command
+        // Glued operators and newlines must not let a second command
         // classify as ReadOnly. In read_only mode any mutation is denied.
         for cmd in [
             "ls\nrm -rf src",
@@ -2248,7 +2254,7 @@ mod tests {
 
     #[test]
     fn fd_numbered_redirect_is_a_write() {
-        // #25: `1>` / `2>>` are writes (a bare `starts_with('>')` missed them).
+        // `1>` / `2>>` are writes (a bare `starts_with('>')` missed them).
         let ro = PolicyEngine::new(SafetyMode::ReadOnly).decide(&shell("echo evil 1>out.txt"));
         assert!(matches!(ro, PolicyDecision::Deny { .. }), "got {ro:?}");
         let sens =

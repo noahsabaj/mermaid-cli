@@ -5,7 +5,7 @@
 //! `/tmp/mermaid-clipboard-paste.png`). On a multi-user host another local user
 //! could read those frames, or pre-create / symlink the path to redirect the
 //! write. Routing them through a `0700` directory under the app data dir closes
-//! that window — only the owning user can traverse it (#11, #33).
+//! that window — only the owning user can traverse it.
 
 use std::path::PathBuf;
 

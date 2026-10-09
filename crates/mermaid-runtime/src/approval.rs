@@ -34,7 +34,7 @@ pub fn approve_and_replay(id: &str) -> Result<ApprovalReplayResult> {
 /// `replay_pending_action` performs a filesystem write or a process spawn —
 /// effects SQLite cannot roll back — so they run *before* the "approved" mark is
 /// written. A crash mid-replay therefore leaves the approval undecided and
-/// safely re-runnable, never "approved but never applied" (#62). The single-shot
+/// safely re-runnable, never "approved but never applied". The single-shot
 /// `decide` is the last mutation; its `WHERE user_decision IS NULL` guard closes
 /// the residual same-user race and makes a second call a no-op error.
 pub(crate) fn approve_and_replay_with(
@@ -53,9 +53,9 @@ pub(crate) fn approve_and_replay_with(
     );
 
     // Claim atomically so two concurrent `approve <id>` calls can't both run the
-    // un-rollback-able effect (#118): exactly one wins the claim and proceeds.
+    // un-rollback-able effect: exactly one wins the claim and proceeds.
     // Any failure before the final mark releases the claim, keeping the action
-    // re-runnable — preserving the effect-before-mark crash-safety of #62.
+    // re-runnable — preserving the effect-before-mark crash-safety.
     anyhow::ensure!(
         store.approvals().claim(id)?,
         "approval {id} is already being applied by a concurrent approve"
@@ -196,7 +196,7 @@ fn replay_pending_action(action: &serde_json::Value) -> Result<String> {
     // every effect with the symlink-safe `*_beneath` helpers — the SAME
     // kernel-confined (`openat2(RESOLVE_BENEATH)`) path the live filesystem tools
     // use — rather than by-path `std::fs`, which follows an in-repo symlink out
-    // of the root (#F4/#F5). `relative_within` rejects an escaping path and names
+    // of the root. `relative_within` rejects an escaping path and names
     // it relative to `workdir`, which the helpers resolve beneath a `workdir` fd.
     match tool {
         "execute_command" => replay_execute_command(args, &workdir),
@@ -266,7 +266,7 @@ fn is_secret_env_name(name: &str) -> bool {
 
 /// Strip secret-bearing env vars from a replay child. The daemon's environment
 /// holds provider API keys and the pairing token; an approved shell command
-/// must not be able to read them back out (#24).
+/// must not be able to read them back out.
 fn scrub_secret_env(cmd: &mut Command) {
     for (name, _) in std::env::vars() {
         if is_secret_env_name(&name) {
@@ -355,8 +355,8 @@ fn replay_execute_command(args: &serde_json::Value, workdir: &Path) -> Result<St
     let command = string_arg(args, "command")?;
     // Re-apply the destructive hard-deny on replay. The command was approved by a
     // human originally, but `pending_action_json` is stored, tamperable state; a
-    // doctored record must not turn `approve` into arbitrary destructive exec
-    // (#F7). Destructive shapes are hard-denied (never merely "ask"), so a
+    // doctored record must not turn `approve` into arbitrary destructive exec.
+    // Destructive shapes are hard-denied (never merely "ask"), so a
     // legitimate pending approval can't be destructive in the first place.
     anyhow::ensure!(
         !crate::policy::is_destructive_command(command),
@@ -367,7 +367,7 @@ fn replay_execute_command(args: &serde_json::Value, workdir: &Path) -> Result<St
     // already-approved shell string (replayed verbatim), but a tampered
     // `working_dir` must not let the replay escape the project root. Use the
     // canonical (symlink-resolving) check so a symlinked working_dir whose real
-    // target is outside the root is rejected, not just a lexical `..` (#F6).
+    // target is outside the root is rejected, not just a lexical `..`.
     let effective_dir = match args.get("working_dir").and_then(|value| value.as_str()) {
         Some(dir) => crate::pathguard::contain_within_canonical(workdir, dir)?,
         None => workdir.to_path_buf(),
@@ -381,7 +381,7 @@ fn replay_execute_command(args: &serde_json::Value, workdir: &Path) -> Result<St
     scrub_secret_env(&mut cmd);
     if mode == "background" {
         // New process group so the detached child (and anything it forks) can be
-        // signalled/reaped as a unit rather than leaking grandchildren (#24).
+        // signalled/reaped as a unit rather than leaking grandchildren.
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
@@ -412,7 +412,7 @@ fn replay_execute_command(args: &serde_json::Value, workdir: &Path) -> Result<St
 
 /// Re-apply one parsed patch hunk beneath `root` for approval replay, using the
 /// SAME confined pathguard helpers as the live tool so a symlinked leaf inside
-/// the root can neither leak an outside file nor redirect a write (#F5).
+/// the root can neither leak an outside file nor redirect a write.
 fn replay_apply_hunk(root: &Path, hunk: &crate::apply_patch::Hunk) -> Result<()> {
     use crate::apply_patch::Hunk;
     match hunk {
@@ -516,7 +516,7 @@ mod tests {
         assert!(crate::pathguard::relative_within(&root, "../escape").is_err());
     }
 
-    /// RC-B: a write replayed through an in-repo symlink that escapes the root
+    /// A write replayed through an in-repo symlink that escapes the root
     /// must be refused, and nothing may be written outside. The live tool path
     /// already had this guarantee via the `*_beneath` helpers; the replay path
     /// now shares it instead of following the symlink with by-path `std::fs`.
@@ -551,7 +551,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&outside);
     }
 
-    /// RC-B/#F7: a tampered pending record whose command is destructive must be
+    /// A tampered pending record whose command is destructive must be
     /// refused on replay rather than executed verbatim.
     #[test]
     fn replay_execute_command_refuses_destructive() {
@@ -682,7 +682,7 @@ mod tests {
         let root = temp_workdir("fail");
         // delete_file of a path that doesn't exist → replay errors *after* the
         // pending pre-check but *before* `decide`, so the approval must stay
-        // undecided (re-runnable), never "approved but never applied" (#62).
+        // undecided (re-runnable), never "approved but never applied".
         let action = serde_json::json!({
             "tool": "delete_file",
             "workdir": root,

@@ -52,7 +52,7 @@ pub struct RenderCache {
     pub host_shell: mermaid_model::safety::HostShell,
     /// Per-message render cache: `(content, theme, width)` hash → fully wrapped,
     /// role-prefixed assistant lines, so committed messages aren't re-parsed or
-    /// re-wrapped every frame (#134).
+    /// re-wrapped every frame.
     pub wrapped_line_cache: FxHashMap<u64, Vec<ratatui::text::Line<'static>>>,
     /// Memoized stitched transcript: committed `Continuation` messages folded
     /// into their predecessor bubble and spent `RecoveryNudge` notes hidden.
@@ -69,7 +69,7 @@ pub struct RenderCache {
     applied_theme: Option<(mermaid_domain::ThemeChoice, bool)>,
     /// Host + user for the status bar's `user@host:cwd` line, injected once at
     /// startup so `StatusWidget::render` doesn't hit the environment on every
-    /// frame (#55). Process-constant, so caching here is exact. The shell reads
+    /// frame. Process-constant, so caching here is exact. The shell reads
     /// the environment and passes the result to [`RenderCache::new`]; render
     /// itself never does, which is what keeps this module a pure function of
     /// its inputs.
@@ -81,7 +81,7 @@ pub struct RenderCache {
     /// version; the snapshot suite pins it (like `home_dir`) so pinned
     /// frames survive release bumps.
     pub version: String,
-    /// F13: last `state.ui.mouse_scroll_accum` value we applied to
+    /// Last `state.ui.mouse_scroll_accum` value we applied to
     /// `chat.scroll_up/down`. Diffing lets the reducer stay pure —
     /// it just publishes a counter; render owns the chat-state side.
     last_mouse_scroll_accum: i32,
@@ -140,7 +140,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         rstate.applied_theme = Some(want);
     }
 
-    // F13: consume any pending mouse-scroll accumulator. The reducer
+    // Consume any pending mouse-scroll accumulator. The reducer
     // publishes a monotonic counter on `ui.mouse_scroll_accum`; we
     // apply the delta to `ChatState` since the reducer isn't allowed
     // to touch render-layer state directly.
@@ -206,19 +206,20 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         let now_sys = std::time::SystemTime::from(state.now);
         let elapsed_since =
             |t: std::time::SystemTime| now_sys.duration_since(t).unwrap_or_default();
-        let elapsed = match &state.turn {
-            // A model run (generating + executing tools) anchors to the run start
-            // so the timer spans the whole agentic loop, not just this step.
-            TurnState::Generating { started, .. } | TurnState::ExecutingTools { started, .. } => {
-                state
+        let elapsed =
+            match &state.turn {
+                // A model run (generating + executing tools) anchors to the run start
+                // so the timer spans the whole agentic loop, not just this step.
+                TurnState::Generating { started, .. }
+                | TurnState::ExecutingTools { started, .. } => state
                     .runtime
                     .run_started
-                    .map_or_else(|| elapsed_since(*started), elapsed_since)
-            },
-            TurnState::Compacting { started, .. } => elapsed_since(*started),
-            TurnState::Cancelling { since, .. } => elapsed_since(*since),
-            TurnState::Idle => std::time::Duration::ZERO,
-        };
+                    .map_or_else(|| elapsed_since(*started), elapsed_since),
+                TurnState::Compacting { started, .. }
+                | TurnState::EvaluatingGoal { started, .. } => elapsed_since(*started),
+                TurnState::Cancelling { since, .. } => elapsed_since(*since),
+                TurnState::Idle => std::time::Duration::ZERO,
+            };
         let (agent_rows, status_override, bg_available) = agent_panel_data(state);
         // Claude Code parity: while a checklist task is in_progress its
         // active_form IS the spinner headline ("Wiring the broker…"), with
@@ -243,7 +244,10 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
         let tokens_display = match &state.turn {
             TurnState::Generating { tokens, .. } => Some(committed.output_tokens + *tokens),
             TurnState::ExecutingTools { .. } => Some(committed.output_tokens + live_child_tokens),
-            TurnState::Compacting { .. } | TurnState::Cancelling { .. } | TurnState::Idle => None,
+            TurnState::Compacting { .. }
+            | TurnState::EvaluatingGoal { .. }
+            | TurnState::Cancelling { .. }
+            | TurnState::Idle => None,
         };
         build_status_lines(
             GenerationStatus::from_turn(&state.turn),
@@ -342,6 +346,19 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
             widgets::question_modal_height(qset, &rstate.theme, frame.area().width)
         }),
         BottomPane::Confirm => 6,
+        // Grows with the answer, but leaves the transcript, the composer and
+        // a few rows of chat on screen.
+        BottomPane::SideQuestion => widgets::side_question_height(
+            &state.side_questions,
+            &rstate.theme,
+            frame.area().width,
+            (frame.area().height / 2).min(
+                frame
+                    .area()
+                    .height
+                    .saturating_sub(input_height + status_line_height + 6),
+            ),
+        ),
         BottomPane::ConversationList | BottomPane::Rewind | BottomPane::PromptSearch => 12,
         BottomPane::ModelPicker => widgets::MODEL_PICKER_HEIGHT,
         BottomPane::FilePicker => {
@@ -553,7 +570,7 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
                 // Content-bearing external tools (type_text, MCP, …) are
                 // non-allowlistable: the gate leaves their scope empty, and we
                 // omit the "don't ask again" option so the user can't
-                // blanket-approve them (#6, #31).
+                // blanket-approve them.
                 let options = if item.allowlist_scope.is_empty() {
                     vec!["1. Yes".to_string(), "2. No (Esc)".to_string()]
                 } else {
@@ -598,6 +615,13 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
                 };
                 frame.render_widget(widget, chunks[4]);
             }
+        },
+        BottomPane::SideQuestion => {
+            let widget = widgets::SideQuestionWidget {
+                theme: &rstate.theme,
+                side: &state.side_questions,
+            };
+            frame.render_widget(widget, chunks[4]);
         },
         BottomPane::ModelPicker => {
             if let mermaid_domain::UiMode::ModelPicker {
@@ -688,6 +712,11 @@ pub fn render(state: &State, rstate: &mut RenderCache, frame: &mut Frame) {
                 reasoning_level: effective,
                 requested_level,
                 safety_mode: state.session.safety_mode,
+                goal: widgets::goal_segment(
+                    state.session.conversation.goal.is_some(),
+                    state.runtime.goal.started,
+                    std::time::SystemTime::from(state.now),
+                ),
             };
             frame.render_widget(status_widget, chunks[4]);
         },
@@ -739,6 +768,7 @@ enum BottomPane<'a> {
     Approval,
     Question,
     Confirm,
+    SideQuestion,
     ModelPicker,
     ConversationList,
     Rewind,
@@ -754,6 +784,7 @@ fn bottom_pane(state: &mermaid_domain::State) -> BottomPane<'_> {
         Focus::ApprovalModal => BottomPane::Approval,
         Focus::QuestionModal => BottomPane::Question,
         Focus::ConfirmModal => BottomPane::Confirm,
+        Focus::SideQuestion => BottomPane::SideQuestion,
         Focus::Picker => match state.ui.mode {
             UiMode::ModelPicker { .. } => BottomPane::ModelPicker,
             UiMode::ConversationList { .. } => BottomPane::ConversationList,
@@ -1255,7 +1286,7 @@ pub(crate) fn render_frame(
     out
 }
 
-/// Full-frame snapshots of `render()`. Runs on every platform (#296): the
+/// Full-frame snapshots of `render()`. Runs on every platform: the
 /// suite pins its own clock, host/user, version and cwd, so nothing platform-
 /// dependent reaches the frame.
 #[cfg(test)]
@@ -1473,7 +1504,7 @@ mod tests {
         assert_eq!(idle.len(), 1);
 
         // A generating partial yields an owned copy whose live message is stamped
-        // from the injected `now`, never the wall clock (render purity, #135).
+        // from the injected `now`, never the wall clock (render purity).
         let turn = TurnState::Generating {
             id: TurnId(1),
             started: SystemTime::now(),

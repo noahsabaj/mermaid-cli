@@ -17,7 +17,8 @@ use std::sync::Arc;
 use tracing::{info, warn};
 
 use super::client::{
-    ContentBlock, McpClient, McpPromptDef, McpResource, McpToolDef, McpToolResult, ResourceContents,
+    ContentBlock, McpClient, McpPromptDef, McpResource, McpToolDef, McpToolResult,
+    ProbeEndedServer, ResourceContents,
 };
 use super::sanitize;
 use super::transport::{StdioTransport, Transport};
@@ -125,7 +126,7 @@ impl McpServerManager {
                 "Starting MCP server: {} ({} {})",
                 name,
                 config.command,
-                // Redact args — they can carry secrets (e.g. `--api-key=…`) (#93).
+                // Redact args — they can carry secrets (e.g. `--api-key=…`).
                 mermaid_model::utils::redact_secrets(&config.args.join(" "))
             ),
         }
@@ -193,20 +194,31 @@ impl McpServerManager {
         name: &str,
         config: &McpServerConfig,
     ) -> Result<(McpClient, Vec<McpToolDef>, Vec<McpPromptDef>)> {
-        let transport: Transport = match config.transport_kind()? {
-            TransportKind::Stdio => {
-                StdioTransport::spawn(&config.command, &config.args, &config.env)
-                    .await?
-                    .into()
-            },
-            TransportKind::Http => HttpTransport::new(config)?.into(),
+        let kind = config.transport_kind()?;
+        let spawn = || async {
+            let transport: Transport = match kind {
+                TransportKind::Stdio => {
+                    StdioTransport::spawn(&config.command, &config.args, &config.env)
+                        .await?
+                        .into()
+                },
+                TransportKind::Http => HttpTransport::new(name, config)?.into(),
+            };
+            Ok::<_, anyhow::Error>(McpClient::new(transport))
         };
-        let mut client = McpClient::new(transport);
+        let mut client = spawn().await?;
 
-        client
-            .initialize()
-            .await
-            .map_err(|e| anyhow!("MCP server '{name}' initialization failed: {e}"))?;
+        let started = match client.initialize().await {
+            // The probe ended a legacy stdio server: start it again for the
+            // handshake alone.
+            Err(e) if e.is::<ProbeEndedServer>() => {
+                client.shutdown().await;
+                client = spawn().await?;
+                client.initialize_legacy().await
+            },
+            other => other,
+        };
+        started.map_err(|e| anyhow!("MCP server '{name}' initialization failed: {e}"))?;
 
         let tools = client
             .list_tools()
@@ -615,12 +627,14 @@ mod tests {
         let tools_result =
             r#"{"tools":[{"name":"echo","description":"echoes","inputSchema":{"type":"object"}}]}"#;
         let fx = fixture(vec![
+            // A legacy server refuses the server/discover probe.
+            status_reply(400, "Bad Request"),
             json_reply(&format!(
-                r#"{{"jsonrpc":"2.0","id":1,"result":{init_result}}}"#
+                r#"{{"jsonrpc":"2.0","id":2,"result":{init_result}}}"#
             )),
             status_reply(202, "Accepted"),
             json_reply(&format!(
-                r#"{{"jsonrpc":"2.0","id":2,"result":{tools_result}}}"#
+                r#"{{"jsonrpc":"2.0","id":3,"result":{tools_result}}}"#
             )),
         ])
         .await;
@@ -645,13 +659,12 @@ mod tests {
 
     #[tokio::test]
     async fn resources_and_prompts_server_exposes_both_through_the_manager() {
-        use super::super::transport_http::test_fixture::{
-            fixture, json_reply, rpc_response, status_reply,
-        };
-        let init = r#"{"protocolVersion":"2025-11-25","capabilities":{"resources":{},"prompts":{}},"serverInfo":{"name":"fx"}}"#;
+        use super::super::transport_http::test_fixture::{fixture, json_reply, rpc_response};
+        // A 2026-07-28 server: its capabilities come in the DiscoverResult,
+        // with no handshake after it.
+        let discover = r#"{"supportedVersions":["2026-07-28"],"capabilities":{"resources":{},"prompts":{}},"_meta":{"io.modelcontextprotocol/serverInfo":{"name":"fx"}}}"#;
         let fx = fixture(vec![
-            json_reply(&rpc_response(1, init)),
-            status_reply(202, "Accepted"),
+            json_reply(&rpc_response(1, discover)),
             json_reply(&rpc_response(2, r#"{"tools":[]}"#)),
             json_reply(&rpc_response(
                 3,
@@ -701,9 +714,11 @@ mod tests {
         };
         let init = r#"{"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"fx"}}"#;
         let fx = fixture(vec![
-            json_reply(&rpc_response(1, init)),
+            // A legacy server refuses the server/discover probe.
+            status_reply(400, "Bad Request"),
+            json_reply(&rpc_response(2, init)),
             status_reply(202, "Accepted"),
-            json_reply(&rpc_response(2, r#"{"tools":[]}"#)),
+            json_reply(&rpc_response(3, r#"{"tools":[]}"#)),
         ])
         .await;
         let config = fx.config();
@@ -723,7 +738,7 @@ mod tests {
             "{err}"
         );
         // Nothing beyond startup reached the wire.
-        assert_eq!(fx.requests().await.len(), 3);
+        assert_eq!(fx.requests().await.len(), 4);
     }
 
     #[tokio::test]

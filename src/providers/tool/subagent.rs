@@ -497,6 +497,15 @@ impl ToolExecutor for SubagentTool {
         }
     }
 
+    async fn execute(&self, args: Value, ctx: ExecContext) -> ToolOutcome {
+        self.run(args, ctx, None).await
+    }
+}
+
+impl SubagentTool {
+    /// The `agent` tool's body. `fork` is set only for a `/btw` fork: the
+    /// user started it, so the spawn gate is skipped (the child's own tool
+    /// calls stay gated), and the fresh child inherits that conversation.
     #[expect(
         clippy::too_many_lines,
         reason = "a child session's whole lifecycle: the kill action, argument parsing, the gate \
@@ -505,7 +514,12 @@ impl ToolExecutor for SubagentTool {
          needs a dozen values the setup produced and the detach hands all of them on, so a helper \
          boundary anywhere in the middle would be a struct of everything"
     )]
-    async fn execute(&self, args: Value, ctx: ExecContext) -> ToolOutcome {
+    pub(crate) async fn run(
+        &self,
+        args: Value,
+        ctx: ExecContext,
+        fork: Option<Vec<mermaid_model::models::ChatMessage>>,
+    ) -> ToolOutcome {
         let started = Instant::now();
 
         // Kill action: cancel a backgrounded child (or evict a finished one
@@ -609,14 +623,15 @@ impl ToolExecutor for SubagentTool {
         // child inherits the live safety mode below, so its own tool calls
         // are re-gated at the same strength — a read_only child can fan out
         // exploration but still can't mutate anything.
-        if let Some(blocked) = super::policy_gate::gate_external(
-            &ctx,
-            "agent",
-            mermaid_runtime::ToolCategory::Subagent,
-            format!("subagent: {description}"),
-            &args,
-        )
-        .await
+        if fork.is_none()
+            && let Some(blocked) = super::policy_gate::gate_external(
+                &ctx,
+                "agent",
+                mermaid_runtime::ToolCategory::Subagent,
+                format!("subagent: {description}"),
+                &args,
+            )
+            .await
         {
             return blocked;
         }
@@ -640,7 +655,7 @@ impl ToolExecutor for SubagentTool {
         // config + cwd, with a fresh (or cache-restored) `State` and a tool
         // registry filtered by the agent type (never self-recursion or GUI).
         //
-        // F7: `ExecContext` now carries the parent's `Config` +
+        // `ExecContext` now carries the parent's `Config` +
         // `model_id`. Previously we built `Config::default()` here and
         // the child model id defaulted to `config.default_model.name`
         // (usually empty), which made subagents fail at provider
@@ -697,7 +712,7 @@ impl ToolExecutor for SubagentTool {
         // type's ceiling (`explore` pins read_only regardless of parent).
         // The child runs headless (no approval broker), so in `ask` its
         // mutations block/await rather than silently escalate;
-        // non-replayable tools fail closed (see #3).
+        // non-replayable tools fail closed.
         let child_safety = SafetyMode::least_permissive(ctx.safety_mode, agent_type.safety_ceiling);
 
         // Where the child writes. A continuation keeps the workspace it
@@ -753,6 +768,13 @@ impl ToolExecutor for SubagentTool {
             child_state.session.model_id = model.to_string();
         }
         let child_model_id = child_state.session.model_id.clone();
+        // A `/btw` fork starts from the parent conversation. Never a
+        // continuation: a fork always mints a fresh child.
+        if let Some(history) = fork {
+            let mut conversation = child_state.session.conversation.clone();
+            conversation.set_messages(history);
+            child_state.session.replace_conversation(conversation);
+        }
 
         // Refresh everything that may have moved since the child was built
         // (or since the parent session started): the injected clock, the
@@ -823,7 +845,7 @@ impl ToolExecutor for SubagentTool {
 
         // Drive the child reducer loop to completion. The wall-clock
         // timeout lives inside `drive_child` so the child runner is always
-        // shut down — even on timeout — rather than dropped mid-flight (#76).
+        // shut down — even on timeout — rather than dropped mid-flight.
         let timeout_secs = match config.agents.timeout_secs {
             0 => DEFAULT_TIMEOUT_SECS,
             secs => secs,
@@ -1306,7 +1328,7 @@ async fn drive_child(
     // The deadline is a policy arm (not a `timeout()` wrapper) so the single
     // `runner.shutdown()` below always runs — on normal exit, cancel, OR
     // timeout — instead of the runner being dropped mid-flight and leaking its
-    // MCP children (#76).
+    // MCP children.
     //
     // `OnCancel::Abort` rather than the headless run's graceful unwind: a
     // cancelled child is being torn down by a parent turn that is itself
@@ -1902,7 +1924,7 @@ mod tests {
 
     #[test]
     fn child_state_inherits_live_safety_mode_over_config_default() {
-        // #2: a subagent must run at the parent's LIVE safety mode, not the
+        // A subagent must run at the parent's LIVE safety mode, not the
         // static config default `State::new` would otherwise apply — otherwise
         // a downgraded session is escapable by delegating to a subagent.
         use mermaid_runtime::SafetyMode;
@@ -1957,7 +1979,7 @@ mod tests {
         );
     }
 
-    /// F7: when `ExecContext::model_id` is empty (the test builder's
+    /// When `ExecContext::model_id` is empty (the test builder's
     /// default), the fallback walks `config.default_model.{provider,name}`.
     /// This pins the happy-path behavior.
     #[test]
@@ -2344,6 +2366,58 @@ mod tests {
             std::fs::read_to_string(project.join("seed.txt")).is_ok(),
             "the project must survive a failed child"
         );
+    }
+
+    #[tokio::test]
+    async fn a_btw_fork_skips_the_spawn_gate_and_detaches_at_once() {
+        // The default `Auto` mode with no classifier would block a
+        // model-authored spawn. A fork is the user's own request, so it starts.
+        let mut config = mermaid_domain::Config::default();
+        config.ollama.host = "http://127.0.0.1:1".to_string();
+        let providers = Arc::new(ProviderFactory::new(config.clone()));
+        let web = Arc::new(WebCapabilities::resolve(&config.web));
+        let tool = SubagentTool::new(Arc::new(SubagentSpawner::new(providers, web)));
+        let (mut ctx, _rx) = crate::providers::ctx::test_exec_context_with_config(
+            TurnId(1),
+            ToolCallId(1),
+            std::env::temp_dir(),
+            config,
+        );
+        ctx.model_id = "ollama/does-not-exist".to_string();
+        let (notify_tx, mut notify_rx) = mpsc::channel(16);
+        ctx.notify = Some(notify_tx);
+        ctx.background.cancel();
+        let history = vec![mermaid_model::models::ChatMessage::user("earlier work")];
+
+        let outcome = tool
+            .run(
+                serde_json::json!({"prompt": "carry on", "description": "btw: carry on"}),
+                ctx,
+                Some(history),
+            )
+            .await;
+
+        assert!(outcome.is_success(), "{outcome:?}");
+        assert!(outcome.model_content.contains("moved to background"));
+        let started = tokio::time::timeout(Duration::from_secs(5), notify_rx.recv())
+            .await
+            .expect("a start notice")
+            .expect("channel alive");
+        assert!(
+            matches!(&started, Msg::BackgroundAgentStarted { description, .. } if description == "btw: carry on"),
+            "{started:?}"
+        );
+        // Let the child fail against the dead provider, so no task outlives
+        // the test.
+        loop {
+            let msg = tokio::time::timeout(Duration::from_secs(30), notify_rx.recv())
+                .await
+                .expect("the child finishes")
+                .expect("channel alive");
+            if matches!(msg, Msg::BackgroundAgentFinished { .. }) {
+                break;
+            }
+        }
     }
 
     #[tokio::test]

@@ -9,15 +9,14 @@
 //!
 //! Critical detail: thinking blocks carry an encrypted `signature` that
 //! MUST round-trip in conversation history when extended thinking is
-//! enabled. Mermaid's `ChatMessage::provider_continuation` field (Step 3
-//! Wave 1) holds it across turns. The signature is per-thinking-block
+//! enabled. Mermaid's `ChatMessage::provider_continuation` field
+//! holds it across turns. The signature is per-thinking-block
 //! server state — drop it and the API returns 400 `invalid_request_error`
 //! claiming reasoning continuity is broken.
 //!
-//! Streaming uses standard SSE framing (reused from Step 2's
-//! `drain_sse_events`) but emits TYPED events (`message_start`,
-//! `content_block_start`, `content_block_delta`, etc.) rather than
-//! OpenAI's flat delta-shape. Wave 3 implements the state machine.
+//! Streaming uses standard SSE framing (`drain_sse_events`) but emits
+//! TYPED events (`message_start`, `content_block_start`,
+//! `content_block_delta`, etc.) rather than OpenAI's flat delta-shape.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -41,8 +40,10 @@ use crate::models::reasoning::{
 use crate::models::stream::{StreamEvent, StreamSink};
 use crate::models::tool_call::{FunctionCall, ToolCall};
 use crate::models::traits::Model;
+use crate::utils::base64_image_media_type;
 
 use super::ModelLimits;
+use super::computer_toolset;
 use super::learning::{Learning, Optional, ParamMemory, Rejections};
 use super::native_tools::{self, Advertised};
 use super::output_budget::{OutputBudgetInputs, OutputCapMode, resolve_output_budget};
@@ -100,6 +101,7 @@ fn finalize_block(
         BlockAccumulator::ToolUse {
             id,
             name,
+            toolset,
             input_buf,
         } => {
             let arguments: Value = if input_buf.is_empty() {
@@ -110,6 +112,7 @@ fn finalize_block(
             let tc = tool_calls.push(
                 if id.is_empty() { None } else { Some(id) },
                 FunctionCall { name, arguments },
+                toolset.as_deref(),
             );
             out.push(StreamEvent::ToolCall(tc));
         },
@@ -166,10 +169,23 @@ impl ToolCalls {
     /// Record a finished `tool_use` as the reducer should see it: a call to
     /// one of Anthropic's own tools is rewritten onto the Mermaid tool it
     /// stands for, and its id noted so history can send it back as written.
-    fn push(&mut self, id: Option<String>, mut function: FunctionCall) -> ToolCall {
-        if native_tools::canonicalize(&mut function)
-            && let Some(id) = &id
-        {
+    fn push(
+        &mut self,
+        id: Option<String>,
+        mut function: FunctionCall,
+        toolset: Option<&str>,
+    ) -> ToolCall {
+        let member = (toolset == Some(computer_toolset::TOOLSET_NAME))
+            .then(|| computer_toolset::canonicalize(&function.name, &function.arguments))
+            .flatten();
+        let native = match member {
+            Some(call) => {
+                function = call;
+                true
+            },
+            None => native_tools::canonicalize(&mut function),
+        };
+        if native && let Some(id) = &id {
             self.native.push(id.clone());
         }
         let call = ToolCall { id, function };
@@ -249,7 +265,7 @@ fn legacy_budget_for(level: ReasoningLevel, max_tokens: usize) -> Option<u32> {
     };
     // Anthropic requires `budget_tokens < max_tokens` with a 1024 floor; when
     // max_tokens can't fit a 1024 budget strictly below it, disable thinking
-    // rather than emit `budget >= max_tokens` — a guaranteed 400 (#53).
+    // rather than emit `budget >= max_tokens` — a guaranteed 400.
     if max_tokens <= 1024 {
         return None;
     }
@@ -370,15 +386,26 @@ fn sent_optionals(body: &Value) -> Vec<Optional> {
             &[COMPACTION_PARAM, "compact"],
         ));
     }
-    let native_declared = body
+    let declared: Vec<&str> = body
         .get("tools")
         .and_then(Value::as_array)
-        .is_some_and(|tools| tools.iter().any(|t| t["type"] != "custom"));
-    if native_declared {
+        .map(|tools| tools.iter().filter_map(|t| t["type"].as_str()).collect())
+        .unwrap_or_default();
+    if declared
+        .iter()
+        .any(|t| *t != "custom" && *t != computer_toolset::TOOLSET_TYPE)
+    {
         sent.push(Optional::new(
             native_tools::REJECTION,
             "Anthropic's text editor and bash tools",
             native_tools::REJECTION_NAMES,
+        ));
+    }
+    if declared.contains(&computer_toolset::TOOLSET_TYPE) {
+        sent.push(Optional::new(
+            computer_toolset::REJECTION,
+            "Anthropic's computer toolset",
+            computer_toolset::REJECTION_NAMES,
         ));
     }
     sent
@@ -421,15 +448,19 @@ fn to_anthropic_tools(openai_tools: &[&Value], native: Advertised) -> Vec<Value>
 /// Anthropic's own tools this request offers: what the turn allows, unless
 /// this model has refused them.
 fn advertised_native_tools(config: &ModelConfig, rejected: &Rejections) -> Advertised {
-    if rejected.contains(native_tools::REJECTION) {
-        return Advertised::default();
-    }
     let names: Vec<&str> = config
         .tools
         .iter()
         .filter_map(|t| t.pointer("/function/name").and_then(Value::as_str))
         .collect();
-    Advertised::resolve(config.native_tools, &names)
+    let mut advertised = Advertised::resolve(config.native_tools, &names);
+    if rejected.contains(native_tools::REJECTION) {
+        advertised = advertised.without_editor_and_bash();
+    }
+    if rejected.contains(computer_toolset::REJECTION) {
+        advertised = advertised.without_computer();
+    }
+    advertised
 }
 
 /// The request's `tools`: every registered tool in Anthropic's shape, the
@@ -441,7 +472,7 @@ fn request_tools(config: &ModelConfig, native: Advertised) -> Vec<Value> {
     let registered: Vec<&Value> = config.tools.iter().collect();
     let mut tools = to_anthropic_tools(&registered, native);
     tools.extend(native.declarations());
-    // Mark the LAST tool with `cache_control: ephemeral` (Step 5b).
+    // Mark the LAST tool with `cache_control: ephemeral`.
     // Anthropic caches everything BEFORE the marker too, so a single marker
     // on the last tool covers all tools + the system prompt above (one big
     // cache breakpoint instead of multiple — there's a hard limit of 4 per
@@ -556,6 +587,8 @@ fn coalesce_consecutive_roles(msgs: Vec<Value>) -> Vec<Value> {
 fn convert_messages(messages: &[ChatMessage], native: Advertised) -> (Option<String>, Vec<Value>) {
     let mut system: Option<String> = None;
     let mut out: Vec<Value> = Vec::new();
+    // Calls sent back as computer toolset members: their results must say so.
+    let mut member_calls: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     let mut i = 0;
     while i < messages.len() {
@@ -590,6 +623,12 @@ fn convert_messages(messages: &[ChatMessage], native: Advertised) -> (Option<Str
             },
             MessageRole::Assistant => {
                 let content_blocks = assistant_content_blocks(msg, native);
+                member_calls.extend(
+                    content_blocks
+                        .iter()
+                        .filter(|b| b.get("toolset_name").is_some())
+                        .filter_map(|b| b["id"].as_str().map(str::to_string)),
+                );
                 if content_blocks.is_empty() {
                     // Skip empty assistant messages — an artifact of
                     // tool-only responses where content is "" and there
@@ -608,11 +647,15 @@ fn convert_messages(messages: &[ChatMessage], native: Advertised) -> (Option<Str
                 while i < messages.len() && messages[i].role == MessageRole::Tool {
                     let t = &messages[i];
                     let tool_use_id = t.tool_call_id.clone().unwrap_or_default();
-                    tool_blocks.push(json!({
+                    let mut block = json!({
                         "type": "tool_result",
                         "tool_use_id": tool_use_id,
-                        "content": t.content,
-                    }));
+                        "content": tool_result_content(t),
+                    });
+                    if member_calls.contains(&tool_use_id) {
+                        block["toolset_name"] = json!(computer_toolset::TOOLSET_NAME);
+                    }
+                    tool_blocks.push(block);
                     i += 1;
                 }
                 out.push(json!({"role": "user", "content": tool_blocks}));
@@ -634,21 +677,7 @@ fn user_content(msg: &ChatMessage) -> Value {
         }));
     }
     // Vision: convert each base64 image to an image block.
-    if let Some(ref images) = msg.images {
-        for data in images {
-            // Default media type is png — matches Mermaid's
-            // clipboard module output. Unsupported formats
-            // surface a clear 415 from the API.
-            content_blocks.push(json!({
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": "image/png",
-                    "data": data,
-                },
-            }));
-        }
-    }
+    content_blocks.extend(msg.images.iter().flatten().map(|data| image_block(data)));
     if content_blocks.len() == 1 && content_blocks[0]["type"] == "text" {
         // Optimization: a single text block can serialize as
         // a string (Anthropic accepts both shapes; string is
@@ -662,6 +691,33 @@ fn user_content(msg: &ChatMessage) -> Value {
     } else {
         json!(content_blocks)
     }
+}
+
+/// One base64 image as an Anthropic `image` block.
+fn image_block(data: &str) -> Value {
+    json!({
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": base64_image_media_type(data),
+            "data": data,
+        },
+    })
+}
+
+/// The `content` of a `tool_result`: the tool's text, followed by an image
+/// block for each image the tool returned (a `read_file` of a picture, an MCP
+/// tool's screenshot). Text alone stays a bare string.
+fn tool_result_content(msg: &ChatMessage) -> Value {
+    let Some(images) = msg.images.as_ref().filter(|images| !images.is_empty()) else {
+        return json!(msg.content);
+    };
+    let mut blocks = Vec::with_capacity(images.len() + 1);
+    if !msg.content.is_empty() {
+        blocks.push(json!({"type": "text", "text": msg.content}));
+    }
+    blocks.extend(images.iter().map(|data| image_block(data)));
+    json!(blocks)
 }
 
 /// The content blocks of an assistant turn, in Anthropic's required order:
@@ -715,6 +771,19 @@ fn assistant_content_blocks(msg: &ChatMessage, native: Advertised) -> Vec<Value>
                 .provider_continuation
                 .as_ref()
                 .is_some_and(|c| c.is_anthropic_native_call(&id));
+            if let Some((member, input)) = made_natively
+                .then(|| native.to_computer_member(&tc.function))
+                .flatten()
+            {
+                content_blocks.push(json!({
+                    "type": "tool_use",
+                    "id": id,
+                    "name": member,
+                    "input": input,
+                    "toolset_name": computer_toolset::TOOLSET_NAME,
+                }));
+                continue;
+            }
             let (name, input) = made_natively
                 .then(|| native.to_native(&tc.function))
                 .flatten()
@@ -874,12 +943,12 @@ impl AnthropicAdapter {
 
         // System prompt: emit as a typed-block array with a
         // `cache_control: ephemeral` marker so Anthropic caches the
-        // system prompt across requests (Step 5b). Anthropic's caching
+        // system prompt across requests. Anthropic's caching
         // gives ~90% input-cost reduction + ~2x latency improvement on
         // cache hits, with a 1,024-token minimum that Mermaid's ~1.6k
         // system prompt easily clears. The flat-string shape is also
         // accepted but doesn't get cached.
-        // Step 5h: emit one or two typed-text blocks. Block 1 is the
+        // Emit one or two typed-text blocks. Block 1 is the
         // static base prompt (cached forever); block 2, when present,
         // is MERMAID.md content (cached per-project, invalidates on
         // file edit). Two cache_control markers means switching
@@ -1105,13 +1174,19 @@ impl AnthropicAdapter {
                         signature = sig;
                     }
                 },
-                ContentBlockOut::ToolUse { id, name, input } => {
+                ContentBlockOut::ToolUse {
+                    id,
+                    name,
+                    input,
+                    toolset_name,
+                } => {
                     tool_calls.push(
                         Some(id),
                         FunctionCall {
                             name,
                             arguments: input,
                         },
+                        toolset_name.as_deref(),
                     );
                 },
                 ContentBlockOut::Other => {},
@@ -1196,14 +1271,14 @@ pub(crate) struct AnthropicStream {
     /// Whether any usage frame arrived. Without one the response reports no
     /// usage rather than a provider-sourced zero, which the reducer would
     /// otherwise fold as authoritative and reset the context gauge with
-    /// (#125 / F54 on the other adapters).
+    /// (the other adapters do the same).
     saw_usage: bool,
     prompt_tokens: usize,
     completion_tokens: usize,
     cache_creation_tokens: usize,
     cache_read_tokens: usize,
     stop_reason: Option<FinishReason>,
-    /// F56: set when the terminal `message_stop` frame is observed, so an
+    /// Set when the terminal `message_stop` frame is observed, so an
     /// abnormal close (connection dropped before any terminal frame) can be
     /// told apart from a clean completion.
     saw_message_stop: bool,
@@ -1286,7 +1361,7 @@ impl AnthropicStream {
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
                 if !text.is_empty() && !self.thinking_truncated {
-                    // #9: this is intentionally `None` here —
+                    // This is intentionally `None` here —
                     // `signature_delta` arrives AFTER the
                     // thinking deltas, so streamed reasoning
                     // chunks can't carry it. The final
@@ -1377,9 +1452,14 @@ fn block_accumulator_for(block: Option<&Value>) -> BlockAccumulator {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
+            let toolset = block
+                .and_then(|b| b.get("toolset_name"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
             BlockAccumulator::ToolUse {
                 id,
                 name,
+                toolset,
                 input_buf: String::new(),
             }
         },
@@ -1478,9 +1558,9 @@ impl StreamProtocol for AnthropicStream {
                 }
             },
             "message_stop" => {
-                // Stream complete — record the terminal frame (F56) and stop
+                // Stream complete — record the terminal frame and stop
                 // reading. Waiting for the body to close instead can stall on
-                // a kept-alive / proxied connection (#138). The `Done` event
+                // a kept-alive / proxied connection. The `Done` event
                 // comes from the wrapper, after `finish`.
                 self.saw_message_stop = true;
                 return Ok(Flow::Stop);
@@ -1499,7 +1579,7 @@ impl StreamProtocol for AnthropicStream {
     }
 
     fn finish(mut self, out: &mut Vec<StreamEvent>) -> Result<ModelResponse> {
-        // F56: tell a genuinely abnormal close (the connection dropped before
+        // Tell a genuinely abnormal close (the connection dropped before
         // ANY terminal frame) apart from a clean completion. If we saw neither
         // `message_stop` nor a `message_delta` `stop_reason`, the turn is
         // truncated — returning a clean `Ok` (with `stop_reason: None`) would be
@@ -1509,7 +1589,7 @@ impl StreamProtocol for AnthropicStream {
         // `stop_reason`, so it does NOT trip this and is preserved.
         // A normal stream ends with `message_stop`, preceded by the
         // `message_delta` that carries the terminal `stop_reason`; neither
-        // seen means the connection closed under us (F56).
+        // seen means the connection closed under us.
         if !self.saw_message_stop && ended_without_terminal(self.stop_reason.as_ref()) {
             return Err(ModelError::StreamError(
                 "Anthropic stream closed before any terminal frame (message_stop / \
@@ -1545,7 +1625,7 @@ impl StreamProtocol for AnthropicStream {
             }
         }
 
-        // F3: `Done` is emitted by the provider wrapper from the returned
+        // `Done` is emitted by the provider wrapper from the returned
         // `ModelResponse` so the `provider_continuation` round-trips. If we
         // emitted it here, the reducer would commit the assistant message on
         // our signature-less Done and drop the real one.
@@ -1702,6 +1782,9 @@ enum ContentBlockOut {
         id: String,
         name: String,
         input: Value,
+        /// The client toolset the call belongs to (`"computer"`).
+        #[serde(default)]
+        toolset_name: Option<String>,
     },
     /// Catch-all for content types we don't model (server-tool results,
     /// future block types). Falls through cleanly via serde's untagged
@@ -1724,6 +1807,8 @@ enum BlockAccumulator {
     ToolUse {
         id: String,
         name: String,
+        /// The client toolset the call belongs to (`"computer"`).
+        toolset: Option<String>,
         input_buf: String,
     },
     /// A server-side `compaction` block, as opened, with its deltas applied.
@@ -1838,7 +1923,7 @@ mod tests {
     fn stream_closed_abnormally_distinguishes_drop_from_completion() {
         // The predicate `finish()` applies: closed before ANY terminal frame
         // (no message_stop, no message_delta stop_reason) is abnormal and
-        // surfaces as a stream error (F56).
+        // surfaces as a stream error.
         let closed_abnormally = |saw_message_stop: bool, stop_reason: Option<&FinishReason>| {
             !saw_message_stop && ended_without_terminal(stop_reason)
         };
@@ -1858,7 +1943,7 @@ mod tests {
 
     #[test]
     fn finalize_block_recovers_tool_use() {
-        // #4: a fully-streamed tool_use block must be recovered even when it's
+        // A fully-streamed tool_use block must be recovered even when it's
         // drained outside `content_block_stop` (the mid-cutoff path).
         let mut text = String::new();
         let mut thinking = String::new();
@@ -1870,6 +1955,7 @@ mod tests {
             BlockAccumulator::ToolUse {
                 id: "tu_1".to_string(),
                 name: "read_file".to_string(),
+                toolset: None,
                 input_buf: r#"{"path":"a.txt"}"#.to_string(),
             },
             &mut text,
@@ -2047,7 +2133,7 @@ mod tests {
         assert_eq!(legacy_budget_for(ReasoningLevel::Max, 64000), Some(32000));
         // Max with low max_tokens → clamped, but not below 1024.
         assert_eq!(legacy_budget_for(ReasoningLevel::Max, 2000), Some(1024));
-        // #53: max_tokens at/below the 1024 floor can't fit a budget strictly
+        // Max_tokens at/below the 1024 floor can't fit a budget strictly
         // below it → None (a budget >= max_tokens is a guaranteed 400).
         assert_eq!(legacy_budget_for(ReasoningLevel::High, 1024), None);
         assert_eq!(legacy_budget_for(ReasoningLevel::Max, 512), None);
@@ -2111,7 +2197,7 @@ mod tests {
         );
     }
 
-    /// Effort gating on the 4.5 family (RC-H). Sonnet 4.5 / Haiku 4.5 don't
+    /// Effort gating on the 4.5 family. Sonnet 4.5 / Haiku 4.5 don't
     /// accept the `effort` parameter at all — it 400s — so they must get no
     /// effort field (`None`). Opus 4.5 accepts effort but not `max`, so `Max`
     /// and `XHigh` snap down to `high`.
@@ -2162,7 +2248,7 @@ mod tests {
         assert_eq!(translated.len(), 1);
         assert_eq!(translated[0]["name"], "read_file");
         assert_eq!(translated[0]["description"], "Read a file");
-        // Step 5c: `type: "custom"` is added explicitly so the API can
+        // `type: "custom"` is added explicitly so the API can
         // disambiguate from server-managed tool types.
         assert_eq!(translated[0]["type"], "custom");
         // The OpenAI `{type: "function", function: {...}}` wrapper is
@@ -2289,6 +2375,30 @@ mod tests {
         assert_eq!(content[1]["source"]["type"], "base64");
         assert_eq!(content[1]["source"]["media_type"], "image/png");
         assert_eq!(content[1]["source"]["data"], "BASE64DATA");
+    }
+
+    #[test]
+    fn a_tool_result_carries_the_images_its_tool_returned() {
+        use super::super::tool_images::{JPEG_B64, tool_loop_with_image};
+        let (_, msgs) = convert_messages(&tool_loop_with_image(), Advertised::default());
+        let results = msgs[2]["content"].as_array().expect("tool results");
+        let with_image = results[0]["content"].as_array().expect("text and image");
+        assert_eq!(
+            with_image[0],
+            json!({"type": "text", "text": "[image/jpeg, 14 bytes]"})
+        );
+        assert_eq!(with_image[1]["type"], "image");
+        assert_eq!(with_image[1]["source"]["media_type"], "image/jpeg");
+        assert_eq!(with_image[1]["source"]["data"], JPEG_B64);
+        assert_eq!(
+            results[1]["content"], "plain text",
+            "text alone stays a string"
+        );
+        assert_eq!(
+            msgs.len(),
+            4,
+            "no extra turn: the image rides in the result"
+        );
     }
 
     // --- Request body ---
@@ -2579,7 +2689,7 @@ mod tests {
             ..Default::default()
         };
         let body = adapter.build_request_body(&messages, &config);
-        // Step 5b: system serializes as a typed-block array carrying a
+        // System serializes as a typed-block array carrying a
         // `cache_control: ephemeral` marker so Anthropic caches it.
         let sys = body["system"].as_array().expect("system is array");
         assert_eq!(sys.len(), 1);
@@ -2593,7 +2703,7 @@ mod tests {
         }
     }
 
-    /// Step 5h: when MERMAID.md content is present, the static base
+    /// When MERMAID.md content is present, the static base
     /// stays in cache slot #1 and the dynamic suffix gets its own
     /// cache slot #2. Two separately-cached typed-text blocks → static
     /// base survives across project switches; only the suffix re-caches
@@ -2658,7 +2768,7 @@ mod tests {
         assert!(body["output_config"].get("format").is_none());
     }
 
-    /// Step 5c bug fix: `effort` lives at `output_config.effort`, NOT
+    /// `effort` lives at `output_config.effort`, NOT
     /// top-level. Adaptive models also need `display: "summarized"` so
     /// Opus 4.7 (which defaults to "omitted") surfaces reasoning chunks.
     #[test]
@@ -2672,7 +2782,7 @@ mod tests {
         let body = adapter.build_request_body(&messages, &config);
         assert_eq!(body["thinking"]["type"], "adaptive");
         assert_eq!(body["thinking"]["display"], "summarized");
-        // Effort is in output_config, NOT top-level (Step 5c fix).
+        // Effort is in output_config, NOT top-level.
         assert_eq!(body["output_config"]["effort"], "high");
         assert!(body.get("effort").is_none(), "effort must NOT be top-level");
         assert!(body["thinking"].get("budget_tokens").is_none());
@@ -2680,7 +2790,7 @@ mod tests {
 
     /// Sonnet 4.5 uses legacy `budget_tokens` thinking AND must NOT receive an
     /// `effort` field — the effort parameter 400s on Sonnet 4.5 / Haiku 4.5
-    /// (RC-H: the old code sent effort to every model, including these). A
+    /// (the old code sent effort to every model, including these). A
     /// temperature is still accepted here.
     #[test]
     fn build_request_body_uses_legacy_for_sonnet_4_5() {
@@ -2708,7 +2818,7 @@ mod tests {
         assert!(body.get("temperature").is_some());
     }
 
-    /// RC-H: Opus 4.8 / Fable 5 are on the 4.6+ adaptive line — adaptive
+    /// Opus 4.8 / Fable 5 are on the 4.6+ adaptive line — adaptive
     /// thinking, effort in `output_config`, and NO temperature (it 400s there).
     #[test]
     fn build_request_body_adaptive_no_temperature_for_opus_4_8() {
@@ -2817,7 +2927,7 @@ mod tests {
         );
     }
 
-    /// Step 5c: `display` defaults to `"summarized"` on adaptive models
+    /// `display` defaults to `"summarized"` on adaptive models
     /// so reasoning chunks are visible in the response stream. Without
     /// this, Opus 4.7 users see no reasoning content (it defaults to
     /// `"omitted"` on Opus 4.7 specifically).
@@ -2904,7 +3014,7 @@ mod tests {
         assert_eq!(names, ["web_fetch", "web_search"]);
     }
 
-    /// Step 5b: only the LAST tool gets `cache_control: ephemeral`.
+    /// Only the LAST tool gets `cache_control: ephemeral`.
     /// Anthropic caches everything BEFORE the marker too, so a single
     /// marker on the last tool is enough — adding more wastes one of
     /// the 4 cache breakpoints per request.

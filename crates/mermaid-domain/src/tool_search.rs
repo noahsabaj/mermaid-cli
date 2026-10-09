@@ -35,7 +35,7 @@ fn server_defers(state: &State, entry: &McpServerEntry) -> bool {
 }
 
 /// Ready servers sorted by name — the stable iteration base every
-/// advertising/search path shares (byte-stable requests, #F68).
+/// advertising/search path shares (byte-stable requests).
 fn ready_servers(state: &State) -> Vec<(&String, &McpServerEntry)> {
     let mut servers: Vec<_> = state
         .mcp

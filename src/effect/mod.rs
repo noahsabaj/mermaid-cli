@@ -56,7 +56,7 @@ const CANCEL_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 #[cfg(test)]
 const CANCEL_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(50);
 
-/// F38: how many recently-cancelled `TurnId`s to remember as tombstones.
+/// How many recently-cancelled `TurnId`s to remember as tombstones.
 /// Turn ids are strictly monotonic and never reused, so a stray turn-scoped
 /// `Cmd` for a cancelled turn can only ever be a post-cancel straggler that
 /// lands within a few turns of the cancel. A small bounded ring is plenty;
@@ -426,9 +426,9 @@ pub struct EffectRunner {
     /// `TurnId` creates a scope; `Cmd::CancelScope` tears it down.
     /// Empty (drained) scopes are reaped by `reap_empty_scopes`, which
     /// runs at the top of every `dispatch` call so the map stays
-    /// bounded across long sessions (F12).
+    /// bounded across long sessions.
     scopes: HashMap<TurnId, TurnScope>,
-    /// F38: bounded tombstone ring of `TurnId`s whose scope has been
+    /// Bounded tombstone ring of `TurnId`s whose scope has been
     /// cancelled+dropped. A turn-scoped `Cmd` (`CallModel` / `ExecuteTool` /
     /// `CompactConversation`) bearing a tombstoned id is dropped in `dispatch`
     /// instead of resurrecting a fresh, un-cancelled scope through
@@ -480,7 +480,7 @@ pub struct EffectRunner {
     /// runner minting its own broker (bound to the CHILD's msg channel) is
     /// exactly what isolates its checklist from the parent's.
     tasks: crate::providers::TaskBroker,
-    /// Abort handle for the background config watcher (#45). It's a perpetual
+    /// Abort handle for the background config watcher. It's a perpetual
     /// loop living in `detached`, so `shutdown` aborts it explicitly before
     /// draining — otherwise the drain would block on it until the timeout.
     config_watch: Option<tokio::task::AbortHandle>,
@@ -539,7 +539,7 @@ impl EffectRunner {
         self
     }
 
-    /// Start the background config watcher (#45): it polls `MERMAID.md` + memory
+    /// Start the background config watcher: it polls `MERMAID.md` + memory
     /// and emits `Msg::InstructionsChanged`/`MemoryChanged` on change, so the
     /// reducer reads them as injected data instead of refreshing inline. Call
     /// once at startup. Live-loop only — a replay driver feeds the recorded
@@ -654,7 +654,7 @@ impl EffectRunner {
             .or_insert_with(|| TurnScope::new(turn))
     }
 
-    /// F38: record a cancelled turn in the bounded tombstone ring, evicting the
+    /// Record a cancelled turn in the bounded tombstone ring, evicting the
     /// oldest id at capacity. Skips duplicates so a re-cancel doesn't churn the
     /// ring (membership is all `is_tombstoned` checks).
     fn tombstone_turn(&mut self, turn: TurnId) {
@@ -667,7 +667,7 @@ impl EffectRunner {
         self.cancelled_turns.push_back(turn);
     }
 
-    /// F38: true iff `turn`'s scope was cancelled (tombstoned). New turn-scoped
+    /// True iff `turn`'s scope was cancelled (tombstoned). New turn-scoped
     /// work for such a turn is dropped rather than spinning up a fresh scope.
     fn is_tombstoned(&self, turn: TurnId) -> bool {
         self.cancelled_turns.contains(&turn)
@@ -677,7 +677,7 @@ impl EffectRunner {
     /// `Msg::QueryResult`. Conversation reads and provider discovery run
     /// async; everything touching the runtime store or the filesystem walk
     /// goes through [`Self::send_blocking_query`] so a synchronous read never
-    /// stalls an async worker thread (#40).
+    /// stalls an async worker thread.
     fn dispatch_query(&mut self, query: Query) {
         let tx = self.msg_tx.clone();
         match query {
@@ -911,7 +911,7 @@ impl EffectRunner {
     /// Run a synchronous lookup on the blocking pool and deliver its
     /// `Msg::QueryResult` — the shared plumbing of every store/filesystem
     /// query (rusqlite reads and the project walk must never stall an async
-    /// worker thread, #40).
+    /// worker thread).
     fn send_blocking_query(&mut self, run: impl FnOnce() -> QueryResult + Send + 'static) {
         let tx = self.msg_tx.clone();
         self.detached.spawn_blocking(move || {
@@ -929,7 +929,7 @@ impl EffectRunner {
     /// stick in `Cancelling` — the reducer has no other way to learn
     /// that the abort fully landed.
     fn drop_scope(&mut self, turn: TurnId) {
-        // F38: tombstone this turn so a stray post-cancel turn-scoped Cmd can't
+        // Tombstone this turn so a stray post-cancel turn-scoped Cmd can't
         // resurrect an un-cancelled scope for it. Recorded for both the live and
         // already-reaped branches below — once cancelled, a turn is dead either
         // way (turn ids are monotonic and never reused).
@@ -971,7 +971,7 @@ impl EffectRunner {
         self.scopes.len()
     }
 
-    /// F12: remove scope entries whose `JoinSet` is empty — every
+    /// Remove scope entries whose `JoinSet` is empty — every
     /// child task has completed, so the scope is just an orphan key
     /// in the map. Called at the top of `dispatch` so the map stays
     /// bounded over long sessions. Cheap: one linear walk, no async.
@@ -990,7 +990,7 @@ impl EffectRunner {
     /// Harvest finished detached tasks. Without this the `detached` `JoinSet`
     /// grows for the whole session (every fire-and-forget effect lingers as a
     /// completed-but-unjoined handle), and a panicking detached task vanishes
-    /// without a trace. Non-blocking — only already-finished tasks are taken (#38).
+    /// without a trace. Non-blocking — only already-finished tasks are taken.
     fn reap_detached(&mut self) {
         while let Some(result) = self.detached.try_join_next() {
             if let Err(e) = result
@@ -1011,12 +1011,12 @@ impl EffectRunner {
          the length is the Cmd count and drops only as commands are retired"
     )]
     pub fn dispatch(&mut self, cmd: Cmd) {
-        // F12: reap any drained scopes before touching the map. Keeps
+        // Reap any drained scopes before touching the map. Keeps
         // `scope_count()` bounded as the session grows.
         self.reap_empty_scopes();
         tracing::trace!(cmd = %cmd.summary(), "effect: dispatch");
 
-        // F38: refuse to spawn fresh work for a turn we've already cancelled.
+        // Refuse to spawn fresh work for a turn we've already cancelled.
         // Only the scope-spawning variants carry a `scope_turn()`; `CancelScope`
         // returns `None` here so a re-cancel still reaches `drop_scope` (which
         // re-emits the terminal `TurnCancelled` the reducer needs). Turn ids are
@@ -1058,7 +1058,7 @@ impl EffectRunner {
                     // synchronous dispatch path so we can't await; if the bounded
                     // channel is momentarily full under heavy streaming, log the
                     // drop rather than swallowing it silently — the estimate just
-                    // stays briefly stale (#F43).
+                    // stays briefly stale.
                     if let Err(e) = tx.try_send(Msg::BuiltinToolSchemaTokens(builtin_tokens)) {
                         tracing::debug!(
                             error = %e,
@@ -1098,7 +1098,7 @@ impl EffectRunner {
                         // The dispatch task panicked. A turn whose model call
                         // never emits a terminal Msg stays in `Generating`
                         // forever; emit one so the reducer can leave that state
-                        // instead of wedging (#43).
+                        // instead of wedging.
                         tracing::error!(turn = %turn, "dispatch_call_model panicked");
                         let _ = fallback_tx
                             .send(Msg::UpstreamError {
@@ -1144,8 +1144,7 @@ impl EffectRunner {
                         // The compaction task panicked. Without a terminal
                         // `CompactionFinished`/`CompactionFailed`, the reducer
                         // wedges in `Compacting` until Ctrl+C; emit a failure so
-                        // it can recover, mirroring `CallModel`/`ExecuteTool`
-                        // (#43, F37).
+                        // it can recover, mirroring `CallModel`/`ExecuteTool`.
                         tracing::error!(turn = %turn, "dispatch_compact_conversation panicked");
                         let _ = fallback_tx
                             .send(Msg::CompactionFailed {
@@ -1153,6 +1152,34 @@ impl EffectRunner {
                                 trigger,
                                 message: "the compaction task panicked unexpectedly".to_string(),
                                 kind: mermaid_domain::StatusKind::Error,
+                            })
+                            .await;
+                    }
+                });
+            },
+            Cmd::EvaluateGoal { turn, request } => {
+                let tx = self.msg_tx.clone();
+                let providers = self.providers.clone();
+                let scope = self.scope_mut(turn);
+                let token = scope.token();
+                scope.spawn(async move {
+                    use futures::FutureExt;
+                    let fallback_tx = tx.clone();
+                    if std::panic::AssertUnwindSafe(evaluate_goal(
+                        tx, providers, turn, request, token,
+                    ))
+                    .catch_unwind()
+                    .await
+                    .is_err()
+                    {
+                        // Without a reply the reducer would wait in
+                        // `EvaluatingGoal` until Esc; report the failure so
+                        // the goal pauses instead.
+                        tracing::error!(turn = %turn, "evaluate_goal panicked");
+                        let _ = fallback_tx
+                            .send(Msg::GoalEvaluated {
+                                turn,
+                                reply: Err("the goal check task panicked".to_string()),
                             })
                             .await;
                     }
@@ -1168,7 +1195,7 @@ impl EffectRunner {
                 let tools = self.tools.clone();
                 let workdir = self.workdir.clone();
                 // Pass the shared Config from ProviderFactory so
-                // subagents inherit it (F7). Falls back to
+                // subagents inherit it. Falls back to
                 // Config::default() when providers aren't bound (unit
                 // tests without real wiring).
                 let config = self
@@ -1230,7 +1257,7 @@ impl EffectRunner {
                         // The tool task panicked. Its turn waits on a
                         // `ToolFinished` for this `call_id` that will now never
                         // arrive; emit a terminal error outcome so the turn
-                        // doesn't wedge (#43).
+                        // doesn't wedge.
                         tracing::error!(
                             turn = %turn,
                             call_id = call_id.0,
@@ -1503,6 +1530,24 @@ impl EffectRunner {
                     }
                 });
             },
+            Cmd::PersistAutoCompact(change) => {
+                let tx = self.msg_tx.clone();
+                let workdir = self.workdir.clone();
+                self.detached.spawn(async move {
+                    let msg = match crate::app::persist_auto_compact(&workdir, &change) {
+                        // Read both files back so the session follows the same
+                        // priority the next one will.
+                        Ok(path) => Msg::AutoCompactSaved {
+                            path: path.display().to_string(),
+                            compaction: crate::app::load_project_scoped_config(&workdir).compaction,
+                        },
+                        Err(err) => Msg::TransientStatus {
+                            text: format!("Couldn't save the auto-compact setting: {err:#}"),
+                        },
+                    };
+                    let _ = tx.send(msg).await;
+                });
+            },
             Cmd::ComposeInEditor { .. } => {
                 // Run-loop-intercepted in the interactive TUI (it owns the
                 // terminal + event stream). Reaching the effect runner means a
@@ -1564,6 +1609,66 @@ impl EffectRunner {
                 let providers = self.providers.clone();
                 self.detached.spawn(async move {
                     consolidate_memory(tx, providers, workdir, model_id).await;
+                });
+            },
+            Cmd::AskSideQuestion { id, mut request } => {
+                // The built-in tools ride along exactly as on `CallModel`:
+                // the history holds calls to them, and the same tool list
+                // keeps the provider's prompt cache warm. The side answer
+                // never runs one.
+                if let Some(tools) = &self.tools {
+                    let mut enriched = tools.describe_all();
+                    enriched.append(&mut request.tools);
+                    request.tools = enriched;
+                }
+                let tx = self.msg_tx.clone();
+                let providers = self.providers.clone();
+                self.detached.spawn(async move {
+                    answer_side_question(tx, providers, id, request).await;
+                });
+            },
+            Cmd::ForkSideQuestion {
+                prompt,
+                description,
+                history,
+                dispatch,
+            } => {
+                let tx = self.msg_tx.clone();
+                let Some(spawner) = self.tools.as_ref().and_then(|t| t.subagent_spawner()) else {
+                    let _ = tx.try_send(Msg::TransientStatus {
+                        text: "The fork did not start: this session cannot run agents.".to_string(),
+                    });
+                    return;
+                };
+                let config = self
+                    .providers
+                    .as_ref()
+                    .map(|p| Arc::new(p.config().clone()))
+                    .unwrap_or_else(|| Arc::new(mermaid_domain::Config::default()));
+                let tool = crate::providers::tool::subagent::SubagentTool::new(spawner.clone())
+                    .with_types(&config.agents.types);
+                // The agent runs headless like any child: no approval broker,
+                // no question channel, and the spawn gate is skipped because
+                // the user asked for it.
+                let services = crate::providers::ctx::ToolServices {
+                    workdir: self.workdir.clone(),
+                    config,
+                    task_id: self.task_id.clone(),
+                    notify: Some(tx.clone()),
+                    classifier: None,
+                    approval: None,
+                    questions: None,
+                    tasks: Some(self.tasks.clone()),
+                };
+                let fork = SideFork {
+                    prompt,
+                    description,
+                    history,
+                    dispatch,
+                    services,
+                };
+                self.detached.spawn(async move {
+                    fork_side_question(tx, tool, fork).await;
                 });
             },
             Cmd::Query(query) => self.dispatch_query(query),
@@ -1642,7 +1747,7 @@ impl EffectRunner {
                     let resolved = crate::runtime_client::RuntimeService::open_default()
                         .and_then(|service| service.resolve_open_target(&target))
                         .unwrap_or(target);
-                    // #63: the resolved value can be a `detected_url`/`log_path`
+                    // The resolved value can be a `detected_url`/`log_path`
                     // from a `processes` row — validate before the OS opener,
                     // exactly like `open_process`.
                     if let Err(err) = crate::runtime_client::validate_open_target(&resolved) {
@@ -1838,7 +1943,7 @@ impl EffectRunner {
                 }
                 // Offload the terminal write to the blocking pool: writing to
                 // stdout can block when the terminal (or a downstream pipe) is
-                // slow, and an async worker must not block on it (#44). The
+                // slow, and an async worker must not block on it. The
                 // OSC-2 title sequence is out-of-band relative to the renderer's
                 // frame draws, so it doesn't corrupt them.
                 self.detached.spawn_blocking(move || {
@@ -1916,7 +2021,7 @@ impl EffectRunner {
             scope.cancel();
         }
 
-        // The config watcher (#45) is a perpetual loop in `detached`; abort it
+        // The config watcher is a perpetual loop in `detached`; abort it
         // so the drain below doesn't block on it until the bounded timeout.
         if let Some(handle) = self.config_watch.take() {
             handle.abort();
@@ -1979,7 +2084,7 @@ impl EffectRunner {
                 // already spawned but `set_manager` hasn't run yet — `get()`
                 // below would return `None` and we'd leak those children. Wait
                 // (bounded) for init to settle so the manager is installed
-                // before we reap it (#59).
+                // before we reap it.
                 let _ = tokio::time::timeout(
                     std::time::Duration::from_secs(2),
                     crate::mcp::manager_ref::wait_ready(),
@@ -1999,7 +2104,7 @@ impl EffectRunner {
                 // runner reaps process-global services. No-op if none started.
                 crate::searxng::shutdown().await;
             }
-            // F42: bound each per-scope drain so one non-cooperative task can't
+            // Bound each per-scope drain so one non-cooperative task can't
             // eat the whole shutdown budget and starve the remaining scopes'
             // drains (the scopes were all cancelled above, so a well-behaved task
             // unwinds well within this). On timeout, dropping `scope` aborts its
@@ -2046,14 +2151,18 @@ fn note_stream_usage(
 }
 
 mod compaction;
+mod goal;
 mod memory;
 mod model_call;
 mod pricing;
+mod side_question;
 mod tool_call;
 
 use compaction::*;
+use goal::*;
 use memory::*;
 use model_call::*;
+use side_question::*;
 use tool_call::*;
 
 #[cfg(test)]
@@ -2315,7 +2424,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_scope_emits_turn_cancelled_even_after_reaping() {
-        // Regression (Axis 1 #9): if a turn's tasks complete and
+        // Regression: if a turn's tasks complete and
         // `reap_empty_scopes` removes the now-empty scope before the user's
         // cancel lands, `drop_scope` used to be a silent no-op and the reducer
         // stuck forever in `Cancelling`. The terminal `TurnCancelled` must fire
@@ -2364,6 +2473,7 @@ mod tests {
             output_schema: None,
             suppress_auto_compact: false,
             requested_compaction: None,
+            compaction: mermaid_domain::CompactionPolicy::default(),
             native_compaction: None,
             native_tools: mermaid_model::models::NativeTools::default(),
         };
@@ -2371,7 +2481,62 @@ mod tests {
         assert_eq!(r.scope_count(), 1);
     }
 
-    /// F12: after a spawned task completes (here via the
+    /// `/btw` runs detached: it opens no turn scope, so the main turn
+    /// neither waits on it nor cancels it. Without a provider it still
+    /// settles, with a failure the pane can show.
+    #[tokio::test]
+    async fn a_side_question_opens_no_scope_and_always_settles() {
+        let (mut r, mut rx) = runner();
+        let request = mermaid_domain::ChatRequest {
+            model_id: "test/m".to_string(),
+            ..mermaid_domain::ChatRequest::default()
+        };
+        r.dispatch(Cmd::AskSideQuestion { id: 4, request });
+        assert_eq!(r.scope_count(), 0);
+        let msg = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("the side question settled")
+            .expect("channel alive");
+        assert!(matches!(
+            msg,
+            Msg::SideQuestionFinished {
+                id: 4,
+                outcome: mermaid_domain::side_question::SideOutcome::Failed(_),
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_fork_without_agent_support_says_so() {
+        let (mut r, mut rx) = runner();
+        r.dispatch(Cmd::ForkSideQuestion {
+            prompt: "carry on".to_string(),
+            description: "btw: carry on".to_string(),
+            history: vec![],
+            dispatch: mermaid_domain::ToolDispatch {
+                model_id: "test/m".to_string(),
+                safety_mode: mermaid_runtime::SafetyMode::Ask,
+                goal: mermaid_domain::UserGoal::default(),
+                reasoning: mermaid_model::models::ReasoningLevel::default(),
+                session_id: "sess-test".to_string(),
+                message_index: 0,
+                scratchpad: None,
+                additional_dirs: Vec::new(),
+                computer_batch: Vec::new(),
+            },
+        });
+        assert_eq!(r.scope_count(), 0);
+        let msg = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("the fork answered")
+            .expect("channel alive");
+        assert!(
+            matches!(&msg, Msg::TransientStatus { text } if text.contains("cannot run agents")),
+            "{msg:?}"
+        );
+    }
+
+    /// After a spawned task completes (here via the
     /// no-ProviderFactory error path), the next `dispatch` call reaps
     /// the empty scope instead of leaving an orphan entry in the map.
     #[tokio::test]
@@ -2395,6 +2560,7 @@ mod tests {
             output_schema: None,
             suppress_auto_compact: false,
             requested_compaction: None,
+            compaction: mermaid_domain::CompactionPolicy::default(),
             native_compaction: None,
             native_tools: mermaid_model::models::NativeTools::default(),
         };
@@ -2448,6 +2614,7 @@ mod tests {
                 message_index: 0,
                 scratchpad: None,
                 additional_dirs: Vec::new(),
+                computer_batch: Vec::new(),
             },
         });
         let first = tokio::time::timeout(Duration::from_millis(200), rx.recv())
@@ -2486,6 +2653,7 @@ mod tests {
                 output_schema: None,
                 suppress_auto_compact: false,
                 requested_compaction: None,
+                compaction: mermaid_domain::CompactionPolicy::default(),
                 native_compaction: None,
                 native_tools: mermaid_model::models::NativeTools::default(),
             },
@@ -2498,7 +2666,7 @@ mod tests {
 
     #[tokio::test]
     async fn tombstoned_turn_is_not_resurrected_by_late_scoped_cmd() {
-        // F38: once a turn's scope has been cancelled (dropped + tombstoned), a
+        // Once a turn's scope has been cancelled (dropped + tombstoned), a
         // stray turn-scoped Cmd bearing the same TurnId must be dropped — not
         // used to spin up a fresh, un-cancelled scope via `scope_mut`'s
         // `or_insert_with`. Turn ids are monotonic and never reused, so such a
@@ -2520,6 +2688,7 @@ mod tests {
             output_schema: None,
             suppress_auto_compact: false,
             requested_compaction: None,
+            compaction: mermaid_domain::CompactionPolicy::default(),
             native_compaction: None,
             native_tools: mermaid_model::models::NativeTools::default(),
         };

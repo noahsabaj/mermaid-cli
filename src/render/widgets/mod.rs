@@ -29,6 +29,7 @@ mod prompt_search;
 mod question;
 mod rewind_picker;
 mod session_header;
+mod side_question;
 mod slash_palette;
 mod status;
 mod status_line;
@@ -46,8 +47,10 @@ pub use rewind_picker::RewindPickerWidget;
 pub use session_header::{
     SESSION_HEADER_HEIGHT, abbreviate_home, build_session_header, session_header_visible,
 };
+pub use side_question::{SideQuestionWidget, side_question_height};
 pub use slash_palette::SlashPaletteWidget;
 pub use status::StatusWidget;
+pub(crate) use status::goal_segment;
 pub use status_line::{AgentPanelRow, build_status_lines, spinner_glyph};
 pub use tasks::{build_task_lines, tasks_height, tasks_visible};
 
@@ -133,6 +136,7 @@ pub enum GenerationStatus {
     Streaming,
     RunningTools,
     Compacting,
+    CheckingGoal,
     Cancelling,
 }
 
@@ -146,6 +150,7 @@ impl GenerationStatus {
             Self::Streaming => "Streaming",
             Self::RunningTools => "Running tools",
             Self::Compacting => "Compacting",
+            Self::CheckingGoal => "Checking goal",
             Self::Cancelling => "Cancelling",
         }
     }
@@ -167,6 +172,7 @@ impl GenerationStatus {
             },
             TurnState::ExecutingTools { .. } => Self::RunningTools,
             TurnState::Compacting { .. } => Self::Compacting,
+            TurnState::EvaluatingGoal { .. } => Self::CheckingGoal,
             TurnState::Cancelling { .. } => Self::Cancelling,
         }
     }

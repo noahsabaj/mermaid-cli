@@ -10,7 +10,7 @@ use mermaid_model::ids::TurnId;
 /// sends `tool_use` blocks with no `tool_result` and providers (Anthropic in
 /// particular) reject it with a 400. Commit a `cancelled` placeholder result
 /// for every outstanding call so history stays well-formed — the same repair
-/// compaction performs for orphaned tool calls (#71), applied to the live
+/// compaction performs for orphaned tool calls, applied to the live
 /// cancel/quit paths. Leaves `state.turn` untouched for any non-`ExecutingTools`
 /// state; the caller sets the real target state afterwards.
 pub fn seal_orphaned_tool_calls(state: &mut State) {
@@ -132,6 +132,7 @@ pub fn handle_turn_cancelled(state: &mut State, cmds: &mut Vec<Cmd>, turn: TurnI
         TurnState::Cancelling { id, .. } if id == turn => {
             state.turn = TurnState::Idle;
             state.ui.live_tool_status.clear();
+            note_goal_interrupted(state, cmds);
             // The cancel ends the run: record how long it worked and what it
             // spent before this point.
             finish_run(state, cmds, RunEnd::Interrupted);

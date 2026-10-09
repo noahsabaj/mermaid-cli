@@ -32,14 +32,14 @@ pub(super) const TOOL_CALL_TIMEOUT_SECS: u64 = 300;
 /// `REQUEST_TIMEOUT_SECS`: this bounds local pipe backpressure — a child that
 /// never drains its stdin — not server compute time. Healthy frame writes
 /// complete in microseconds; a multi-second stall means the child is wedged,
-/// so we fail fast instead of waiting the full response budget (#37).
+/// so we fail fast instead of waiting the full response budget.
 const WRITE_TIMEOUT_SECS: u64 = 10;
 
 /// Minimal, non-secret environment variables passed through to an MCP server
 /// child after `env_clear()`. Deliberately excludes every provider API key /
 /// cloud credential Mermaid holds — only locale, terminal, and path basics
 /// survive (plus the server's own declared `env`, added separately, and any
-/// `LC_*` matched by prefix). See F48.
+/// `LC_*` matched by prefix).
 #[cfg(not(windows))]
 const SAFE_ENV_PASSTHROUGH: &[&str] = &[
     "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TERM", "TMPDIR",
@@ -116,7 +116,7 @@ impl StdioTransport {
         // third-party (including curated, no-confirmation) server code. Start
         // from an empty environment and re-add only a minimal, non-secret
         // allowlist, plus any `LC_*` locale overrides, plus the server's own
-        // declared `env` vars (which intentionally take precedence). See F48.
+        // declared `env` vars (which intentionally take precedence).
         cmd.env_clear();
         for key in SAFE_ENV_PASSTHROUGH {
             if let Some(value) = std::env::var_os(key) {
@@ -134,7 +134,7 @@ impl StdioTransport {
         }
 
         let mut child = cmd.spawn().with_context(|| {
-            // Redact args — they can carry secrets (e.g. `--api-key=…`) (#93).
+            // Redact args — they can carry secrets (e.g. `--api-key=…`).
             format!(
                 "Failed to spawn MCP server: {} {}",
                 command,
@@ -147,7 +147,7 @@ impl StdioTransport {
             .take()
             .ok_or_else(|| anyhow!("Failed to capture MCP server stdin"))?;
         // Wrap stdin now (rather than at the end) so the stdout reader task can
-        // share it and reply to server-initiated requests we don't support (F79).
+        // share it and reply to server-initiated requests we don't support.
         let stdin = Arc::new(Mutex::new(stdin));
         let stdout = child
             .stdout
@@ -218,7 +218,7 @@ impl StdioTransport {
         // Write the request under a timeout. On any failure — including a wedged
         // child that never drains its stdin — drop the pending entry first so a
         // flaky server can't slowly grow the map with dead senders. Error context
-        // carries only `method`, never `params` (which may hold secrets) (#37).
+        // carries only `method`, never `params` (which may hold secrets).
         {
             let mut stdin = self.stdin.lock().await;
             match timeout(
@@ -269,13 +269,15 @@ impl StdioTransport {
             Ok(Ok(value)) => value,
             Ok(Err(_)) => {
                 self.pending.lock().await.remove(&id);
-                return Err(anyhow!("MCP response channel closed unexpectedly"));
+                return Err(ConnectionClosed.into());
             },
             Err(_) => {
                 self.pending.lock().await.remove(&id);
-                return Err(anyhow!(
-                    "MCP request timed out after {response_timeout_secs}s: {method}"
-                ));
+                return Err(RequestTimeout {
+                    method: method.to_string(),
+                    secs: response_timeout_secs,
+                }
+                .into());
             },
         };
 
@@ -292,7 +294,7 @@ impl StdioTransport {
 
         let msg = format!("{}\n", serde_json::to_string(&notification)?);
         let mut stdin = self.stdin.lock().await;
-        // Bound the write+flush like send_request (#37): a child that never
+        // Bound the write+flush like send_request: a child that never
         // drains its stdin must not hang the caller forever.
         timeout(
             Duration::from_secs(WRITE_TIMEOUT_SECS),
@@ -304,6 +306,11 @@ impl StdioTransport {
             .await
             .map_err(|_| anyhow!("Timed out flushing MCP notification (method: {method})"))??;
         Ok(())
+    }
+
+    /// True once the child process has exited.
+    pub async fn has_exited(&self) -> bool {
+        matches!(self.child.lock().await.try_wait(), Ok(Some(_)))
     }
 
     /// Gracefully shut down the MCP server process per MCP spec guidance:
@@ -414,12 +421,15 @@ impl Transport {
         }
     }
 
-    /// Like [`Self::send_request`], but with an explicit response-wait budget.
-    pub async fn send_request_with_timeout(
+    /// Like [`Self::send_request`], but with an explicit response-wait budget
+    /// and extra HTTP headers (the 2026-07-28 `Mcp-Name` / `Mcp-Param-*`
+    /// headers; stdio has no headers and ignores them).
+    pub async fn send_request_with(
         &self,
         method: &str,
         params: Value,
         response_timeout_secs: u64,
+        headers: &reqwest::header::HeaderMap,
     ) -> Result<Value> {
         match self {
             Self::Stdio(t) => {
@@ -427,9 +437,34 @@ impl Transport {
                     .await
             },
             Self::Http(t) => {
-                t.send_request_with_timeout(method, params, response_timeout_secs)
+                t.send_request_with_headers(method, params, response_timeout_secs, headers)
                     .await
             },
+        }
+    }
+
+    /// True for a remote (Streamable HTTP) server.
+    pub fn is_http(&self) -> bool {
+        matches!(self, Self::Http(_))
+    }
+
+    /// Switch the transport to the 2026-07-28 ("modern") protocol: HTTP sends
+    /// `MCP-Protocol-Version: 2026-07-28` and `Mcp-Method` on every request
+    /// and keeps no session. `None` goes back to the session-based shape.
+    /// No-op on stdio, which has no headers.
+    pub fn set_modern(&self, modern: Option<&str>) {
+        match self {
+            Self::Stdio(_) => {},
+            Self::Http(t) => t.set_modern(modern),
+        }
+    }
+
+    /// True when a stdio server process has exited (an HTTP server never
+    /// reports that).
+    pub async fn has_exited(&self) -> bool {
+        match self {
+            Self::Stdio(t) => t.has_exited().await,
+            Self::Http(_) => false,
         }
     }
 
@@ -460,16 +495,77 @@ impl Transport {
     }
 }
 
+/// The stdio server closed its stdout before answering: it exited or
+/// crashed. Typed so the era probe can tell "the probe ended the server"
+/// from "the server answered with an error".
+#[derive(Debug)]
+pub(super) struct ConnectionClosed;
+
+impl std::fmt::Display for ConnectionClosed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("MCP response channel closed unexpectedly")
+    }
+}
+
+impl std::error::Error for ConnectionClosed {}
+
+/// No response within the request's budget. Typed so the stdio era probe
+/// can treat silence as "legacy server".
+#[derive(Debug)]
+pub(super) struct RequestTimeout {
+    pub method: String,
+    pub secs: u64,
+}
+
+impl std::fmt::Display for RequestTimeout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "MCP request timed out after {}s: {}",
+            self.secs, self.method
+        )
+    }
+}
+
+impl std::error::Error for RequestTimeout {}
+
+/// A JSON-RPC `error` member, kept typed so callers can act on its code
+/// (era detection reads the 2026-07-28 protocol errors).
+#[derive(Debug, Clone)]
+pub(super) struct JsonRpcError {
+    pub code: i64,
+    pub message: String,
+    pub data: Option<Value>,
+}
+
+impl JsonRpcError {
+    /// Parse a JSON-RPC `error` object.
+    pub(super) fn from_error_member(error: &Value) -> Self {
+        Self {
+            code: error.get("code").and_then(|c| c.as_i64()).unwrap_or(-1),
+            message: error
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("Unknown error")
+                .to_string(),
+            data: error.get("data").cloned(),
+        }
+    }
+}
+
+impl std::fmt::Display for JsonRpcError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "MCP error (code {}): {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for JsonRpcError {}
+
 /// Turn a full JSON-RPC response object into its `result`, mapping a JSON-RPC
-/// `error` member to an `Err`. Shared by both transports.
+/// `error` member to an `Err` (a [`JsonRpcError`]). Shared by both transports.
 pub(super) fn extract_jsonrpc_result(response: Value) -> Result<Value> {
     if let Some(error) = response.get("error") {
-        let code = error.get("code").and_then(|c| c.as_i64()).unwrap_or(-1);
-        let message = error
-            .get("message")
-            .and_then(|m| m.as_str())
-            .unwrap_or("Unknown error");
-        return Err(anyhow!("MCP error (code {code}): {message}"));
+        return Err(JsonRpcError::from_error_member(error).into());
     }
     response
         .get("result")
@@ -491,7 +587,7 @@ pub(super) fn parse_response_id(v: &Value) -> Option<u64> {
 /// 2.0 a Response has an `id` and never a `method`; a server Request has an
 /// `id` AND a `method`; a Notification has a `method` and no `id`. Routing a
 /// message that has a `method` to `pending` would wrongly complete a caller's
-/// oneshot — see #89.
+/// oneshot.
 pub(super) fn is_response(msg: &Value) -> bool {
     msg.get("id").and_then(parse_response_id).is_some() && msg.get("method").is_none()
 }
@@ -513,7 +609,7 @@ async fn read_stdout_frames(
                 // A non-UTF-8 frame can't be a JSON-RPC message — JSON is
                 // UTF-8 by RFC 8259 §8.1 and serde_json needs a &str — so it
                 // carries nothing to route. Skip it and resync on the next
-                // frame instead of tearing down the reader (#36).
+                // frame instead of tearing down the reader.
                 Err(_) => {
                     tracing::warn!("MCP: dropping non-UTF-8 stdout frame");
                     continue;
@@ -540,8 +636,8 @@ async fn read_stdout_frames(
         // Only a true JSON-RPC *response* (an id, no method) completes a
         // pending request. A server-initiated *request* also carries an id
         // but ALSO a method; its id can collide with one of ours, and
-        // routing it to `pending` would wrongly complete a caller's oneshot
-        // (#89). Notifications (method, no id) are likewise not responses.
+        // routing it to `pending` would wrongly complete a caller's oneshot.
+        // Notifications (method, no id) are likewise not responses.
         if is_response(&msg) {
             if let Some(id) = msg.get("id").and_then(parse_response_id) {
                 let mut pending = pending.lock().await;
@@ -556,7 +652,7 @@ async fn read_stdout_frames(
             match msg.get("id") {
                 // Server request: it BLOCKS until it gets a response. Reply
                 // with a JSON-RPC "method not supported" error rather than
-                // dropping it and letting the server stall forever (F79).
+                // dropping it and letting the server stall forever.
                 Some(id) if !id.is_null() => {
                     tracing::debug!(
                         method = msg.get("method").and_then(|m| m.as_str()).unwrap_or(""),
@@ -583,8 +679,8 @@ async fn read_stdout_frames(
     // error. No further responses can arrive, so fail every still-pending
     // request NOW rather than letting each caller burn REQUEST_TIMEOUT_SECS.
     // Dropping each oneshot::Sender closes its channel; the caller's
-    // `timeout(.., rx)` then resolves immediately via its channel-closed arm
-    // (#94). `clear()` drops all senders.
+    // `timeout(.., rx)` then resolves immediately via its channel-closed arm.
+    // `clear()` drops all senders.
     pending.lock().await.clear();
 }
 
@@ -594,7 +690,7 @@ async fn log_stderr(stderr: tokio::process::ChildStderr) {
     loop {
         match read_line_capped(&mut reader, MAX_MCP_FRAME_BYTES).await {
             Ok(CappedLine::Line(bytes)) => {
-                // Redact — servers sometimes echo secrets on stderr (#93).
+                // Redact — servers sometimes echo secrets on stderr.
                 let line = String::from_utf8_lossy(&bytes);
                 tracing::debug!(
                     "MCP stderr: {}",
@@ -609,7 +705,7 @@ async fn log_stderr(stderr: tokio::process::ChildStderr) {
 
 /// Reply to a server-initiated JSON-RPC *request* we don't implement with a
 /// JSON-RPC error, so the server isn't left blocking on a response that would
-/// otherwise never arrive (F79). The request `id` is echoed back verbatim
+/// otherwise never arrive. The request `id` is echoed back verbatim
 /// (number or string), as the spec requires. Best-effort and bounded by
 /// `WRITE_TIMEOUT_SECS`: a write failure or a wedged child just means no reply
 /// gets out, which the reader loop will soon observe as EOF anyway.
@@ -704,7 +800,7 @@ mod tests {
     #[test]
     fn is_response_false_for_server_request() {
         // Server-initiated request: has BOTH id and method. Must NOT be routed to
-        // a pending oneshot — that is bug #89 (and its id can collide with ours).
+        // a pending oneshot (its id can collide with ours).
         assert!(!is_response(
             &json!({"jsonrpc": "2.0", "id": 1, "method": "sampling/createMessage", "params": {}})
         ));
@@ -725,7 +821,7 @@ mod tests {
 
     #[test]
     fn invalid_utf8_frame_is_not_valid_json() {
-        // #36 safety claim: a non-UTF-8 frame can never be a JSON-RPC message, so
+        // A non-UTF-8 frame can never be a JSON-RPC message, so
         // skipping it (rather than tearing down the reader) loses nothing.
         let bad = [0xff, 0xfe, b'{', b'}'];
         assert!(String::from_utf8(bad.to_vec()).is_err());
@@ -734,8 +830,7 @@ mod tests {
 
     // The server reads our request, then closes stdout while keeping stdin open
     // and staying alive — so the write+flush succeed and resolution comes from
-    // the #94 EOF drain (channel-closed), not a BrokenPipe or the 30s wait.
-    // Pre-#94 this blocks ~REQUEST_TIMEOUT_SECS.
+    // the EOF drain (channel-closed), not a BrokenPipe or the 30s wait.
     #[cfg(unix)]
     #[tokio::test]
     async fn pending_request_fails_fast_when_server_closes_stdout() {
@@ -762,7 +857,7 @@ mod tests {
         // `t` drops here → kill_on_drop reaps the sleeping child.
     }
 
-    // F48: the MCP child must NOT inherit Mermaid's whole environment (which
+    // The MCP child must NOT inherit Mermaid's whole environment (which
     // holds every provider API key). The child echoes back, as a JSON-RPC
     // response, a declared env var (must pass through), whether PATH is present
     // (allowlisted), and CARGO — a var the parent has under `cargo test` that is
@@ -792,7 +887,7 @@ printf '{"jsonrpc":"2.0","id":1,"result":{"declared":"%s","path":"%s","cargo":"%
         );
     }
 
-    // F79: a server-initiated request (id + method) we don't support must get a
+    // A server-initiated request (id + method) we don't support must get a
     // JSON-RPC error reply so the server isn't left blocking. The fake server
     // reads our ping, emits a server request, then reads our reply and reports —
     // via the ping response — whether that reply carried the -32601 error code.
@@ -827,8 +922,8 @@ esac"#;
         );
     }
 
-    // terminate() must deliver a real SIGTERM (signal 15), not SIGKILL (signal 9)
-    // (#92). Assert on the delivered signal directly rather than relying on a
+    // terminate() must deliver a real SIGTERM (signal 15), not SIGKILL (signal 9).
+    // Assert on the delivered signal directly rather than relying on a
     // TERM trap running, which would race trap-installation against the signal.
     #[cfg(unix)]
     #[tokio::test]

@@ -140,19 +140,15 @@ pub fn push_task_notice(state: &mut State, text: String) {
 /// the reducer injects a staleness nudge (then re-arms for another window).
 pub const TASK_STALENESS_CALLS: u32 = 5;
 
-/// `/load` landed: swap the loaded conversation in and drop everything that
-/// belonged to the previous one.
-fn apply_loaded_conversation(
-    state: &mut State,
-    cmds: &mut Vec<Cmd>,
-    history: crate::ConversationHistory,
-) {
+/// `/load` landed: swap in the loaded conversation and reset everything that
+/// belonged to the one being left.
+fn load_conversation(state: &mut State, cmds: &mut Vec<Cmd>, history: crate::ConversationHistory) {
     // If a turn was in flight when the user loaded another conversation
     // (`/load` mid-generation), cancel its scope first. Otherwise we
     // overwrite `state.turn` to `Idle` below and lose the only handle —
     // the turn's CancellationToken + JoinSet — that could stop the
     // running model call and tool tasks, orphaning them uncancellable;
-    // their parked approval requests could never be answered either (#2).
+    // their parked approval requests could never be answered either.
     if let Some(id) = state.turn.id() {
         cmds.push(Cmd::CancelScope(id));
         // Drop the cancelled turn's parked approval/question modals and
@@ -167,6 +163,8 @@ fn apply_loaded_conversation(
     state.ui.queued_messages.clear();
     state.session.replace_conversation(history);
     state.turn = TurnState::Idle;
+    // A loaded goal (if any) restarts its counters.
+    state.runtime.goal = crate::goal::GoalProgress::default();
     // The abandoned run's summary counters die with it: a leaked
     // `run_started` would otherwise let a later `finish_run` (quit)
     // stamp the OLD run's summary into the conversation loaded here.
@@ -178,6 +176,8 @@ fn apply_loaded_conversation(
     // The loaded conversation has its own id — the previous session's
     // scratch dir no longer applies. Recompute (same as `/clear`).
     refresh_scratchpad(state, cmds);
+    // Side questions were about the conversation being left.
+    state.side_questions.reset();
     emit_title_if_changed(state, cmds);
 }
 
@@ -188,9 +188,7 @@ fn apply_loaded_conversation(
 /// transcript listings always append).
 pub fn handle_query_result(state: &mut State, cmds: &mut Vec<Cmd>, result: QueryResult) {
     match result {
-        QueryResult::ConversationLoaded(history) => {
-            apply_loaded_conversation(state, cmds, *history)
-        },
+        QueryResult::ConversationLoaded(history) => load_conversation(state, cmds, *history),
         QueryResult::AvailableModelsListed(candidates) => {
             // Only fill a picker that is still open — Esc before discovery
             // landed drops the event, exactly like `ConversationsListed`.
@@ -506,6 +504,7 @@ pub fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
         SlashCmd::Todos(arg) => {
             handle_todos_command(state, cmds, arg.as_deref());
         },
+        SlashCmd::Goal(arg) => handle_slash_goal(state, cmds, arg.as_deref()),
         SlashCmd::Scratchpad => {
             // Listing needs the filesystem, so it runs as an effect; the
             // reducer only answers when there is no directory to list.
@@ -831,9 +830,13 @@ pub fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
                 ),
             );
         },
+        SlashCmd::AutoCompact(arg) => {
+            handle_auto_compact_command(state, cmds, arg.as_deref().unwrap_or(""));
+        },
         SlashCmd::OutputStyle { name, project } => {
             handle_output_style_command(state, cmds, name.as_deref(), project);
         },
+        SlashCmd::Btw(question) => handle_btw(state, cmds, question),
         SlashCmd::Editor => {
             // `/editor` opens on whatever draft remains after the command
             // itself was consumed (usually empty); Ctrl+O is the
@@ -876,6 +879,59 @@ pub fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
             )));
         },
     }
+}
+
+/// `/autocompact`: bare shows the threshold for the current model; a change
+/// goes to the effect layer, which writes it and answers with
+/// [`Msg::AutoCompactSaved`].
+fn handle_auto_compact_command(state: &mut State, cmds: &mut Vec<Cmd>, arg: &str) {
+    match crate::autocompact::parse(arg, &state.session.model_id) {
+        Ok(None) => {
+            let status = crate::autocompact::status(
+                &state.settings.compaction,
+                &state.session.model_id,
+                known_context_window(state),
+            );
+            push_system(
+                state,
+                cmds,
+                format!("{status}\n{}", crate::autocompact::USAGE),
+            );
+        },
+        Ok(Some(change)) => cmds.push(Cmd::PersistAutoCompact(change)),
+        Err(message) => push_system(state, cmds, message),
+    }
+}
+
+/// Take the automatic compaction settings the effect layer read back after
+/// an `/autocompact` change, and show what now applies.
+pub(super) fn apply_saved_auto_compact(
+    state: &mut State,
+    cmds: &mut Vec<Cmd>,
+    path: &str,
+    saved: crate::config::CompactionConfig,
+) {
+    let live = &mut state.settings.compaction;
+    live.auto_enabled = saved.auto_enabled;
+    live.auto_threshold_tokens = saved.auto_threshold_tokens;
+    live.auto_threshold_tokens_per_model = saved.auto_threshold_tokens_per_model;
+    let status = crate::autocompact::status(
+        &state.settings.compaction,
+        &state.session.model_id,
+        known_context_window(state),
+    );
+    push_system(state, cmds, format!("Saved to {path}.\n{status}"));
+}
+
+/// The current model's context window, when a response or the provider has
+/// told us.
+fn known_context_window(state: &State) -> Option<usize> {
+    state
+        .session
+        .context_usage
+        .as_ref()
+        .and_then(|s| s.max_tokens)
+        .or(state.runtime.provider_capabilities.max_context_tokens)
 }
 
 /// `/output-style`: bare lists every selectable style; a name switches for
@@ -1173,7 +1229,7 @@ pub fn handle_manual_compact(state: &mut State, cmds: &mut Vec<Cmd>, instruction
         return;
     }
 
-    // Instructions/memory are kept fresh by the config watcher (#45); read as
+    // Instructions/memory are kept fresh by the config watcher; read as
     // injected data so the reducer does no I/O before building the request.
     let turn = state.ids.fresh_turn();
     state.turn = TurnState::Compacting {
@@ -1190,11 +1246,11 @@ pub fn handle_manual_compact(state: &mut State, cmds: &mut Vec<Cmd>, instruction
     state.runtime.auto_compact_suppressed = false;
     cmds.push(Cmd::CompactConversation {
         turn,
-        request: CompactionRequest::manual(
-            build_chat_request(state),
-            instructions,
-            state.settings.compaction.policy(),
-        ),
+        request: {
+            let request = build_chat_request(state);
+            let policy = request.compaction;
+            CompactionRequest::manual(request, instructions, policy)
+        },
     });
 }
 
@@ -1205,8 +1261,8 @@ pub fn handle_confirm_accepted(state: &mut State, cmds: &mut Vec<Cmd>) {
     match confirm.accept_msg_token {
         crate::state::ConfirmationTarget::ClearConversation => {
             // If a turn was still in flight when the user cleared, cancel its
-            // scope first and reset to `Idle` — mirroring `QueryResult::ConversationLoaded`
-            // (#2, F34). Without this the orphaned model/tool tasks keep running
+            // scope first and reset to `Idle` — mirroring `QueryResult::ConversationLoaded`.
+            // Without this the orphaned model/tool tasks keep running
             // (tools keep mutating files after a "clear"), and the still-active
             // turn's same-id `StreamDone`/`ToolFinished` would pass the stale
             // filter and commit a stray message into the freshly-cleared
@@ -1234,6 +1290,8 @@ pub fn handle_confirm_accepted(state: &mut State, cmds: &mut Vec<Cmd>) {
             state.session.conversation =
                 crate::ConversationHistory::new(project_path, model_name, state.now);
             state.session.conversation.git_branch = git_branch;
+            // The fresh conversation has no goal.
+            state.runtime.goal = crate::goal::GoalProgress::default();
             state.session.last_token_usage = None;
             state.session.cumulative_token_usage = TokenUsageTotals::default();
             state.session.usage_by_model.clear();
@@ -1258,6 +1316,8 @@ pub fn handle_confirm_accepted(state: &mut State, cmds: &mut Vec<Cmd>) {
             // New conversation id -> new scratch dir. The old one stays on
             // disk until the sweep reaps it (its pid lock expires with us).
             refresh_scratchpad(state, cmds);
+            // Side questions were about the conversation being left.
+            state.side_questions.reset();
             emit_title_if_changed(state, cmds);
         },
     }

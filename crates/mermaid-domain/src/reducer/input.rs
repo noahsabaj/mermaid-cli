@@ -579,6 +579,12 @@ pub fn handle_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode, mods: K
             handle_confirm_key(state, cmds, code);
             return;
         },
+        // Above the busy-Esc guard: Esc closes the pane and never cancels
+        // the main turn the side question runs beside.
+        Focus::SideQuestion => {
+            handle_side_question_key(state, cmds, code, mods);
+            return;
+        },
         // Pickers dispatch BELOW the busy-Esc guard and the composer
         // chords (Ctrl+D still quits, Alt+T still cycles, with a picker
         // open) — same order the guard chain always had.
@@ -1009,7 +1015,7 @@ pub fn handle_approval_key(state: &mut State, cmds: &mut Vec<Cmd>, code: KeyCode
         use crate::ApprovalChoice;
         // Content-bearing external tools are non-allowlistable: the gate signals
         // this with an empty allowlist scope, and the modal then omits the
-        // middle "approve always" option (#6, #31). Layout:
+        // middle "approve always" option. Layout:
         //   allowlistable:     0 = Yes, 1 = Yes-always, 2 = No
         //   non-allowlistable: 0 = Yes,                 1 = No
         let allowlistable = state
@@ -1168,6 +1174,8 @@ pub fn fork_conversation_at(state: &mut State, cmds: &mut Vec<Cmd>, message_inde
     // dir too — the original session's scratch contents describe work on
     // the timeline being discarded.
     refresh_scratchpad(state, cmds);
+    // Side questions were about the conversation being left.
+    state.side_questions.reset();
 
     // 4. `state.ids.image` is NOT re-based: the allocator stays monotonic, so
     //    image numbers remain unique across the fork (seed_conversation's
@@ -1776,13 +1784,14 @@ pub fn handle_submit_prompt(
 
     commit_user_message(state, text, attachment_ids);
     state.ui.input_buffer.clear();
+    note_user_prompt(state);
 
     // The first user message derives the conversation title; every
     // subsequent message keeps it. Either way, emit SetTerminalTitle
     // only on actual change.
     emit_title_if_changed(state, cmds);
 
-    // Instructions/memory are kept fresh by the background config watcher (#45),
+    // Instructions/memory are kept fresh by the background config watcher,
     // which stamps `state.instructions`/`state.memory` via
     // `Msg::InstructionsChanged`/`MemoryChanged`. The reducer reads them here as
     // injected data — no inline I/O — so `update()` stays pure and a recorded
@@ -1808,7 +1817,7 @@ pub fn handle_submit_prompt(
 
 /// Handle `Msg::OpenImageAt`. Resolves the base64 payload from the committed
 /// message history, writes it to a temp file, and dispatches
-/// `Cmd::OpenInSystem` so the user's default image viewer opens it. F13.
+/// `Cmd::OpenInSystem` so the user's default image viewer opens it.
 ///
 /// Resolution prefers the stable global image number: the click map indexes
 /// the DISPLAY transcript, which the continuation stitch can shift away from

@@ -90,7 +90,7 @@ impl ModelProvider for MetaProvider {
         let usage = response.usage.clone();
         let provider_continuation = response.provider_continuation.clone();
         let stop_reason = response.stop_reason.clone();
-        // F3: the terminal Done goes on the same sink the adapter just
+        // The terminal Done goes on the same sink the adapter just
         // finished writing to, so it cannot overtake a still-queued ToolCall.
         let _ = ctx
             .sink

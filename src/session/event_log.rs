@@ -1,6 +1,5 @@
 //! The per-session event-log appender and fold-reader.
 //!
-//! Design: `docs/design/event-log.md`, then `docs/design/fold-first-resume.md`.
 //! One JSONL file per session at `.mermaid/conversations/<id>.jsonl`, cascaded
 //! by `delete_conversation`.
 //!
@@ -15,7 +14,7 @@
 //! properties the snapshot writer owns for its file: session-id validation
 //! before any path join, credential redaction per line, tool-image
 //! stripping on message-bearing events (and dropping `image` events
-//! outright — a tool image must not reach durable storage, #99), owner-only
+//! outright — a tool image must not reach durable storage), owner-only
 //! create mode, and a read cap. A failed append evicts the cached `seq`
 //! cursor so the next save re-derives it from disk — the same self-healing
 //! posture as `with_shared_store` on the flaky-drive case.
@@ -56,8 +55,7 @@ pub struct EventLog {
     dir: PathBuf,
     /// Per session, what THIS process last wrote: the next `seq` to use and
     /// the file length it left behind. The length is the concurrent-writer
-    /// baseline (F73, moved here from the snapshot in
-    /// `docs/design/fold-first-resume.md`) — a `stat` is O(1), where
+    /// baseline (moved here from the snapshot) — a `stat` is O(1), where
     /// counting lines would reintroduce the per-append cost the whole
     /// arrangement exists to remove.
     ///
@@ -174,7 +172,7 @@ impl EventLog {
             let mut value = serde_json::to_value(&line).context("serialize session event")?;
             // The one redaction pass for this store: a credential that
             // crossed the transcript must not reach the log in cleartext,
-            // exactly as the snapshot writer scrubs its file (#17).
+            // exactly as the snapshot writer scrubs its file.
             mermaid_model::utils::redact_json(&mut value);
             writeln!(file, "{value}").context("append session event line")?;
             seq += 1;
@@ -189,8 +187,7 @@ impl EventLog {
     }
 
     /// Refuse to append to a log another process has written since we last
-    /// did (F73, moved from the snapshot in
-    /// `docs/design/fold-first-resume.md`).
+    /// did (moved here from the snapshot).
     ///
     /// A daemon run and an interactive session can hold the same session
     /// id. While the snapshot was authoritative, a last-writer-wins
@@ -513,7 +510,7 @@ const fn is_idempotent(event: &SessionEvent) -> bool {
     }
 }
 
-/// Tool-image policy at the disk boundary (#99), matching the snapshot
+/// Tool-image policy at the disk boundary, matching the snapshot
 /// writer's: images on non-User messages are dropped (with the marker
 /// appended), and standalone `image` events — always a tool image
 /// routed onto an assistant message — are dropped whole. User-supplied
@@ -564,7 +561,7 @@ fn strip_tool_images(message: &ChatMessage) -> ChatMessage {
 
 /// Open (creating 0600 if needed) the log for append. The log carries the
 /// transcript in cleartext minus redaction, so it gets the same owner-only
-/// posture as the snapshot and the recorder (#132).
+/// posture as the snapshot and the recorder.
 fn open_append(path: &Path) -> Result<File> {
     let mut opts = OpenOptions::new();
     opts.create(true).append(true);

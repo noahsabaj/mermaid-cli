@@ -87,7 +87,7 @@ pub struct State {
     /// System temp dir, injected once at startup by the shell (which reads
     /// `std::env::temp_dir()`). Pasted-image attachments build their scratch
     /// path from it; holding it here keeps the reducer free of the env read it
-    /// used to do inline (#54), and injecting it keeps the read out of this
+    /// used to do inline, and injecting it keeps the read out of this
     /// crate entirely.
     pub temp_dir: PathBuf,
     pub ids: IdAllocatorBundle,
@@ -106,6 +106,10 @@ pub struct State {
     /// emits `Cmd::ResolveQuestion`, unblocking the parked tool task. Empty in
     /// headless mode (no broker → the tool proceeds without asking).
     pub pending_question: VecDeque<PendingQuestionSet>,
+    /// `/btw` side questions and the pane that shows them. Outside the
+    /// conversation by design: nothing here is persisted or sent on a main
+    /// turn (see `side_question`).
+    pub side_questions: crate::side_question::SideQuestions,
     /// Runtime-only observability state: process registry, provider
     /// capability snapshot, and lifecycle timeline. Not sent to the
     /// model.
@@ -157,7 +161,7 @@ impl State {
         let project_path = cwd.display().to_string();
         let conversation = ConversationHistory::new(project_path, model_id.clone(), now);
         let initial_title = conversation.title.clone();
-        // F5: seed `mcp.servers` from the user's configured MCP
+        // Seed `mcp.servers` from the user's configured MCP
         // servers with `Starting` status. Previously the map started
         // empty, and `McpServerReady` handlers used `get_mut` —
         // configured servers never populated, so their tools never
@@ -177,7 +181,7 @@ impl State {
             }
             m
         };
-        // F11: honor the per-model reasoning preference (persisted via
+        // Honor the per-model reasoning preference (persisted via
         // `/reasoning high` while using a specific model). Falls back to
         // the global default when no entry exists.
         let reasoning = settings
@@ -227,6 +231,7 @@ impl State {
             confirm: None,
             pending_approval: VecDeque::new(),
             pending_question: VecDeque::new(),
+            side_questions: crate::side_question::SideQuestions::default(),
             runtime,
             should_exit: false,
             output_schema: None,
@@ -914,6 +919,13 @@ pub enum TurnState {
         /// would commit its remaining text unmarked.
         resume_continuation: bool,
     },
+    /// The run would have ended, and a `/goal` is active: a one-shot model
+    /// call checks whether the goal is met. "Not yet" starts the next goal
+    /// turn; "met", "impossible" or a failed check ends the run.
+    EvaluatingGoal {
+        id: TurnId,
+        started: SystemTime,
+    },
     /// `CancelTurn` was dispatched. The reducer has already emitted a
     /// `Cmd::CancelScope` — now we wait for the final `Cancelled` /
     /// `StreamDone` that the effect runner sends back when the scope's
@@ -935,6 +947,7 @@ impl TurnState {
             Self::Generating { id, .. }
             | Self::ExecutingTools { id, .. }
             | Self::Compacting { id, .. }
+            | Self::EvaluatingGoal { id, .. }
             | Self::Cancelling { id, .. } => Some(*id),
         }
     }
@@ -1079,7 +1092,7 @@ impl ToolOutcome {
     /// so the renderer — `action_display_for`, which falls back to
     /// `error_message().unwrap_or("[cancelled]")` — surfaces the failure
     /// instead of mislabeling it as a cancellation. The MCP proxy uses this
-    /// for `isError: true` results (#91): the model still sees the server's
+    /// for `isError: true` results: the model still sees the server's
     /// content verbatim via `model_content`, but the outcome reads as an
     /// error rather than a success.
     #[must_use]
@@ -1459,7 +1472,7 @@ pub struct UiState {
     /// stepping past the newest history entry with Down restores
     /// the partial input unchanged. Cleared on any non-nav key.
     pub history_draft: String,
-    /// Running accumulator for mouse-wheel scroll events (F13). The
+    /// Running accumulator for mouse-wheel scroll events. The
     /// reducer adds the delta here on `Msg::MouseScroll`; the render
     /// layer compares against its last-seen snapshot and applies the
     /// diff to the chat pane's `ChatState`. This keeps the reducer
@@ -1595,6 +1608,8 @@ pub enum Focus {
     QuestionModal,
     /// A yes/no confirmation (`/clear`).
     ConfirmModal,
+    /// The `/btw` side-question pane.
+    SideQuestion,
     /// One of the `UiMode` pickers (model / conversations / rewind).
     Picker,
     /// The plain composer.
@@ -1614,6 +1629,8 @@ impl State {
             Focus::QuestionModal
         } else if self.confirm.is_some() {
             Focus::ConfirmModal
+        } else if self.side_questions.view.is_some() {
+            Focus::SideQuestion
         } else if matches!(
             self.ui.mode,
             UiMode::ModelPicker { .. }
@@ -1733,7 +1750,7 @@ pub struct McpState {
     /// Deferred MCP tools promoted to direct advertisement by a
     /// `tool_search` call this session (sanitized full names). A
     /// `BTreeSet` keeps the advertised tool order byte-stable across
-    /// requests for prompt-cache warmth (#F68). Transient: cleared by
+    /// requests for prompt-cache warmth. Transient: cleared by
     /// conversation switch/`/clear` along with the rest of the session.
     pub promoted: std::collections::BTreeSet<String>,
 }
@@ -1829,8 +1846,8 @@ pub enum ApprovalChoice {
 
 /// Category of the gated action — drives the prompt's label.
 ///
-/// A deliberately coarser projection of `mermaid_model::safety::ToolCategory`: seven
-/// prompt labels for twelve policy categories, plus `Classify` which has no
+/// A deliberately coarser projection of `mermaid_model::safety::ToolCategory`: eight
+/// prompt labels for thirteen policy categories, plus `Classify` which has no
 /// `ToolCategory` at all. The mapping is the `From` impl below, exhaustive so a
 /// new `ToolCategory` variant is a compile error in exactly one place.
 ///
@@ -1845,6 +1862,7 @@ pub enum ApprovalKind {
     Web,
     Mcp,
     Subagent,
+    Computer,
     Classify,
 }
 
@@ -1857,6 +1875,7 @@ impl From<mermaid_model::safety::ToolCategory> for ApprovalKind {
             C::Web | C::Network | C::ExternalDirectory => Self::Web,
             C::Mcp => Self::Mcp,
             C::Subagent => Self::Subagent,
+            C::Computer => Self::Computer,
             // `Read` and `Memory` resolve to Allow/Deny in `decide`, so neither
             // reaches an approval prompt; the arm exists to keep the match
             // total. The label is a poor fit and would read wrong if one ever

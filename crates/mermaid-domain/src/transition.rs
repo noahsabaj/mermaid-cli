@@ -167,11 +167,17 @@ pub fn tool_result_messages(
                 .id
                 .clone()
                 .unwrap_or_else(|| format!("call_{}", call.call_id.0));
-            ChatMessage::tool(
+            let message = ChatMessage::tool(
                 tool_call_id,
                 call.source.function.name.clone(),
                 outcome.as_tool_message_content(),
-            )
+            );
+            // Images the tool returned (a `read_file` of a picture, an MCP
+            // tool's screenshot) go to the model with its result.
+            match outcome.images() {
+                Some(images) => message.with_images(images),
+                None => message,
+            }
         })
         .collect()
 }
@@ -382,5 +388,21 @@ mod tests {
         assert_eq!(msgs[0].tool_name.as_deref(), Some("read_file"));
         assert_eq!(msgs[0].content, "contents");
         assert!(msgs[1].content.contains("cancelled"));
+    }
+
+    #[test]
+    fn tool_result_messages_carry_the_images_a_tool_returned() {
+        let calls = vec![sample_call(1, "read_file"), sample_call(2, "read_file")];
+        let outcomes = vec![
+            ToolOutcome::success("image: a.png", "1 image read", 0.1)
+                .with_images(vec!["PNGDATA".to_string()]),
+            ToolOutcome::success("text", "1 line read", 0.1),
+        ];
+        let msgs = tool_result_messages(&calls, outcomes);
+        assert_eq!(
+            msgs[0].images.as_deref(),
+            Some(&["PNGDATA".to_string()][..])
+        );
+        assert!(msgs[1].images.is_none());
     }
 }

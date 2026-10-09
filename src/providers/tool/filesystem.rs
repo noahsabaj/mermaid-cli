@@ -11,6 +11,7 @@ use mermaid_domain::ProgressEvent;
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
+use base64::Engine as _;
 
 use mermaid_domain::{ToolDefinition, ToolMetadata, ToolOutcome, ToolRunMetadata};
 use mermaid_model::constants::MAX_RESPONSE_CHARS as MAX_FILE_READ_BYTES;
@@ -33,7 +34,7 @@ fn defn(name: &str, description: &str, input_schema: serde_json::Value) -> ToolD
     }
 }
 
-/// Aggregate cap for a multi-file `read_file` result (#F45). Each file is
+/// Aggregate cap for a multi-file `read_file` result. Each file is
 /// individually bounded at `MAX_RESPONSE_CHARS` by `read_one`, but a batch of up
 /// to `MAX_BATCH_TOOL_ITEMS` files could otherwise sum to ~12.8 MB in a single
 /// tool result — far past any sane model-context budget. This bounds the
@@ -137,7 +138,7 @@ impl ToolExecutor for ReadFileTool {
     fn schema(&self) -> ToolDefinition {
         defn(
             "read_file",
-            "Read the contents of one or more files from disk. Relative paths resolve relative to the project directory; absolute paths may resolve anywhere on disk.",
+            "Read the contents of one or more files from disk. A PNG, JPEG, GIF or WebP file comes back as an image. Relative paths resolve relative to the project directory; absolute paths may resolve anywhere on disk.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -173,6 +174,7 @@ impl ToolExecutor for ReadFileTool {
         let roots = AllowedRoots::of(&ctx);
         let mut combined = String::new();
         let mut any_truncated = false;
+        let mut images: Vec<String> = Vec::new();
 
         for (idx, raw_path) in paths.iter().enumerate() {
             let target = match resolve_read_target(&roots, raw_path) {
@@ -200,13 +202,19 @@ impl ToolExecutor for ReadFileTool {
                     return ToolOutcome::cancelled();
                 },
                 read = read_target(target.root, target.rel) => {
-                    let read = read.and_then(|(content, was_truncated, is_dir)| {
-                        if is_dir {
-                            return Ok((content, was_truncated));
-                        }
-                        view.apply(&content)
-                            .map(|content| (content, was_truncated))
-                            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
+                    let read = read.and_then(|read| match read {
+                        Read::Listing { content, truncated } => Ok((content, truncated)),
+                        Read::Text { content, truncated } => view
+                            .apply(&content)
+                            .map(|content| (content, truncated))
+                            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e)),
+                        // The picture goes to the model as an image; the text
+                        // result names what it is.
+                        Read::Image { data, media_type } => {
+                            let note = format!("[{media_type}, {} bytes]", data.len());
+                            images.push(base64::engine::general_purpose::STANDARD.encode(&data));
+                            Ok((note, false))
+                        },
                     });
                     match read {
                         Ok((content, was_truncated)) => {
@@ -241,7 +249,7 @@ impl ToolExecutor for ReadFileTool {
             }
         }
 
-        // F45: bound the COMBINED multi-file result. Each file is already capped
+        // Bound the COMBINED multi-file result. Each file is already capped
         // at MAX_RESPONSE_CHARS by read_one, but a batch of files can still sum to
         // ~12.8 MB in one tool result — past any sane context budget. Only the
         // multi-file accumulation needs this (single-file output is already
@@ -251,33 +259,61 @@ impl ToolExecutor for ReadFileTool {
             any_truncated = true;
         }
 
-        let duration_secs = start.elapsed().as_secs_f64();
-        let line_count = combined.lines().count();
-        let byte_count = combined.len();
-        // The REAL truncation flag from the bounded read — not a sniff for the
-        // marker string, which a file containing that literal text would
-        // falsely trip (#78).
-        let truncated = any_truncated;
-        ToolOutcome::success(
+        read_outcome(
             combined,
-            format!(
-                "{} {} read",
-                line_count,
-                plural(line_count, "line", "lines")
-            ),
-            duration_secs,
+            paths,
+            any_truncated,
+            images,
+            start.elapsed().as_secs_f64(),
         )
-        .with_metadata(ToolRunMetadata {
+    }
+}
+
+/// The finished `read_file` result: the text, a summary naming lines and
+/// pictures, and the pictures as images.
+fn read_outcome(
+    combined: String,
+    paths: Vec<String>,
+    truncated: bool,
+    images: Vec<String>,
+    duration_secs: f64,
+) -> ToolOutcome {
+    let line_count = combined.lines().count();
+    let byte_count = combined.len();
+    let lines = format!("{line_count} {}", plural(line_count, "line", "lines"));
+    let pictures = format!(
+        "{} {}",
+        images.len(),
+        plural(images.len(), "image", "images")
+    );
+    let summary = if images.is_empty() {
+        format!("{lines} read")
+    } else if images.len() == paths.len() {
+        format!("{pictures} read")
+    } else {
+        format!("{lines}, {pictures} read")
+    };
+    let outcome =
+        ToolOutcome::success(combined, summary, duration_secs).with_metadata(ToolRunMetadata {
             detail: ToolMetadata::ReadFile {
                 paths,
                 line_count,
                 byte_count,
+                // The REAL truncation flag from the bounded read — not a sniff
+                // for the marker string, which a file containing that literal
+                // text would falsely trip.
                 truncated,
             },
             line_count: Some(line_count),
             byte_count: Some(byte_count),
             ..ToolRunMetadata::default()
-        })
+        });
+    // `with_images` after `with_metadata`: the metadata box replaces the
+    // artifacts the images ride in.
+    if images.is_empty() {
+        outcome
+    } else {
+        outcome.with_images(images)
     }
 }
 
@@ -600,7 +636,7 @@ impl ToolExecutor for WriteFileTool {
             biased;
             _ = ctx.token.cancelled() => ToolOutcome::cancelled(),
             // The prior-content read (for the display diff) now happens INSIDE
-            // this blocking job and BOUNDED (#F44/RC-L) — never a synchronous
+            // this blocking job and BOUNDED — never a synchronous
             // unbounded `read_to_string` on the async worker thread.
             result = tokio::task::spawn_blocking(move || write_with_diff_blocking(&root, &abs_path, &rel, &content)) => {
                 match result {
@@ -1032,19 +1068,32 @@ impl View {
 /// Entries a directory listing shows before it stops.
 const DIRECTORY_LISTING_CAP: usize = 1_000;
 
-/// Read `rel` beneath `root`: a file's (bounded) text, or for a directory a
-/// listing two levels deep, skipping hidden and ignored entries. The flag says
-/// which it was, so a listing is never line-numbered as if it were a file.
-async fn read_target(root: PathBuf, rel: PathBuf) -> std::io::Result<(String, bool, bool)> {
+/// What one `read_file` path held.
+#[derive(Debug)]
+enum Read {
+    /// A file's (bounded) text, and whether the cap cut it.
+    Text { content: String, truncated: bool },
+    /// A directory's listing, and whether it hit [`DIRECTORY_LISTING_CAP`].
+    Listing { content: String, truncated: bool },
+    /// A picture, whole, for a vision model to see.
+    Image {
+        data: Vec<u8>,
+        media_type: &'static str,
+    },
+}
+
+/// Read `rel` beneath `root`: a file's text or picture, or for a directory a
+/// listing two levels deep, skipping hidden and ignored entries. A listing is
+/// its own variant, so it is never line-numbered as if it were a file.
+async fn read_target(root: PathBuf, rel: PathBuf) -> std::io::Result<Read> {
     let abs = root.join(&rel);
     if tokio::fs::metadata(&abs).await.is_ok_and(|m| m.is_dir()) {
-        let listing = tokio::task::spawn_blocking(move || list_directory(&abs))
+        let (content, truncated) = tokio::task::spawn_blocking(move || list_directory(&abs))
             .await
             .map_err(|e| std::io::Error::other(e.to_string()))?;
-        return Ok((listing.0, listing.1, true));
+        return Ok(Read::Listing { content, truncated });
     }
-    let (content, truncated) = read_one(root, rel).await?;
-    Ok((content, truncated, false))
+    read_one(root, rel).await
 }
 
 /// `dir`'s entries two levels deep, one relative path per line (directories
@@ -1074,34 +1123,54 @@ fn list_directory(dir: &Path) -> (String, bool) {
     (out, truncated)
 }
 
-/// Read one file (bounded) from `rel` beneath `root`. Returns the (possibly
-/// marker-footed) text and the REAL truncation flag from the bounded read, so
-/// the caller propagates that rather than sniffing the output for the marker
-/// string — which a file whose own content contains that literal text would
-/// otherwise falsely trip (#78).
+/// The largest picture `read_file` returns. Its base64 form is 5 MiB, the
+/// per-image ceiling Anthropic enforces; the other providers accept at least
+/// as much.
+const MAX_IMAGE_BYTES: usize = 3_932_160;
+
+/// Read one file (bounded) from `rel` beneath `root`: a picture whole, or the
+/// (possibly marker-footed) text with the REAL truncation flag from the
+/// bounded read, so the caller propagates that rather than sniffing the
+/// output for the marker string — which a file whose own content contains
+/// that literal text would otherwise falsely trip. A picture is known
+/// by its first bytes, not its name.
 ///
 /// The root-relative path feeds the confined fd read, so the bytes come from
 /// the inode the kernel resolved under `RESOLVE_BENEATH` rather than whatever
-/// a concurrently-swapped symlink now points at (#77).
-async fn read_one(root: PathBuf, rel: PathBuf) -> std::io::Result<(String, bool)> {
-    let result = tokio::task::spawn_blocking(move || {
+/// a concurrently-swapped symlink now points at.
+async fn read_one(root: PathBuf, rel: PathBuf) -> std::io::Result<Read> {
+    tokio::task::spawn_blocking(move || {
         let file = mermaid_runtime::open_beneath(&root, &rel, mermaid_runtime::OpenIntent::Read)?;
         // Bounded read: never pull more than the cap (+1 probe byte) into RAM,
         // so a model pointing `read_file` at a multi-gigabyte file can't OOM the
-        // process — a full read would have slurped the whole thing first (#15).
-        let (data, truncated) = mermaid_model::utils::read_capped(file, MAX_FILE_READ_BYTES)?;
-        let mut s = String::from_utf8_lossy(&data).into_owned();
+        // process — a full read would have slurped the whole thing first.
+        let cap = MAX_FILE_READ_BYTES.max(MAX_IMAGE_BYTES);
+        let (mut data, over_cap) = mermaid_model::utils::read_capped(file, cap)?;
+        if let Some(media_type) = mermaid_model::utils::image_media_type(&data) {
+            if over_cap {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "{media_type} is larger than {MAX_IMAGE_BYTES} bytes, the most a model \
+                         accepts in one image"
+                    ),
+                ));
+            }
+            return Ok(Read::Image { data, media_type });
+        }
+        let truncated = over_cap || data.len() > MAX_FILE_READ_BYTES;
+        data.truncate(MAX_FILE_READ_BYTES);
+        let mut content = String::from_utf8_lossy(&data).into_owned();
         if truncated {
             // Char-boundary-safe truncation with a marker footer.
-            let cut = s.floor_char_boundary(MAX_FILE_READ_BYTES);
-            s.truncate(cut);
-            s.push_str("\n\n[TRUNCATED: file exceeded read cap]");
+            let cut = content.floor_char_boundary(MAX_FILE_READ_BYTES);
+            content.truncate(cut);
+            content.push_str("\n\n[TRUNCATED: file exceeded read cap]");
         }
-        Ok::<_, std::io::Error>((s, truncated))
+        Ok(Read::Text { content, truncated })
     })
     .await
-    .map_err(|e| std::io::Error::other(e.to_string()))??;
-    Ok(result)
+    .map_err(|e| std::io::Error::other(e.to_string()))?
 }
 
 /// Write `content` to `rel` beneath `root` (the project workdir or the session
@@ -1109,7 +1178,7 @@ async fn read_one(root: PathBuf, rel: PathBuf) -> std::io::Result<(String, bool)
 /// dirs the same confined way. The bytes are written to a temp and
 /// `renameat`-swapped over the target, all beneath the directory fd the kernel
 /// resolved under `RESOLVE_BENEATH`: a parent dir swapped for an escaping
-/// symlink can't redirect the write (#77), and a crash/kill/disk-full
+/// symlink can't redirect the write, and a crash/kill/disk-full
 /// mid-write leaves the previous file intact rather than a truncated or
 /// half-written one.
 fn write_one_blocking(root: &Path, rel: &Path, content: &str) -> std::io::Result<usize> {
@@ -1129,7 +1198,7 @@ struct WriteResult {
 }
 
 /// Write `content` and build the display diff against the prior file in ONE
-/// blocking job (#F44/RC-L). The prior content is read BOUNDED via
+/// blocking job. The prior content is read BOUNDED via
 /// [`mermaid_model::utils::read_file_capped`] — overwriting a multi-gigabyte file must
 /// not slurp it into RAM on the async worker just to render a diff. A prior file
 /// larger than the read cap (or otherwise unreadable) is elided from the diff
@@ -1410,7 +1479,10 @@ mod tests {
         // is agent-owned by design.
         let target = resolve_read_target(&roots, fact.to_str().unwrap()).unwrap();
         assert!(target.external.is_none(), "memory reads are not external");
-        let (content, truncated) = read_one(target.root, target.rel).await.unwrap();
+        let Read::Text { content, truncated } = read_one(target.root, target.rel).await.unwrap()
+        else {
+            panic!("a markdown file reads as text");
+        };
         assert!(!truncated);
         assert_eq!(content, "the fact body");
 
@@ -1606,6 +1678,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn read_file_returns_a_picture_as_an_image() {
+        use base64::engine::general_purpose::STANDARD;
+        let dir = temp_root("read_image");
+        // Named .dat: the format is known by the bytes, not the name.
+        let png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR rest of the picture";
+        fs::write(dir.join("shot.dat"), png).expect("write");
+        fs::write(dir.join("notes.txt"), "one\ntwo").expect("write");
+
+        let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), dir.clone());
+        let outcome = ReadFileTool
+            .execute(serde_json::json!({"path": "shot.dat"}), ctx)
+            .await;
+        assert!(outcome.is_success(), "{}", outcome.output());
+        assert_eq!(outcome.images(), Some(vec![STANDARD.encode(png)]));
+        assert_eq!(
+            outcome.output(),
+            format!("[image/png, {} bytes]", png.len())
+        );
+        assert_eq!(outcome.summary, "1 image read");
+
+        // Mixed with text: each file in its section, the picture as an image.
+        let (ctx, _rx) = test_exec_context(TurnId(2), ToolCallId(1), dir.clone());
+        let outcome = ReadFileTool
+            .execute(serde_json::json!({"paths": ["notes.txt", "shot.dat"]}), ctx)
+            .await;
+        assert!(outcome.is_success(), "{}", outcome.output());
+        assert_eq!(outcome.images().map(|images| images.len()), Some(1));
+        assert!(
+            outcome.output().contains("=== notes.txt ===\none\ntwo"),
+            "{}",
+            outcome.output()
+        );
+        assert!(
+            outcome.output().contains("=== shot.dat ===\n[image/png"),
+            "{}",
+            outcome.output()
+        );
+
+        // Text stays text, with no image.
+        let (ctx, _rx) = test_exec_context(TurnId(3), ToolCallId(1), dir.clone());
+        let outcome = ReadFileTool
+            .execute(serde_json::json!({"path": "notes.txt"}), ctx)
+            .await;
+        assert!(outcome.images().is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn read_file_refuses_a_picture_too_large_for_a_model() {
+        let dir = temp_root("read_big_image");
+        let mut jpeg = b"\xff\xd8\xff\xe0".to_vec();
+        jpeg.resize(MAX_IMAGE_BYTES + 1, 0);
+        fs::write(dir.join("big.jpg"), &jpeg).expect("write");
+        let (ctx, _rx) = test_exec_context(TurnId(1), ToolCallId(1), dir.clone());
+        let outcome = ReadFileTool
+            .execute(serde_json::json!({"path": "big.jpg"}), ctx)
+            .await;
+        assert_eq!(outcome.status, mermaid_domain::ToolStatus::Error);
+        let msg = outcome.error_message().unwrap_or_default();
+        assert!(msg.contains("image/jpeg is larger than"), "{msg}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
     async fn duplicate_same_turn_read_collapses_to_a_reuse_note() {
         let dir = temp_root("read_dedup");
         fs::write(dir.join("a.txt"), "line one\nline two").expect("write");
@@ -1717,7 +1853,7 @@ mod tests {
 
     #[tokio::test]
     async fn read_file_multi_aggregate_is_capped() {
-        // F45: many files in one call can't blow past the aggregate cap. Each
+        // Many files in one call can't blow past the aggregate cap. Each
         // file is under the per-file cap, but their sum exceeds the aggregate.
         let dir = temp_root("read_aggregate_cap");
         let chunk = "a".repeat(MAX_READ_AGGREGATE_CHARS * 2 / 3);
@@ -1749,7 +1885,7 @@ mod tests {
 
     #[tokio::test]
     async fn write_file_elides_diff_for_oversized_existing_file() {
-        // F44: overwriting a file larger than the read cap must NOT slurp it into
+        // Overwriting a file larger than the read cap must NOT slurp it into
         // RAM for a diff — the diff is elided with a marker instead.
         let dir = temp_root("write_oversized_diff");
         let big = "a".repeat(MAX_FILE_READ_BYTES + 1);
@@ -1789,7 +1925,7 @@ mod tests {
 
     #[tokio::test]
     async fn read_file_with_marker_in_content_is_not_flagged_truncated() {
-        // #78: a small file whose own content contains the truncation-marker
+        // A small file whose own content contains the truncation-marker
         // string must NOT be reported as truncated — the flag comes from the
         // bounded read now, not a substring sniff of the output.
         let dir = temp_root("read_marker_content");
@@ -1949,11 +2085,11 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    // ─── F10: absolute-path block ───────────────────────────────────
+    // ─── absolute-path block ───────────────────────────────────
 
     /// Reading `/etc/passwd` (or any absolute path outside workdir)
     /// must fail with a clear "outside the project" error. The tool
-    /// schema advertises this contract; before F10 it was a lie.
+    /// schema advertises this contract; before this it was a lie.
     /// Reading an absolute path outside workdir succeeds.
     #[tokio::test]
     async fn read_file_allows_absolute_path_outside_workdir() {

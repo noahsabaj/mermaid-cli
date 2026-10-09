@@ -24,7 +24,7 @@ pub use error::{
 };
 pub use providers::{
     CompatStyle, MaxTokensParam, ProviderProfile, REGISTRY as PROVIDER_REGISTRY,
-    ReasoningExtraction, ReasoningStrategy, lookup_provider,
+    ReasoningExtraction, ReasoningStrategy, WireApi, lookup_provider,
 };
 pub use reasoning::{ReasoningCapability, ReasoningChunk, ReasoningLevel, nearest_effort};
 pub use stream::{StatusNotify, StreamEvent, StreamSink, emit, emit_all};
@@ -32,6 +32,6 @@ pub use tool_call::{FunctionCall, ToolCall};
 
 pub use traits::Model;
 pub use types::{
-    ChatMessage, ChatMessageKind, FinishReason, MessageAudience, MessageRole, MetaResponseItem,
-    ModelResponse, ProviderContinuation, TokenUsage, TokenUsageSource,
+    ChatMessage, ChatMessageKind, FinishReason, MessageAudience, MessageRole, ModelResponse,
+    ProviderContinuation, ResponseItem, TokenUsage, TokenUsageSource,
 };

@@ -18,16 +18,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Ollama models cost $0. A model with no price says so and is left out of
   the total. Saved sessions now record their usage per model, so a resumed
   session keeps its cost.
+
 - **Ctrl+R searches the prompts you sent before.** It lists this session's
   prompts at once and adds those of the project's last 50 saved sessions
   as they load, newest first. Type to filter (every word must match, case
   does not matter); Ctrl+R or Down goes to the next match; Enter puts the
   prompt in the composer to edit or send; Esc leaves the draft as it was.
+
 - **`/init` asks the agent to write AGENTS.md.** It sends one ordinary
   prompt: write the file at the project root with the build, test, lint
   and run commands, the layout and the pitfalls an agent cannot learn
   quickly from the code, or improve the file that is there. Words after
   `/init` are added to the request.
+
 - **`--add-dir <dir>` and `/add-dir <path>` let the agent work in more than
   one directory.** Each added directory gets the project directory's trust:
   the file tools and the policy gate treat paths inside it as project paths
@@ -42,6 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   out of it is not inside it. Subagents inherit the list, and `/doctor` and
   the model's session facts name it. A repository's `.mermaid/config.toml`
   cannot set the key.
+
 - **MCP resources and prompts.** A server that declares the `resources`
   capability gives the model two built-in tools, `list_mcp_resources`
   (optionally filtered by `server`; each resource's uri, name, description
@@ -58,6 +62,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   text as your message. `/doctor` lists each ready server's tool, prompt and
   resource support.
 
+- **Gemini models get Gemini's own computer use tool.** With `[tools]
+  computer` and `provider_native` on, Gemini gets its `computer_use` tool for
+  the desktop in place of Mermaid's schema. Each call runs through Mermaid's
+  `computer` tool with the same approval and mouse-move stop, its
+  coordinates (out of 1000 across the screen) are scaled to the screen, and
+  the screenshot after it goes back in the function response. A call Gemini
+  asks to confirm is shown with that request; a call it blocks does not run.
+
+- **OpenAI models get OpenAI's own computer tool.** With `[tools] computer`
+  and `provider_native` on, an OpenAI model on the Responses API gets the
+  `computer` tool it is trained on in place of Mermaid's schema. Each call's
+  actions run in order through Mermaid's `computer` tool, with one approval
+  for the call and the same mouse-move stop, and the screenshot after them
+  goes back to the model. OpenAI's safety warnings on a call are shown with
+  the approval. A model that refuses the tool gets Mermaid's schema from
+  then on.
+
+- **Evals for computer use and pictures.** `settings-window` asks the model to
+  change a value in a Settings window with the mouse and keyboard. The harness
+  starts a private Xvfb display for the run, so it never touches your screen,
+  and the window saves outside the project, so only the screen can pass it.
+  `chart-value` asks for a number that is only in a chart picture.
+  `MERMAID_EVAL_CONFIG` adds config overrides to live runs, for ablations such
+  as the native computer toolset against the plain tool. CI now runs the
+  `computer` tool's X11 tests and the screen eval on Xvfb.
+
+- **`/btw` asks a side question without touching the conversation.** Type
+  `/btw what was that config file called?` at any time, also while the agent
+  works. The model answers from the session so far in a pane under the
+  composer, as a separate call that does not interrupt the running turn. The
+  question and answer are never saved, compacted, or sent with later turns;
+  later side questions see the newest 20 earlier ones. The side call has no
+  tools. Esc closes the pane, Up/Down scrolls, Left/Right steps through
+  earlier answers, `c` copies the answer, `x` clears the earlier ones, and a
+  bare `/btw` reopens the newest answer. `f` forks the answer into a
+  background agent that carries on from it with full tools; `/agents` lists
+  it and its report is posted to the conversation.
+
+- **`/goal` keeps Mermaid working until a condition is met.** `/goal all tests
+  pass and clippy is clean` starts a turn with the condition as the request.
+  Each time the run would end, a separate model call with no tools reads the
+  end of the conversation and answers met, not met, or impossible. Not met
+  starts the next turn with the check's reason and the goal restated, both
+  visible in the transcript; met or impossible clears the goal. Esc, a failed
+  turn, `[goal] max_turns` turns without a message from you (default 50), or 3
+  turns in a row with no tool call pause the goal with it still set. `/goal`
+  alone shows the condition, time, checks and tokens; `/goal clear` removes
+  it; the footer shows `goal 4m`. The check uses the session's model unless
+  `[goal] model` names another. `--resume` keeps the goal, and
+  `mermaid run "/goal ..."` runs the loop headless, with a `goal:` error when
+  it ends unmet. Claude Code, Codex and Cursor have the same command.
+
+- **Mermaid speaks MCP 2026-07-28, the newest protocol revision.** Each
+  server gets a `server/discover` request first. A 2026-07-28 server then
+  gets stateless requests with the version, client info and capabilities in
+  `_meta`, with no `initialize` handshake or session. Over HTTP the requests
+  also carry `Mcp-Method`, `Mcp-Name` and the `Mcp-Param-*` headers a tool
+  asks for with `x-mcp-header`, and a tool with invalid annotations is left
+  out. A tool call that answers `input_required` with only a `requestState`
+  is sent again with it. Servers that speak only 2025-11-25 keep working:
+  an error, an HTTP `4xx` or a silent stdio server falls back to the
+  `initialize` handshake, and a stdio server that exits on the probe is
+  started again for it. `x-mcp-header` is removed from the schemas the
+  model sees.
+
 - **Mermaid reads Claude Code's files.** A user who moved from Claude Code
   used to lose their instructions, skills, commands and agents, because
   Mermaid read only `AGENTS.md`, `MERMAID.md` and `.mermaid/skills/`. Now
@@ -72,6 +141,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   project file cannot redefine `general` or `explore`. The `agent` tool now
   lists the configured types with their new `description`, so the model knows
   they exist. See docs/plugins.md, "Files from other tools".
+
+- **Remote MCP servers that need an OAuth sign-in now connect.** Hosted
+  servers such as Linear, Notion, Sentry and Atlassian answer `401` until the
+  user signs in, so Mermaid could not use them. `mermaid add <name> --url
+  <URL>` now opens the browser to sign in when the server asks for it, and
+  `mermaid mcp login <name>` / `mermaid mcp logout <name>` sign in again or
+  delete the sign-in. The flow follows the MCP authorization spec
+  (2026-07-28): resource and authorization-server metadata discovery, PKCE
+  `S256`, the `resource` indicator, and the `iss` check before the code is
+  redeemed. Mermaid identifies itself with a Client ID Metadata Document,
+  and uses Dynamic Client Registration only for servers without it. Tokens
+  go to the OS keyring, bound to the server's URL, and refresh on their own;
+  `mermaid mcp` marks the servers that are signed in. A server that needs a
+  client registered by hand takes `[mcp_servers.<name>.oauth]` (`client_id`,
+  `client_secret_env`, `callback_port`, `scopes`), or the matching
+  `--client-id`, `--client-secret-env` and `--callback-port` flags on
+  `mermaid add --url`. `mermaid remove <name>` also deletes the server's
+  stored sign-in.
+
 - **Mermaid cleans up the config keys it no longer reads.** A config file
   written by an older `mermaid init` still carries sections a later release
   removed, such as `[plan]` (0.28.0) or `[computer_use]` and
@@ -85,6 +173,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and a key Mermaid does not know is never touched. Bare `mermaid` at a
   terminal lists the keys and asks `Delete them now? [y/N]` first; headless
   runs, pipes and scripts never ask and never edit.
+- **`read_file` shows pictures to the model.** A PNG, JPEG, GIF or WebP file
+  (known by its first bytes, not its name) comes back as an image beside a
+  one-line `[image/png, 48213 bytes]` result, so a vision model can look at a
+  screenshot, a chart or a mockup it was pointed at. A picture over 3.75 MiB,
+  whose base64 passes the 5 MiB a provider takes in one image, is refused with
+  its size. The text editor's `view` of a picture returns it the same way.
 - **The model can follow the processes it starts in the background.** Before,
   a command run with `mode="background"` returned a pid and log path, and only
   the user could check it with `/logs` or end it with `/stop`; a foreground
@@ -95,15 +189,82 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   appears in its output, or a timeout of up to an hour passes (Esc ends it),
   `stop` ends the process tree, and `list` shows the session's processes. It
   reaches only processes this session started, never a raw pid.
+- **The model can use the screen: the `computer` tool, off by default.** With
+  `computer = true` under `[tools]`, a vision model takes screenshots and
+  drives the mouse and keyboard of the user's real screen. Claude gets
+  Anthropic's computer toolset (`computer_toolset_20260801`), the tool it is
+  trained on, rewritten onto Mermaid's `computer` tool like the text editor;
+  other models call that tool directly with the same actions. Mermaid only
+  does the physics: each screenshot is fitted to 1568 px and 1.15 megapixels,
+  the model's coordinates are scaled back to the screen, and input actions
+  wait half a second for the screen to change. Actions in one message run in
+  order, and after one fails the rest are not run. Screenshots, `zoom` and
+  `cursor_position` run in every safety mode; mouse and keyboard actions are
+  gated as external access. `read_only` blocks them; `ask` asks once for all
+  the actions of one message; `auto` checks the batch once, with the last
+  screenshot. If you move the mouse while Mermaid works, Mermaid stops
+  sending input until your next message.
+  Windows and macOS use xcap and enigo; Linux speaks X11 directly, so no C
+  library is linked. Wayland is not supported yet. Off by default because
+  every screenshot sends the screen to the model's provider.
+- **OpenAI models keep their reasoning between tool calls.** `openai/<model>`
+  now goes to OpenAI's Responses API instead of Chat Completions. On Chat
+  Completions a reasoning model's reasoning was thrown away at every tool
+  call, so it started again from zero at each step; now its encrypted
+  reasoning comes back with each request (`store: false`: nothing is kept on
+  OpenAI's side), and the reasoning summary shows in the reasoning panel. On
+  the same endpoint the model gets OpenAI's own `apply_patch` tool, which GPT-5
+  models are trained on, in place of Mermaid's schema for `apply_patch`; each
+  call is rewritten onto Mermaid's `apply_patch` before it runs, so every
+  safety gate applies, and `[tools] provider_native = false` turns it off.
+  Automatic compaction is done by OpenAI's server-side compaction, like on
+  Anthropic (`[compaction] provider_native`). A model that refuses any of
+  these (reasoning on `gpt-4.1`, `apply_patch` on an older model) is remembered
+  and gets a request without it. Other OpenAI-compatible providers, and custom
+  `[providers.<name>]` entries, keep Chat Completions; a proxy that serves only
+  Chat Completions can be set up as a custom provider. Meta's adapter shares
+  the new Responses code.
+- **`/autocompact` sets when automatic compaction starts.** The threshold was
+  only a percentage of the window, the same for every model, and only in
+  config.toml. `/autocompact 250000` now compacts the current model at 250k
+  tokens; `all-models` sets it for every model, and `project` writes it to
+  `<git-root>/.mermaid/config.toml` in place of the user config. A bare
+  `/autocompact` shows the threshold and where it comes from, `off` and `on`
+  turn automatic compaction off and on, and `reset` removes a value. The
+  config keys are `[compaction] auto_threshold_tokens` and
+  `[compaction.auto_threshold_tokens_per_model]`. A change applies from the
+  next turn, also on providers that compact server-side.
 
 ### Fixed
+
+- **Gemini 3 keeps working after its first tool call.** Gemini 3 attaches a
+  thought signature to its function calls and refuses the next request with
+  a 400 when a call of the current turn comes back without it. Mermaid now
+  saves the signatures with the turn and sends them back to the model that
+  wrote them. A call another model made gets Google's documented stand-in.
+
+- **Images a tool returns reach the model.** An MCP tool's screenshot was
+  drawn in the chat and never sent: tool results carried text only. Each
+  result now carries its images: inside the `tool_result` for Anthropic, and
+  for OpenAI-compatible, Ollama, Gemini and Meta, which take images only from
+  the user, right after the run of results, each labelled `Image returned by
+  tool call <id>:`. Only the newest three images in a conversation go out, as
+  before. Every adapter also sends an image's real media type (JPEG, GIF and
+  WebP were all labelled PNG).
 
 - **A background command that exits at once is reported as exited on Linux.**
   The liveness check used `kill -0`, which succeeds on a process that has
   exited but has not been reaped yet. In a container whose pid 1 reaps late,
   a command that failed during startup was reported as started and running.
   The check now reads the process state from `/proc` first.
-
+- **Provider errors show the full message.** The TUI and `mermaid run`
+  built their error lines from a short fallback mapping, so the fuller one
+  in `mermaid-model` never ran: a 401 read "Backend error", a JSON error body
+  was printed raw instead of its `message`, and the `(request-id: ...,
+  cf-ray: ...)` line promised for provider failures never appeared. Errors
+  now go through that mapping: "Authentication failed", "Rate limited",
+  "Model not found", the provider's own message, and the request ids when
+  the response carried them.
 - **The highlighted row in `/load` and the rewind picker can be read.** Its
   meta, `(14 msg · 2026-01-01 12:34)` or `(#1 back)`, was drawn in
   `text_disabled` on a `text_disabled` band, the same colour, so it vanished
@@ -129,6 +290,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   takes the palette the session is about to open with, resolved by the TUI's
   own rule (`NO_COLOR` beats the theme choice). Under the default dark theme
   it looks exactly as before.
+- **Automatic compaction works on GPT-6 and GPT-5.6.** GPT-6 models
+  (`gpt-6-astra`, `gpt-6.1-sol`, ...) had no entry in the model catalog, and
+  OpenAI's models endpoint gives no limits, so their context window was
+  unknown and automatic compaction never ran. They now have the documented
+  1.05M window. GPT-5.6 was listed at 1.5M; OpenAI documents 1.05M, so its
+  85% trigger sat above the real window and compaction could never run before
+  the request failed. It is now 1.05M.
 
 ### Removed
 

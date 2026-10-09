@@ -4,7 +4,7 @@
 //! the same Up/Down/Enter/Escape state machine over a `cursor` and a row
 //! count.
 //!
-//! The paste-into-the-file-picker bug (#350) came from exactly this family
+//! The paste-into-the-file-picker bug came from exactly this family
 //! of per-surface duplication. [`picker_step`] is that machine said once:
 //! callers keep only their confirm semantics and any extra keys.
 

@@ -27,10 +27,12 @@
 //!     queued-message auto-submit) without self-invoking the
 //!     reducer.
 
+pub(crate) mod goal_loop;
 pub(crate) mod input;
 pub(crate) mod lifecycle;
 pub(crate) mod prompt_search;
 pub(crate) mod safety_mode;
+pub(crate) mod side_question;
 pub(crate) mod slash;
 pub(crate) mod streaming;
 pub(crate) mod subagents;
@@ -39,10 +41,12 @@ pub(crate) mod tools;
 #[cfg(test)]
 mod tests;
 
+pub use goal_loop::*;
 pub use input::*;
 pub use lifecycle::*;
 pub use prompt_search::*;
 pub use safety_mode::*;
+pub use side_question::*;
 pub use slash::*;
 pub use streaming::*;
 pub use subagents::*;
@@ -168,6 +172,9 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
         },
         Msg::CancelTurn => {
             handle_cancel_turn(&mut state, &mut cmds);
+        },
+        Msg::GoalEvaluated { turn, reply } => {
+            handle_goal_evaluated(&mut state, &mut cmds, turn, reply);
         },
         Msg::ConfirmAccepted => {
             handle_confirm_accepted(&mut state, &mut cmds);
@@ -468,7 +475,7 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
         } => {
             // Drop approval requests for a turn that's already being cancelled:
             // its tool task is unwinding, so surfacing (and parking on) a modal
-            // would outlive the turn (#74). The stale-filter lets a same-id
+            // would outlive the turn. The stale-filter lets a same-id
             // `Cancelling` turn through, so guard the state explicitly here.
             if matches!(state.turn, TurnState::Cancelling { .. }) {
                 return (state, cmds);
@@ -500,7 +507,7 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             questions,
         } => {
             // Same cancellation guard as approvals: drop a question for a turn
-            // that's already unwinding (#74) so its modal can't outlive the turn.
+            // that's already unwinding so its modal can't outlive the turn.
             if matches!(state.turn, TurnState::Cancelling { .. }) {
                 return (state, cmds);
             }
@@ -521,7 +528,7 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
         },
 
         // ── MCP ─────────────────────────────────────────────────────
-        // F5: upsert semantics. State::new seeds entries for configured
+        // Upsert semantics. State::new seeds entries for configured
         // servers in `Starting` status, so these handlers normally find
         // an existing entry to update. But a server discovered at
         // runtime (hypothetical future path) should still land in the
@@ -625,6 +632,12 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
                 .append(mermaid_model::models::ChatMessage::system(text), state.now);
             cmds.push(state.session.save_conversation_cmd());
         },
+        Msg::SideQuestionText { id, chunk } => {
+            state.side_questions.push_chunk(id, &chunk);
+        },
+        Msg::SideQuestionFinished { id, outcome } => {
+            handle_side_question_finished(&mut state, id, outcome);
+        },
         Msg::ModelPullFinished { model } => {
             push_system(&mut state, &mut cmds, format!("Pulled {model}"));
         },
@@ -667,7 +680,7 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             // reducer state depends on raw terminal dimensions.
         },
         Msg::MouseScroll { delta } => {
-            // F13: accumulate into a counter. Render layer diffs
+            // Accumulate into a counter. Render layer diffs
             // against its last-seen value and applies the resulting
             // delta to ChatState. `saturating_add` never overflows.
             state.ui.mouse_scroll_accum = state.ui.mouse_scroll_accum.saturating_add(delta as i32);
@@ -682,6 +695,9 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             // "config saved", etc.). Routed into the chat transcript because it
             // is worth reading after the fact.
             push_system(&mut state, &mut cmds, text);
+        },
+        Msg::AutoCompactSaved { path, compaction } => {
+            slash::apply_saved_auto_compact(&mut state, &mut cmds, &path, compaction);
         },
         Msg::Toast { text } => {
             // Feedback on a keystroke the user just made. It expires on its own
@@ -825,7 +841,7 @@ pub fn update_step(mut state: State, msg: Msg) -> (State, Vec<Cmd>) {
             // The selection itself lives in the render layer; the main loop
             // resolves it to text and hands it here so the clipboard write is an
             // `update()`-emitted Cmd (recorded for replay) rather than an
-            // out-of-band dispatch (#18).
+            // out-of-band dispatch.
             if !text.is_empty() {
                 cmds.push(Cmd::CopyToClipboard(text));
             }

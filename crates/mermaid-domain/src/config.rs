@@ -156,6 +156,10 @@ pub struct Config {
     /// (`[pricing]` table).
     #[serde(default)]
     pub pricing: PricingConfig,
+    /// `/goal` settings (`[goal]` table): which model checks a goal and how
+    /// many turns a goal may run before it pauses for the user.
+    #[serde(default)]
+    pub goal: GoalConfig,
 
     /// Runtime-only prompt customizations supplied by CLI flags. These are
     /// deliberately skipped when saving config so one-off agent personas do
@@ -233,12 +237,17 @@ pub struct ToolsConfig {
     /// every safety gate applies. A model that refuses them gets Mermaid's.
     /// `false` always sends Mermaid's.
     pub provider_native: bool,
+    /// Give the model the `computer` tool: screenshots, mouse and keyboard on
+    /// the user's real screen. Off unless the user turns it on, since every
+    /// screenshot sends what is on the screen to the model's provider.
+    pub computer: bool,
 }
 
 impl Default for ToolsConfig {
     fn default() -> Self {
         Self {
             provider_native: true,
+            computer: false,
         }
     }
 }
@@ -623,6 +632,33 @@ impl Default for DaemonConfig {
     }
 }
 
+/// `/goal` settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GoalConfig {
+    /// Model id that checks whether the goal is met after each run. `None`
+    /// checks with the session's active model. A small, fast model is
+    /// enough: the check reads the conversation and answers in one line.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Goal turns that may run without a message from the user before the
+    /// goal pauses. Each message from the user starts the count again. `0`
+    /// means no limit.
+    pub max_turns: u32,
+}
+
+/// Default for [`GoalConfig::max_turns`].
+pub const DEFAULT_GOAL_MAX_TURNS: u32 = 50;
+
+impl Default for GoalConfig {
+    fn default() -> Self {
+        Self {
+            model: None,
+            max_turns: DEFAULT_GOAL_MAX_TURNS,
+        }
+    }
+}
+
 /// Durable semantic memory settings (v0.10.0).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -681,6 +717,28 @@ pub struct CompactionConfig {
     /// reserve no longer fits".
     pub auto_threshold_percent: u8,
 
+    /// Context size, in tokens, at which auto-compaction triggers for every
+    /// model. Replaces `auto_threshold_percent` when set. Raised to at least
+    /// [`crate::MIN_AUTO_THRESHOLD_TOKENS`].
+    ///
+    /// Example:
+    /// ```toml
+    /// [compaction]
+    /// auto_threshold_tokens = 250000
+    /// ```
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_threshold_tokens: Option<usize>,
+
+    /// Token thresholds for single models, keyed by model ID. One here
+    /// overrides `auto_threshold_tokens` for that model.
+    ///
+    /// Example:
+    /// ```toml
+    /// [compaction.auto_threshold_tokens_per_model]
+    /// "openai/gpt-5.6" = 400000
+    /// ```
+    pub auto_threshold_tokens_per_model: HashMap<String, usize>,
+
     /// How many trailing user turns survive compaction verbatim. Clamped to at
     /// least 1 — a compaction that preserved no turn would hand the model a
     /// summary with no live thread to continue.
@@ -722,6 +780,8 @@ impl Default for CompactionConfig {
             auto_enabled: policy.auto_enabled,
             provider_native: true,
             auto_threshold_percent: policy.auto_threshold_percent,
+            auto_threshold_tokens: None,
+            auto_threshold_tokens_per_model: HashMap::new(),
             tail_turns: policy.tail_turns,
             tail_token_budget: policy.tail_token_budget,
             summary_max_tokens: policy.summary_max_tokens,
@@ -744,12 +804,35 @@ impl CompactionConfig {
     /// smaller *maximum* and quietly under-reserve on every turn.
     #[must_use]
     pub fn policy(&self) -> crate::CompactionPolicy {
+        self.policy_with_tokens(self.auto_threshold_tokens)
+    }
+
+    /// [`Self::policy`] for `model_id`, whose own token threshold, if it has
+    /// one, overrides the one for every model.
+    #[must_use]
+    pub fn policy_for(&self, model_id: &str) -> crate::CompactionPolicy {
+        self.policy_with_tokens(self.model_threshold_tokens(model_id))
+    }
+
+    /// The token threshold that applies to `model_id`, from its own entry or
+    /// the one for every model.
+    #[must_use]
+    pub fn model_threshold_tokens(&self, model_id: &str) -> Option<usize> {
+        self.auto_threshold_tokens_per_model
+            .get(model_id)
+            .copied()
+            .or(self.auto_threshold_tokens)
+    }
+
+    fn policy_with_tokens(&self, tokens: Option<usize>) -> crate::CompactionPolicy {
         let defaults = crate::CompactionPolicy::default();
         let min_reserve = self.min_response_reserve_tokens;
         let max_reserve = self.max_response_reserve_tokens;
         crate::CompactionPolicy {
             auto_enabled: self.auto_enabled,
             auto_threshold_percent: self.auto_threshold_percent.clamp(1, 100),
+            // Below this, every turn would compact.
+            auto_threshold_tokens: tokens.map(|t| t.max(crate::MIN_AUTO_THRESHOLD_TOKENS)),
             tail_turns: self.tail_turns.max(1),
             // A zero budget would drop the whole tail; fall back to the default
             // rather than produce a checkpoint with nothing after it.
@@ -920,6 +1003,36 @@ pub struct McpServerConfig {
     /// global setting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub defer: Option<bool>,
+    /// OAuth sign-in settings for a remote (`url`) server. Optional: with no
+    /// table, `mermaid mcp login` discovers everything from the server and
+    /// registers itself dynamically. Set it for a server whose authorization
+    /// server needs a client registered by hand.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth: Option<McpOAuthConfig>,
+}
+
+/// `[mcp_servers.<name>.oauth]`: a pre-registered OAuth client for a remote
+/// MCP server. The MCP authorization spec puts a pre-registered client ahead
+/// of dynamic registration, and some hosted servers (GitHub's among them)
+/// accept only one.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct McpOAuthConfig {
+    /// Client id of an OAuth app the user registered with the server's
+    /// authorization server. Unset = dynamic client registration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    /// Env var holding that app's client secret, read when a token is
+    /// requested, so the secret never lands in config.toml. Unset = a public
+    /// client (PKCE only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_secret_env: Option<String>,
+    /// Fixed port for the `http://127.0.0.1:<port>/callback` redirect, for an
+    /// app registered with one exact redirect URI. Unset = any free port.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub callback_port: Option<u16>,
+    /// Scopes to request, replacing the ones the server advertises.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scopes: Vec<String>,
 }
 
 /// Which transport an [`McpServerConfig`] selects: a spawned child process
@@ -988,7 +1101,7 @@ impl McpServerConfig {
 
 /// Mask a header/env map for `Debug`: keys are kept (so you can still see which
 /// vars are set) but values are never rendered — they hold secrets like API keys
-/// and `Authorization` tokens (#F12). A `BTreeMap` keeps the output deterministic.
+/// and `Authorization` tokens. A `BTreeMap` keeps the output deterministic.
 fn debug_masked_map(
     map: &HashMap<String, String>,
 ) -> std::collections::BTreeMap<&str, &'static str> {
@@ -998,7 +1111,7 @@ fn debug_masked_map(
 // Manual `Debug` for the secret-bearing config structs so a `{:?}` (into
 // tracing, a panic, or an error) cannot dump provider keys / Authorization
 // headers / MCP env secrets. `Config` keeps its derived `Debug`, which now
-// recurses through these redacting impls (#F12).
+// recurses through these redacting impls.
 impl std::fmt::Debug for McpServerConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("McpServerConfig")
@@ -1022,6 +1135,8 @@ impl std::fmt::Debug for McpServerConfig {
             // Tool allow/deny lists are plain tool names, not secrets.
             .field("enabled_tools", &self.enabled_tools)
             .field("disabled_tools", &self.disabled_tools)
+            // Ids, an env var NAME, a port and scopes: none is a secret.
+            .field("oauth", &self.oauth)
             .finish()
     }
 }

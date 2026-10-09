@@ -8,6 +8,9 @@ use crate::transition::{
 };
 use crate::{ProgressEvent, SubagentPhase};
 use mermaid_model::ids::TurnId;
+use mermaid_model::models::adapters::computer_toolset::{
+    HALTED as COMPUTER_HALTED, TOOL as COMPUTER_TOOL,
+};
 
 /// Route a typed `ProgressEvent`.
 ///
@@ -77,6 +80,94 @@ pub fn handle_tool_progress(
     }
 }
 
+/// What a tool call carries from the live state at the moment it is
+/// dispatched: the safety mode, the user's goal for the Auto-mode classifier,
+/// and the checkpoint anchor.
+pub(crate) fn tool_dispatch(state: &State) -> crate::cmd::ToolDispatch {
+    crate::cmd::ToolDispatch {
+        model_id: state.session.model_id.clone(),
+        safety_mode: state.session.safety_mode,
+        goal: crate::user_goal::user_goal(&state.session),
+        reasoning: state.session.reasoning,
+        // Checkpoint anchoring: conversation id + length at DISPATCH. History
+        // here is [..., user@k, assistant(tool_use)], so any checkpoint this
+        // run takes has message_index >= k+1 and a fork at k discards it iff
+        // message_index > k (strict).
+        session_id: state.session.conversation.id.clone(),
+        message_index: state.session.messages().len(),
+        scratchpad: state.session.scratchpad.clone(),
+        additional_dirs: state.additional_dirs.clone(),
+        computer_batch: Vec::new(),
+    }
+}
+
+/// The arguments of the `computer` calls among `calls`, in order.
+pub(crate) fn computer_batch<'a>(
+    calls: impl IntoIterator<Item = &'a mermaid_model::models::ToolCall>,
+) -> Vec<serde_json::Value> {
+    calls
+        .into_iter()
+        .filter(|call| call.function.name == COMPUTER_TOOL)
+        .map(|call| call.function.arguments.clone())
+        .collect()
+}
+
+/// The next step for a turn's queued computer actions once one finishes:
+/// after a success the next action runs, after a failure it is not run.
+enum ComputerNext {
+    Run(crate::state::PendingToolCall, Vec<serde_json::Value>),
+    Halt(mermaid_model::ids::ToolCallId),
+}
+
+/// When the finished call `call_id` is a computer action, the step for the
+/// turn's next queued one.
+fn next_computer_action(
+    calls: &[crate::state::PendingToolCall],
+    outcomes: &[Option<ToolOutcome>],
+    call_id: mermaid_model::ids::ToolCallId,
+    outcome: &ToolOutcome,
+) -> Option<ComputerNext> {
+    if !calls
+        .iter()
+        .any(|c| c.call_id == call_id && c.source.function.name == COMPUTER_TOOL)
+    {
+        return None;
+    }
+    calls
+        .iter()
+        .zip(outcomes)
+        .find(|(c, o)| c.source.function.name == COMPUTER_TOOL && o.is_none())
+        .map(|(c, _)| {
+            if outcome.is_success() {
+                ComputerNext::Run(c.clone(), computer_batch(calls.iter().map(|c| &c.source)))
+            } else {
+                ComputerNext::Halt(c.call_id)
+            }
+        })
+}
+
+fn run_computer_next(state: &mut State, cmds: &mut Vec<Cmd>, turn: TurnId, next: ComputerNext) {
+    match next {
+        ComputerNext::Run(call, batch) => cmds.push(Cmd::ExecuteTool {
+            turn,
+            call_id: call.call_id,
+            source: call.source,
+            dispatch: crate::cmd::ToolDispatch {
+                computer_batch: batch,
+                ..tool_dispatch(state)
+            },
+        }),
+        // The halted action is a failure too, so it halts the one after it.
+        ComputerNext::Halt(next) => handle_tool_finished(
+            state,
+            cmds,
+            turn,
+            next,
+            ToolOutcome::error(COMPUTER_HALTED, None),
+        ),
+    }
+}
+
 pub fn handle_tool_finished(
     state: &mut State,
     cmds: &mut Vec<Cmd>,
@@ -86,6 +177,7 @@ pub fn handle_tool_finished(
 ) {
     // Borrow calls + outcomes simultaneously via a helper to avoid
     // double mutable borrow on `state.turn`.
+    let mut computer_next = None;
     let completed = match &mut state.turn {
         TurnState::ExecutingTools {
             id,
@@ -96,6 +188,7 @@ pub fn handle_tool_finished(
             if !fill_outcome(calls, outcomes, call_id, outcome.clone()) {
                 return;
             }
+            computer_next = next_computer_action(calls, outcomes, call_id, &outcome);
             state.ui.live_tool_status.remove(&call_id);
             // Fold tool-consumed provider usage (a subagent's child-session
             // total) into the session counters, so the footer and the
@@ -160,6 +253,11 @@ pub fn handle_tool_finished(
         },
         _ => None,
     };
+
+    if let Some(next) = computer_next {
+        run_computer_next(state, cmds, turn, next);
+        return;
+    }
 
     if let Some(completed_outcomes) = completed
         && let TurnState::ExecutingTools { id, calls, .. } =

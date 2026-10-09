@@ -100,6 +100,7 @@ fn consolidation_request(
         output_schema: None,
         suppress_auto_compact: false,
         requested_compaction: None,
+        compaction: mermaid_domain::CompactionPolicy::default(),
         native_compaction: None,
         native_tools: mermaid_model::models::NativeTools::default(),
     }
@@ -108,7 +109,7 @@ fn consolidation_request(
 /// Snapshot the to-be-pruned files first so the prune is reversible. The
 /// delete that follows is irreversible, so a failed checkpoint must NOT
 /// proceed — otherwise the report would advertise "Recoverable from the latest
-/// checkpoint" for a prune with no checkpoint behind it (#F69). The `Err` is
+/// checkpoint" for a prune with no checkpoint behind it. The `Err` is
 /// the abort message for the user; nothing has been deleted at that point, so
 /// no memory is lost.
 fn checkpoint_prune_targets(workdir: &std::path::Path, plan: &PrunePlan) -> Result<(), String> {

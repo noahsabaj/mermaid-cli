@@ -99,6 +99,10 @@ pub struct ConversationHistory {
     /// plan; sessions saved before this field existed load an empty store.
     #[serde(default)]
     pub tasks: crate::ChecklistStore,
+    /// The active `/goal` condition, so `--resume`/`--continue` keep working
+    /// toward it. `None` when no goal is set; cleared once the goal is met.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<String>,
 }
 
 impl ConversationHistory {
@@ -172,6 +176,7 @@ impl ConversationHistory {
             cli_version: None,
             git_sha: None,
             tasks: crate::ChecklistStore::default(),
+            goal: None,
         }
     }
 

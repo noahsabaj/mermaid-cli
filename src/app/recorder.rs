@@ -22,7 +22,7 @@
 //!       bit-exactly; new `Msg` variants round-trip automatically.
 //!
 //! Two deliberate divergences from live state, both security-driven:
-//!   - Credential-shaped strings are redacted before hitting disk (#17), so
+//!   - Credential-shaped strings are redacted before hitting disk, so
 //!     a session where a secret crossed the reducer replays the *redacted*
 //!     transcript. Replay is deterministic with respect to the log — folding
 //!     the same log twice always produces identical state — and identical to
@@ -86,7 +86,7 @@ impl Recorder {
         // A recording stores the full conversation — prompts, model output, and
         // tool results (e.g. a `read_file` of a private doc) — in cleartext;
         // only credential-shaped strings are scrubbed. Create it owner-only so a
-        // shared temp/cwd doesn't leak it (#132).
+        // shared temp/cwd doesn't leak it.
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
@@ -164,7 +164,7 @@ impl Recorder {
         // Single redaction choke point: scrub credential-shaped strings out of
         // every recorded payload before it hits disk. A `read_file .env` result,
         // a pasted token, or an API error echoing a key would otherwise be
-        // persisted in cleartext in the `--record` log (#17).
+        // persisted in cleartext in the `--record` log.
         mermaid_model::utils::redact_json(&mut body);
         let entry = serde_json::json!({
             "ts": now,
@@ -390,7 +390,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn recording_file_is_owner_only() {
-        // #132: recordings hold cleartext prompts/output/file-contents, so they
+        // Recordings hold cleartext prompts/output/file-contents, so they
         // must be created 0600 rather than inheriting a world-readable umask.
         use std::os::unix::fs::PermissionsExt;
         let path = tmpfile("perms.jsonl");
@@ -464,7 +464,7 @@ mod tests {
     #[test]
     fn record_msg_redacts_secrets_in_body() {
         // A recorded payload carrying a credential (e.g. a `read_file .env`
-        // result or an API error echoing a key) must hit disk scrubbed (#17).
+        // result or an API error echoing a key) must hit disk scrubbed.
         let path = tmpfile("redact.jsonl");
         let _ = std::fs::remove_file(&path);
         {
@@ -705,6 +705,7 @@ mod tests {
                 | MsgKind::BuiltinToolSchemaTokens
                 | MsgKind::CompactionFinished
                 | MsgKind::CompactionFailed
+                | MsgKind::GoalEvaluated
                 | MsgKind::StreamDone
                 | MsgKind::UpstreamError
                 | MsgKind::ToolStarted
@@ -724,6 +725,7 @@ mod tests {
                 | MsgKind::QueryResult
                 | MsgKind::ScratchpadReady
                 | MsgKind::RuntimeStore
+                | MsgKind::SideQuestion
                 | MsgKind::ModelPullFinished
                 | MsgKind::ModelPullProgress
                 | MsgKind::Tick
@@ -732,6 +734,7 @@ mod tests {
                 | MsgKind::FocusChanged
                 | MsgKind::OpenImageAt
                 | MsgKind::TransientStatus
+                | MsgKind::AutoCompactSaved
                 | MsgKind::Toast
                 | MsgKind::EditorReturned
                 | MsgKind::BackgroundAgent
@@ -785,6 +788,8 @@ mod tests {
                 texts: vec!["hook says hi".to_string()],
             },
             Msg::Slash(SlashCmd::Compact(None)),
+            Msg::Slash(SlashCmd::Btw(Some("which file?".to_string()))),
+            Msg::Slash(SlashCmd::Btw(None)),
             Msg::CancelTurn,
             Msg::BackgroundAgentStarted {
                 agent_id: "a7".to_string(),
@@ -868,6 +873,18 @@ mod tests {
                 warn: true,
             },
             Msg::BuiltinToolSchemaTokens(1234),
+            Msg::GoalEvaluated {
+                turn: TurnId(2),
+                reply: Ok(mermaid_domain::goal::GoalReply {
+                    text: "NOT_MET: tests still fail".to_string(),
+                    reasoning: None,
+                    usage: None,
+                }),
+            },
+            Msg::GoalEvaluated {
+                turn: TurnId(2),
+                reply: Err("timeout".to_string()),
+            },
             Msg::CompactionFailed {
                 turn: TurnId(2),
                 trigger: mermaid_domain::CompactionTrigger::Manual,
@@ -1023,6 +1040,18 @@ mod tests {
                     mermaid_domain::cost::PriceLookup::Unknown,
                 ),
             ])),
+            Msg::SideQuestionText {
+                id: 1,
+                chunk: "src/parser.rs".to_string(),
+            },
+            Msg::SideQuestionFinished {
+                id: 1,
+                outcome: mermaid_domain::side_question::SideOutcome::Done { tried_tools: true },
+            },
+            Msg::SideQuestionFinished {
+                id: 2,
+                outcome: mermaid_domain::side_question::SideOutcome::Failed("offline".to_string()),
+            },
             Msg::QueryResult(QueryResult::RuntimeTasksListed(Vec::new())),
             Msg::QueryResult(QueryResult::RuntimeTaskLoaded {
                 task: None,
@@ -1044,6 +1073,13 @@ mod tests {
             },
             Msg::TransientStatus {
                 text: "saved".to_string(),
+            },
+            Msg::AutoCompactSaved {
+                path: "/home/u/.config/mermaid/config.toml".to_string(),
+                compaction: mermaid_domain::config::CompactionConfig {
+                    auto_threshold_tokens: Some(250_000),
+                    ..Default::default()
+                },
             },
             Msg::MouseScroll { delta: -3 },
             Msg::FocusChanged(false),

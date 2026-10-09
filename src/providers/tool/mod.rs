@@ -18,6 +18,7 @@
 
 pub mod apply_patch;
 pub mod ask_user_question;
+pub mod computer;
 pub mod context;
 pub mod exec;
 pub mod filesystem;
@@ -231,6 +232,19 @@ impl ToolRegistry {
         // ready server serves resources (`mermaid_domain::mcp_resources`).
         r.register(Arc::new(mcp_resources::ListMcpResourcesTool));
         r.register(Arc::new(mcp_resources::ReadMcpResourceTool));
+
+        // `computer` drives the user's real screen, and every screenshot goes
+        // to the model's provider, so it exists only when the user turns it on.
+        match (config.tools.computer, computer::availability()) {
+            (true, Ok(())) => r.register(Arc::new(computer::ComputerTool::new())),
+            (true, Err(reason)) => r.note_unavailable("computer", reason),
+            (false, _) => r.note_unavailable(
+                "computer",
+                "computer is off; the user turns it on with `computer = true` under `[tools]` \
+                 in config.toml"
+                    .to_string(),
+            ),
+        }
 
         // `safety.network = "deny"` is a global egress kill-switch, not only
         // a shell sandbox flag. Omit web capabilities entirely so adapters and

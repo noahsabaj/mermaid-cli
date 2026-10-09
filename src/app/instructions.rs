@@ -1,4 +1,4 @@
-//! Project-instructions loader (Step 5h).
+//! Project-instructions loader.
 //!
 //! On session start, walk UP from the current working directory looking
 //! for repo instruction files. Stop at the git root (any directory
@@ -66,7 +66,7 @@ pub fn find_instruction_files(start: &Path) -> Vec<PathBuf> {
 /// On Unix this is `$HOME`. On Windows `HOME` is usually unset — the home var is
 /// `%USERPROFILE%` (or `%HOMEDRIVE%%HOMEPATH%`) — so without consulting those the
 /// walk would have no home boundary on Windows and could climb above the user's
-/// profile, relying solely on `.git` / `MAX_WALK_DEPTH` (F63). An empty value is
+/// profile, relying solely on `.git` / `MAX_WALK_DEPTH`. An empty value is
 /// treated as unset.
 fn home_dir_boundary() -> Option<PathBuf> {
     let home = std::env::var_os("HOME");
@@ -112,14 +112,14 @@ fn pick_home_boundary(
 }
 
 /// Walk implementation with the `$HOME` boundary injected, so tests can
-/// exercise the "stop at home" rule (#108) without mutating the process-global
+/// exercise the "stop at home" rule without mutating the process-global
 /// `HOME` env var (which would race other threads' tests).
 fn find_instruction_files_bounded(start: &Path, home: Option<&Path>) -> Vec<PathBuf> {
     let mut current = start.to_path_buf();
     for _ in 0..MAX_WALK_DEPTH {
         // Stop at $HOME *before* searching — don't load the user's home-dir
         // instruction files (or anything above home). Checked first so a walk
-        // that climbs into home can't pick up `~/AGENTS.md` (#108); the old
+        // that climbs into home can't pick up `~/AGENTS.md`; the old
         // order searched, found, and returned it before this guard ran.
         if home == Some(current.as_path()) {
             return Vec::new();
@@ -187,7 +187,7 @@ pub fn load_from_paths(paths: &[PathBuf]) -> Option<LoadedInstructions> {
         // Tolerate a per-file failure: if one path is missing or unreadable
         // (e.g. MERMAID.md removed in the race between `find_instruction_files`
         // and here), skip just that file and load the rest, rather than letting
-        // one stat/read failure drop the WHOLE multi-file set (F62). Only when
+        // one stat/read failure drop the WHOLE multi-file set. Only when
         // EVERY file fails does the load return `None` (via `sources.first()?`).
         let Ok(metadata) = std::fs::metadata(path) else {
             continue;
@@ -197,7 +197,7 @@ pub fn load_from_paths(paths: &[PathBuf]) -> Option<LoadedInstructions> {
         };
         let true_len = metadata.len() as usize;
         // Bounded read: never slurp a giant MERMAID.md whole just to truncate it
-        // afterwards (#16). Read one byte past the cap so the combined-body
+        // afterwards. Read one byte past the cap so the combined-body
         // truncation check below still detects an oversized single file; the
         // true on-disk size comes from the stat above, so `byte_len` stays
         // accurate rather than reflecting the capped read.
@@ -332,7 +332,7 @@ const INSTRUCTION_SECTION_SEPARATOR: &str = "\n\n---\n\n";
 
 /// Wrap each `(path, body)` in a labeled header — even a single file — so the
 /// content lands in the system prompt as clearly-bounded project data rather
-/// than blending into trusted system authority (#109). Returns the labeled
+/// than blending into trusted system authority. Returns the labeled
 /// sections in load order: lowest precedence first, highest precedence LAST (so
 /// `MERMAID.md` lands after `AGENTS.md`).
 fn label_instruction_bodies(bodies: Vec<(PathBuf, String)>) -> Vec<String> {
@@ -349,7 +349,7 @@ fn label_instruction_bodies(bodies: Vec<(PathBuf, String)>) -> Vec<String> {
 }
 
 /// Join labeled `sections` into one body capped at `cap` bytes while PRESERVING
-/// the documented "MERMAID.md wins on conflict" contract under the cap (F61).
+/// the documented "MERMAID.md wins on conflict" contract under the cap.
 ///
 /// `sections` is in precedence order, **highest precedence last**. When the
 /// combined body fits, it is returned whole. When it overflows, the
@@ -546,7 +546,7 @@ mod tests {
 
     #[test]
     fn find_instruction_files_stops_at_home_boundary() {
-        // #108: a walk that climbs into $HOME must NOT pick up the home-dir
+        // A walk that climbs into $HOME must NOT pick up the home-dir
         // AGENTS.md. The boundary is injected (no global env mutation), so the
         // test is race-free. Without the fix the walk would search `home`,
         // find AGENTS.md, and return it before the home guard ever ran.
@@ -567,7 +567,7 @@ mod tests {
 
     #[test]
     fn single_file_instructions_get_labeled_header() {
-        // #109: even a single instruction file is wrapped in a labeled
+        // Even a single instruction file is wrapped in a labeled
         // boundary so it reaches the system prompt as clearly-bounded project
         // data, not unlabeled trusted-system text.
         let _lock = FS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -695,7 +695,7 @@ mod tests {
 
     #[test]
     fn oversized_agents_does_not_drop_mermaid_winner() {
-        // F61: when AGENTS.md alone is huge, head-truncating the COMBINED body
+        // When AGENTS.md alone is huge, head-truncating the COMBINED body
         // used to drop the entire MERMAID.md tail — silently letting the
         // lower-priority file "win". MERMAID.md must survive intact and last (so
         // it still overrides on conflict); AGENTS.md is the file truncated.
@@ -780,7 +780,7 @@ mod tests {
 
     #[test]
     fn load_from_paths_tolerates_a_missing_file() {
-        // F62: if one path is missing (e.g. MERMAID.md removed in the race
+        // If one path is missing (e.g. MERMAID.md removed in the race
         // between discovery and load), the present file(s) must still load
         // rather than the whole multi-file set returning None.
         let _lock = FS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -809,7 +809,7 @@ mod tests {
 
     #[test]
     fn pick_home_boundary_resolves_windows_home_vars() {
-        // F63: on Windows `HOME` is usually unset; the home boundary must fall
+        // On Windows `HOME` is usually unset; the home boundary must fall
         // back to `%USERPROFILE%`, then `%HOMEDRIVE%%HOMEPATH%`. Exercised here
         // with synthetic values so it's verifiable on every platform.
         use std::ffi::OsStr;

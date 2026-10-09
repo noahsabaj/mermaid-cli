@@ -472,7 +472,7 @@ impl ExecuteCommandTool {
             // Mermaid shutdown: the orphaned driver task that still owns this
             // `Child` is aborted at runtime teardown, and a `kill_on_drop(true)`
             // child would then be SIGKILLed despite `mode=background` semantics
-            // — inconsistent with a truly backgrounded process (#F16).
+            // — inconsistent with a truly backgrounded process.
             .kill_on_drop(false);
 
         // Unix: lead a new SESSION, not just a new process group. `setsid()`
@@ -1096,7 +1096,7 @@ mod tests {
 
     #[tokio::test]
     async fn tee_log_is_capped() {
-        // #126: the on-disk tee log must be bounded so a command spewing
+        // The on-disk tee log must be bounded so a command spewing
         // gigabytes can't fill the temp dir, even though the in-memory buffer is
         // already capped.
         let dir = std::env::temp_dir().join(format!("mermaid_teelog_{}", std::process::id()));
@@ -1120,7 +1120,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     pub(crate) fn tee_log_created_owner_only_and_refuses_existing() {
-        // #F14/#F15: the tee log (which can capture secret-bearing stdout) must
+        // The tee log (which can capture secret-bearing stdout) must
         // be owner-only, and the O_EXCL create must refuse a pre-existing path —
         // the same guard that refuses to follow a symlink planted at the
         // predictable name.
@@ -1146,7 +1146,7 @@ mod tests {
 
     #[test]
     pub(crate) fn secret_env_name_denylist_covers_common_carriers() {
-        // #4: secrets the old denylist missed.
+        // Secrets the old denylist missed.
         for name in [
             "ANTHROPIC_API_KEY",
             "AWS_SECRET_ACCESS_KEY",
@@ -1177,7 +1177,7 @@ mod tests {
 
     #[tokio::test]
     async fn out_of_project_working_dir_is_escalated_and_blocked() {
-        // #1: a read-only command auto-runs in-project, but the same command
+        // A read-only command auto-runs in-project, but the same command
         // with an out-of-project working_dir is escalated to ExternalDirectory
         // and denied (here, by ReadOnly mode — proving it's no longer treated
         // as an auto-allowable in-project read).
@@ -1810,7 +1810,7 @@ mod tests {
     #[test]
     pub(crate) fn dangerous_detection_resists_substring_evasion() {
         // The old lowercased-substring blocklist let these through; the
-        // tokenized, segment-aware check now catches them (#114).
+        // tokenized, segment-aware check now catches them.
         assert!(contains_dangerous_command("RM -RF /"));
         assert!(contains_dangerous_command("rm  -rf  /"));
         assert!(contains_dangerous_command("echo hi; rm -rf /"));

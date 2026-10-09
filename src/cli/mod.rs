@@ -5,7 +5,7 @@ mod daemon;
 mod feedback;
 
 pub use args::{
-    Cli, Commands, DaemonCommand, OutputFormat, PairCommand, PluginCommand, QaCommand,
+    Cli, Commands, DaemonCommand, McpCommand, OutputFormat, PairCommand, PluginCommand, QaCommand,
     resolve_run_prompt,
 };
 pub use commands::{handle_command, list_models};

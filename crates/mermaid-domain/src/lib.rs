@@ -28,6 +28,7 @@
 //! await something cannot, because the runtime is not on the dependency list.
 
 pub mod action_display;
+pub mod autocompact;
 pub mod checklist;
 pub mod cmd;
 pub mod compaction;
@@ -36,6 +37,7 @@ pub mod context;
 pub mod conversation;
 pub mod cost;
 pub mod file_mention;
+pub mod goal;
 pub mod image_token;
 pub mod input_kind;
 pub mod mcp_resources;
@@ -50,6 +52,7 @@ pub mod request;
 pub mod run_event;
 pub mod runtime;
 pub mod session_event;
+pub mod side_question;
 pub mod slash_commands;
 pub mod state;
 pub mod tool_search;
@@ -64,15 +67,16 @@ pub use checklist::{
 pub use cmd::{ChatRequest, Cmd, ToolDefinition, ToolDispatch};
 pub use compaction::{
     CompactionBoundary, CompactionEvent, CompactionPolicy, CompactionRequest, CompactionResult,
-    CompactionTrigger, PreparedCompaction, RequestedCompaction, build_replacement_messages,
-    build_summary_request, compaction_receipt, context_exceeds_hard_limit, format_compact_count,
-    normalize_summary, prepare_compaction, should_auto_compact,
+    CompactionTrigger, MIN_AUTO_THRESHOLD_TOKENS, PreparedCompaction, RequestedCompaction,
+    build_replacement_messages, build_summary_request, compaction_receipt,
+    context_exceeds_hard_limit, format_compact_count, normalize_summary, prepare_compaction,
+    should_auto_compact,
 };
 pub use config::{
     ActiveStyle, AgentTypeConfig, AgentsConfig, CompactionConfig, Config, ConfigLayer, ExecConfig,
-    FetchBackend, FilesystemPolicy, McpServerConfig, MemoryConfig, NetworkPolicy, OutputConfig,
-    OutputStyleSummary, SafetyConfig, SearchBackend, SessionFlags, ThemeChoice, TransportKind,
-    UiConfig, UserProviderConfig, WebConfig,
+    FetchBackend, FilesystemPolicy, McpOAuthConfig, McpServerConfig, MemoryConfig, NetworkPolicy,
+    OutputConfig, OutputStyleSummary, SafetyConfig, SearchBackend, SessionFlags, ThemeChoice,
+    TransportKind, UiConfig, UserProviderConfig, WebConfig,
 };
 pub use context::{
     InstructionSource, LoadedInstructions, LoadedMemory, LoadedSkills, MemoryEntry, MemoryScope,

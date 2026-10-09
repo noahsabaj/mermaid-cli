@@ -63,7 +63,27 @@ pub async fn gate_external(
     summary: String,
     args: &serde_json::Value,
 ) -> Option<ToolOutcome> {
-    gate_external_inner(ctx, tool, category, summary, args, false).await
+    gate_external_inner(ctx, tool, category, summary, args, false, None).await
+}
+
+/// `computer` variant of [`gate_external`]: carries the screen the model last
+/// saw, so the Auto-mode check can judge what the input lands on.
+pub async fn gate_computer(
+    ctx: &ExecContext,
+    summary: String,
+    args: &serde_json::Value,
+    screen: Option<String>,
+) -> Option<ToolOutcome> {
+    gate_external_inner(
+        ctx,
+        "computer",
+        mermaid_runtime::ToolCategory::Computer,
+        summary,
+        args,
+        false,
+        screen,
+    )
+    .await
 }
 
 /// MCP variant of [`gate_external`]: carries the server-advertised
@@ -82,6 +102,7 @@ pub async fn gate_external_mcp(
         summary,
         args,
         read_only_hint,
+        None,
     )
     .await
 }
@@ -93,6 +114,7 @@ async fn gate_external_inner(
     summary: String,
     args: &serde_json::Value,
     mcp_read_only_hint: bool,
+    screen: Option<String>,
 ) -> Option<ToolOutcome> {
     if matches!(
         category,
@@ -112,11 +134,11 @@ async fn gate_external_inner(
     // Surface a concrete, content-bearing detail (the text being typed, the URL
     // being fetched, the MCP server__tool + args). Without this the Auto-mode
     // classifier and the human approval prompt see only the tool name and a
-    // generic summary — so they can't actually vet *what* the action does
-    // (#29, #30, #31).
+    // generic summary — so they can't actually vet *what* the action does.
     request.command = action_detail(tool, args);
     request.arguments = Some(args.clone());
     request.mcp_read_only_hint = mcp_read_only_hint;
+    request.screen = screen;
     let pending = serde_json::json!({ "tool": tool, "args": args });
     // `scratch_contained` is always false here: external actions (network,
     // desktop, MCP, subagents) act OUTSIDE the filesystem, so scratchpad
@@ -167,7 +189,7 @@ fn action_detail(tool: &str, args: &serde_json::Value) -> Option<String> {
             // Surface the real query text so the Auto classifier and the human
             // approval modal can catch exfiltration-via-query (`evil.com?leak=
             // <secret>`) — not just a count. Handles both the single-`query` and
-            // `queries[]` shapes `web.rs` accepts (#30).
+            // `queries[]` shapes `web.rs` accepts.
             let queries: Vec<String> = if let Some(q) = s("query") {
                 vec![q.to_string()]
             } else if let Some(arr) = args.get("queries").and_then(|v| v.as_array()) {
@@ -187,7 +209,7 @@ fn action_detail(tool: &str, args: &serde_json::Value) -> Option<String> {
         "agent" => {
             // The subagent prompt is model-authored and can carry injection or
             // exfiltration; surface it so the reviewer vets the real task, not
-            // the short label (#31).
+            // the short label.
             Some(format!("agent: {}", s("prompt")?))
         },
         _ => None,
@@ -337,6 +359,7 @@ pub async fn gate(
                         path: request.path.clone(),
                         arguments: request.arguments.clone(),
                         goal: ctx.goal.clone(),
+                        screen: request.screen.clone(),
                         workdir: ctx.workdir.display().to_string(),
                         turn: ctx.turn,
                         token: ctx.token.clone(),
@@ -412,7 +435,7 @@ async fn inline_decision(
         .flatten();
     let key = allowlist_key(&request.tool, request.command.as_deref(), external_path);
     // An empty key marks a non-allowlistable action — always prompt, never
-    // match a stored entry (#6, #31).
+    // match a stored entry.
     if !key.is_empty() && broker.is_allowlisted(&key) {
         return Gate::Proceed { risk };
     }
@@ -465,8 +488,8 @@ fn format_approval_body(request: &ActionRequest, classifier_reason: Option<&str>
     let mut body = if let Some(cmd) = modal_detail {
         // A prompt sigil reads as "shell command"; only use it for actual
         // shell categories. MCP details (`mcp s__t(…)`) render verbatim
-        // so the prompt isn't misleading
-        // (#30, #31). The sigil is the HOST shell's (`$ ` / `PS> `): telling
+        // so the prompt isn't misleading.
+        // The sigil is the HOST shell's (`$ ` / `PS> `): telling
         // the reader they are approving a POSIX command when PowerShell will
         // run it is the same lie the `Bash(...)` transcript label told.
         match request.category {
@@ -615,7 +638,7 @@ mod tests {
 
     #[test]
     fn action_detail_surfaces_web_search_and_agent_content() {
-        // #30/#31: the classifier + approval modal must see the real content,
+        // The classifier + approval modal must see the real content,
         // not just a count/label.
         let d = action_detail(
             "web_search",
@@ -648,7 +671,7 @@ mod tests {
 
     #[tokio::test]
     async fn headless_ask_blocks_non_replayable_unless_opted_in() {
-        // #3: web/mcp/subagent on an Ask decision with no approval
+        // Web/mcp/subagent on an Ask decision with no approval
         // UI is blocked by default, allowed only with the opt-in flag.
         let req = || ActionRequest::new("web_fetch", ToolCategory::Web, "web_fetch https://x");
 
@@ -1069,7 +1092,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<mermaid_domain::Msg>(8);
         let broker = crate::providers::ApprovalBroker::new(tx);
         // Approve-always once so the key is allowlisted, then the SAME command
-        // must proceed WITHOUT emitting another prompt. (#6: execute_command
+        // must proceed WITHOUT emitting another prompt. (execute_command
         // keys on the full normalized command, so only an identical command is
         // cleared — a different-argument command re-prompts; that distinction is
         // covered by the `allowlist_key` unit tests.)

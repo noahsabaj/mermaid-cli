@@ -21,8 +21,6 @@
 //! purpose: `--replay` folds a recorded log with no tokio runtime in sight, and
 //! keeping the kernel callable from a plain `for` loop is what proves this
 //! abstraction did not smuggle a runtime into the fold.
-//!
-//! See `docs/design/engine-extraction.md`.
 
 mod handle;
 
@@ -150,8 +148,7 @@ pub struct DrivePolicy {
     pub on_cancel: OnCancel,
     /// Wall-clock budget for this drive. A `select!` arm rather than a
     /// `timeout()` wrapper, so a timed-out caller keeps its state and still
-    /// reaches its own shutdown path instead of dropping the sink mid-flight
-    /// (#76).
+    /// reaches its own shutdown path instead of dropping the sink mid-flight.
     pub deadline: Option<Duration>,
 }
 
@@ -392,8 +389,8 @@ impl<S: EffectSink, O: StepObserver> Engine<S, O> {
     ///
     /// The `select!` is `biased`: cancellation and the deadline are one-shot
     /// arms that must win against a saturated message channel. (The interactive
-    /// loop's fairness requirement — #112, where a hot channel starved terminal
-    /// input — does not apply here, because there is no input arm to starve.)
+    /// loop's fairness requirement, where a hot channel can starve terminal
+    /// input, does not apply here, because there is no input arm to starve.)
     pub async fn drive(&mut self, inbox: &mut Inbox<'_>, policy: &DrivePolicy) -> DriveExit {
         let deadline = policy.deadline.map(|d| Instant::now() + d);
         // Set when a cancel token fires under `OnCancel::Unwind`: from then on

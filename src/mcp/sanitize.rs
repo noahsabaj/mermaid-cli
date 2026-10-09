@@ -200,6 +200,8 @@ const REF_INLINE_DEPTH: usize = 8;
 ///   cycle-safe; unresolvable refs become `{"type":"object"}` keeping any
 ///   sibling `description`)
 /// - `$schema`, `$id`, `$defs`, `definitions`, `$comment` dropped
+/// - `x-mcp-header` dropped: it tells the MCP client which arguments to copy
+///   into HTTP headers, and is nothing to the model
 /// - `const: v` rewritten to `enum: [v]` (Gemini)
 /// - `anyOf`/`oneOf` where removing `{"type":"null"}` branches leaves exactly
 ///   one branch flatten to that branch (the pervasive "nullable" pattern)
@@ -258,7 +260,7 @@ fn sanitize_node(node: &Value, defs: &HashMap<String, Value>, depth: usize) -> V
     let mut out = serde_json::Map::with_capacity(obj.len());
     for (key, value) in obj {
         match key.as_str() {
-            "$schema" | "$id" | "$defs" | "definitions" | "$comment" => {},
+            "$schema" | "$id" | "$defs" | "definitions" | "$comment" | "x-mcp-header" => {},
             "exclusiveMinimum" | "exclusiveMaximum" if value.is_boolean() => {},
             "const" => {
                 out.insert("enum".to_string(), Value::Array(vec![value.clone()]));
@@ -548,6 +550,18 @@ mod tests {
     fn schema_numeric_exclusive_bounds_kept() {
         let out = sanitize_schema(&json!({"type": "number", "exclusiveMinimum": 0}));
         assert_eq!(out, json!({"type": "number", "exclusiveMinimum": 0}));
+    }
+
+    #[test]
+    fn schema_header_annotation_is_dropped() {
+        let out = sanitize_schema(&json!({
+            "type": "object",
+            "properties": {"region": {"type": "string", "x-mcp-header": "Region"}}
+        }));
+        assert_eq!(
+            out,
+            json!({"type": "object", "properties": {"region": {"type": "string"}}})
+        );
     }
 
     #[test]

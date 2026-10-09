@@ -108,6 +108,10 @@ pub const KEYBINDINGS: &[(&str, &str)] = &[
     ("End", "Jump to the newest message"),
     ("Ctrl+V", "Paste (including images)"),
     ("Ctrl+O", "Compose the prompt in $VISUAL/$EDITOR"),
+    (
+        "In the /btw pane",
+        "Esc close · Up/Down scroll · Left/Right older/newer · c copy · f fork · x clear earlier",
+    ),
     ("Ctrl+B", "Background a running command"),
     ("Ctrl+T", "Expand or collapse the task checklist"),
     ("Alt+T", "Cycle reasoning depth"),
@@ -192,6 +196,22 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         group: SlashCommandGroup::Everyday,
     },
     SlashCommand {
+        name: "btw",
+        aliases: &[],
+        description: "Ask a side question; the answer stays out of the conversation",
+        arg_hint: Some("[question]"),
+        usage_note: None,
+        group: SlashCommandGroup::Everyday,
+    },
+    SlashCommand {
+        name: "goal",
+        aliases: &[],
+        description: "Keep working until a condition is met; no arg shows status",
+        arg_hint: Some("[condition|clear]"),
+        usage_note: None,
+        group: SlashCommandGroup::Everyday,
+    },
+    SlashCommand {
         name: "scratchpad",
         aliases: &[],
         description: "Show the session scratch directory and its contents",
@@ -236,6 +256,14 @@ pub const COMMAND_REGISTRY: &[SlashCommand] = &[
         aliases: &["compress", "summarize"],
         description: "Compact conversation context with optional focus instructions",
         arg_hint: Some("[instructions]"),
+        usage_note: None,
+        group: SlashCommandGroup::ModelContext,
+    },
+    SlashCommand {
+        name: "autocompact",
+        aliases: &[],
+        description: "Show or set when automatic compaction starts",
+        arg_hint: Some("[tokens|off|on|reset] [global|project] [current-model|all-models]"),
         usage_note: None,
         group: SlashCommandGroup::ModelContext,
     },
@@ -616,6 +644,31 @@ fn parse_output_style_arg(arg: Option<String>) -> crate::SlashCmd {
     }
 }
 
+/// `/context [auto|max|offload on|off|<tokens>]`. An unknown argument shows
+/// the report, which documents the forms.
+fn parse_context_arg(arg: Option<&str>) -> crate::ContextCmd {
+    use crate::ContextCmd;
+    match arg.map(str::trim) {
+        None | Some("") => ContextCmd::Show,
+        Some("auto") => ContextCmd::Auto,
+        Some("max") | Some("full") => ContextCmd::Max,
+        Some(s) => {
+            if let Some(rest) = s.strip_prefix("offload") {
+                match rest.trim() {
+                    "on" | "true" | "enable" | "yes" => ContextCmd::Offload(true),
+                    "off" | "false" | "disable" | "no" | "" => ContextCmd::Offload(false),
+                    // "offload garbage" → just show.
+                    _ => ContextCmd::Show,
+                }
+            } else if let Ok(n) = s.parse::<u32>() {
+                ContextCmd::Set(n)
+            } else {
+                ContextCmd::Show
+            }
+        },
+    }
+}
+
 /// Parse a slash-command input line (without the leading `/`) into a
 /// `SlashCmd`, or `None` when the line names no command.
 ///
@@ -681,33 +734,13 @@ pub fn parse_slash_command(raw: &str) -> Option<crate::SlashCmd> {
         Some("usage") => SlashCmd::Usage,
         Some("init") => SlashCmd::Init(arg),
         Some("todos") => SlashCmd::Todos(arg),
+        Some("btw") => SlashCmd::Btw(arg.filter(|a| !a.is_empty())),
+        Some("goal") => SlashCmd::Goal(arg),
         Some("scratchpad") => SlashCmd::Scratchpad,
         Some("add-dir") => SlashCmd::AddDir(arg.filter(|a| !a.is_empty())),
-        Some("context") => {
-            use crate::ContextCmd;
-            let a = arg.as_deref().map(str::trim);
-            SlashCmd::Context(match a {
-                None | Some("") => ContextCmd::Show,
-                Some("auto") => ContextCmd::Auto,
-                Some("max") | Some("full") => ContextCmd::Max,
-                Some(s) => {
-                    if let Some(rest) = s.strip_prefix("offload") {
-                        match rest.trim() {
-                            "on" | "true" | "enable" | "yes" => ContextCmd::Offload(true),
-                            "off" | "false" | "disable" | "no" | "" => ContextCmd::Offload(false),
-                            // "offload garbage" → just show.
-                            _ => ContextCmd::Show,
-                        }
-                    } else if let Ok(n) = s.parse::<u32>() {
-                        ContextCmd::Set(n)
-                    } else {
-                        // Unrecognized arg → show (self-documenting report).
-                        ContextCmd::Show
-                    }
-                },
-            })
-        },
+        Some("context") => SlashCmd::Context(parse_context_arg(arg.as_deref())),
         Some("compact") => SlashCmd::Compact(arg),
+        Some("autocompact") => SlashCmd::AutoCompact(arg),
         Some("memory") => SlashCmd::Memory,
         Some("remember") => SlashCmd::Remember(required(arg)),
         Some("forget") => SlashCmd::Forget(required(arg)),

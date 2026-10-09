@@ -170,6 +170,12 @@ pub enum Msg {
         message: String,
         kind: StatusKind,
     },
+    /// A `/goal` check came back: the raw reply, or why the call failed.
+    /// Parsed in the reducer so a recording replays the same verdict.
+    GoalEvaluated {
+        turn: TurnId,
+        reply: Result<crate::goal::GoalReply, String>,
+    },
     /// Stream complete. Carries final token count and opaque provider state
     /// that must round-trip on the next request.
     StreamDone {
@@ -325,6 +331,20 @@ pub enum Msg {
     /// writes the usage report with a cost block.
     ModelPricesResolved(crate::cost::ModelPrices),
 
+    // ── Side questions (`/btw`) ─────────────────────────────────────
+    /// A streamed chunk of a side question's answer. Keyed by the side
+    /// question's own id, never a `TurnId`: the main turn neither gates nor
+    /// sees it.
+    SideQuestionText {
+        id: u64,
+        chunk: String,
+    },
+    /// A side question's call ended.
+    SideQuestionFinished {
+        id: u64,
+        outcome: crate::side_question::SideOutcome,
+    },
+
     // ── Misc model operations ───────────────────────────────────────
     /// `/model <name>` finished pulling (Ollama only).
     ModelPullFinished {
@@ -350,6 +370,14 @@ pub enum Msg {
     /// config saved, plugin install, …) without a bespoke Msg per effect.
     TransientStatus {
         text: String,
+    },
+
+    /// An `/autocompact` change was written to `path`. `compaction` is the
+    /// user and project config merged again, so the session follows the same
+    /// priority a new session would.
+    AutoCompactSaved {
+        path: String,
+        compaction: crate::config::CompactionConfig,
     },
 
     /// Ephemeral confirmation of a manual action (clipboard copy), shown just
@@ -407,7 +435,7 @@ pub enum Msg {
         duration_secs: u64,
     },
 
-    // ── Mouse (F13) ─────────────────────────────────────────────────
+    // ── Mouse ─────────────────────────────────────────────────
     /// Mouse-wheel scroll in the chat pane. Positive delta = scroll
     /// toward older messages (up), negative = toward newer (down). The
     /// reducer accumulates into `ui.mouse_scroll_accum`; the render layer
@@ -442,7 +470,7 @@ pub enum Msg {
     /// Copy the current chat text selection to the system clipboard. The main
     /// loop reads the selected text from the render layer (`rstate.chat`) and
     /// emits this, so the side effect flows through `update()` — and is recorded
-    /// for replay — instead of being dispatched out-of-band (#18).
+    /// for replay — instead of being dispatched out-of-band.
     CopySelection(String),
 }
 
@@ -640,6 +668,15 @@ pub enum SlashCmd {
         name: Option<String>,
         project: bool,
     },
+    /// `/btw`: `Some(question)` asks a side question; `None` reopens the
+    /// side-question pane on the newest exchange.
+    Btw(Option<String>),
+    /// `/goal`: no arg → status; a clear word → clear; anything else sets
+    /// the condition and starts working toward it.
+    Goal(Option<String>),
+    /// `/autocompact`: the raw argument, parsed by the reducer, which knows
+    /// the model a bare scope means.
+    AutoCompact(Option<String>),
     /// Compose the input draft in `$VISUAL`/`$EDITOR` (also Ctrl+O).
     Editor,
     Help,
@@ -687,6 +724,7 @@ impl Msg {
             | Self::ContextUsageEstimated { turn, .. }
             | Self::CompactionFinished { turn, .. }
             | Self::CompactionFailed { turn, .. }
+            | Self::GoalEvaluated { turn, .. }
             | Self::StreamDone { turn, .. }
             | Self::UpstreamError { turn, .. }
             | Self::ToolStarted { turn, .. }
@@ -730,11 +768,14 @@ impl Msg {
             | Self::ScratchpadReady { .. }
             | Self::RuntimeText(_)
             | Self::ModelPricesResolved(_)
+            | Self::SideQuestionText { .. }
+            | Self::SideQuestionFinished { .. }
             | Self::ModelPullFinished { .. }
             | Self::ModelPullProgress(_)
             | Self::Tick
             | Self::Resize { .. }
             | Self::TransientStatus { .. }
+            | Self::AutoCompactSaved { .. }
             | Self::Toast { .. }
             | Self::EditorReturned { .. }
             | Self::BackgroundAgentStarted { .. }
@@ -771,6 +812,7 @@ impl Msg {
             Self::BuiltinToolSchemaTokens(_) => MsgKind::BuiltinToolSchemaTokens,
             Self::CompactionFinished { .. } => MsgKind::CompactionFinished,
             Self::CompactionFailed { .. } => MsgKind::CompactionFailed,
+            Self::GoalEvaluated { .. } => MsgKind::GoalEvaluated,
             Self::StreamDone { .. } => MsgKind::StreamDone,
             Self::UpstreamError { .. } => MsgKind::UpstreamError,
             Self::ToolStarted { .. } => MsgKind::ToolStarted,
@@ -792,6 +834,9 @@ impl Msg {
             Self::QueryResult(_) => MsgKind::QueryResult,
             Self::ScratchpadReady { .. } => MsgKind::ScratchpadReady,
             Self::RuntimeText(_) | Self::ModelPricesResolved(_) => MsgKind::RuntimeStore,
+            Self::SideQuestionText { .. } | Self::SideQuestionFinished { .. } => {
+                MsgKind::SideQuestion
+            },
             Self::ModelPullFinished { .. } => MsgKind::ModelPullFinished,
             Self::ModelPullProgress(_) => MsgKind::ModelPullProgress,
             Self::Tick => MsgKind::Tick,
@@ -800,6 +845,7 @@ impl Msg {
             Self::FocusChanged(_) => MsgKind::FocusChanged,
             Self::OpenImageAt { .. } => MsgKind::OpenImageAt,
             Self::TransientStatus { .. } => MsgKind::TransientStatus,
+            Self::AutoCompactSaved { .. } => MsgKind::AutoCompactSaved,
             Self::Toast { .. } => MsgKind::Toast,
             Self::EditorReturned { .. } => MsgKind::EditorReturned,
             Self::BackgroundAgentStarted { .. }
@@ -832,6 +878,7 @@ pub enum MsgKind {
     BuiltinToolSchemaTokens,
     CompactionFinished,
     CompactionFailed,
+    GoalEvaluated,
     StreamDone,
     UpstreamError,
     ToolStarted,
@@ -851,6 +898,7 @@ pub enum MsgKind {
     QueryResult,
     ScratchpadReady,
     RuntimeStore,
+    SideQuestion,
     ModelPullFinished,
     ModelPullProgress,
     Tick,
@@ -860,6 +908,7 @@ pub enum MsgKind {
     BackgroundAgent,
     OpenImageAt,
     TransientStatus,
+    AutoCompactSaved,
     Toast,
     EditorReturned,
     CopySelection,

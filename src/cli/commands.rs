@@ -22,7 +22,7 @@ use crate::{
     session::ConversationManager,
 };
 
-use super::{Commands, OutputFormat, PairCommand, PluginCommand, QaCommand};
+use super::{Commands, McpCommand, OutputFormat, PairCommand, PluginCommand, QaCommand};
 
 /// Handle CLI subcommands
 /// Returns Ok(true) if the command was handled and we should exit
@@ -184,16 +184,28 @@ pub async fn handle_command(
             url,
             header,
             env_header,
+            client_id,
+            client_secret_env,
+            callback_port,
         } => {
             // --url conflicts with --command/--arg/--env at the clap level, so
             // exactly one registration path runs.
             match url {
                 Some(url) => {
+                    let oauth = (client_id.is_some() || callback_port.is_some()).then(|| {
+                        mermaid_domain::McpOAuthConfig {
+                            client_id: client_id.clone(),
+                            client_secret_env: client_secret_env.clone(),
+                            callback_port: *callback_port,
+                            scopes: Vec::new(),
+                        }
+                    });
                     crate::mcp::add_http_server(
                         name,
                         url.clone(),
                         header.clone(),
                         env_header.clone(),
+                        oauth,
                     )
                     .await?;
                 },
@@ -208,8 +220,12 @@ pub async fn handle_command(
             crate::mcp::remove_server(name).await?;
             Ok(true)
         },
-        Commands::Mcp => {
-            show_mcp_servers();
+        Commands::Mcp { command } => {
+            match command {
+                None => show_mcp_servers(),
+                Some(McpCommand::Login { name }) => mcp_login(name).await?,
+                Some(McpCommand::Logout { name }) => mcp_logout(name)?,
+            }
             Ok(true)
         },
         Commands::Login { provider } => {
@@ -1566,6 +1582,7 @@ async fn show_model_info(model: &str, config: &Config) -> Result<()> {
             output_schema: None,
             suppress_auto_compact: false,
             requested_compaction: None,
+            compaction: mermaid_domain::CompactionPolicy::default(),
             native_compaction: None,
             native_tools: mermaid_model::models::NativeTools::default(),
         };
@@ -2023,7 +2040,7 @@ fn show_checkpoints(limit: usize) -> Result<()> {
 fn restore_checkpoint(id: &str, force: bool) -> Result<()> {
     // Restoring overwrites the working tree from the checkpoint. Confirm first
     // (default NO); `--force` is the scripted-use bypass, and a non-interactive
-    // session without it refuses rather than clobbering the tree unprompted (#113).
+    // session without it refuses rather than clobbering the tree unprompted.
     if !mermaid_model::utils::confirm_or_refuse(
         &format!("Restore checkpoint {id}? This overwrites the current working tree."),
         force,
@@ -2207,7 +2224,7 @@ fn handle_pair(command: &PairCommand) -> Result<()> {
 /// window-title/prompt rewrites, cursor moves used for spoofing. Keeps `\n` and
 /// `\t`; drops every ESC-introduced sequence (CSI / OSC / DCS / PM / APC / SOS
 /// and simple two-/three-byte forms) and all other C0/C1 control characters
-/// (incl. `\r` and DEL). See F49.
+/// (incl. `\r` and DEL).
 fn sanitize_terminal_text(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut chars = input.chars();
@@ -2432,7 +2449,7 @@ async fn run_update(check: bool, force: bool) -> Result<()> {
     // Confirm before fetching + running the install script — it executes
     // downloaded shell/PowerShell and replaces the running binary. `--force` is
     // the scripted-use bypass; a non-interactive session without it refuses
-    // rather than running fetched code unprompted (#110).
+    // rather than running fetched code unprompted.
     let script_url = if cfg!(target_os = "windows") {
         INSTALL_PS1_URL
     } else {
@@ -2478,7 +2495,7 @@ async fn run_install_script(client: &reqwest::Client, install_dir: &Path) -> Res
     // Stage the fetched script in the per-user 0700 private temp dir, created
     // exclusively (O_EXCL → never follows/opens a pre-planted symlink) so a local
     // attacker can neither redirect the write nor swap the file between write and
-    // exec (#F50). The previous world-readable, predictable
+    // exec. The previous world-readable, predictable
     // `temp_dir()/mermaid-update-<pid>.<ext>` allowed both a symlink redirect and
     // a write→exec TOCTOU.
     let dir = mermaid_model::utils::private_temp_dir()
@@ -2522,7 +2539,7 @@ async fn run_install_script(client: &reqwest::Client, install_dir: &Path) -> Res
 /// symlink pre-planted at the path is refused (`O_EXCL` never follows) and the
 /// staged code is owner-only (`0600` file inside the `0700` private dir). This
 /// closes the symlink-redirect and write→exec TOCTOU that the old predictable,
-/// world-readable temp path left open (#F50).
+/// world-readable temp path left open.
 fn stage_install_script(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     #[cfg(unix)]
@@ -2561,6 +2578,41 @@ fn version_at_least(current: &str, latest: &str) -> bool {
         (Some(c), Some(l)) => c >= l,
         _ => current == latest,
     }
+}
+
+/// The remote server `name` from config, for `mermaid mcp login`.
+fn remote_mcp_server(name: &str) -> Result<mermaid_domain::McpServerConfig> {
+    let config = load_config_or_warn();
+    let Some(server) = config.mcp_servers.get(name) else {
+        anyhow::bail!(
+            "no MCP server named '{name}' is configured; add a remote one with \
+             `mermaid add {name} --url <URL>`"
+        );
+    };
+    anyhow::ensure!(
+        server.url.is_some(),
+        "'{name}' is a local (command) server; sign-in applies only to remote servers"
+    );
+    Ok(server.clone())
+}
+
+/// `mermaid mcp login <name>`: the OAuth browser flow for a remote server.
+async fn mcp_login(name: &str) -> Result<()> {
+    let server = remote_mcp_server(name)?;
+    crate::mcp::oauth::login(name, &server).await?;
+    println!("The '{name}' tools will be available next time you start mermaid.");
+    Ok(())
+}
+
+/// `mermaid mcp logout <name>`: delete the stored tokens. Works for a server
+/// no longer in config, so a removed entry's tokens can still be deleted.
+fn mcp_logout(name: &str) -> Result<()> {
+    if crate::mcp::oauth::logout(name)? {
+        println!("Removed the stored sign-in for '{name}'.");
+    } else {
+        println!("No stored sign-in for '{name}'.");
+    }
+    Ok(())
 }
 
 /// Show configured MCP servers
@@ -2602,9 +2654,16 @@ fn show_mcp_servers() {
                     .join(", ")
             )
         };
-        println!("  {name} — {package}{env_display}");
+        let signed_in =
+            if server_cfg.url.is_some() && crate::mcp::oauth::is_signed_in(name, server_cfg) {
+                " (signed in)"
+            } else {
+                ""
+            };
+        println!("  {name} — {package}{env_display}{signed_in}");
     }
     println!("\nManage with: mermaid add <name> / mermaid remove <name>");
+    println!("Sign in to a remote server with: mermaid mcp login <name>");
 }
 
 /// Show status of all dependencies
@@ -2738,7 +2797,7 @@ async fn print_ollama_status(config: &Config, has_remote: bool) {
     }
 }
 
-/// Project instructions (Step 5h). Walks UP from cwd to git root or
+/// Project instructions. Walks UP from cwd to git root or
 /// $HOME to find the nearest supported instruction files.
 fn print_project_instructions_status() {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));

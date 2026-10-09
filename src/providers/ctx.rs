@@ -228,6 +228,9 @@ pub struct ExecContext {
     /// The conversation that led to this call, passed to the Auto-mode
     /// classifier so it can judge whether an action is aligned.
     pub goal: mermaid_domain::UserGoal,
+    /// For a `computer` call: every `computer` call of this turn, in order
+    /// (`ToolDispatch::computer_batch`). Empty for every other tool.
+    pub computer_batch: Vec<serde_json::Value>,
     /// LLM classifier for `SafetyMode::Auto`. `Some` only when the effective
     /// mode is `Auto` and a provider is bound; the gate awaits it to resolve a
     /// `PolicyDecision::Classify`. `None` ⇒ the gate fails safe (escalate).
@@ -319,6 +322,7 @@ impl ExecContext {
             additional_dirs: dispatch.additional_dirs,
             safety_mode: dispatch.safety_mode,
             goal: dispatch.goal,
+            computer_batch: dispatch.computer_batch,
             classifier: services.classifier,
             approval: services.approval,
             questions: services.questions,
@@ -425,6 +429,7 @@ pub fn test_exec_context_with_config(
                 message_index: 0,
                 scratchpad: None,
                 additional_dirs: Vec::new(),
+                computer_batch: Vec::new(),
             },
             ToolServices {
                 workdir,

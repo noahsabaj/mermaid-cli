@@ -25,10 +25,10 @@ pub mod terminal;
 // Public re-exports - the ONLY way to access app functionality
 pub use config::{
     get_config_dir, init_config, load_config, load_config_or_warn, load_layered_config,
-    load_layered_config_or_warn, load_project_scoped_config, persist_default_reasoning,
-    persist_last_model, persist_ollama_allow_ram_offload, persist_ollama_num_ctx_for_model,
-    persist_output_style, persist_reasoning_for_model, persist_ui_theme, remove_user_config_key,
-    resolve_model_id, update_user_config_key,
+    load_layered_config_or_warn, load_project_scoped_config, persist_auto_compact,
+    persist_default_reasoning, persist_last_model, persist_ollama_allow_ram_offload,
+    persist_ollama_num_ctx_for_model, persist_output_style, persist_reasoning_for_model,
+    persist_ui_theme, remove_user_config_key, resolve_model_id, update_user_config_key,
 };
 pub use event_source::event_to_msg;
 pub use lifecycle::RuntimeLifecycle;

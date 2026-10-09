@@ -1,0 +1,16 @@
+# Computer use: change one value in a window with the mouse and keyboard. The
+# window is a real X client on a private Xvfb display, and it saves outside
+# the project, so only the screen can change the outcome.
+fixture = "desktop"
+screen_app = "settings"
+prompt = """
+A Settings window is open on the screen. Change the port to 9090 and press OK.
+"""
+
+[[check]]
+kind = "app_saved"
+equals = "port=9090"
+
+[[check]]
+kind = "unchanged"
+paths = ["."]

@@ -195,8 +195,8 @@ pub fn load_project_scoped_config(cwd: &std::path::Path) -> Config {
 }
 
 /// Like [`load_config`] (user scope, no session flags) but never fails: on a
-/// malformed config, warn on stderr (secret-redacted, #F13) and fall back to
-/// defaults (#111). For standalone subcommands that only read user settings.
+/// malformed config, warn on stderr (secret-redacted) and fall back to
+/// defaults. For standalone subcommands that only read user settings.
 #[must_use]
 pub fn load_config_or_warn() -> Config {
     load_config().unwrap_or_else(|e| {
@@ -416,7 +416,7 @@ pub(crate) fn deep_remove_segments(table: &mut toml::Table, path: &[&str]) -> bo
 
 /// Like [`load_layered_config`] but never fails — the startup entry point.
 /// On success, prints notices and layer-attributed warnings to stderr. On a
-/// malformed layer, warns (secret-redacted, #F13) and degrades: the session
+/// malformed layer, warns (secret-redacted) and degrades: the session
 /// flags are re-applied over bare defaults so `--no-network`/`-c` survive a
 /// corrupt user file rather than being silently dropped with it.
 #[must_use]
@@ -434,7 +434,7 @@ pub fn load_layered_config_or_warn(cwd: Option<&std::path::Path>, flags: &Sessio
         Err(e) => {
             // A TOML parse error renders the offending source line, which can be
             // a secret-bearing one (`extra_headers`/`env`/`api_key_env`); scrub
-            // credential-shaped content before it reaches stderr (#F13).
+            // credential-shaped content before it reaches stderr.
             eprintln!(
                 "mermaid: {}",
                 mermaid_model::utils::redact_secrets(&format!("{e:#}"))
@@ -573,7 +573,7 @@ pub(super) fn with_persist_lock<T>(f: impl FnOnce() -> T) -> T {
 /// only its own keys: unknown keys survive, defaults are not frozen in, and
 /// project-layer or session-flag values can never leak into the user file.
 /// A malformed file propagates the parse error rather than being overwritten
-/// with defaults (#111).
+/// with defaults.
 fn update_user_config_table(mutate: impl FnOnce(&mut toml::Table) -> Result<()>) -> Result<()> {
     update_user_config_table_at(&get_config_path()?, mutate)
 }
@@ -711,6 +711,70 @@ pub fn persist_ollama_allow_ram_offload(enabled: bool) -> Result<()> {
         &["ollama", "allow_ram_offload"],
         toml::Value::Boolean(enabled),
     )
+}
+
+/// Write an `/autocompact` change to the file it names, and return that
+/// file's path. `cwd` locates the project file.
+///
+/// # Errors
+///
+/// The read-modify-write of that file, and for the project file, `cwd` not
+/// being inside a git repository.
+pub fn persist_auto_compact(
+    cwd: &std::path::Path,
+    change: &mermaid_domain::autocompact::AutoCompactChange,
+) -> Result<PathBuf> {
+    use mermaid_domain::autocompact::ConfigFile;
+    let mutate = |table: &mut toml::Table| apply_auto_compact_change(table, change);
+    match change.file {
+        ConfigFile::User => {
+            update_user_config_table(mutate)?;
+            get_config_path()
+        },
+        ConfigFile::Project => super::project_config::update_project_config_table(cwd, mutate),
+    }
+}
+
+/// `change` applied to a raw config table. A reset for every model removes
+/// every automatic compaction value in the file.
+fn apply_auto_compact_change(
+    table: &mut toml::Table,
+    change: &mermaid_domain::autocompact::AutoCompactChange,
+) -> Result<()> {
+    use mermaid_domain::autocompact::AutoCompactSetting;
+    const SECTION: &str = "compaction";
+    const ENABLED: &str = "auto_enabled";
+    const TOKENS: &str = "auto_threshold_tokens";
+    const PER_MODEL: &str = "auto_threshold_tokens_per_model";
+    let model = change.model_id.as_deref();
+    match change.setting {
+        AutoCompactSetting::Tokens(tokens) => {
+            let value = toml::Value::Integer(i64::try_from(tokens)?);
+            match model {
+                Some(model) => deep_set_segments(table, &[SECTION, PER_MODEL, model], value),
+                None => deep_set_segments(table, &[SECTION, TOKENS], value),
+            }
+        },
+        AutoCompactSetting::Off => {
+            deep_set_segments(table, &[SECTION, ENABLED], toml::Value::Boolean(false))
+        },
+        AutoCompactSetting::On => {
+            deep_set_segments(table, &[SECTION, ENABLED], toml::Value::Boolean(true))
+        },
+        AutoCompactSetting::Reset => {
+            match model {
+                Some(model) => {
+                    deep_remove_segments(table, &[SECTION, PER_MODEL, model]);
+                },
+                None => {
+                    for key in [ENABLED, TOKENS, PER_MODEL] {
+                        deep_remove_segments(table, &[SECTION, key]);
+                    }
+                },
+            }
+            Ok(())
+        },
+    }
 }
 
 /// Resolve which model to use: CLI arg > `last_used` > `[default_model]` > a
@@ -1621,7 +1685,7 @@ mod tests {
         assert!(!blob.contains("url"), "{blob}");
     }
 
-    /// Configs persisted before Step 4 don't have a `reasoning` field on
+    /// Older configs don't have a `reasoning` field on
     /// `[default_model]`. Loading them must succeed and yield the
     /// `Medium` default — otherwise existing user configs break on
     /// upgrade.
@@ -1814,7 +1878,7 @@ port = 11434
         assert!(cfg.ollama.auto_start);
     }
 
-    /// Configs from before Step 5b don't have a `reasoning_per_model`
+    /// Older configs don't have a `reasoning_per_model`
     /// section. Loading them must succeed with an empty map — otherwise
     /// upgrade breaks every existing user.
     #[test]
@@ -1960,6 +2024,76 @@ port = 11434
         let c: Config =
             toml::from_str("[compaction]\nauto_threshold_percent = 0\n").expect("parses");
         assert_eq!(c.compaction.policy().auto_threshold_percent, 1);
+    }
+
+    #[test]
+    fn a_model_token_threshold_overrides_the_one_for_all_models() {
+        let c: Config = toml::from_str(
+            "[compaction]\n\
+             auto_threshold_tokens = 250000\n\
+             [compaction.auto_threshold_tokens_per_model]\n\
+             \"openai/gpt-5.6\" = 400000\n\
+             \"ollama/tiny\" = 10\n",
+        )
+        .expect("parses");
+        let tokens = |model: &str| c.compaction.policy_for(model).auto_threshold_tokens;
+        assert_eq!(tokens("openai/gpt-5.6"), Some(400_000));
+        assert_eq!(tokens("anthropic/claude-opus-5-5"), Some(250_000));
+        assert_eq!(
+            tokens("ollama/tiny"),
+            Some(mermaid_domain::MIN_AUTO_THRESHOLD_TOKENS),
+            "a threshold that would compact every turn is raised"
+        );
+        assert_eq!(
+            Config::default().compaction.policy_for("openai/gpt-5.6"),
+            mermaid_domain::CompactionPolicy::default()
+        );
+    }
+
+    fn auto_compact(
+        setting: mermaid_domain::autocompact::AutoCompactSetting,
+        model: Option<&str>,
+    ) -> mermaid_domain::autocompact::AutoCompactChange {
+        mermaid_domain::autocompact::AutoCompactChange {
+            setting,
+            file: mermaid_domain::autocompact::ConfigFile::User,
+            model_id: model.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn auto_compact_changes_write_only_their_own_keys() {
+        use mermaid_domain::autocompact::AutoCompactSetting::{Off, Reset, Tokens};
+        let mut table: toml::Table =
+            toml::from_str("[compaction]\ntail_turns = 3\n").expect("parses");
+        let model = "ollama/qwen3.5:8b";
+        apply_auto_compact_change(&mut table, &auto_compact(Tokens(250_000), Some(model)))
+            .expect("set model");
+        apply_auto_compact_change(&mut table, &auto_compact(Tokens(500_000), None))
+            .expect("set all");
+        apply_auto_compact_change(&mut table, &auto_compact(Off, None)).expect("off");
+        let c: Config = toml::from_str(&toml::to_string(&table).expect("writes")).expect("parses");
+        assert_eq!(c.compaction.tail_turns, 3);
+        assert_eq!(c.compaction.auto_threshold_tokens, Some(500_000));
+        assert_eq!(
+            c.compaction.auto_threshold_tokens_per_model.get(model),
+            Some(&250_000),
+            "a model ID with dots is one key"
+        );
+        assert!(!c.compaction.auto_enabled);
+
+        apply_auto_compact_change(&mut table, &auto_compact(Reset, Some(model))).expect("reset");
+        let c: Config = toml::from_str(&toml::to_string(&table).expect("writes")).expect("parses");
+        assert!(c.compaction.auto_threshold_tokens_per_model.is_empty());
+        assert_eq!(c.compaction.auto_threshold_tokens, Some(500_000));
+
+        apply_auto_compact_change(&mut table, &auto_compact(Reset, None)).expect("reset all");
+        assert_eq!(
+            table["compaction"]
+                .as_table()
+                .map(|t| t.keys().collect::<Vec<_>>()),
+            Some(vec![&"tail_turns".to_string()])
+        );
     }
 
     /// Config with one remote provider carrying an explicit `default_model`.

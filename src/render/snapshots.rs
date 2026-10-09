@@ -13,7 +13,7 @@
 //! env or clock read sneaks into `render()`, it fails here before the pinned
 //! snapshots start flaking across machines.
 //!
-//! Timezone: the suite is TZ-INDEPENDENT rather than TZ-pinned (#296). It used
+//! Timezone: the suite is TZ-INDEPENDENT rather than TZ-pinned. It used
 //! to set `TZ=UTC` around each scene — which is what kept it off Windows, where
 //! chrono reads the system zone and ignores `TZ`. That pinning did not work on
 //! unix either: chrono resolves the local zone once per process and caches it,
@@ -151,6 +151,46 @@ fn busy_streaming() {
             pending_tool_calls: Vec::new(),
             continuation: false,
         };
+        s
+    });
+}
+
+/// `/btw` while the main turn streams: the side pane owns the bottom zone,
+/// earlier side questions dimmed above the one on view, the main spinner
+/// still running above the composer.
+#[test]
+fn side_question_pane() {
+    use mermaid_domain::side_question::SideOutcome;
+    assert_scene("side_question_pane", || {
+        let mut s = scene_state();
+        s.session
+            .append(ChatMessage::user("refactor the config loader"), s.now);
+        s.turn = TurnState::Generating {
+            id: TurnId(1),
+            started: std::time::SystemTime::from(fixed_now() - chrono::Duration::seconds(3)),
+            partial_text: "Moving the defaults into one table".to_string(),
+            partial_reasoning: String::new(),
+            tokens: 12,
+            phase: GenPhase::Streaming,
+            provider_continuation: None,
+            pending_tool_calls: Vec::new(),
+            continuation: false,
+        };
+        let earlier = s.side_questions.ask("is this on main?".to_string());
+        s.side_questions
+            .push_chunk(earlier, "Yes, the branch is main.");
+        s.side_questions
+            .finish(earlier, SideOutcome::Done { tried_tools: false });
+        let id = s
+            .side_questions
+            .ask("what was the config file called?".to_string());
+        s.side_questions.push_chunk(
+            id,
+            "It is `src/app/config.rs`. The loader reads `config.toml` from the \
+             user config directory, then the project's `.mermaid/config.toml`.",
+        );
+        s.side_questions
+            .finish(id, SideOutcome::Done { tried_tools: false });
         s
     });
 }

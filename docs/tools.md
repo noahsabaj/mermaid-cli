@@ -16,7 +16,7 @@ Editing: `edit_file` is for one location -- `target_content` must match once (or
 `allow_multiple`), with matching that degrades in steps from exact through trailing-whitespace,
 full-trim and Unicode normalisation before refusing. `apply_patch` is for multi-hunk and
 new-file work and takes a unified diff, range headers included. Both write atomically beneath
-the resolved root, snapshot a checkpoint for `/undo`, and replay through the approval queue.
+the resolved root, snapshot a checkpoint for `/restore`, and replay through the approval queue.
 
 On Anthropic, the model gets Anthropic's own text editor and bash tools, the definitions Claude
 is trained on, in place of Mermaid's schemas for the same work: the text editor stands in for
@@ -27,9 +27,21 @@ for before anything runs (`view` is a line-numbered `read_file`, `str_replace` a
 gate, the read-only sandbox, checkpoints and approvals see the same tool they always do, and
 history sends the call back to the model as it wrote it. `bash` is not offered on Windows,
 where commands run under PowerShell. A model that refuses these tools gets Mermaid's schemas
-from then on; `[tools] provider_native = false` always sends Mermaid's. OpenAI's `apply_patch`
-and `shell` tools exist only in the Responses API, which Mermaid does not use for OpenAI;
-Mermaid's own `apply_patch` already takes the same patch format.
+from then on; `[tools] provider_native = false` always sends Mermaid's.
+
+On OpenAI, the model gets OpenAI's own `apply_patch` tool in place of Mermaid's `apply_patch`
+schema. Each call names one file operation (`create_file`, `update_file`, `delete_file`) whose
+diff is already the body of Mermaid's `*** Begin Patch` envelope, so it is rewritten onto
+Mermaid's `apply_patch` before anything runs and passes through the same gates; history sends
+the call back as the model wrote it, answered as an `apply_patch_call_output`. OpenAI's `shell`
+tool is not offered: it runs a list of commands and wants an exit outcome for each, which
+`execute_command` does not report.
+
+Pictures: `read_file` returns a PNG, JPEG, GIF or WebP file (known by its first bytes) as an
+image beside a one-line `[image/png, 48213 bytes]` result, up to 3.75 MiB. Any tool's images
+(an MCP tool's screenshot, too) travel with its result: inside the `tool_result` on Anthropic,
+and as a user turn right after the run of results on the providers that take images only from
+the user. Only the newest three images in a conversation are sent.
 
 Background processes: `execute_command` with `mode="background"` (or a foreground command the
 user moves to the background with Ctrl+B) returns an id such as `bg-1234`. `background_process`
@@ -40,6 +52,33 @@ the same as `read`. `stop` ends the process tree. `list` shows the session's pro
 reaches only processes this Mermaid process started for the calling session, never a raw pid, so
 it needs no approval in any safety mode. Exit codes are not recorded. The user's `/logs` and
 `/stop` work on the same processes.
+
+Computer: with `computer = true` under `[tools]`, the `computer` tool takes screenshots and drives
+the mouse and keyboard of the user's real screen. It is off by default because every screenshot
+goes to the model's provider. Its actions are those of Anthropic's computer toolset: `screenshot`,
+`zoom`, `cursor_position`, `left_click`, `right_click`, `middle_click`, `double_click`,
+`triple_click`, `left_click_drag`, `mouse_move`, `left_mouse_down`, `left_mouse_up`, `scroll`,
+`type`, `key`, `hold_key` and `wait`. With `provider_native`, Claude gets Anthropic's toolset
+itself (`computer_toolset_20260801`), OpenAI models get OpenAI's `computer` tool and Gemini models
+get Gemini's `computer_use` tool for the desktop, each rewritten onto the tool as it arrives;
+other vision models call the tool directly. One OpenAI call carries several actions: they run in
+order, stop at the first that fails, and the call returns a screenshot of the screen after them.
+Each Gemini call returns a screenshot too, and its coordinates are out of 1000 across the screen.
+Gemini's `navigate`, `key_down` and `key_up` are left out. A warning the provider attaches to a
+call (OpenAI's safety checks, Gemini's request for confirmation) is shown to the gate with the
+actions; a call Gemini blocks does not run. A screenshot is fitted to 1568 px on its long edge and
+1.15 megapixels, and coordinates are pixels of the last screenshot, scaled back to the primary
+screen. Input actions wait 0.5 s before they return. Calls in one message run in order, and after
+one fails the rest return "Not executed: an earlier computer action in this turn failed." without
+running. Screenshots, `zoom`, `cursor_position` and `wait` run in every safety mode; the other
+actions are gated as external access, so `read_only` blocks them. The gate decides once for all
+the input actions of one model message: `ask` shows the whole batch in one prompt, and `auto`
+gives the safety check the batch and the last screenshot, so its model must accept pictures. A
+headless run in `ask` refuses input unless `--allow-untrusted-tools` is set. If the user moves the
+mouse while Mermaid works, the next input action returns "Not executed: the user moved the mouse"
+and input stays stopped until the user sends a message.
+Windows and macOS use xcap and enigo (macOS asks the terminal for Screen Recording and
+Accessibility). Linux needs an X11 session; Wayland is not supported yet.
 
 Paths outside the project (absolute, or traversing out of it) resolve to where they point and
 are gated as external access: `read_only` denies, `ask` prompts with a per-directory
@@ -64,7 +103,17 @@ that compacts server-side (Anthropic), the provider handles that automatic trigg
 
 MCP servers contribute additional tools under the `mcp__<server>__<tool>` prefix when configured. Names and schemas are sanitized to provider-safe form at startup (charset `[A-Za-z0-9_-]`, 64-char cap, `$ref` inlining and other schema normalization); `enabled_tools`/`disabled_tools` filters keep matching the RAW tool names the server itself advertises.
 
-Servers start concurrently at launch, each bounded by a 60-second timeout, and report ready/errored individually.
+Servers start concurrently at launch and report ready/errored individually.
+
+Mermaid speaks MCP 2026-07-28 and still works with servers that only speak 2025-11-25. Each server
+gets a `server/discover` request first. A server that answers it speaks 2026-07-28: there is no
+`initialize` handshake or session, and every request carries the protocol version, client info and
+capabilities in `_meta`. Any other answer (an error, an HTTP `4xx`, or silence from a stdio
+server for 20 seconds) means 2025-11-25, and Mermaid runs the `initialize` handshake instead. On a
+2026-07-28 HTTP server, calls also carry the `Mcp-Method`, `Mcp-Name` and `Mcp-Param-*` headers;
+a tool whose `x-mcp-header` annotations are invalid is left out with a warning. Mermaid declares
+no client capabilities (no sampling, elicitation or roots), so a tool call that asks for that
+kind of input fails with an error.
 
 By default MCP tools are **deferred**: instead of advertising every server's tools on every request, the model gets one `tool_search` tool that searches deferred tool names/descriptions and promotes matches to direct advertisement for the rest of the session — deferred schemas don't count against `/context` until promoted. Opt out globally with `mcp_defer_tools = false` at the top level of config, or per server with `defer = false` on its `[mcp_servers.<name>]` entry.
 
@@ -81,6 +130,47 @@ Output is capped at 100,000 characters, keeping the head and the tail. Both tool
 
 A server that declares `prompts` contributes each of its prompts to the `/` palette as `/mcp__<server>__<prompt>` (sanitized like tool names, lowercased), tagged `(mcp:<server>)` like a plugin's prompt commands. Typed words map onto the prompt's declared arguments in order; double quotes group words, and the last argument takes whatever is left. A missing required argument prints a usage line. Otherwise Mermaid fetches the prompt (`prompts/get`) and sends its text as your message, so the transcript shows the text itself; non-text parts are left out with a note. A server's prompts leave the palette when it errors or stops. `/doctor` lists each ready server's tool and prompt counts and whether it serves resources.
 
+### Remote servers and sign-in
+
+A remote server is an `[mcp_servers.<name>]` entry with a `url` (Streamable HTTP). Add one with
+`mermaid add <name> --url <URL>`. If the server needs an OAuth sign-in, Mermaid opens the browser
+there and then; `mermaid mcp login <name>` signs in again later, and `mermaid mcp logout <name>`
+deletes the stored tokens. The flow follows the MCP authorization spec (2026-07-28):
+
+- Discovery from the server's `401` challenge or its `/.well-known/oauth-protected-resource`
+  metadata, then the authorization server's RFC 8414 or OpenID Connect metadata. The metadata
+  must name the issuer it was fetched for, and the server must support PKCE `S256`.
+- The client, in the spec's order: a client you registered yourself (`oauth.client_id`), then
+  Mermaid's Client ID Metadata Document
+  (`https://noahsabaj.github.io/mermaid-cli/oauth/client-metadata.json`), then Dynamic Client
+  Registration as a native app.
+- The browser redirects to `http://127.0.0.1:<port>/callback`. On a remote shell, sign in in any
+  browser and paste the address it ends on into the terminal. Mermaid checks `state` and the
+  `iss` of the response before it redeems the code.
+- Tokens are requested for the server's `resource` (RFC 8707) and stored in the OS keyring
+  (service `mermaid`, account `mcp-oauth:<name>`), bound to the server's `url`. They refresh
+  when they expire or when the server answers `401`. When a refresh fails, or the server answers
+  `403 insufficient_scope`, the server does not start and says to run `mermaid mcp login <name>`;
+  that sign-in asks for the new scopes as well as the old ones.
+
+A config that sends its own `Authorization` header (`headers` or `env_headers`) turns this off.
+For a server that does not let Mermaid register itself, register an OAuth app there and name it
+in config:
+
+```toml
+[mcp_servers.github]
+url = "https://api.githubcopilot.com/mcp/"
+
+[mcp_servers.github.oauth]
+client_id = "Iv1.0123456789abcdef"
+client_secret_env = "GITHUB_MCP_CLIENT_SECRET"  # only for a confidential app
+callback_port = 8765                            # the app's redirect: http://127.0.0.1:8765/callback
+# scopes = ["repo"]                             # replaces the scopes the server suggests
+```
+
+`mermaid add <name> --url <URL> --client-id <ID> --client-secret-env <VAR> --callback-port <PORT>`
+writes the same table.
+
 ## Web tools
 
 `web_fetch` is registered natively with no key. `web_search` is registered when the selected backend is viable; the managed default is omitted with an actionable diagnostic on unsupported platforms.
@@ -91,7 +181,7 @@ it needs the native fetch backend.
 
 Inspect an existing `web_fetch` snapshot with Unicode-caseless `pattern` matching, or page through it with stable `start_line`/`line_count` continuation, without refetching.
 
-Backend selection, redirect and provenance rules, and the transfer budgets are in
+Backend selection and redirect rules are in
 [configuration.md](configuration.md#web-tool-backends).
 
 ## Inline approvals

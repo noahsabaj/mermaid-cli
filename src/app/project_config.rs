@@ -120,25 +120,44 @@ pub(crate) fn load_project_layer(
 /// write), and the read-modify-write itself. The write is atomic; a failure
 /// leaves the previous file intact.
 pub(crate) fn persist_project_output_style(cwd: &Path, style: &str) -> Result<()> {
+    update_project_config_table(cwd, |table| {
+        let output = table
+            .entry("output".to_string())
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+        let output = output
+            .as_table_mut()
+            .context("project config [output] is not a table")?;
+        output.insert("style".to_string(), toml::Value::String(style.to_string()));
+        Ok(())
+    })
+    .map(|_| ())
+}
+
+/// Read `<git-root>/.mermaid/config.toml` for `cwd` (empty when absent),
+/// apply `mutate`, and write it back. Returns the file's path.
+///
+/// # Errors
+///
+/// `cwd` sitting outside a git repository, `mutate`'s, and the
+/// read-modify-write itself. The write is atomic; a failure leaves the
+/// previous file intact.
+pub(crate) fn update_project_config_table(
+    cwd: &Path,
+    mutate: impl FnOnce(&mut toml::Table) -> Result<()>,
+) -> Result<PathBuf> {
     let Some(dir) = super::memory::find_git_root(cwd).map(|root| root.join(".mermaid")) else {
         anyhow::bail!(
-            "not inside a git repository — project output styles need <git-root>/.mermaid/config.toml"
+            "not inside a git repository, so there is no <git-root>/.mermaid/config.toml"
         );
     };
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     let path = dir.join("config.toml");
     let mut table = read_config_table(&path)?;
-    let output = table
-        .entry("output".to_string())
-        .or_insert_with(|| toml::Value::Table(toml::Table::new()));
-    let output = output
-        .as_table_mut()
-        .context("project config [output] is not a table")?;
-    output.insert("style".to_string(), toml::Value::String(style.to_string()));
+    mutate(&mut table)?;
     let bytes = toml::to_string_pretty(&table)?.into_bytes();
     mermaid_runtime::write_atomic(&path, &bytes)
         .with_context(|| format!("write {}", path.display()))?;
-    Ok(())
+    Ok(path)
 }
 
 /// Strip everything outside the allowlist (top-level, nested denials, and

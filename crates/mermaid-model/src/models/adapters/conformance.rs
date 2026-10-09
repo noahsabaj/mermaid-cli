@@ -59,7 +59,7 @@ struct Outcome {
 enum Failure {
     /// The provider sent a typed error frame mid-stream.
     ProviderError,
-    /// The body ended without a terminal frame (F56).
+    /// The body ended without a terminal frame.
     StreamCut,
 }
 
@@ -121,7 +121,7 @@ fn normalize(events: &[StreamEvent], response: ModelResponse) -> Outcome {
     let mut streamed_tool_calls = Vec::new();
     // Adapters never emit `Status` or `Done`: the first is the Ollama
     // autostart notice, which comes from outside the stream, and the second
-    // comes from the provider wrapper (F3). Collected rather than ignored so
+    // comes from the provider wrapper. Collected rather than ignored so
     // an adapter that starts emitting one is caught here.
     let mut off_contract: Vec<String> = Vec::new();
     for event in events {
@@ -178,9 +178,9 @@ fn fixture(provider: &str, name: &str) -> String {
 mod protocols {
     use super::super::anthropic::AnthropicStream;
     use super::super::gemini::GeminiStream;
-    use super::super::meta::MetaStream;
     use super::super::ollama::OllamaStream;
     use super::super::openai_compat::OpenAICompatStream;
+    use super::super::responses::{Provider, ResponsesStream};
 
     pub(super) fn anthropic() -> AnthropicStream {
         AnthropicStream::new("claude-test".to_string())
@@ -194,8 +194,12 @@ mod protocols {
         OllamaStream::new("ollama-test".to_string())
     }
 
-    pub(super) fn meta() -> MetaStream {
-        MetaStream::new("muse-spark-test".to_string())
+    pub(super) fn meta() -> ResponsesStream {
+        ResponsesStream::new(Provider::Meta, "muse-spark-test".to_string())
+    }
+
+    pub(super) fn openai_responses() -> ResponsesStream {
+        ResponsesStream::new(Provider::OpenAi, "gpt-test".to_string())
     }
 
     /// `deepinfra` carries `ReasoningExtraction::DeltaContentField
@@ -240,6 +244,7 @@ macro_rules! all_providers {
             scenario!(protocols::gemini, "gemini", $sse),
             scenario!(protocols::openai_compat, "openai_compat", $sse),
             scenario!(protocols::meta, "meta", $sse),
+            scenario!(protocols::openai_responses, "openai_responses", $sse),
             scenario!(protocols::ollama, "ollama", $ndjson),
         ]
     };
@@ -304,7 +309,7 @@ async fn a_real_truncation_survives_as_length_everywhere() {
 
 #[tokio::test]
 async fn a_mid_stream_error_frame_is_typed_everywhere() {
-    // #123: without this, an OpenRouter error frame surfaced as "missing
+    // Without this, an OpenRouter error frame surfaced as "missing
     // field choices" — a parse failure blaming the client for the
     // provider's rate limit.
     for outcome in all_providers!("error_frame.sse", "error_frame.ndjson") {
@@ -314,7 +319,7 @@ async fn a_mid_stream_error_frame_is_typed_everywhere() {
 
 #[tokio::test]
 async fn a_body_cut_before_the_terminal_frame_is_an_error_everywhere() {
-    // F56. A clean `Ok` here would be indistinguishable from a real, short
+    // A clean `Ok` here would be indistinguishable from a real, short
     // completion, and the caller would commit a half-finished turn.
     for outcome in all_providers!("abnormal_close.sse", "abnormal_close.ndjson") {
         assert_eq!(outcome, Err(Failure::StreamCut));
@@ -373,6 +378,11 @@ async fn oversized_everywhere(needle: &str) -> Vec<(ScenarioResult, &'static str
             protocols::meta,
             "meta",
             oversized("meta", "reasoning.sse", needle)
+        ),
+        scenario_body!(
+            protocols::openai_responses,
+            "openai_responses",
+            oversized("openai_responses", "reasoning.sse", needle)
         ),
         scenario_body!(
             protocols::ollama,
@@ -464,7 +474,7 @@ fn strip_usage(body: &str) -> String {
 async fn no_usage_frame_means_no_usage_everywhere() {
     // A stream that never reports usage must say so with `None`: a provider
     // usage of zero is folded as authoritative billing truth and resets the
-    // context gauge (#125 / F54). Anthropic was the last adapter to fabricate
+    // context gauge. Anthropic was the last adapter to fabricate
     // one.
     let cases = vec![
         scenario_body!(
@@ -486,6 +496,11 @@ async fn no_usage_frame_means_no_usage_everywhere() {
             protocols::meta,
             "meta",
             strip_usage(&fixture("meta", "text.sse"))
+        ),
+        scenario_body!(
+            protocols::openai_responses,
+            "openai_responses",
+            strip_usage(&fixture("openai_responses", "text.sse"))
         ),
         scenario_body!(
             protocols::ollama,

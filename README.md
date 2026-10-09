@@ -11,11 +11,11 @@ An open-source AI coding assistant for the terminal. Multi-provider — Ollama (
 - **Checkpoints** — shadow-git snapshots before mutations; inspect with `/checkpoints`, roll back with `/restore <id>`
 - **Durable memory** — the agent remembers facts across sessions; a compact index auto-loads into every prompt
 - **Project instructions and skills** — auto-loads `AGENTS.md` (or `CLAUDE.md`) and `MERMAID.md`, plus task-specific playbooks loaded on demand
-- **MCP servers** — stdio JSON-RPC client with a built-in registry of 16 popular servers
+- **MCP servers** — stdio JSON-RPC client with a built-in registry of popular servers
 - **Sessions** — conversations auto-save; `--continue` reopens the last one here, `--resume` opens a picker, double-Esc forks the timeline at an earlier message
 - **Context compaction** — automatic checkpoint-and-continue when the window fills; manual `/compact [focus]`
 - **Image paste** — Ctrl+V attaches images for vision models on X11, Wayland, macOS, and Windows
-- **Reasoning levels** — seven tiers, cycled with Alt+T, persisted per model
+- **Reasoning levels** — cycled with Alt+T, persisted per model
 - **Record and replay** — `--record` captures every reducer input; `--replay` reconstructs the session offline, deterministically
 - **Non-interactive mode** — script with `mermaid run "prompt"` for CI and automation
 
@@ -79,42 +79,14 @@ Inside the TUI, use `/help` for grouped commands, `/doctor` for the session read
 ```bash
 mermaid                                    # Start fresh session
 mermaid --continue                         # Resume the most recent session in this directory
-mermaid --resume                           # Pick a past session from a searchable list
 mermaid --model anthropic/<model>          # Pick a model (see Remote providers below)
-mermaid --reasoning high                   # Override default reasoning depth
-mermaid --path /path/to/project            # Run against a specific project directory
-mermaid --add-dir ../shared-lib            # Also work in another directory (or /add-dir mid-session)
-mermaid list                               # List available models across providers
-mermaid doctor                             # First-run readiness check
-mermaid init                               # Create default config file
-mermaid add <name>                         # Add an MCP server (e.g., context7, git)
-
 mermaid run "fix the tests"                # Non-interactive mode
-mermaid run "explain main.rs" -f json      # JSON output (or -f ndjson to stream events)
-mermaid --sandbox run "refactor this"      # Confine writes to the project, deny network
+mermaid add <name>                         # Add an MCP server from the built-in registry (e.g., context7, git)
 ```
 
-Every flag, structured output, headless session resume, and record/replay: [docs/cli-reference.md](docs/cli-reference.md).
+Every flag, keyboard shortcut, and slash command: [docs/cli-reference.md](docs/cli-reference.md). `mermaid --help` and `/help` list them too.
 
-`mermaid add <name>` resolves the name through a registry of 16 popular MCP servers (context7, playwright, git, postgres, notion, slack, and more), prompts for required env vars, and validates by spawning the server.
-
-## Keyboard shortcuts
-
-| Key | Action |
-|-----|--------|
-| Enter | Send message (or queue while the model is generating) |
-| Esc | Stop generation / dismiss palette |
-| Esc Esc | (idle) Rewind: fork the session at an earlier message |
-| Ctrl+C | Quit (auto-saves the session) |
-| Alt+T | Cycle reasoning level |
-| Shift+Tab | Cycle safety mode: `read_only → ask → auto → full_access` |
-| Ctrl+V | Paste image or text from clipboard |
-| Ctrl+O | Compose the prompt in `$VISUAL`/`$EDITOR` |
-| Ctrl+R | Search earlier prompts (this session and saved ones) |
-| `/` | Open the slash-command palette (a line that names no command is sent as a message) |
-| `@` | Open the fuzzy file picker |
-
-The [full tables](docs/cli-reference.md#keyboard-shortcuts) add selection, background processes, and every slash command; `/help` groups them in the TUI.
+Remote MCP servers that sign in with OAuth (Linear, Notion, Sentry, Atlassian and others) work too: `mermaid add linear --url https://mcp.linear.app/mcp` opens the browser to sign in, and `mermaid mcp login <name>` signs in again later. Tokens go to the OS keyring and refresh on their own. See [docs/tools.md](docs/tools.md#remote-servers-and-sign-in).
 
 ## Tools
 
@@ -122,7 +94,7 @@ The model calls these autonomously:
 
 | Tool | Description |
 |------|-------------|
-| `read_file` | Read files (text, PDF, images) |
+| `read_file` | Read files and directories; pictures come back as images |
 | `write_file` | Create or overwrite files (timestamped backup) |
 | `edit_file` | Single-location search-and-replace; refuses an ambiguous match |
 | `apply_patch` | Multi-hunk, context-anchored edits with a diff (fuzzy-tolerant) |
@@ -133,6 +105,7 @@ The model calls these autonomously:
 | `memory` | Durable cross-session memory (project, shared, or global scope) |
 | `web_search` | Search the web (managed local SearXNG by default) |
 | `web_fetch` | Fetch a URL into a bounded session snapshot (in-process, no key) |
+| `computer` | Screenshots, mouse and keyboard on your screen (off until `[tools] computer = true`) |
 | `agent` | Spawn an autonomous subagent for parallel tasks |
 | `task_create`, `task_update`, `task_list` | The live task checklist (`/todos`) |
 | `ask_user_question` | Multiple-choice questions when a decision is the user's to make |
@@ -144,13 +117,7 @@ MCP servers contribute tools under the `mcp__<server>__<tool>` prefix, **deferre
 
 ## Safety
 
-Approval policy and OS confinement are independent. The policy (`read_only`, `ask`, `auto`, `full_access`) decides what needs your say-so; the sandbox decides what the kernel permits regardless:
-
-- `--no-network` — blocks web tools everywhere, and stops model-run commands from reaching the network
-- `--confine-fs` — write-class filesystem access only beneath the project root, any `--add-dir` directories, cwd, and temp
-- `--sandbox` — both at once
-
-Enforcement is seccomp-BPF plus Landlock on Linux, Seatbelt on macOS, AppContainer plus Job Objects on Windows. It fails closed: unappliable confinement exits 126 rather than running unconfined. On macOS and on Linux 6.12 and later, `read_only` mode runs every shell command inside a kernel-enforced read-only sandbox (no writes, sockets, IPC, outward signals or privileges), so any command that only reads works; Windows and older Linux kernels keep the read-only allowlists. See [docs/sandbox.md](docs/sandbox.md).
+Approval policy and OS confinement are independent. The policy (`read_only`, `ask`, `auto`, `full_access`) decides what needs your say-so; the sandbox (`--no-network`, `--confine-fs`, or both with `--sandbox`) decides what the kernel permits regardless, and fails closed. See [docs/sandbox.md](docs/sandbox.md).
 
 ## Project instructions
 
@@ -195,7 +162,7 @@ Set the appropriate environment variable, or override it with `[providers.<name>
 | Grok (xAI) | `XAI_API_KEY` | `grok/<model>` (`xai/<model>` alias) |
 | Ollama Cloud | `OLLAMA_API_KEY` | `ollama/<model>:cloud` |
 
-Environment variables always win; the OS keyring fills the gap when none is set. Store a key with `mermaid login <provider>` and remove it with `mermaid logout <provider>`. Keys are reported as `env`, `keyring`, or `none` — never by value. Per-provider details are in [docs/configuration.md](docs/configuration.md#provider-notes).
+Or store a key in the OS keyring with `mermaid login <provider>`; environment variables still win. Details: [API keys](docs/configuration.md#api-keys) and [provider notes](docs/configuration.md#provider-notes).
 
 ## Architecture
 
@@ -211,14 +178,6 @@ Mermaid's runtime is an Elm/MVU pattern: one pure reducer (`fn update(State, Msg
 - [docs/runtime.md](docs/runtime.md) — the optional `mermaidd` service, logging, diagnostics
 - [docs/development.md](docs/development.md) — pre-PR gate, CI matrix, snapshot suites
 - [AGENTS.md](AGENTS.md) — contributor and agent guardrails
-
-## Development
-
-```
-just check    # cargo fmt --check + clippy -D warnings + guards + cargo nextest run
-```
-
-That is the exact pre-PR gate, and what CI's blocking jobs run.
 
 ## License
 

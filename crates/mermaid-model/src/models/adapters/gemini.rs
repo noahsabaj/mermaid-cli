@@ -24,9 +24,12 @@
 //! - Reasoning is gated by `generationConfig.thinkingConfig.thinkingBudget`
 //!   (int) + `includeThoughts: bool`. Thoughts come back as parts with
 //!   `thought: true`.
-//! - **No signature round-trip.** Gemini has no encrypted server state
-//!   for thinking blocks — multi-turn reasoning is stateless on the
-//!   client side. This is significantly simpler than Anthropic.
+//! - **Thought signatures ride on function calls.** Gemini 3 attaches an
+//!   opaque `thoughtSignature` to the first function call of a response and
+//!   refuses the next request with a 400 if a call of the current turn comes
+//!   back without it. The signatures are saved on the turn's continuation
+//!   and sent back to the model that wrote them. Thought text itself is
+//!   replayed as plain `thought: true` parts.
 //! - Tool call IDs are synthesized (`call_<n>`) since Gemini doesn't
 //!   supply them; tool results match by **name** on the wire. The protocol has
 //!   no call-id field on `functionCall`/`functionResponse`, so two parallel
@@ -34,7 +37,7 @@
 //!   keep calls and results in arrival order so positional matching holds. This
 //!   is an inherent Gemini limitation, not fixable in the wire format.
 //!
-//! # Caching note (Step 5b)
+//! # Caching note
 //!
 //! Gemini 2.5+ enables **implicit caching** by default — repeated
 //! content prefixes get cost discounts automatically with no client
@@ -61,7 +64,10 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::accumulator::{CappedText, ended_without_terminal, error_body};
+use super::computer_toolset::TOOL as COMPUTER;
+use super::gemini_computer;
 use super::learning::{Learning, Optional, ParamMemory, Rejections};
+use super::tool_images::images_after_tool_run;
 use crate::models::ModelCapabilities;
 use crate::models::adapters::driver::{Flow, Framing, StreamProtocol, drive_stream};
 use crate::models::config::ModelConfig;
@@ -73,8 +79,10 @@ use crate::models::stream::{StreamEvent, StreamSink};
 use crate::models::tool_call::{FunctionCall, ToolCall};
 use crate::models::traits::Model;
 use crate::models::types::{
-    ChatMessage, FinishReason, MessageAudience, MessageRole, ModelResponse, TokenUsage,
+    ChatMessage, FinishReason, GeminiNativeCall, GeminiSignature, MessageAudience, MessageRole,
+    ModelResponse, ProviderContinuation, TokenUsage,
 };
+use crate::utils::base64_image_media_type;
 
 use super::ModelLimits;
 
@@ -208,7 +216,21 @@ fn sent_optionals(body: &Value) -> Vec<Optional> {
             &["thinking"],
         ));
     }
+    if offers_computer(body) {
+        sent.push(Optional::new(
+            gemini_computer::REJECTION,
+            "Gemini's computer tool",
+            gemini_computer::REJECTION_NAMES,
+        ));
+    }
     sent
+}
+
+/// Whether a built request offers Gemini's own computer tool.
+fn offers_computer(body: &Value) -> bool {
+    body["tools"]
+        .as_array()
+        .is_some_and(|tools| tools.iter().any(|tool| tool.get("computer_use").is_some()))
 }
 
 /// Convert Mermaid's OpenAI-shaped tool definitions to Gemini's nested
@@ -286,13 +308,17 @@ fn coalesce_consecutive_roles(msgs: Vec<Value>) -> Vec<Value> {
 /// - `MessageRole::Assistant` → `{role: "model", parts: [text + functionCall]}`.
 ///   Note the role rename: Mermaid's `Assistant` serializes as Gemini's
 ///   `model`. Thinking content (`msg.thinking`) re-emits as a `thought:
-///   true` text part — stateless, no signature.
+///   true` text part. Each function call carries the thought signature it
+///   came with, when `model` wrote it.
 /// - `MessageRole::Tool` → user-role message with one `functionResponse`
 ///   part per tool result. Consecutive Tool messages merge into one
 ///   user-role message (same idea as Anthropic).
-fn convert_messages(messages: &[ChatMessage]) -> (Option<Value>, Vec<Value>) {
+fn convert_messages(messages: &[ChatMessage], model: &str) -> (Option<Value>, Vec<Value>) {
     let mut system: Option<Value> = None;
     let mut out: Vec<Value> = Vec::new();
+    // Computer calls this model made natively, by call id.
+    let mut native_calls: std::collections::HashMap<&str, &GeminiNativeCall> =
+        std::collections::HashMap::new();
 
     let mut i = 0;
     while i < messages.len() {
@@ -323,16 +349,7 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<Value>, Vec<Value>) {
                 if !msg.content.is_empty() {
                     parts.push(json!({"text": msg.content}));
                 }
-                if let Some(ref images) = msg.images {
-                    for data in images {
-                        parts.push(json!({
-                            "inlineData": {
-                                "mimeType": "image/png",
-                                "data": data,
-                            }
-                        }));
-                    }
-                }
+                parts.extend(msg.images.iter().flatten().map(|data| inline_image(data)));
                 if parts.is_empty() {
                     parts.push(json!({"text": ""}));
                 }
@@ -354,15 +371,8 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<Value>, Vec<Value>) {
                 if !msg.content.is_empty() {
                     parts.push(json!({"text": msg.content}));
                 }
-                if let Some(ref tool_calls) = msg.tool_calls {
-                    for tc in tool_calls {
-                        parts.push(json!({
-                            "functionCall": {
-                                "name": tc.function.name,
-                                "args": tc.function.arguments,
-                            }
-                        }));
-                    }
+                for (n, tc) in msg.tool_calls.iter().flatten().enumerate() {
+                    parts.push(function_call_part(msg, n, tc, model, &mut native_calls));
                 }
                 if parts.is_empty() {
                     // Skip empty assistant turns (shouldn't happen, but
@@ -379,6 +389,15 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<Value>, Vec<Value>) {
                 let mut parts: Vec<Value> = Vec::new();
                 while i < messages.len() && messages[i].role == MessageRole::Tool {
                     let t = &messages[i];
+                    if let Some(call) = t
+                        .tool_call_id
+                        .as_deref()
+                        .and_then(|id| native_calls.get(id))
+                    {
+                        parts.push(gemini_computer::response(call, t));
+                        i += 1;
+                        continue;
+                    }
                     let name = t
                         .tool_name
                         .clone()
@@ -394,12 +413,72 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<Value>, Vec<Value>) {
                     }));
                     i += 1;
                 }
+                // The images the run returned ride in the same user turn,
+                // after the responses, each labelled with its call.
+                // A computer call's screenshot is in its response already.
+                for image in images_after_tool_run(messages, i - 1)
+                    .into_iter()
+                    .filter(|image| !native_calls.contains_key(image.call_id))
+                {
+                    parts.push(json!({"text": image.label()}));
+                    parts.push(inline_image(image.data));
+                }
                 out.push(json!({"role": "user", "parts": parts}));
             },
         }
     }
 
     (system, coalesce_consecutive_roles(out))
+}
+
+/// The `functionCall` part for the `n`th call of `msg`: as the model wrote
+/// it when it was a native computer call (noted in `native_calls`, so its
+/// result is answered in kind), with the thought signature it carried when
+/// `model` wrote it, or the stand-in on the first call when another model
+/// did.
+fn function_call_part<'a>(
+    msg: &'a ChatMessage,
+    n: usize,
+    tc: &ToolCall,
+    model: &str,
+    native_calls: &mut std::collections::HashMap<&'a str, &'a GeminiNativeCall>,
+) -> Value {
+    let continuation = msg.provider_continuation.as_ref();
+    let id = tc.id.as_deref();
+    let native = id.and_then(|id| continuation?.gemini_native_call(model, id));
+    let mut part = match native {
+        Some(call) => {
+            native_calls.insert(call.call_id.as_str(), call);
+            json!({"functionCall": {"name": call.name, "args": call.args}})
+        },
+        None => json!({
+            "functionCall": {
+                "name": tc.function.name,
+                "args": tc.function.arguments,
+            }
+        }),
+    };
+    let signature = match continuation.and_then(|c| c.gemini_signatures(model)) {
+        Some(signed) => signed
+            .iter()
+            .find(|s| id == Some(s.call_id.as_str()))
+            .map(|s| s.signature.as_str()),
+        None => (n == 0).then_some(UNSIGNED),
+    };
+    if let Some(signature) = signature {
+        part["thoughtSignature"] = json!(signature);
+    }
+    part
+}
+
+/// One base64 image as a Gemini `inlineData` part.
+fn inline_image(data: &str) -> Value {
+    json!({
+        "inlineData": {
+            "mimeType": base64_image_media_type(data),
+            "data": data,
+        }
+    })
 }
 
 /// Google Gemini adapter.
@@ -492,7 +571,7 @@ impl GeminiAdapter {
         config: &ModelConfig,
         rejected: &Rejections,
     ) -> Value {
-        let (system_from_msgs, gemini_contents) = convert_messages(messages);
+        let (system_from_msgs, gemini_contents) = convert_messages(messages, &self.model_name);
         // ModelConfig.system_prompt (+ optional MERMAID.md suffix) overrides
         // any system message in the history (matches Anthropic / OpenAI-compat
         // behavior). Gemini doesn't expose per-block cache markers in this
@@ -576,8 +655,21 @@ impl GeminiAdapter {
 
         // Tool registration is the single capability boundary. Preserve every
         // registry-selected tool; native fetch and SearXNG are keyless.
-        let registered: Vec<&Value> = config.tools.iter().collect();
-        let gemini_tools = to_gemini_tools(&registered);
+        let is_computer = |tool: &&Value| {
+            tool.pointer("/function/name").and_then(Value::as_str) == Some(COMPUTER)
+        };
+        let native_computer = config.native_tools.computer
+            && !rejected.contains(gemini_computer::REJECTION)
+            && config.tools.iter().any(|tool| is_computer(&tool));
+        let registered: Vec<&Value> = config
+            .tools
+            .iter()
+            .filter(|tool| !(native_computer && is_computer(tool)))
+            .collect();
+        let mut gemini_tools = to_gemini_tools(&registered);
+        if native_computer {
+            gemini_tools.push(gemini_computer::declaration());
+        }
         if !gemini_tools.is_empty() {
             body["tools"] = json!(gemini_tools);
         }
@@ -666,7 +758,11 @@ impl GeminiAdapter {
     }
 
     /// Decode a non-streaming response into `ModelResponse`.
-    async fn decode_non_streaming(&self, response: reqwest::Response) -> Result<ModelResponse> {
+    async fn decode_non_streaming(
+        &self,
+        response: reqwest::Response,
+        native_computer: bool,
+    ) -> Result<ModelResponse> {
         if !response.status().is_success() {
             return Err(http_error_from_response(response).await);
         }
@@ -676,7 +772,7 @@ impl GeminiAdapter {
             raw: None,
         })?;
 
-        // F52: a prompt-level safety block returns `promptFeedback.blockReason`
+        // A prompt-level safety block returns `promptFeedback.blockReason`
         // with NO candidates. Without this guard the `candidates.into_iter()
         // .next()` below is `None`, the block is skipped, and we return an empty
         // `Ok` with `stop_reason: None`. Surface a typed refusal instead — the
@@ -698,7 +794,7 @@ impl GeminiAdapter {
 
         let mut text_acc = String::new();
         let mut thinking_acc = String::new();
-        let mut tool_calls: Vec<ToolCall> = Vec::new();
+        let mut calls = Calls::new(native_computer);
         let mut stop_reason: Option<FinishReason> = None;
 
         if let Some(candidate) = json.candidates.into_iter().next() {
@@ -716,14 +812,7 @@ impl GeminiAdapter {
                                 text_acc.push_str(&text);
                             }
                         } else if let Some(fc) = part.function_call {
-                            let id = format!("call_{}", tool_calls.len());
-                            tool_calls.push(ToolCall {
-                                id: Some(id),
-                                function: FunctionCall {
-                                    name: fc.name,
-                                    arguments: fc.args,
-                                },
-                            });
+                            calls.record(fc.name, fc.args, part.thought_signature);
                         }
                     }
                 },
@@ -747,8 +836,8 @@ impl GeminiAdapter {
         let raw_prompt_tokens = json.usage_metadata.prompt_token_count.unwrap_or(0);
         let cached_tokens = json.usage_metadata.cached_content_token_count.unwrap_or(0);
         // Gemini's promptTokenCount INCLUDES cachedContentTokenCount; subtract it
-        // so the input breakdown (fresh prompt + cached) isn't double-counted
-        // (#137), matching openai_compat's token_usage_from_wire.
+        // so the input breakdown (fresh prompt + cached) isn't double-counted,
+        // matching openai_compat's token_usage_from_wire.
         let prompt_tokens = raw_prompt_tokens.saturating_sub(cached_tokens);
         let completion_tokens = json.usage_metadata.candidates_token_count.unwrap_or(0);
         let reasoning_tokens = json.usage_metadata.thoughts_token_count.unwrap_or(0);
@@ -766,13 +855,8 @@ impl GeminiAdapter {
             } else {
                 Some(thinking_acc)
             },
-            tool_calls: if tool_calls.is_empty() {
-                None
-            } else {
-                Some(tool_calls)
-            },
-            // Gemini has no signature round-trip — leave None.
-            provider_continuation: None,
+            provider_continuation: calls.continuation(&self.model_name),
+            tool_calls: (!calls.tool_calls.is_empty()).then_some(calls.tool_calls),
         })
     }
 
@@ -788,13 +872,14 @@ impl GeminiAdapter {
         &self,
         response: reqwest::Response,
         sink: Option<&StreamSink>,
+        native_computer: bool,
     ) -> Result<ModelResponse> {
         if !response.status().is_success() {
             return Err(http_error_from_response(response).await);
         }
         drive_stream(
             response.bytes_stream(),
-            GeminiStream::new(self.model_name.clone()),
+            GeminiStream::new(self.model_name.clone()).with_native_computer(native_computer),
             sink,
         )
         .await
@@ -817,6 +902,13 @@ impl GeminiStream {
             model_name,
         }
     }
+
+    /// Read calls to the computer functions as Gemini's computer tool: set
+    /// when the request offered it.
+    pub(crate) const fn with_native_computer(mut self, on: bool) -> Self {
+        self.state.calls.native_computer = on;
+        self
+    }
 }
 
 impl StreamProtocol for GeminiStream {
@@ -828,7 +920,7 @@ impl StreamProtocol for GeminiStream {
     }
 
     fn finish(self, _out: &mut Vec<StreamEvent>) -> Result<ModelResponse> {
-        // F56: a stream that ended before any candidate `finishReason` was
+        // A stream that ended before any candidate `finishReason` was
         // dropped mid-response. Surface a stream error instead of a clean `Ok`
         // (with `stop_reason: None`) that would be indistinguishable from a real
         // completion. A `MAX_TOKENS` truncation set a real `finishReason`, so it
@@ -841,9 +933,10 @@ impl StreamProtocol for GeminiStream {
             ));
         }
 
-        // F3: the wrapper emits the authoritative `Done`. See
+        // The wrapper emits the authoritative `Done`. See
         // adapters/anthropic.rs for rationale.
         let usage = self.state.usage();
+        let provider_continuation = self.state.calls.continuation(&self.model_name);
 
         Ok(ModelResponse {
             content: self.state.text_acc.into_string(),
@@ -855,12 +948,9 @@ impl StreamProtocol for GeminiStream {
             } else {
                 Some(self.state.thinking_acc.into_string())
             },
-            tool_calls: if self.state.tool_calls_done.is_empty() {
-                None
-            } else {
-                Some(self.state.tool_calls_done)
-            },
-            provider_continuation: None,
+            tool_calls: (!self.state.calls.tool_calls.is_empty())
+                .then_some(self.state.calls.tool_calls),
+            provider_continuation,
         })
     }
 }
@@ -872,22 +962,22 @@ impl StreamProtocol for GeminiStream {
 struct StreamState {
     text_acc: CappedText,
     thinking_acc: CappedText,
-    tool_calls_done: Vec<ToolCall>,
+    calls: Calls,
     prompt_tokens: usize,
     completion_tokens: usize,
     cached_input_tokens: usize,
     reasoning_output_tokens: usize,
     /// Set once a `usageMetadata` block is seen, so a stream that never reports
-    /// usage returns `None` instead of a misleading zero (#125).
+    /// usage returns `None` instead of a misleading zero.
     saw_usage: bool,
     finish_reason: Option<FinishReason>,
 }
 
 impl StreamState {
-    /// Build the response usage. `None` when no `usageMetadata` arrived (#125),
+    /// Build the response usage. `None` when no `usageMetadata` arrived,
     /// so the reducer keeps its estimate rather than resetting to zero. The
     /// fresh-prompt component subtracts cached, which Gemini folds into
-    /// `promptTokenCount`, so the input breakdown isn't double-counted (#137).
+    /// `promptTokenCount`, so the input breakdown isn't double-counted.
     fn usage(&self) -> Option<TokenUsage> {
         self.saw_usage.then(|| {
             let fresh_prompt = self.prompt_tokens.saturating_sub(self.cached_input_tokens);
@@ -929,7 +1019,7 @@ fn process_chunk_payload(
         }));
     }
 
-    // F52: a prompt-level safety block streams as a chunk carrying
+    // A prompt-level safety block streams as a chunk carrying
     // `promptFeedback.blockReason` and NO candidates. The no-parts branch below
     // would otherwise swallow it as a benign empty success — there's no
     // candidate `finishReason` to trip its block check. Surface a typed refusal,
@@ -974,7 +1064,7 @@ fn process_chunk_payload(
         if let Some(fr) = finish_reason
             && !gemini_empty_is_benign(fr)
             && state.text_acc.is_empty()
-            && state.tool_calls_done.is_empty()
+            && state.calls.tool_calls.is_empty()
         {
             return Err(ModelError::Backend(BackendError::ProviderError {
                 provider: "gemini".to_string(),
@@ -1013,6 +1103,87 @@ fn record_usage(state: &mut StreamState, usage: &Value) {
     }
 }
 
+/// A part's thought signature, in either spelling the API uses.
+fn signature_of(part: &Value) -> Option<&str> {
+    part.get("thoughtSignature")
+        .or_else(|| part.get("thought_signature"))
+        .and_then(Value::as_str)
+}
+
+/// The function calls of one response, as Mermaid runs them, with what
+/// replay needs to send them back as written.
+#[derive(Debug, Default)]
+struct Calls {
+    /// The request offered Gemini's computer tool, so its function names are
+    /// computer calls.
+    native_computer: bool,
+    tool_calls: Vec<ToolCall>,
+    signatures: Vec<GeminiSignature>,
+    native_calls: Vec<GeminiNativeCall>,
+}
+
+impl Calls {
+    fn new(native_computer: bool) -> Self {
+        Self {
+            native_computer,
+            ..Self::default()
+        }
+    }
+
+    /// Record one call, with an id of its own (Gemini sends none we keep),
+    /// rewritten onto Mermaid's `computer` when it is a computer call.
+    fn record(&mut self, name: String, args: Value, signature: Option<String>) -> ToolCall {
+        let id = format!("call_{}", self.tool_calls.len());
+        if let Some(signature) = signature {
+            self.signatures.push(GeminiSignature {
+                call_id: id.clone(),
+                signature,
+            });
+        }
+        let native = self
+            .native_computer
+            .then(|| gemini_computer::canonicalize(&name, &args))
+            .flatten();
+        let function = match native {
+            Some(function) => {
+                self.native_calls.push(GeminiNativeCall {
+                    call_id: id.clone(),
+                    name,
+                    args,
+                });
+                function
+            },
+            None => FunctionCall {
+                name,
+                arguments: args,
+            },
+        };
+        let call = ToolCall {
+            id: Some(id),
+            function,
+        };
+        self.tool_calls.push(call.clone());
+        call
+    }
+
+    /// The continuation the response leaves, for the model that wrote it. A
+    /// response with function calls always leaves one, even with no
+    /// signature, so that replay can tell a call this model made unsigned
+    /// from a call another model made.
+    fn continuation(&self, model: &str) -> Option<ProviderContinuation> {
+        (!self.tool_calls.is_empty()).then(|| ProviderContinuation::Gemini {
+            model: model.to_string(),
+            signatures: self.signatures.clone(),
+            native_calls: self.native_calls.clone(),
+        })
+    }
+}
+
+/// The documented stand-in for a signature on a function call Gemini did
+/// not write: a call made by another model, or saved before signatures were
+/// kept. Without one, Gemini 3 refuses the request.
+const UNSIGNED: &str = "skip_thought_signature_validator";
+
 /// Handle one part of a chunk: a function call is emitted whole, a text part
 /// goes to the answer or (with `thought: true`) the reasoning buffer, and
 /// anything else is skipped.
@@ -1029,16 +1200,9 @@ fn process_part(part: &Value, state: &mut StreamState, out: &mut Vec<StreamEvent
         if name.is_empty() {
             return;
         }
-        let id = format!("call_{}", state.tool_calls_done.len());
-        let tc = ToolCall {
-            id: Some(id),
-            function: FunctionCall {
-                name,
-                arguments: args,
-            },
-        };
-        out.push(StreamEvent::ToolCall(tc.clone()));
-        state.tool_calls_done.push(tc);
+        let signature = signature_of(part).map(str::to_string);
+        let call = state.calls.record(name, args, signature);
+        out.push(StreamEvent::ToolCall(call));
         return;
     }
 
@@ -1102,20 +1266,21 @@ impl Model for GeminiAdapter {
         // Optimistic send; a 400 naming an optional parameter takes it back
         // and retries (see `learning`).
         let mut learning = Learning::start(&self.memory, &self.model_name, sink.as_ref());
-        let response = loop {
+        let (response, native_computer) = loop {
             let body = self.build_request_body_with(messages, config, learning.rejections());
             let response = self.send_chat(&body, sink.is_some()).await?;
             if !learning.is_retryable(&response) {
-                break response;
+                break (response, offers_computer(&body));
             }
             let err = http_error_from_response(response).await;
             learning.retry_or_fail(err, &sent_optionals(&body)).await?;
         };
         learning.settle(&response);
         if let Some(sink) = sink {
-            self.handle_stream(response, Some(&sink)).await
+            self.handle_stream(response, Some(&sink), native_computer)
+                .await
         } else {
-            self.decode_non_streaming(response).await
+            self.decode_non_streaming(response, native_computer).await
         }
     }
 }
@@ -1149,7 +1314,7 @@ struct GeminiResponse {
     #[serde(default, rename = "usageMetadata")]
     usage_metadata: UsageMetadata,
     // A prompt-level safety block returns `promptFeedback.blockReason` and NO
-    // candidates (F52). Captured so `decode_non_streaming` can surface a typed
+    // candidates. Captured so `decode_non_streaming` can surface a typed
     // refusal instead of an empty `Ok`.
     #[serde(default, rename = "promptFeedback")]
     prompt_feedback: Option<PromptFeedback>,
@@ -1194,6 +1359,8 @@ struct ResponsePart {
     thought: Option<bool>,
     #[serde(default, rename = "functionCall")]
     function_call: Option<FunctionCallOut>,
+    #[serde(default, rename = "thoughtSignature", alias = "thought_signature")]
+    thought_signature: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1301,7 +1468,7 @@ mod tests {
 
     #[test]
     fn empty_response_benign_only_for_non_blocks() {
-        // #51: both the streaming and non-streaming paths now treat an empty
+        // Both the streaming and non-streaming paths now treat an empty
         // response as benign for these reasons (UNSPECIFIED included — not a
         // block); a real block like SAFETY/RECITATION still surfaces an error.
         assert!(gemini_empty_is_benign("STOP"));
@@ -1313,7 +1480,7 @@ mod tests {
 
     #[test]
     fn prompt_block_response_parses_with_no_candidates() {
-        // F52: a prompt-level block returns `promptFeedback.blockReason` and NO
+        // A prompt-level block returns `promptFeedback.blockReason` and NO
         // candidates. The wire type must capture it so `decode_non_streaming`
         // can surface a refusal instead of an empty Ok.
         let json = serde_json::json!({
@@ -1331,7 +1498,7 @@ mod tests {
 
     #[test]
     fn stream_prompt_block_surfaces_provider_error() {
-        // F52 (streaming): a chunk carrying `promptFeedback.blockReason` with no
+        // Streaming: a chunk carrying `promptFeedback.blockReason` with no
         // candidates must surface a typed ProviderError, not be swallowed by the
         // no-parts branch as a silent empty success.
         let mut state = StreamState::default();
@@ -1364,6 +1531,10 @@ mod tests {
         let payload = r#"{"promptFeedback":{"safetyRatings":[]},"candidates":[{"content":{"parts":[{"text":"hello"}]}}]}"#;
         process_chunk_payload(payload, &mut state, &mut events).expect("benign feedback is ok");
         assert_eq!(state.text_acc.as_str(), "hello");
+    }
+
+    fn convert_messages_for_test(messages: &[ChatMessage]) -> (Option<Value>, Vec<Value>) {
+        convert_messages(messages, "gemini-test")
     }
 
     fn test_adapter() -> GeminiAdapter {
@@ -1452,7 +1623,7 @@ mod tests {
             ChatMessage::user("hi"),
             ChatMessage::system("ignored second system"),
         ];
-        let (system, contents) = convert_messages(&messages);
+        let (system, contents) = convert_messages_for_test(&messages);
         let sys = system.expect("system extracted");
         assert_eq!(sys["parts"][0]["text"], "You are helpful.");
         // Conversation-audience system messages are NOT included in contents.
@@ -1470,7 +1641,7 @@ mod tests {
         nudge.kind = ChatMessageKind::RecoveryNudge;
         let messages = vec![ChatMessage::user("ok"), nudge];
 
-        let (_system, contents) = convert_messages(&messages);
+        let (_system, contents) = convert_messages_for_test(&messages);
         assert_eq!(contents.len(), 1, "merged into the adjacent user turn");
         let parts = contents[0]["parts"].as_array().expect("parts array");
         assert_eq!(parts.len(), 2);
@@ -1547,7 +1718,7 @@ mod tests {
         ];
 
         for (name, messages) in shapes {
-            let (_system, contents) = convert_messages(&messages);
+            let (_system, contents) = convert_messages_for_test(&messages);
             assert!(!contents.is_empty(), "{name}: the history must not vanish");
             for pair in contents.windows(2) {
                 assert_ne!(
@@ -1564,7 +1735,7 @@ mod tests {
     #[test]
     fn coalescing_two_user_turns_keeps_both_texts() {
         let messages = vec![ChatMessage::user("first"), ChatMessage::user("second")];
-        let (_system, contents) = convert_messages(&messages);
+        let (_system, contents) = convert_messages_for_test(&messages);
         assert_eq!(contents.len(), 1);
         let parts = contents[0]["parts"].as_array().expect("parts array");
         assert_eq!(parts.len(), 2, "both texts survive: {parts:#?}");
@@ -1575,7 +1746,7 @@ mod tests {
     #[test]
     fn convert_messages_renames_assistant_to_model() {
         let messages = vec![ChatMessage::user("hi"), ChatMessage::assistant("hello")];
-        let (_system, contents) = convert_messages(&messages);
+        let (_system, contents) = convert_messages_for_test(&messages);
         assert_eq!(contents[0]["role"], "user");
         assert_eq!(contents[1]["role"], "model");
         assert_eq!(contents[1]["parts"][0]["text"], "hello");
@@ -1610,7 +1781,7 @@ mod tests {
             ChatMessage::tool("call_0", "read_file", "contents of A"),
             ChatMessage::tool("call_1", "read_file", "contents of B"),
         ];
-        let (_, contents) = convert_messages(&messages);
+        let (_, contents) = convert_messages_for_test(&messages);
         // user → model(functionCall) → user(both functionResponses)
         assert_eq!(contents.len(), 3);
         assert_eq!(contents[1]["role"], "model");
@@ -1639,7 +1810,7 @@ mod tests {
             },
         }]);
         let messages = vec![ChatMessage::user("read it"), msg];
-        let (_, contents) = convert_messages(&messages);
+        let (_, contents) = convert_messages_for_test(&messages);
         assert_eq!(contents[1]["role"], "model");
         let parts = contents[1]["parts"].as_array().unwrap();
         assert_eq!(parts.len(), 1);
@@ -1651,7 +1822,7 @@ mod tests {
     #[test]
     fn convert_messages_emits_inline_data_for_user_images() {
         let msg = ChatMessage::user("look at this").with_images(vec!["base64data".to_string()]);
-        let (_, contents) = convert_messages(&[msg]);
+        let (_, contents) = convert_messages_for_test(&[msg]);
         let parts = contents[0]["parts"].as_array().unwrap();
         assert_eq!(parts.len(), 2);
         assert_eq!(parts[0]["text"], "look at this");
@@ -1660,11 +1831,25 @@ mod tests {
     }
 
     #[test]
+    fn tool_images_follow_the_function_responses_in_their_turn() {
+        use super::super::tool_images::{JPEG_B64, tool_loop_with_image};
+        let (_, contents) = convert_messages_for_test(&tool_loop_with_image());
+        let parts = contents[2]["parts"].as_array().unwrap();
+        assert_eq!(contents[2]["role"], "user");
+        assert!(parts[0].get("functionResponse").is_some());
+        assert!(parts[1].get("functionResponse").is_some());
+        assert_eq!(parts[2]["text"], "Image returned by tool call c1:");
+        assert_eq!(parts[3]["inlineData"]["mimeType"], "image/jpeg");
+        assert_eq!(parts[3]["inlineData"]["data"], JPEG_B64);
+        assert_eq!(parts.len(), 4);
+    }
+
+    #[test]
     fn convert_messages_emits_thought_part_for_assistant_thinking() {
         let mut msg = ChatMessage::assistant("the answer is 42");
         msg.thinking = Some("step 1: think hard".to_string());
         let messages = vec![ChatMessage::user("compute"), msg];
-        let (_, contents) = convert_messages(&messages);
+        let (_, contents) = convert_messages_for_test(&messages);
         let parts = contents[1]["parts"].as_array().unwrap();
         assert_eq!(parts.len(), 2);
         assert_eq!(parts[0]["text"], "step 1: think hard");
@@ -1765,7 +1950,7 @@ mod tests {
         assert_eq!(sys["parts"][0]["text"], "You are helpful.");
     }
 
-    /// Step 5h: Gemini doesn't expose per-block cache markers in this path.
+    /// Gemini doesn't expose per-block cache markers in this path.
     /// The dynamic MERMAID.md suffix is concatenated onto the static system
     /// instruction with a `---` separator. Both halves reach the model in
     /// one systemInstruction payload.
@@ -1787,7 +1972,7 @@ mod tests {
         assert!(text.contains("---"));
     }
 
-    /// Step 5c: gemini-3-pro (the test adapter's model) now uses
+    /// `gemini-3-pro` (the test adapter's model) now uses
     /// `thinkingLevel` enum, not `thinkingBudget` int. Same Medium
     /// reasoning request maps to `thinkingLevel: "medium"`.
     #[test]
@@ -1806,7 +1991,7 @@ mod tests {
         assert!(tc.get("thinkingBudget").is_none());
     }
 
-    /// Step 5c: Gemini 3 has no `max` tier — Max collapses to `high`.
+    /// Gemini 3 has no `max` tier — Max collapses to `high`.
     #[test]
     fn build_request_body_thinking_level_for_max_collapses_to_high_on_gemini_3() {
         let adapter = test_adapter(); // gemini-3-pro
@@ -1822,7 +2007,7 @@ mod tests {
         );
     }
 
-    /// Step 5c: Gemini 3 cannot truly disable thinking — `None` maps to
+    /// Gemini 3 cannot truly disable thinking — `None` maps to
     /// `thinkingLevel: "minimal"` (closest-to-off per Google's docs).
     #[test]
     fn build_request_body_thinking_level_minimal_for_none_on_gemini_3() {
@@ -1839,7 +2024,7 @@ mod tests {
         assert_eq!(tc["includeThoughts"], false);
     }
 
-    /// Step 5c: gemini-2.5-pro uses thinkingBudget int with floor 128.
+    /// `gemini-2.5-pro` uses thinkingBudget int with floor 128.
     /// `--reasoning none` clamps UP to 128 (can't actually disable).
     #[test]
     fn build_request_body_thinking_budget_clamps_to_min_128_on_gemini_2_5_pro_for_none() {
@@ -1862,7 +2047,7 @@ mod tests {
         assert_eq!(tc["includeThoughts"], true);
     }
 
-    /// Step 5c: gemini-2.5-flash CAN disable. `--reasoning none` → 0.
+    /// `gemini-2.5-flash` CAN disable. `--reasoning none` → 0.
     #[test]
     fn build_request_body_thinking_budget_zero_for_none_on_gemini_2_5_flash() {
         let adapter = GeminiAdapter::new(
@@ -1882,7 +2067,7 @@ mod tests {
         assert_eq!(tc["includeThoughts"], false);
     }
 
-    /// Step 5c: gemini-2.5-flash with Max → -1 (adaptive sentinel).
+    /// `gemini-2.5-flash` with Max → -1 (adaptive sentinel).
     #[test]
     fn build_request_body_thinking_budget_adaptive_for_max_on_gemini_2_5_flash() {
         let adapter = GeminiAdapter::new(
@@ -1903,7 +2088,7 @@ mod tests {
         );
     }
 
-    /// Step 5c: legacy Gemini models (2.0, 1.5) don't support
+    /// Legacy Gemini models (2.0, 1.5) don't support
     /// thinkingConfig — sending one would 400 with a syntax error per
     /// the official docs. Adapter must omit the field entirely.
     #[test]
@@ -2185,7 +2370,7 @@ mod tests {
 
     #[test]
     fn stream_usage_is_none_without_usage_metadata() {
-        // #125: a stream that never carried a `usageMetadata` block yields None,
+        // A stream that never carried a `usageMetadata` block yields None,
         // so the reducer keeps its char/4 estimate instead of resetting to zero.
         let mut events: Vec<StreamEvent> = Vec::new();
         let mut state = StreamState::default();
@@ -2198,7 +2383,7 @@ mod tests {
 
     #[test]
     fn stream_usage_does_not_double_count_cached_input() {
-        // #137: Gemini folds cached tokens into promptTokenCount; the input
+        // Gemini folds cached tokens into promptTokenCount; the input
         // breakdown must not add them a second time.
         let mut events: Vec<StreamEvent> = Vec::new();
         let mut state = StreamState::default();
@@ -2267,13 +2452,70 @@ mod tests {
         .to_string();
         process_chunk_payload(&chunk, &mut state, &mut events).unwrap();
 
-        assert_eq!(state.tool_calls_done.len(), 1);
-        let tc = &state.tool_calls_done[0];
+        assert_eq!(state.calls.tool_calls.len(), 1);
+        let tc = &state.calls.tool_calls[0];
         assert_eq!(tc.function.name, "read_file");
         assert_eq!(tc.function.arguments["path"], "Cargo.toml");
         assert_eq!(tc.id.as_deref(), Some("call_0"));
 
         assert_eq!(count_tool_calls(&events), 1);
+    }
+
+    #[test]
+    fn signatures_on_calls_are_kept_for_the_model_that_wrote_them() {
+        let mut events: Vec<StreamEvent> = Vec::new();
+        let mut stream = GeminiStream::new("gemini-3-flash".to_string());
+        let chunk = json!({
+            "candidates": [{
+                "content": {"parts": [
+                    {"functionCall": {"name": "read_file", "args": {"path": "a"}},
+                     "thoughtSignature": "c2lnLWE="},
+                    {"functionCall": {"name": "read_file", "args": {"path": "b"}}},
+                ]},
+                "finishReason": "STOP",
+            }]
+        })
+        .to_string();
+        stream.on_frame(&chunk, &mut events).unwrap();
+        let response = stream.finish(&mut events).unwrap();
+        let continuation = response.provider_continuation.expect("continuation");
+        let signed = continuation
+            .gemini_signatures("gemini-3-flash")
+            .expect("this model's");
+        assert_eq!(signed.len(), 1, "only the first parallel call is signed");
+        assert_eq!(signed[0].call_id, "call_0");
+        assert_eq!(signed[0].signature, "c2lnLWE=");
+        assert!(continuation.gemini_signatures("gemini-3-pro").is_none());
+
+        // Replayed: the signature on its call, nothing on the other.
+        let mut turn = ChatMessage::assistant("").with_provider_continuation(continuation);
+        turn.tool_calls = response.tool_calls;
+        let history = [ChatMessage::user("read both"), turn];
+        let (_, contents) = convert_messages(&history, "gemini-3-flash");
+        let parts = contents[1]["parts"].as_array().unwrap();
+        assert_eq!(parts[0]["thoughtSignature"], "c2lnLWE=");
+        assert!(parts[1].get("thoughtSignature").is_none());
+
+        // Another model never saw it: the first call gets the documented
+        // stand-in instead.
+        let (_, contents) = convert_messages(&history, "gemini-3-pro");
+        let parts = contents[1]["parts"].as_array().unwrap();
+        assert_eq!(parts[0]["thoughtSignature"], UNSIGNED);
+        assert!(parts[1].get("thoughtSignature").is_none());
+    }
+
+    #[test]
+    fn a_response_without_calls_leaves_no_continuation() {
+        let mut events: Vec<StreamEvent> = Vec::new();
+        let mut stream = GeminiStream::new("gemini-3-flash".to_string());
+        let chunk = json!({"candidates": [{
+            "content": {"parts": [{"text": "hi", "thoughtSignature": "c2ln"}]},
+            "finishReason": "STOP",
+        }]})
+        .to_string();
+        stream.on_frame(&chunk, &mut events).unwrap();
+        let response = stream.finish(&mut events).unwrap();
+        assert!(response.provider_continuation.is_none());
     }
 
     #[test]
@@ -2297,7 +2539,7 @@ mod tests {
 
         assert_eq!(state.thinking_acc.as_str(), "thinking...");
         assert_eq!(state.text_acc.as_str(), "calling tool now");
-        assert_eq!(state.tool_calls_done.len(), 1);
+        assert_eq!(state.calls.tool_calls.len(), 1);
 
         assert_eq!(count_reasoning(&events), 1);
         assert_eq!(count_text(&events), 1);
@@ -2346,16 +2588,16 @@ mod tests {
         .to_string();
         process_chunk_payload(&chunk, &mut state, &mut events).unwrap();
 
-        assert_eq!(state.tool_calls_done.len(), 2);
-        assert_eq!(state.tool_calls_done[0].id.as_deref(), Some("call_0"));
-        assert_eq!(state.tool_calls_done[1].id.as_deref(), Some("call_1"));
+        assert_eq!(state.calls.tool_calls.len(), 2);
+        assert_eq!(state.calls.tool_calls[0].id.as_deref(), Some("call_0"));
+        assert_eq!(state.calls.tool_calls[1].id.as_deref(), Some("call_1"));
     }
 
     #[test]
     fn stream_safety_block_with_no_parts_errors() {
         let mut events: Vec<StreamEvent> = Vec::new();
         let mut state = StreamState::default();
-        // A content-free SAFETY block must error, not silently succeed (#1).
+        // A content-free SAFETY block must error, not silently succeed.
         let chunk = json!({ "candidates": [{ "finishReason": "SAFETY" }] }).to_string();
         assert!(process_chunk_payload(&chunk, &mut state, &mut events).is_err());
     }
@@ -2378,7 +2620,7 @@ mod tests {
 
     #[test]
     fn stream_closed_abnormally_when_no_finish_reason_observed() {
-        // F56: content chunks with no finishReason leave the stream incomplete
+        // Content chunks with no finishReason leave the stream incomplete
         // until a terminal finishReason lands. A drop here must surface as an
         // error, not a clean Ok indistinguishable from a real completion.
         let mut events: Vec<StreamEvent> = Vec::new();
@@ -2412,7 +2654,7 @@ mod tests {
 
     #[test]
     fn parallel_same_tool_calls_keep_call_order() {
-        // #8: Gemini's wire protocol has no call id, so two calls to the SAME
+        // Gemini's wire protocol has no call id, so two calls to the SAME
         // tool in one turn are associated by POSITION. We synthesize ids in
         // arrival order and must emit results in the same order — that ordering
         // is the only correctness lever, so pin it against accidental reordering.
@@ -2428,10 +2670,10 @@ mod tests {
         })
         .to_string();
         process_chunk_payload(&chunk, &mut state, &mut events).unwrap();
-        assert_eq!(state.tool_calls_done.len(), 2);
-        assert_eq!(state.tool_calls_done[0].id.as_deref(), Some("call_0"));
-        assert_eq!(state.tool_calls_done[1].id.as_deref(), Some("call_1"));
-        assert_eq!(state.tool_calls_done[0].function.arguments["path"], "a");
-        assert_eq!(state.tool_calls_done[1].function.arguments["path"], "b");
+        assert_eq!(state.calls.tool_calls.len(), 2);
+        assert_eq!(state.calls.tool_calls[0].id.as_deref(), Some("call_0"));
+        assert_eq!(state.calls.tool_calls[1].id.as_deref(), Some("call_1"));
+        assert_eq!(state.calls.tool_calls[0].function.arguments["path"], "a");
+        assert_eq!(state.calls.tool_calls[1].function.arguments["path"], "b");
     }
 }

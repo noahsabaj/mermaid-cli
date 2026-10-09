@@ -152,10 +152,25 @@ checkpoint_on_mutation = true
 
 [tools]
 # Send a provider's own tool definitions where it has them (Anthropic's text
-# editor and bash) instead of Mermaid's schemas for the same tools. The calls
+# editor and bash, OpenAI's apply_patch) instead of Mermaid's schemas for the
+# same tools. The calls
 # still run through Mermaid's file and shell tools, so every safety gate
 # applies. false always sends Mermaid's.
 # provider_native = true
+# Give the model the `computer` tool: screenshots, mouse and keyboard on your
+# real screen. Off by default: every screenshot goes to the model's provider.
+# Mouse and keyboard actions are gated like other external access.
+# computer = false
+
+[goal]
+# Model that checks a `/goal` after each run. Omit to check with the session's
+# model; a small, fast model is enough, because the check reads the end of the
+# conversation and answers in one line. User config only: a project file cannot
+# set it.
+# model = "<provider>/<small-fast-model>"
+# Goal turns that may run without a message from you before the goal pauses.
+# Each message from you starts the count again. 0 means no limit.
+# max_turns = 50
 
 [ui]
 # TUI color theme: "dark" (default) or "light". Switch live with
@@ -198,7 +213,12 @@ max_truncation_recoveries = 3
 # compaction entirely to `/compact`.
 # auto_enabled = true
 # auto_threshold_percent = 85        # clamped to 1..=100
-# Let a provider that compacts server-side (Anthropic) do the automatic
+# A context size in tokens replaces the percentage (minimum 50000). One for a
+# single model overrides the one for all models. `/autocompact` sets both.
+# auto_threshold_tokens = 250000
+# Per model, in its own [compaction.auto_threshold_tokens_per_model] table,
+# with lines like "openai/gpt-5.6" = 400000.
+# Let a provider that compacts server-side (Anthropic, OpenAI) do the automatic
 # compaction at the same threshold, with its own summary. A model that
 # refuses it falls back to Mermaid's. false always compacts client-side.
 # provider_native = true
@@ -329,8 +349,7 @@ Subagents follow the same setting. The same switch covers the checklist
 reminders outside the prompt: the note when more than one task is in progress
 and the reminder when a task has gone several model calls without an update.
 Tool descriptions carry only what each tool does, whatever the setting. A `--system-prompt` replacement is the whole
-prompt, so the pack is never added to it. `/runtime` shows whether the pack is
-on for the current model.
+prompt, so the pack is never added to it.
 
 Locality is a stand-in for what actually matters, which is how capable the
 model is. A strong model served from your own machine gets coached anyway, and
@@ -382,7 +401,7 @@ searxng_url = "http://localhost:8080"
 
 - **`web_fetch` defaults to `native`**: it fetches directly from your machine without ambient proxy variables, rejects URL userinfo and non-global destinations at every redirect, refuses HTTPS downgrade redirects, decodes supported text charsets, and routes extraction by MIME. HTML/XHTML uses readability; Markdown and plain text are preserved; JSON and XML are rendered as data. Set `fetch_backend = "ollama"` to explicitly route through Ollama Cloud's server-side fetch instead (useful for JS-heavy pages and bot walls; needs `OLLAMA_API_KEY`). Ollama's API does not disclose its target redirect chain or final URL, so Mermaid labels final provenance as unknown and treats target-hop enforcement as provider-managed rather than fabricating a final URL.
 - **`web_search` defaults to sovereign `auto`**: Mermaid downloads and runs a self-contained local [SearXNG](https://github.com/searxng/searxng) bundle on the first search on supported Linux, macOS, and Windows (x86_64) targets, then health-checks and reuses it. Merely setting `OLLAMA_API_KEY` never changes the route. Select `search_backend = "ollama"` explicitly for Ollama Cloud, or `"searxng"` for your own instance at `searxng_url` (including on Windows; the instance must have `json` in `search.formats`). On a platform with no bundle (for example Windows on ARM), set `allow_ollama_search_fallback = true` (with `OLLAMA_API_KEY`) to let `auto` fall back to Ollama Cloud there. The fallback engages only where the bundle is unsupported (a viable managed bundle always wins), and the startup notice discloses the off-machine egress when it does.
-- Native fetches retain requested/final URL, status, MIME, charset, backend, extraction mode, source/extracted sizes, and truncation provenance; cloud fetches retain the requested URL and explicitly mark final provenance unavailable. The complete model-visible result is capped at 30 KB. Decoded chunks are charged at the transport boundary against a 64 MiB per-turn budget, with 16 MiB per response, eight downloads globally, two per origin, two blocking extractors, and four concurrent search queries. Batch search preserves input order and reports per-query partial failures structurally. Snapshots are session/task scoped and the process-wide cache is capped at four entries and 32 MiB.
+- Native fetches record the requested and final URL, status, MIME type and truncation; cloud fetches mark the final URL as unknown. Results, downloads and the snapshot cache are size-capped per turn.
 
 ## Provider notes
 
@@ -395,6 +414,15 @@ Mermaid's model/tool loop without Meta retaining the response server-side.
 Mermaid requests automatic reasoning summaries for the existing reasoning panel
 and keeps the encrypted continuation only in private local session data.
 
+OpenAI works the same way: `openai/<model>` goes to OpenAI's Responses API
+(`POST /responses` with `store: false`), so a reasoning model keeps its
+reasoning from one tool call to the next instead of starting again at each
+step. The encrypted reasoning is replayed only to the model that wrote it;
+after `/model` switches to another OpenAI model, the history goes back as plain
+messages. Every other OpenAI-compatible provider, and a custom
+`[providers.<name>]` entry, keeps Chat Completions. A proxy that serves only
+Chat Completions can be reached as a custom provider (`compat = "openai-effort"`).
+
 ```bash
 export MODEL_API_KEY="your-meta-api-key"
 mermaid --model meta/muse-spark-1.1 --reasoning high
@@ -402,7 +430,7 @@ mermaid --model meta/muse-spark-1.1 --reasoning high
 
 Cloudflare Workers AI needs both `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` (the account id is spliced into the account-scoped endpoint URL); alternatively set `[providers.cloudflare].base_url` to a full account-scoped URL or an AI Gateway endpoint. Example model: `cloudflare/@cf/zai-org/glm-5.2`.
 
-Grok (xAI) uses `XAI_API_KEY` (create one at https://console.x.ai) at `https://api.x.ai/v1` — OpenAI-compatible Chat Completions. Models like `grok-4.6`/`grok-4` support vision (`jpg/jpeg`/`png`, 20MiB per image, unlimited images) and tool calling. Both `grok/<model>` and `xai/<model>` prefixes work and resolve to the same endpoint. Example: `mermaid --model grok/grok-4.6`.
+Grok (xAI) uses `XAI_API_KEY` (create one at https://console.x.ai) at `https://api.x.ai/v1` — OpenAI-compatible Chat Completions. Both `grok/<model>` and `xai/<model>` prefixes work and resolve to the same endpoint. Example: `mermaid --model grok/grok-4.6`.
 
 Ollama Cloud models authenticate via `OLLAMA_API_KEY`. Native `web_fetch` and managed/self-hosted SearXNG do not require it. Cloud web routing is never inferred from the key: set `fetch_backend = "ollama"` or `search_backend = "ollama"` explicitly, or opt into `allow_ollama_search_fallback` for platforms without a managed bundle (see [Web tool backends](#web-tool-backends)). Use `mermaid cloud-setup` from your shell to set the key for cloud models; `/cloud-setup` in the TUI points back to that shell command.
 

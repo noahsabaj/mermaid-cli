@@ -90,7 +90,7 @@ pub fn build_chat_request(state: &State) -> ChatRequest {
     // default), most MCP tools are replaced by one `tool_search` definition;
     // see `domain::tool_search`. The effect runner prepends built-in tools
     // before dispatching, so this vector is the MCP-only portion. Ordering
-    // is byte-stable across runs for prompt-cache warmth (#F68).
+    // is byte-stable across runs for prompt-cache warmth.
     let mcp_tools = super::tool_search::mcp_tool_definitions(state);
 
     // Run-summary lines ("Worked for …") are display-only UI — never send them
@@ -157,6 +157,10 @@ pub fn build_chat_request(state: &State) -> ChatRequest {
         // request because the effect preflight never sees RuntimeState.
         suppress_auto_compact: state.runtime.auto_compact_suppressed,
         requested_compaction: state.runtime.requested_compaction.clone(),
+        compaction: state
+            .settings
+            .compaction
+            .policy_for(&state.session.model_id),
         // The effect layer decides, once it knows the provider.
         native_compaction: None,
         native_tools: mermaid_model::models::NativeTools::default(),

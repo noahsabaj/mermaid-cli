@@ -1,7 +1,8 @@
 //! Drift guards for the shipped markdown — the same registry-backed truth
 //! pattern the prompt tests use (`advertised_slash_commands_exist`). The README
-//! documents slash commands and a starter config; `docs/configuration.md`
-//! carries the annotated full schema. All of it rots silently without these.
+//! and `docs/` document slash commands and a starter config;
+//! `docs/configuration.md` carries the annotated full schema. All of it rots
+//! silently without these.
 
 use mermaid_domain::slash_commands::COMMAND_REGISTRY;
 
@@ -45,23 +46,22 @@ fn backticked_commands(text: &str) -> Vec<String> {
 /// registry. Every entry needs a reason; a real built-in never belongs here.
 const NOT_BUILTINS: &[&str] = &[
     // Backticked absolute filesystem paths (`` `/dev` ``).
-    "dev", "tmp", "etc", "proc",
-    // Example of a PLUGIN-defined prompt command in the plugins section —
-    // dynamic by design, so it can't be in the static registry.
+    "dev",
+    "tmp",
+    "etc",
+    "proc",
+    // Examples of plugin- and user-defined prompt commands in
+    // `docs/plugins.md` — dynamic by design, so not in the static registry.
     "deploy",
     // `/mcp__<server>__<prompt>`: MCP servers' prompt commands, read up to
     // the first `_`. Discovered at startup, so never in the registry.
     "mcp",
+    "fix-issue",
 ];
 
-#[test]
-fn readme_slash_commands_exist() {
-    let commands = backticked_commands(README);
-    assert!(
-        !commands.is_empty(),
-        "expected the README to document slash commands"
-    );
-    for name in commands {
+/// Fails when `doc` names a backticked `/command` that is not registered.
+fn assert_slash_commands_exist(label: &str, doc: &str) {
+    for name in backticked_commands(doc) {
         if NOT_BUILTINS.contains(&name.as_str()) {
             continue;
         }
@@ -69,8 +69,31 @@ fn readme_slash_commands_exist() {
             COMMAND_REGISTRY
                 .iter()
                 .any(|c| c.name == name || c.aliases.contains(&name.as_str())),
-            "README documents `/{name}` but no such slash command is registered"
+            "{label} documents `/{name}` but no such slash command is registered"
         );
+    }
+}
+
+#[test]
+fn readme_slash_commands_exist() {
+    assert!(
+        !backticked_commands(README).is_empty(),
+        "expected the README to document slash commands"
+    );
+    assert_slash_commands_exist("README", README);
+}
+
+/// The same check over every `docs/*.md`, which named `/undo` and `/runtime`
+/// long after neither existed.
+#[test]
+fn docs_slash_commands_exist() {
+    let docs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs");
+    for entry in std::fs::read_dir(&docs).expect("read docs/") {
+        let path = entry.expect("docs/ entry").path();
+        if path.extension().is_some_and(|ext| ext == "md") {
+            let doc = std::fs::read_to_string(&path).expect("read doc");
+            assert_slash_commands_exist(&path.display().to_string(), &doc);
+        }
     }
 }
 
