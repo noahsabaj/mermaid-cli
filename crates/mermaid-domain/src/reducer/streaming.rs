@@ -745,11 +745,19 @@ pub fn handle_stream_done(
             {
                 continue;
             }
+            let computer_batch = if Some(index) == first_computer {
+                computer_batch(pending.iter().map(|call| &call.source))
+            } else {
+                Vec::new()
+            };
             cmds.push(Cmd::ExecuteTool {
                 turn,
                 call_id: call.call_id,
                 source: call.source.clone(),
-                dispatch: tool_dispatch(state),
+                dispatch: crate::cmd::ToolDispatch {
+                    computer_batch,
+                    ..tool_dispatch(state)
+                },
             });
         }
         state.turn = crate::transition::start_executing_tools(

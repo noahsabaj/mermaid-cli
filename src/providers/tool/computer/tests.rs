@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use mermaid_model::ids::{ToolCallId, TurnId};
 use mermaid_runtime::SafetyMode;
@@ -316,4 +317,150 @@ fn the_approval_prompt_names_the_action_and_its_target() {
         describe(&json!({"action": "scroll", "coordinate": [1, 2], "scroll_direction": "down"})),
         "computer scroll (1, 2) down"
     );
+}
+
+#[test]
+fn a_batch_gate_lists_every_action() {
+    let click = json!({"action": "left_click", "coordinate": [10, 20]});
+    let typing = json!({"action": "type", "text": "hello"});
+    assert_eq!(
+        gate_summary(&click, std::slice::from_ref(&click)),
+        "computer left_click (10, 20)"
+    );
+    assert_eq!(
+        gate_summary(&click, &[click.clone(), typing]),
+        "computer, 2 actions: left_click (10, 20); type \"hello\""
+    );
+}
+
+fn run_key(messages: usize) -> RunKey {
+    RunKey {
+        session: Some("s".to_string()),
+        messages,
+        latest: Some("click it".to_string()),
+    }
+}
+
+#[test]
+fn moving_the_mouse_stops_input_until_the_next_message() {
+    let mut desktop = FakeDesktop::new((1000, 500), (1000, 500));
+    let mut state = ToolState::default();
+    let click = |x: i64| parse(&json!({"action": "left_click", "coordinate": [x, 10]})).unwrap();
+    let screenshot = parse(&json!({"action": "screenshot"})).unwrap();
+
+    run_watched(&mut desktop, &mut state, &run_key(1), &click(10)).unwrap();
+    // A small jitter is not the user.
+    desktop.cursor = (12, 8);
+    run_watched(&mut desktop, &mut state, &run_key(1), &click(20)).unwrap();
+
+    desktop.cursor = (400, 300);
+    desktop.events.clear();
+    let err = run_watched(&mut desktop, &mut state, &run_key(1), &click(30)).unwrap_err();
+    assert_eq!(err, MOVED);
+    assert!(desktop.events.is_empty(), "nothing was sent after the move");
+    assert!(state.watch.as_ref().unwrap().stopped);
+    assert!(
+        run_watched(&mut desktop, &mut state, &run_key(1), &screenshot).is_ok(),
+        "looking at the screen is not input"
+    );
+
+    // The user's next message starts a new run.
+    run_watched(&mut desktop, &mut state, &run_key(2), &click(30)).unwrap();
+    assert_eq!(desktop.events.first(), Some(&Event::Move(30, 10)));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stopped_run_refuses_input_without_touching_the_screen() {
+    let tool = ComputerTool::new();
+    let ctx = ctx(SafetyMode::FullAccess);
+    tool.state().watch = Some(Watch {
+        run: RunKey::of(&ctx),
+        pointer: None,
+        stopped: true,
+    });
+    let outcome = tool
+        .execute_with(json!({"action": "key", "text": "Return"}), &ctx, no_screen)
+        .await;
+    assert_eq!(outcome.error_message(), Some(MOVED));
+    let outcome = tool
+        .execute_with(json!({"action": "screenshot"}), &ctx, fake_screen)
+        .await;
+    assert!(outcome.is_success(), "{outcome:?}");
+}
+
+/// Allows every action and keeps what it was asked.
+#[derive(Default)]
+struct Recorder(Mutex<Vec<crate::providers::VetRequest>>);
+
+#[async_trait::async_trait]
+impl crate::providers::AutoClassifier for Recorder {
+    async fn vet(&self, req: &crate::providers::VetRequest) -> crate::providers::VetVerdict {
+        self.0.lock().unwrap().push(req.clone());
+        crate::providers::VetVerdict::allow()
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn auto_checks_a_batch_once_with_every_action_and_the_screen() {
+    let tool = ComputerTool::new();
+    let recorder = Arc::new(Recorder::default());
+    // Each call opens a fresh fake screen with the pointer at (0, 0), so the
+    // click leaves it there and the mouse watch sees no move.
+    let click = json!({"action": "left_click", "coordinate": [0, 0]});
+    let typing = json!({"action": "type", "text": "hello"});
+    let mut ctx = ctx(SafetyMode::Auto);
+    ctx.goal = mermaid_domain::UserGoal::from_request("type hello in the box");
+    ctx.classifier = Some(recorder.clone());
+
+    tool.execute_with(json!({"action": "screenshot"}), &ctx, fake_screen)
+        .await;
+    ctx.computer_batch = vec![click.clone(), typing.clone()];
+    for args in [&click, &typing] {
+        let outcome = tool.execute_with(args.clone(), &ctx, fake_screen).await;
+        assert!(outcome.is_success(), "{outcome:?}");
+    }
+    {
+        let asked = recorder.0.lock().unwrap();
+        assert_eq!(asked.len(), 1, "one check for the whole batch");
+        assert_eq!(
+            asked[0].arguments,
+            Some(json!({"actions": [click.clone(), typing.clone()]}))
+        );
+        let screen = asked[0].screen.as_deref().expect("the last screenshot");
+        let png = base64::engine::general_purpose::STANDARD
+            .decode(screen)
+            .unwrap();
+        assert_eq!(decoded_size(&png), (1429, 804));
+    }
+
+    // The next model response is a new batch, so it is checked again.
+    ctx.turn = TurnId(2);
+    ctx.computer_batch = vec![click.clone()];
+    tool.execute_with(click.clone(), &ctx, fake_screen).await;
+    let asked = recorder.0.lock().unwrap();
+    assert_eq!(asked.len(), 2);
+    assert_eq!(asked[1].arguments, Some(click));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_headless_run_asks_by_failing_closed_unless_trusted() {
+    let tool = ComputerTool::new();
+    let ctx = ctx(SafetyMode::Ask);
+    assert!(ctx.approval.is_none(), "a headless run has no prompt");
+    let click = json!({"action": "left_click", "coordinate": [5, 5]});
+    let outcome = tool.execute_with(click.clone(), &ctx, no_screen).await;
+    let error = outcome.error_message().unwrap_or_default();
+    assert!(error.contains("headless run"), "{error}");
+
+    let mut config = mermaid_domain::Config::default();
+    config.safety.mode = SafetyMode::Ask;
+    config.safety.allow_untrusted_headless_tools = true;
+    let (ctx, _rx) = crate::providers::ctx::test_exec_context_with_config(
+        TurnId(1),
+        ToolCallId(1),
+        PathBuf::from("."),
+        config,
+    );
+    let outcome = tool.execute_with(click, &ctx, fake_screen).await;
+    assert!(outcome.is_success(), "{outcome:?}");
 }

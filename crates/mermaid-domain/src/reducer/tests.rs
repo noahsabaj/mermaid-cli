@@ -7029,6 +7029,35 @@ fn computer_actions_run_one_at_a_time_in_order() {
     );
 }
 
+fn batch_sizes(cmds: &[Cmd]) -> Vec<usize> {
+    cmds.iter()
+        .filter_map(|c| match c {
+            Cmd::ExecuteTool { dispatch, .. } => Some(dispatch.computer_batch.len()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn every_computer_action_carries_its_whole_batch_for_the_gate() {
+    let (state, cmds) = stream_done_with_calls(&["computer", "read_file", "computer"]);
+    assert_eq!(
+        batch_sizes(&cmds),
+        vec![2, 0],
+        "the gate sees both computer actions; other tools see none"
+    );
+    let ids = pending_ids(&state);
+    let (_, cmds) = update(
+        state,
+        Msg::ToolFinished {
+            turn: TurnId(9),
+            call_id: ids[0],
+            outcome: ToolOutcome::success("clicked", "clicked", 0.1),
+        },
+    );
+    assert_eq!(batch_sizes(&cmds), vec![2]);
+}
+
 #[test]
 fn a_failed_computer_action_stops_the_rest_of_the_batch() {
     let (state, _) = stream_done_with_calls(&["computer", "computer", "computer"]);

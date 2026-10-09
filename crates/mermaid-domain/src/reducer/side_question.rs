@@ -98,6 +98,7 @@ fn fork_viewed(state: &mut State, cmds: &mut Vec<Cmd>) {
             session_id: state.session.conversation.id.clone(),
             message_index: state.session.messages().len(),
             scratchpad: state.session.scratchpad.clone(),
+            computer_batch: Vec::new(),
         },
     });
     state.side_questions.dismiss();

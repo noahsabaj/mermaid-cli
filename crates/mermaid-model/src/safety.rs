@@ -196,6 +196,11 @@ pub struct ActionRequest {
     /// launcher will enforce that sandbox for this very spawn.
     #[serde(default)]
     pub read_only_contained: bool,
+    /// For `ToolCategory::Computer` only: the screen the model last saw, as a
+    /// base64 PNG, so the Auto-mode check can see what the clicks land on.
+    /// Never stored.
+    #[serde(skip)]
+    pub screen: Option<String>,
 }
 
 impl ActionRequest {
@@ -213,6 +218,7 @@ impl ActionRequest {
             arguments: None,
             mcp_read_only_hint: false,
             read_only_contained: false,
+            screen: None,
         }
     }
 }

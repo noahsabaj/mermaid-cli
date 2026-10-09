@@ -71,6 +71,11 @@ pub struct ToolDispatch {
     /// `None` until `Msg::ScratchpadReady` lands — tools fall back to
     /// workdir-relative temp space.
     pub scratchpad: Option<PathBuf>,
+    /// For a `computer` call: the arguments of every `computer` call the
+    /// model made in this turn, in order. The calls run one at a time, and
+    /// the gate shows and decides the whole batch at the first. Empty for
+    /// every other tool.
+    pub computer_batch: Vec<serde_json::Value>,
 }
 
 /// A single side-effect request. Most variants are one-shot; `CallModel`

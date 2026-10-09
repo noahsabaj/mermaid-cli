@@ -28,12 +28,11 @@ use serde_json::Value;
 
 use mermaid_domain::{ToolDefinition, ToolOutcome};
 use mermaid_model::models::adapters::computer_toolset::MEMBERS;
-use mermaid_runtime::ToolCategory;
 
 use self::desktop::{Button, Desktop, Key, parse_chord};
 use super::super::ctx::ExecContext;
 use super::ToolExecutor;
-use super::policy_gate::gate_external;
+use super::policy_gate::gate_computer;
 
 /// The largest picture sent: the long edge and the pixel count every
 /// current vision model accepts without the provider shrinking or refusing
@@ -603,17 +602,128 @@ fn describe(args: &Value) -> String {
     parts.join(" ")
 }
 
+/// Why an input action did not run after the user moved the real mouse.
+const MOVED: &str = "Not executed: the user moved the mouse, so the user may be using the \
+    screen. Mouse and keyboard actions stay stopped until the user sends a message.";
+
+/// How far the pointer may sit from where Mermaid left it, in input
+/// coordinates, before it counts as moved by the user.
+const MOVE_TOLERANCE: i32 = 3;
+
+/// One run of the agent: a session and the user messages in it so far. A new
+/// user message starts a new run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RunKey {
+    session: Option<String>,
+    messages: usize,
+    latest: Option<String>,
+}
+
+impl RunKey {
+    fn of(ctx: &ExecContext) -> Self {
+        Self {
+            session: ctx.session_id.clone(),
+            messages: ctx.goal.requests.len() + ctx.goal.omitted,
+            latest: ctx.goal.requests.last().cloned(),
+        }
+    }
+}
+
+/// Where Mermaid left the pointer after its last input action in a run.
+#[derive(Debug, Clone)]
+struct Watch {
+    run: RunKey,
+    pointer: Option<(i32, i32)>,
+    /// The user moved the mouse in this run: input stays stopped.
+    stopped: bool,
+}
+
+/// A batch the gate already allowed: the session, the turn, and the safety
+/// mode it was allowed in.
+type Grant = (
+    Option<String>,
+    mermaid_model::ids::TurnId,
+    mermaid_runtime::SafetyMode,
+);
+
+#[derive(Debug, Default)]
+struct ToolState {
+    /// The size of the screen as the model last saw it.
+    shot: Option<Shot>,
+    /// The last full screenshot sent to the model, for the Auto-mode check.
+    screen: Option<Vec<u8>>,
+    watch: Option<Watch>,
+    granted: Option<Grant>,
+}
+
+/// What the gate shows and decides for an input action: the action, or the
+/// whole batch when the model sent several.
+fn gate_summary(args: &Value, batch: &[Value]) -> String {
+    if batch.len() < 2 {
+        return describe(args);
+    }
+    let actions: Vec<String> = batch
+        .iter()
+        .map(|a| describe(a).trim_start_matches("computer ").to_string())
+        .collect();
+    format!("computer, {} actions: {}", batch.len(), actions.join("; "))
+}
+
+/// Run `action` with the pointer watch: an input action first checks that
+/// the pointer is where Mermaid left it in this run, and after it runs,
+/// records where the pointer is now.
+fn run_watched(
+    desktop: &mut dyn Desktop,
+    state: &mut ToolState,
+    run_key: &RunKey,
+    action: &Action,
+) -> Result<Done, String> {
+    if !action.is_input() {
+        let done = run(desktop, &mut state.shot, action);
+        if let (Action::Screenshot, Ok(Done { png: Some(png), .. })) = (action, &done) {
+            state.screen = Some(png.clone());
+        }
+        return done;
+    }
+    if let Some(watch) = state.watch.as_mut().filter(|w| w.run == *run_key) {
+        let moved = watch
+            .pointer
+            .zip(desktop.cursor().ok())
+            .is_some_and(|(was, now)| {
+                (was.0 - now.0).abs() > MOVE_TOLERANCE || (was.1 - now.1).abs() > MOVE_TOLERANCE
+            });
+        if moved {
+            watch.stopped = true;
+            return Err(MOVED.to_string());
+        }
+    }
+    let done = run(desktop, &mut state.shot, action);
+    state.watch = Some(Watch {
+        run: run_key.clone(),
+        pointer: desktop.cursor().ok(),
+        stopped: false,
+    });
+    done
+}
+
 /// The `computer` tool. It remembers the size of the last screenshot, so the
-/// model's coordinates mean pixels of the picture it saw.
+/// model's coordinates mean pixels of the picture it saw, and where it left
+/// the pointer, so it stops when the user moves the mouse.
 pub struct ComputerTool {
-    shot: Arc<Mutex<Option<Shot>>>,
+    state: Arc<Mutex<ToolState>>,
 }
 
 impl ComputerTool {
     pub fn new() -> Self {
         Self {
-            shot: Arc::new(Mutex::new(None)),
+            state: Arc::new(Mutex::new(ToolState::default())),
         }
+    }
+
+    fn state(&self) -> std::sync::MutexGuard<'_, ToolState> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Run `action` on a screen opened by `open`, off the async runtime: the
@@ -622,22 +732,47 @@ impl ComputerTool {
     async fn perform(
         &self,
         action: Action,
+        run: RunKey,
         open: fn() -> Result<Box<dyn Desktop>, String>,
     ) -> Result<Done, String> {
-        let shot = Arc::clone(&self.shot);
+        let state = Arc::clone(&self.state);
         tokio::task::spawn_blocking(move || {
             let mut desktop = open()?;
-            let mut last = *shot
+            let mut state = state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let done = run(desktop.as_mut(), &mut last, &action);
-            *shot
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = last;
-            done
+            run_watched(desktop.as_mut(), &mut state, &run, &action)
         })
         .await
         .map_err(|e| format!("the screen backend stopped: {e}"))?
+    }
+
+    /// Consult the policy gate for an input action, once per batch: a later
+    /// action of a batch the gate allowed, in the same safety mode, runs
+    /// without asking again.
+    async fn gate(&self, args: &Value, ctx: &ExecContext) -> Option<ToolOutcome> {
+        let grant: Grant = (ctx.session_id.clone(), ctx.turn, ctx.safety_mode);
+        if self.state().granted.as_ref() == Some(&grant) {
+            return None;
+        }
+        let summary = gate_summary(args, &ctx.computer_batch);
+        let batch;
+        let detail = if ctx.computer_batch.len() > 1 {
+            batch = serde_json::json!({ "actions": ctx.computer_batch });
+            &batch
+        } else {
+            args
+        };
+        let screen = self
+            .state()
+            .screen
+            .as_ref()
+            .map(|png| base64::engine::general_purpose::STANDARD.encode(png));
+        let blocked = gate_computer(ctx, summary, detail, screen).await;
+        if blocked.is_none() {
+            self.state().granted = Some(grant);
+        }
+        blocked
     }
 
     async fn execute_with(
@@ -652,17 +787,19 @@ impl ComputerTool {
             Err(e) => return ToolOutcome::error(e, None),
         };
         let input = action.is_input();
-        if input
-            && let Some(blocked) = gate_external(
-                ctx,
-                "computer",
-                ToolCategory::Computer,
-                describe(&args),
-                &args,
-            )
-            .await
-        {
-            return blocked;
+        let run = RunKey::of(ctx);
+        if input {
+            let stopped = self
+                .state()
+                .watch
+                .as_ref()
+                .is_some_and(|w| w.run == run && w.stopped);
+            if stopped {
+                return ToolOutcome::error(MOVED, None);
+            }
+            if let Some(blocked) = self.gate(&args, ctx).await {
+                return blocked;
+            }
         }
         let done = match action {
             // Waits on the runtime, so Esc ends it at once.
@@ -670,7 +807,7 @@ impl ComputerTool {
                 tokio::time::sleep(Duration::from_secs_f64(secs)).await;
                 Ok(Done::text(format!("Waited {secs} s.")))
             },
-            action => self.perform(action, open).await,
+            action => self.perform(action, run, open).await,
         };
         let done = match done {
             Ok(done) => done,

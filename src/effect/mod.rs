@@ -2434,6 +2434,7 @@ mod tests {
                 session_id: "sess-test".to_string(),
                 message_index: 0,
                 scratchpad: None,
+                computer_batch: Vec::new(),
             },
         });
         assert_eq!(r.scope_count(), 0);
@@ -2523,6 +2524,7 @@ mod tests {
                 session_id: "sess-test".to_string(),
                 message_index: 0,
                 scratchpad: None,
+                computer_batch: Vec::new(),
             },
         });
         let first = tokio::time::timeout(Duration::from_millis(200), rx.recv())
