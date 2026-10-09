@@ -132,6 +132,7 @@ pub fn handle_turn_cancelled(state: &mut State, cmds: &mut Vec<Cmd>, turn: TurnI
         TurnState::Cancelling { id, .. } if id == turn => {
             state.turn = TurnState::Idle;
             state.ui.live_tool_status.clear();
+            note_goal_interrupted(state, cmds);
             // The cancel ends the run: record how long it worked and what it
             // spent before this point.
             finish_run(state, cmds, RunEnd::Interrupted);

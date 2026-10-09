@@ -439,6 +439,11 @@ pub enum ChatMessageKind {
     /// with the mode — hidden from the transcript (the status band is the
     /// human announcement), and unlike `RecoveryNudge` NEVER swept.
     ContextMarker,
+    /// A `/goal` check that found the goal not met yet: the check's reason
+    /// and the goal restated. Starts the next goal turn, so the model must
+    /// read it; unlike a nudge it stays visible and is never swept, because
+    /// the transcript should show why the run kept going.
+    GoalCheck,
     /// F74: a kind written by a NEWER build that this one doesn't model. Mapped
     /// here by `#[serde(other)]` instead of failing the whole conversation parse;
     /// it's neither a checkpoint nor a run summary, so every `matches!` site
@@ -482,7 +487,9 @@ impl ChatMessageKind {
         match self {
             // Injected to steer the model — the whole point is that it reads
             // them. Hidden from the transcript, never from the model.
-            Self::RecoveryNudge | Self::ContextMarker => MessageAudience::ModelDirected,
+            Self::RecoveryNudge | Self::ContextMarker | Self::GoalCheck => {
+                MessageAudience::ModelDirected
+            },
             Self::Normal
             | Self::ContextCheckpoint
             | Self::RunSummary

@@ -148,6 +148,11 @@ pub struct Config {
     #[serde(default)]
     pub output: OutputConfig,
 
+    /// `/goal` settings (`[goal]` table): which model checks a goal and how
+    /// many turns a goal may run before it pauses for the user.
+    #[serde(default)]
+    pub goal: GoalConfig,
+
     /// Runtime-only prompt customizations supplied by CLI flags. These are
     /// deliberately skipped when saving config so one-off agent personas do
     /// not pollute the user's persistent Mermaid settings.
@@ -564,6 +569,33 @@ impl Default for DaemonConfig {
             retention_days: 30,
             outcomes_retention_days: 180,
             scratchpad_retention_days: mermaid_model::constants::SCRATCHPAD_RETENTION_DAYS as i64,
+        }
+    }
+}
+
+/// `/goal` settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GoalConfig {
+    /// Model id that checks whether the goal is met after each run. `None`
+    /// checks with the session's active model. A small, fast model is
+    /// enough: the check reads the conversation and answers in one line.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Goal turns that may run without a message from the user before the
+    /// goal pauses. Each message from the user starts the count again. `0`
+    /// means no limit.
+    pub max_turns: u32,
+}
+
+/// Default for [`GoalConfig::max_turns`].
+pub const DEFAULT_GOAL_MAX_TURNS: u32 = 50;
+
+impl Default for GoalConfig {
+    fn default() -> Self {
+        Self {
+            model: None,
+            max_turns: DEFAULT_GOAL_MAX_TURNS,
         }
     }
 }

@@ -168,6 +168,8 @@ pub fn handle_query_result(state: &mut State, cmds: &mut Vec<Cmd>, result: Query
             state.ui.queued_messages.clear();
             state.session.replace_conversation(*history);
             state.turn = TurnState::Idle;
+            // A loaded goal (if any) restarts its counters.
+            state.runtime.goal = crate::goal::GoalProgress::default();
             // The abandoned run's summary counters die with it: a leaked
             // `run_started` would otherwise let a later `finish_run` (quit)
             // stamp the OLD run's summary into the conversation loaded here.
@@ -388,6 +390,7 @@ pub fn handle_slash(state: &mut State, cmds: &mut Vec<Cmd>, cmd: SlashCmd) {
         SlashCmd::Todos(arg) => {
             handle_todos_command(state, cmds, arg.as_deref());
         },
+        SlashCmd::Goal(arg) => handle_slash_goal(state, cmds, arg.as_deref()),
         SlashCmd::Scratchpad => {
             // Listing needs the filesystem, so it runs as an effect; the
             // reducer only answers when there is no directory to list.
@@ -1081,6 +1084,8 @@ pub fn handle_confirm_accepted(state: &mut State, cmds: &mut Vec<Cmd>) {
             state.session.conversation =
                 crate::ConversationHistory::new(project_path, model_name, state.now);
             state.session.conversation.git_branch = git_branch;
+            // The fresh conversation has no goal.
+            state.runtime.goal = crate::goal::GoalProgress::default();
             state.session.last_token_usage = None;
             state.session.cumulative_token_usage = TokenUsageTotals::default();
             // Same rationale as `ConversationLoaded`: the cleared-away run's

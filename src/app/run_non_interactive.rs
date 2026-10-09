@@ -255,13 +255,7 @@ pub async fn run_non_interactive_with(
     // It goes through `reduce`, not `step`: it is a synthetic input the driver
     // manufactures, and projecting it onto the public stream would announce
     // an event no client sent.
-    engine.reduce(
-        chrono::Local::now(),
-        Msg::SubmitPrompt {
-            text: prompt,
-            attachment_ids: vec![],
-        },
-    );
+    engine.reduce(chrono::Local::now(), seed_msg(prompt));
 
     let deadline = opts.deadline.unwrap_or(Duration::from_secs(20 * 60));
     let cancel = opts.cancel.clone();
@@ -321,6 +315,23 @@ pub async fn run_non_interactive_with(
         let _ = tx.send(terminal);
     }
     Ok(result)
+}
+
+/// The reducer input that starts a headless run: the prompt, or for
+/// `/goal <condition>` the goal command itself, so `mermaid run "/goal ..."`
+/// keeps working until the goal is met (as in the TUI). No other slash
+/// command means anything without a terminal, so the rest stay prompts.
+fn seed_msg(prompt: String) -> Msg {
+    if let Some(rest) = prompt.trim_start().strip_prefix('/')
+        && let Some(cmd @ mermaid_domain::SlashCmd::Goal(Some(_))) =
+            mermaid_domain::parse_slash_command(rest)
+    {
+        return Msg::Slash(cmd);
+    }
+    Msg::SubmitPrompt {
+        text: prompt,
+        attachment_ids: vec![],
+    }
 }
 
 /// Slots on the run's event bus. Matches the daemon's own: a lagged
@@ -542,6 +553,25 @@ fn build_result(state: &State) -> RunResult {
         out.reasoning = reasoning;
     }
 
+    // `mermaid run "/goal ..."`: a goal that did not end met is a failure
+    // the caller must see, not just a line in the transcript.
+    if state.session.conversation.goal.is_some() {
+        out.errors.push(format!(
+            "goal: not met ({})",
+            state
+                .runtime
+                .goal
+                .last_reason
+                .as_deref()
+                .unwrap_or("the run stopped before a check found it met")
+        ));
+    } else if let Some(outcome) = &state.runtime.goal.last_outcome
+        && !outcome.met
+    {
+        out.errors
+            .push(format!("goal: impossible ({})", outcome.reason));
+    }
+
     out
 }
 
@@ -640,6 +670,28 @@ mod tests {
             .append(ChatMessage::assistant("final reply"), state.now);
         let result = build_result(&state);
         assert_eq!(result.response, "final reply");
+    }
+
+    #[test]
+    fn a_goal_prompt_seeds_the_goal_command() {
+        use mermaid_domain::SlashCmd;
+        assert!(matches!(
+            super::seed_msg("/goal all tests pass".to_string()),
+            super::Msg::Slash(SlashCmd::Goal(Some(c))) if c == "all tests pass"
+        ));
+        // A bare `/goal` would only print a status line; it stays a prompt.
+        assert!(matches!(
+            super::seed_msg("/goal".to_string()),
+            super::Msg::SubmitPrompt { .. }
+        ));
+        assert!(matches!(
+            super::seed_msg("/help me".to_string()),
+            super::Msg::SubmitPrompt { .. }
+        ));
+        assert!(matches!(
+            super::seed_msg("fix the goal tests".to_string()),
+            super::Msg::SubmitPrompt { .. }
+        ));
     }
 
     #[test]

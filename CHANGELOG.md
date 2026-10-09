@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`/goal` keeps Mermaid working until a condition is met.** `/goal all tests
+  pass and clippy is clean` starts a turn with the condition as the request.
+  Each time the run would end, a separate model call with no tools reads the
+  end of the conversation and answers met, not met, or impossible. Not met
+  starts the next turn with the check's reason and the goal restated, both
+  visible in the transcript; met or impossible clears the goal. Esc, a failed
+  turn, `[goal] max_turns` turns without a message from you (default 50), or 3
+  turns in a row with no tool call pause the goal with it still set. `/goal`
+  alone shows the condition, time, checks and tokens; `/goal clear` removes
+  it; the footer shows `goal 4m`. The check uses the session's model unless
+  `[goal] model` names another. `--resume` keeps the goal, and
+  `mermaid run "/goal ..."` runs the loop headless, with a `goal:` error when
+  it ends unmet. Claude Code, Codex and Cursor have the same command.
+
 - **Mermaid cleans up the config keys it no longer reads.** A config file
   written by an older `mermaid init` still carries sections a later release
   removed, such as `[plan]` (0.28.0) or `[computer_use]` and
