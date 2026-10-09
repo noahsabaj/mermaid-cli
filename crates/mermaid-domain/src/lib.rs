@@ -69,9 +69,9 @@ pub use compaction::{
 };
 pub use config::{
     ActiveStyle, AgentTypeConfig, AgentsConfig, CompactionConfig, Config, ConfigLayer, ExecConfig,
-    FetchBackend, FilesystemPolicy, McpServerConfig, MemoryConfig, NetworkPolicy, OutputConfig,
-    OutputStyleSummary, SafetyConfig, SearchBackend, SessionFlags, ThemeChoice, TransportKind,
-    UiConfig, UserProviderConfig, WebConfig,
+    FetchBackend, FilesystemPolicy, McpOAuthConfig, McpServerConfig, MemoryConfig, NetworkPolicy,
+    OutputConfig, OutputStyleSummary, SafetyConfig, SearchBackend, SessionFlags, ThemeChoice,
+    TransportKind, UiConfig, UserProviderConfig, WebConfig,
 };
 pub use context::{
     InstructionSource, LoadedInstructions, LoadedMemory, LoadedSkills, MemoryEntry, MemoryScope,
