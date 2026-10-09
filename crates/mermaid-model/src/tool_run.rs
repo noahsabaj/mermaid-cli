@@ -58,6 +58,11 @@ pub struct ToolRunMetadata {
     /// count the whole tree, not just the parent's own model calls.
     #[serde(default)]
     pub token_usage: Option<crate::models::TokenUsage>,
+    /// `token_usage` split by the model that made the calls (a subagent's
+    /// own subagents may run other models), so the parent can price each.
+    /// Empty when `token_usage` is `None` or the tool did not split it.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub usage_by_model: std::collections::BTreeMap<String, crate::models::TokenUsage>,
 }
 
 /// Tool outcome status independent of how the result is rendered.

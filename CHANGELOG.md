@@ -9,6 +9,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`/usage` shows what the session cost.** Below the token counts it now
+  lists each model the session used, subagents included, with an estimate
+  at list prices and a total. A price comes from `[pricing.models."<model>"]`
+  in your config first, then from the public catalog at models.dev (fetched
+  at most once a day and cached; set `[pricing] catalog_url = ""` to never
+  fetch it, and it is never fetched under `safety.network = "deny"`). Local
+  Ollama models cost $0. A model with no price says so and is left out of
+  the total. Saved sessions now record their usage per model, so a resumed
+  session keeps its cost.
+
+- **Ctrl+R searches the prompts you sent before.** It lists this session's
+  prompts at once and adds those of the project's last 50 saved sessions
+  as they load, newest first. Type to filter (every word must match, case
+  does not matter); Ctrl+R or Down goes to the next match; Enter puts the
+  prompt in the composer to edit or send; Esc leaves the draft as it was.
+
+- **`/init` asks the agent to write AGENTS.md.** It sends one ordinary
+  prompt: write the file at the project root with the build, test, lint
+  and run commands, the layout and the pitfalls an agent cannot learn
+  quickly from the code, or improve the file that is there. Words after
+  `/init` are added to the request.
+
+- **`--add-dir <dir>` and `/add-dir <path>` let the agent work in more than
+  one directory.** Each added directory gets the project directory's trust:
+  the file tools and the policy gate treat paths inside it as project paths
+  (no outside-the-project approval or Auto-mode review, edits checkpointed,
+  writes confined beneath it), `execute_command` with a `working_dir` there
+  is not escalated, and `--confine-fs` / `--sandbox` let shell commands write
+  there. `read_only` still blocks writes everywhere. The flag repeats and adds
+  to a new user-config key, `[workspace] additional_dirs`; `/add-dir <path>`
+  adds one for the rest of the session and bare `/add-dir` lists them.
+  Paths are canonicalized when added, and a missing one is an error. Symlinks
+  get the project root's rules: a link inside an added directory that points
+  out of it is not inside it. Subagents inherit the list, and `/doctor` and
+  the model's session facts name it. A repository's `.mermaid/config.toml`
+  cannot set the key.
+
+- **MCP resources and prompts.** A server that declares the `resources`
+  capability gives the model two built-in tools, `list_mcp_resources`
+  (optionally filtered by `server`; each resource's uri, name, description
+  and mimeType) and `read_mcp_resource` (`server`, `uri`; text verbatim,
+  images attached, other binary content summarized by type and size, output
+  capped at 100,000 characters). They are advertised only while such a server
+  is ready, are never deferred behind `tool_search`, and pass the same policy
+  gate as MCP tool calls, so `read_only` blocks them as it blocks MCP tools. A
+  server that declares `prompts` puts each prompt in the `/` palette as
+  `/mcp__<server>__<prompt>`, tagged `(mcp:<server>)`: running it maps the
+  typed words onto the prompt's declared arguments in order (quotes group
+  words; the last argument takes the rest), prints a usage line when a
+  required one is missing, and otherwise fetches the prompt and sends its
+  text as your message. `/doctor` lists each ready server's tool, prompt and
+  resource support.
+
 - **Gemini models get Gemini's own computer use tool.** With `[tools]
   computer` and `provider_native` on, Gemini gets its `computer_use` tool for
   the desktop in place of Mermaid's schema. Each call runs through Mermaid's
