@@ -214,12 +214,17 @@ pub struct ToolsConfig {
     /// every safety gate applies. A model that refuses them gets Mermaid's.
     /// `false` always sends Mermaid's.
     pub provider_native: bool,
+    /// Give the model the `computer` tool: screenshots, mouse and keyboard on
+    /// the user's real screen. Off unless the user turns it on, since every
+    /// screenshot sends what is on the screen to the model's provider.
+    pub computer: bool,
 }
 
 impl Default for ToolsConfig {
     fn default() -> Self {
         Self {
             provider_native: true,
+            computer: false,
         }
     }
 }

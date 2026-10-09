@@ -6,6 +6,7 @@ use crate::request::*;
 use crate::state::{State, StatusKind, TokenUsageTotals, ToolOutcome, TurnState};
 use crate::transition::commit_assistant_message;
 use mermaid_model::ids::TurnId;
+use mermaid_model::models::adapters::computer_toolset::TOOL as COMPUTER_TOOL;
 use mermaid_model::models::{ChatMessage, MessageRole, ProviderContinuation, TokenUsage};
 
 /// How one API request's usage folds into the session/run counters.
@@ -732,32 +733,23 @@ pub fn handle_stream_done(
             .collect();
         // A goal turn that calls tools is making progress (stall guard).
         state.runtime.goal.used_tools = true;
-        // Captured once for the whole batch: the live safety mode + the
-        // user's goal (for the Auto-mode classifier).
-        let goal = crate::user_goal::user_goal(&state.session);
-        let safety_mode = state.session.safety_mode;
-        for call in &pending {
-            if call.source.function.name == crate::tool_search::TOOL_SEARCH_NAME {
+        // Computer actions act on one screen, so they run one at a time, in
+        // the order the model wrote them: only the first is dispatched here,
+        // and `handle_tool_finished` dispatches each next one.
+        let first_computer = pending
+            .iter()
+            .position(|call| call.source.function.name == COMPUTER_TOOL);
+        for (index, call) in pending.iter().enumerate() {
+            if call.source.function.name == crate::tool_search::TOOL_SEARCH_NAME
+                || (call.source.function.name == COMPUTER_TOOL && Some(index) != first_computer)
+            {
                 continue;
             }
             cmds.push(Cmd::ExecuteTool {
                 turn,
                 call_id: call.call_id,
                 source: call.source.clone(),
-                dispatch: crate::cmd::ToolDispatch {
-                    model_id: state.session.model_id.clone(),
-                    safety_mode,
-                    goal: goal.clone(),
-                    reasoning: state.session.reasoning,
-                    // Checkpoint anchoring: conversation id + length at
-                    // DISPATCH. History here is [..., user@k,
-                    // assistant(tool_use)], so any checkpoint this run takes
-                    // has message_index >= k+1 and a fork at k discards it
-                    // iff message_index > k (strict).
-                    session_id: state.session.conversation.id.clone(),
-                    message_index: state.session.messages().len(),
-                    scratchpad: state.session.scratchpad.clone(),
-                },
+                dispatch: tool_dispatch(state),
             });
         }
         state.turn = crate::transition::start_executing_tools(

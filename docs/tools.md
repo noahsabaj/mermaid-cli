@@ -15,7 +15,7 @@ Editing: `edit_file` is for one location -- `target_content` must match once (or
 `allow_multiple`), with matching that degrades in steps from exact through trailing-whitespace,
 full-trim and Unicode normalisation before refusing. `apply_patch` is for multi-hunk and
 new-file work and takes a unified diff, range headers included. Both write atomically beneath
-the resolved root, snapshot a checkpoint for `/undo`, and replay through the approval queue.
+the resolved root, snapshot a checkpoint for `/restore`, and replay through the approval queue.
 
 On Anthropic, the model gets Anthropic's own text editor and bash tools, the definitions Claude
 is trained on, in place of Mermaid's schemas for the same work: the text editor stands in for
@@ -46,6 +46,22 @@ reaches only processes this Mermaid process started for the calling session, nev
 it needs no approval in any safety mode. Exit codes are not recorded. The user's `/logs` and
 `/stop` work on the same processes.
 
+Computer: with `computer = true` under `[tools]`, the `computer` tool takes screenshots and drives
+the mouse and keyboard of the user's real screen. It is off by default because every screenshot
+goes to the model's provider. Its actions are those of Anthropic's computer toolset: `screenshot`,
+`zoom`, `cursor_position`, `left_click`, `right_click`, `middle_click`, `double_click`,
+`triple_click`, `left_click_drag`, `mouse_move`, `left_mouse_down`, `left_mouse_up`, `scroll`,
+`type`, `key`, `hold_key` and `wait`. On Anthropic, Claude gets the toolset itself
+(`computer_toolset_20260801`), rewritten onto the tool as it arrives, with `provider_native`;
+other vision models call the tool directly. A screenshot is fitted to 1568 px on its long edge and
+1.15 megapixels, and coordinates are pixels of the last screenshot, scaled back to the primary
+screen. Input actions wait 0.5 s before they return. Calls in one message run in order, and after
+one fails the rest return "Not executed: an earlier computer action in this turn failed." without
+running. Screenshots, `zoom`, `cursor_position` and `wait` run in every safety mode; the other
+actions are gated as external access, so `read_only` blocks them and `ask` asks for each one.
+Windows and macOS use xcap and enigo (macOS asks the terminal for Screen Recording and
+Accessibility). Linux needs an X11 session; Wayland is not supported yet.
+
 Paths outside the project (absolute, or traversing out of it) resolve to where they point and
 are gated as external access: `read_only` denies, `ask` prompts with a per-directory
 "don't ask again", `auto` classifies, `full_access` allows. See the README's [Safety](../README.md#safety) section.
@@ -69,7 +85,17 @@ that compacts server-side (Anthropic), the provider handles that automatic trigg
 
 MCP servers contribute additional tools under the `mcp__<server>__<tool>` prefix when configured. Names and schemas are sanitized to provider-safe form at startup (charset `[A-Za-z0-9_-]`, 64-char cap, `$ref` inlining and other schema normalization); `enabled_tools`/`disabled_tools` filters keep matching the RAW tool names the server itself advertises.
 
-Servers start concurrently at launch, each bounded by a 60-second timeout, and report ready/errored individually.
+Servers start concurrently at launch and report ready/errored individually.
+
+Mermaid speaks MCP 2026-07-28 and still works with servers that only speak 2025-11-25. Each server
+gets a `server/discover` request first. A server that answers it speaks 2026-07-28: there is no
+`initialize` handshake or session, and every request carries the protocol version, client info and
+capabilities in `_meta`. Any other answer (an error, an HTTP `4xx`, or silence from a stdio
+server for 20 seconds) means 2025-11-25, and Mermaid runs the `initialize` handshake instead. On a
+2026-07-28 HTTP server, calls also carry the `Mcp-Method`, `Mcp-Name` and `Mcp-Param-*` headers;
+a tool whose `x-mcp-header` annotations are invalid is left out with a warning. Mermaid declares
+no client capabilities (no sampling, elicitation or roots), so a tool call that asks for that
+kind of input fails with an error.
 
 By default MCP tools are **deferred**: instead of advertising every server's tools on every request, the model gets one `tool_search` tool that searches deferred tool names/descriptions and promotes matches to direct advertisement for the rest of the session — deferred schemas don't count against `/context` until promoted. Opt out globally with `mcp_defer_tools = false` at the top level of config, or per server with `defer = false` on its `[mcp_servers.<name>]` entry.
 
@@ -124,7 +150,7 @@ it needs the native fetch backend.
 
 Inspect an existing `web_fetch` snapshot with Unicode-caseless `pattern` matching, or page through it with stable `start_line`/`line_count` continuation, without refetching.
 
-Backend selection, redirect and provenance rules, and the transfer budgets are in
+Backend selection and redirect rules are in
 [configuration.md](configuration.md#web-tool-backends).
 
 ## Inline approvals
