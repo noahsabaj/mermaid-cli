@@ -266,7 +266,9 @@ impl ToolRegistry {
             providers,
             Arc::clone(&web_capabilities),
         ));
-        r.register(Arc::new(subagent::SubagentTool::new(spawner.clone())));
+        r.register(Arc::new(
+            subagent::SubagentTool::new(spawner.clone()).with_types(&config.agents.types),
+        ));
         r.subagent_spawner = Some(spawner);
         r.web_capabilities = Some(web_capabilities);
 

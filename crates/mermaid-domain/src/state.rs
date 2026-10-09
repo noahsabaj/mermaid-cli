@@ -1123,9 +1123,10 @@ pub struct LiveToolStatus {
     pub tokens: usize,
 }
 
-/// One plugin-contributed slash command (a markdown prompt from an enabled
-/// plugin's `manifest.prompts`). Plain data — parsing/IO happens in
-/// `app::plugin_assets`; the reducer only expands and submits.
+/// One prompt-backed slash command: a markdown prompt from an enabled
+/// plugin's `manifest.prompts`, or a `commands/*.md` file in a project or
+/// user directory. Plain data — parsing/IO happens in `app::plugin_assets`
+/// and `app::file_assets`; the reducer only expands and submits.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PluginCommand {
     /// Command name without the leading `/` (validated `[a-z0-9-]+`).
@@ -1135,19 +1136,48 @@ pub struct PluginCommand {
     /// The prompt body. `$ARGUMENTS` is replaced with the typed args;
     /// without the token, non-empty args append as a final paragraph.
     pub body: String,
-    /// Owning plugin name, shown as `(plugin:<name>)` in the palette.
-    pub plugin: String,
+    /// Where the command comes from, shown in parentheses in the palette and
+    /// `/help`: `plugin:<name>`, `project` or `user`.
+    pub origin: String,
 }
 
 impl PluginCommand {
     /// Expand the body with typed arguments: replace-all of `$ARGUMENTS`
-    /// when the token is present, else append the args as a new paragraph
-    /// when non-empty. Pure.
+    /// and of the positional `$1`, `$2`, ... (whitespace-split args, empty
+    /// when absent — Claude Code's command syntax) when any is present, else
+    /// append the args as a new paragraph when non-empty. Pure.
     #[must_use]
     pub fn expand(&self, args: &str) -> String {
         let args = args.trim();
-        if self.body.contains("$ARGUMENTS") {
-            return self.body.replace("$ARGUMENTS", args);
+        let positional: Vec<&str> = args.split_whitespace().collect();
+        let mut out = String::with_capacity(self.body.len() + args.len());
+        let mut found = false;
+        let mut rest = self.body.as_str();
+        while let Some(at) = rest.find('$') {
+            out.push_str(&rest[..at]);
+            let after = &rest[at + 1..];
+            if let Some(tail) = after.strip_prefix("ARGUMENTS") {
+                out.push_str(args);
+                rest = tail;
+                found = true;
+                continue;
+            }
+            let digits = after.len() - after.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+            match after[..digits].parse::<usize>() {
+                Ok(n) if n >= 1 => {
+                    out.push_str(positional.get(n - 1).copied().unwrap_or(""));
+                    rest = &after[digits..];
+                    found = true;
+                },
+                _ => {
+                    out.push('$');
+                    rest = after;
+                },
+            }
+        }
+        out.push_str(rest);
+        if found {
+            return out;
         }
         if args.is_empty() {
             self.body.clone()

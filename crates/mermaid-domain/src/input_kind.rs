@@ -171,7 +171,7 @@ mod tests {
             name: name.to_string(),
             description: "does things".to_string(),
             body: "body".to_string(),
-            plugin: "demo".to_string(),
+            origin: "plugin:demo".to_string(),
         }
     }
 
