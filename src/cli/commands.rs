@@ -22,7 +22,7 @@ use crate::{
     session::ConversationManager,
 };
 
-use super::{Commands, OutputFormat, PairCommand, PluginCommand, QaCommand};
+use super::{Commands, McpCommand, OutputFormat, PairCommand, PluginCommand, QaCommand};
 
 /// Handle CLI subcommands
 /// Returns Ok(true) if the command was handled and we should exit
@@ -184,16 +184,28 @@ pub async fn handle_command(
             url,
             header,
             env_header,
+            client_id,
+            client_secret_env,
+            callback_port,
         } => {
             // --url conflicts with --command/--arg/--env at the clap level, so
             // exactly one registration path runs.
             match url {
                 Some(url) => {
+                    let oauth = (client_id.is_some() || callback_port.is_some()).then(|| {
+                        mermaid_domain::McpOAuthConfig {
+                            client_id: client_id.clone(),
+                            client_secret_env: client_secret_env.clone(),
+                            callback_port: *callback_port,
+                            scopes: Vec::new(),
+                        }
+                    });
                     crate::mcp::add_http_server(
                         name,
                         url.clone(),
                         header.clone(),
                         env_header.clone(),
+                        oauth,
                     )
                     .await?;
                 },
@@ -208,8 +220,12 @@ pub async fn handle_command(
             crate::mcp::remove_server(name).await?;
             Ok(true)
         },
-        Commands::Mcp => {
-            show_mcp_servers();
+        Commands::Mcp { command } => {
+            match command {
+                None => show_mcp_servers(),
+                Some(McpCommand::Login { name }) => mcp_login(name).await?,
+                Some(McpCommand::Logout { name }) => mcp_logout(name)?,
+            }
             Ok(true)
         },
         Commands::Login { provider } => {
@@ -2563,6 +2579,41 @@ fn version_at_least(current: &str, latest: &str) -> bool {
     }
 }
 
+/// The remote server `name` from config, for `mermaid mcp login`.
+fn remote_mcp_server(name: &str) -> Result<mermaid_domain::McpServerConfig> {
+    let config = load_config_or_warn();
+    let Some(server) = config.mcp_servers.get(name) else {
+        anyhow::bail!(
+            "no MCP server named '{name}' is configured; add a remote one with \
+             `mermaid add {name} --url <URL>`"
+        );
+    };
+    anyhow::ensure!(
+        server.url.is_some(),
+        "'{name}' is a local (command) server; sign-in applies only to remote servers"
+    );
+    Ok(server.clone())
+}
+
+/// `mermaid mcp login <name>`: the OAuth browser flow for a remote server.
+async fn mcp_login(name: &str) -> Result<()> {
+    let server = remote_mcp_server(name)?;
+    crate::mcp::oauth::login(name, &server).await?;
+    println!("The '{name}' tools will be available next time you start mermaid.");
+    Ok(())
+}
+
+/// `mermaid mcp logout <name>`: delete the stored tokens. Works for a server
+/// no longer in config, so a removed entry's tokens can still be deleted.
+fn mcp_logout(name: &str) -> Result<()> {
+    if crate::mcp::oauth::logout(name)? {
+        println!("Removed the stored sign-in for '{name}'.");
+    } else {
+        println!("No stored sign-in for '{name}'.");
+    }
+    Ok(())
+}
+
 /// Show configured MCP servers
 fn show_mcp_servers() {
     let config = load_config_or_warn();
@@ -2602,9 +2653,16 @@ fn show_mcp_servers() {
                     .join(", ")
             )
         };
-        println!("  {name} — {package}{env_display}");
+        let signed_in =
+            if server_cfg.url.is_some() && crate::mcp::oauth::is_signed_in(name, server_cfg) {
+                " (signed in)"
+            } else {
+                ""
+            };
+        println!("  {name} — {package}{env_display}{signed_in}");
     }
     println!("\nManage with: mermaid add <name> / mermaid remove <name>");
+    println!("Sign in to a remote server with: mermaid mcp login <name>");
 }
 
 /// Show status of all dependencies

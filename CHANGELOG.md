@@ -23,6 +23,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   project file cannot redefine `general` or `explore`. The `agent` tool now
   lists the configured types with their new `description`, so the model knows
   they exist. See docs/plugins.md, "Files from other tools".
+
+- **Remote MCP servers that need an OAuth sign-in now connect.** Hosted
+  servers such as Linear, Notion, Sentry and Atlassian answer `401` until the
+  user signs in, so Mermaid could not use them. `mermaid add <name> --url
+  <URL>` now opens the browser to sign in when the server asks for it, and
+  `mermaid mcp login <name>` / `mermaid mcp logout <name>` sign in again or
+  delete the sign-in. The flow follows the MCP authorization spec
+  (2026-07-28): resource and authorization-server metadata discovery, PKCE
+  `S256`, the `resource` indicator, and the `iss` check before the code is
+  redeemed. Mermaid identifies itself with a Client ID Metadata Document,
+  and uses Dynamic Client Registration only for servers without it. Tokens
+  go to the OS keyring, bound to the server's URL, and refresh on their own;
+  `mermaid mcp` marks the servers that are signed in. A server that needs a
+  client registered by hand takes `[mcp_servers.<name>.oauth]` (`client_id`,
+  `client_secret_env`, `callback_port`, `scopes`), or the matching
+  `--client-id`, `--client-secret-env` and `--callback-port` flags on
+  `mermaid add --url`. `mermaid remove <name>` also deletes the server's
+  stored sign-in.
+
 - **Mermaid cleans up the config keys it no longer reads.** A config file
   written by an older `mermaid init` still carries sections a later release
   removed, such as `[plan]` (0.28.0) or `[computer_use]` and

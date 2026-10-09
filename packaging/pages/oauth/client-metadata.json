@@ -1,0 +1,13 @@
+{
+  "client_id": "https://noahsabaj.github.io/mermaid-cli/oauth/client-metadata.json",
+  "client_name": "Mermaid",
+  "client_uri": "https://github.com/noahsabaj/mermaid-cli",
+  "redirect_uris": [
+    "http://127.0.0.1/callback",
+    "http://localhost/callback"
+  ],
+  "grant_types": ["authorization_code", "refresh_token"],
+  "response_types": ["code"],
+  "token_endpoint_auth_method": "none",
+  "application_type": "native"
+}
