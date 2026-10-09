@@ -733,14 +733,13 @@ fn parse_content_block(block: &Value) -> Option<ContentBlock> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::transport::StdioTransport;
     use super::*;
 
     /// A client on a `sh -c` fake server. Requests are numbered from 1:
     /// the probe is 1.
     #[cfg(unix)]
     async fn sh_client(script: &str) -> McpClient {
-        let t = StdioTransport::spawn(
+        let t = super::super::transport::StdioTransport::spawn(
             "sh",
             &["-c".to_string(), script.to_string()],
             &HashMap::new(),
