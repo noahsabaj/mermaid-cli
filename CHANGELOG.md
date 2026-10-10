@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.0] - 2026-10-10
+
 ### Added
 
 - **`/usage` shows what the session cost.** Below the token counts it now
@@ -5910,7 +5912,8 @@ MERMAID.md project instructions, MCP spec bump, and a security update.
 - rustfmt and clippy configuration
 - Docker compose setup for LiteLLM proxy
 
-[Unreleased]: https://github.com/noahsabaj/mermaid-cli/compare/v0.29.0...HEAD
+[Unreleased]: https://github.com/noahsabaj/mermaid-cli/compare/v0.30.0...HEAD
+[0.30.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.29.0...v0.30.0
 [0.29.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.28.0...v0.29.0
 [0.28.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.27.0...v0.28.0
 [0.27.0]: https://github.com/noahsabaj/mermaid-cli/compare/v0.26.0...v0.27.0
